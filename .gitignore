@@ -1,0 +1,13 @@
+# Runtime credentials and per-host config — see docs/credentials.md
+.env
+.env.local
+.env.*.local
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor noise
+*.swp
+*.swo
+.idea/
