@@ -63,7 +63,7 @@ Two coupled choices are settled here:
 | Rootless support                    | Native                          | Bolt-on               | Native          | Bolt-on            |
 | Daemon footprint                    | Daemonless                      | Daemon                | Daemonless      | Daemon             |
 | Always-on lifecycle (host init)     | Quadlet/systemd, native         | Restart policies only | Quadlet/systemd | Restart policies only |
-| macOS client local-build ergonomics | `podman machine` (workable)     | Docker Desktop / OrbStack | `podman machine` | Docker Desktop / OrbStack |
+| macOS client local-build ergonomics | Lima + docker-cli (operator's existing setup) | Docker Desktop / OrbStack | Lima + docker-cli or `podman machine` | Docker Desktop / OrbStack |
 | Image size (base)                   | ~30 MB                          | ~80 MB                | ~5 MB           | ~30 MB             |
 | Node/Python binary compatibility    | Excellent (glibc)               | Excellent (glibc)     | Quirky (musl)   | Excellent (glibc)  |
 | `nvim` recency from repo            | Outdated → install upstream     | Outdated → install upstream | Reasonable | Outdated → install upstream |
@@ -71,11 +71,11 @@ Two coupled choices are settled here:
 
 ## Consequences
 
-- Item **B** (build the image) writes a `Containerfile` (Podman's preferred name; identical syntax to a Dockerfile and consumable by Docker if needed) targeting `debian:12-slim`.
+- Item **B** (build the image) writes a `Dockerfile` (not `Containerfile`) targeting `debian:12-slim`. The universal `Dockerfile` name lets `docker build` work without `-f`, and Podman accepts the same file unchanged — zero-cost compatibility for both halves of the toolchain.
 - Item **E** (host-side orchestration) defaults to **Podman Quadlet `.container` units** under the operator's user systemd, with a thin wrapper script offering `up`/`down`/`attach`/`list`. `compose` is left as a possible escape hatch but not the primary interface.
 - Item **C** (entrypoint) is implemented as a single shell script that starts `sshd`, then a named `tmux` session — same regardless of runtime, so this decision doesn't constrain it.
-- Local development on macOS uses `podman machine` (or any OCI-compatible runtime). Operators who strongly prefer Docker locally can build the image with `docker build` against the same `Containerfile`; runtime choice is deployment-time, not build-time.
-- **Reversibility:** moving from Podman to Docker is cheap (image is OCI; entrypoint is portable); moving from Debian 12 to another glibc distro is moderate; moving to musl is expensive. The base-image choice is the higher-stakes half of this decision.
+- **Local development on macOS uses Lima + docker-cli** (the operator's existing setup). Local validation steps in docs and smoke scripts assume `docker build` / `docker run` from a Lima-backed Docker socket. The image is OCI-portable, so the same artifact runs under Podman on the VPS.
+- **Reversibility:** moving from Podman to Docker on the VPS is cheap (image is OCI; entrypoint is portable); moving from Debian 12 to another glibc distro is moderate; moving to musl is expensive. The base-image choice is the higher-stakes half of this decision.
 
 ## Open questions deferred to later items
 
