@@ -17,6 +17,10 @@ These are load-bearing design decisions, not preferences:
 3. **Multiple parallel containers.** Naming, port allocation, volume mounts, and git identity must all support N containers running simultaneously on the same host without collision.
 4. **Push auth must work non-interactively.** Agents commit autonomously, so SSH keys / git credentials inside the container must be configured to push without prompts. Never embed long-lived secrets in the image — inject at runtime.
 
+## Decisions
+
+- **Runtime + base image:** Podman + `debian:12-slim`. See [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
+
 ## Architecture sketch (to be built)
 
 Expect the repo to grow into roughly:
