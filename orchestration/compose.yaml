@@ -1,0 +1,34 @@
+# compose.yaml — Docker Compose template for local Lima + docker-cli use.
+#
+# This is an OPTIONAL escape hatch for operators who prefer compose over
+# `bin/devenv`. The canonical path is `bin/devenv up <name>`, which calls
+# `docker run` / `podman run` directly. See docs/orchestration.md.
+#
+# Usage (from this directory):
+#   DEVENV_NAME=alpha DEVENV_PORT=2218 docker compose up -d
+#   DEVENV_NAME=alpha docker compose down
+#
+# Parallel-container safety: every per-container value (name, port, volume)
+# is parameterized via DEVENV_NAME / DEVENV_PORT, so running compose twice
+# with different env values yields two non-colliding stacks.
+
+services:
+  devenv:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    image: localhost/remote-persistent-devenv:latest
+    container_name: "devenv-${DEVENV_NAME:-default}"
+    env_file:
+      - ../.env
+    ports:
+      - "${DEVENV_PORT:-2200}:22"
+    volumes:
+      - "devenv-${DEVENV_NAME:-default}-workspace:/workspace"
+    restart: unless-stopped
+
+volumes:
+  # Compose expands ${DEVENV_NAME} at parse time, so each invocation
+  # creates a distinct named volume. The volume survives `compose down`.
+  devenv-${DEVENV_NAME:-default}-workspace:
+    name: "devenv-${DEVENV_NAME:-default}-workspace"

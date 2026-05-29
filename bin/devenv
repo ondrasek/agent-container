@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# devenv — host-side orchestration for the remote-persistent-devenv image.
+#
+# Subcommands:
+#   devenv build [tag]    Build the image at the repo root.
+#   devenv up <name>      Start container `devenv-<name>` (detached).
+#   devenv down <name>    Stop and remove `devenv-<name>`. --purge also drops the volume.
+#   devenv list           List running devenv containers.
+#   devenv attach <name>  ssh + tmux attach to the named container.
+#   devenv logs <name>    Tail container logs.
+#
+# Runtime auto-detection: prefers `podman` (the production target on the VPS)
+# over `docker`. Override with DEVENV_RUNTIME=docker|podman.
+#
+# State (port mappings) lives in ${XDG_STATE_HOME:-$HOME/.local/state}/devenv/.
+# .env lookup order at `up` time:
+#   1. ./.env in cwd
+#   2. ~/.config/devenv/<name>.env
+#   3. ~/.config/devenv/.env
+#
+# Hard constraints respected:
+#   - No root required.
+#   - No reference to .devcontainer / VSCode.
+#   - Parallel-safe: per-container name, port, and named volume.
+#   - No secrets in arguments — credentials flow via --env-file.
+
+set -euo pipefail
+
+# --- Constants --------------------------------------------------------------
+readonly IMAGE_NAME="localhost/remote-persistent-devenv:latest"
+readonly CONTAINER_PREFIX="devenv-"
+readonly PORT_BASE=2200
+readonly PORT_RANGE=100  # 2200..2299
+
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
+
+readonly SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+readonly REPO_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
+
+# --- Logging ----------------------------------------------------------------
+log()  { printf '[devenv] %s\n' "$*" >&2; }
+warn() { printf '[devenv] WARNING: %s\n' "$*" >&2; }
+die()  { printf '[devenv] FATAL: %s\n' "$*" >&2; exit 1; }
+
+# --- Runtime detection ------------------------------------------------------
+detect_runtime() {
+    if [[ -n "${DEVENV_RUNTIME:-}" ]]; then
+        case "${DEVENV_RUNTIME}" in
+            docker|podman) ;;
+            *) die "DEVENV_RUNTIME must be 'docker' or 'podman', got: ${DEVENV_RUNTIME}" ;;
+        esac
+        command -v "${DEVENV_RUNTIME}" >/dev/null 2>&1 \
+            || die "DEVENV_RUNTIME=${DEVENV_RUNTIME} but '${DEVENV_RUNTIME}' is not on PATH"
+        printf '%s' "${DEVENV_RUNTIME}"
+        return
+    fi
+    if command -v podman >/dev/null 2>&1; then
+        printf 'podman'
+    elif command -v docker >/dev/null 2>&1; then
+        printf 'docker'
+    else
+        die "neither 'podman' nor 'docker' on PATH (install one, or set DEVENV_RUNTIME)"
+    fi
+}
+
+# --- Helpers ----------------------------------------------------------------
+require_name() {
+    local name="${1:-}"
+    [[ -n "${name}" ]] || die "missing required <name> argument"
+    [[ "${name}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+        || die "invalid <name> '${name}'; must match [a-z0-9][a-z0-9_-]*"
+    printf '%s' "${name}"
+}
+
+container_name() { printf '%s%s' "${CONTAINER_PREFIX}" "$1"; }
+volume_name()    { printf '%s%s-workspace' "${CONTAINER_PREFIX}" "$1"; }
+
+# Deterministic port allocation: PORT_BASE + (sum-of-name-chars mod PORT_RANGE).
+# Collisions inside the 100-port window are possible but rare for short names;
+# `up` detects an in-use port and aborts with an actionable message.
+port_for_name() {
+    local name="$1"
+    local i sum=0
+    for (( i = 0; i < ${#name}; i++ )); do
+        sum=$(( sum + $(printf '%d' "'${name:$i:1}") ))
+    done
+    printf '%d' $(( PORT_BASE + (sum % PORT_RANGE) ))
+}
+
+resolve_env_file() {
+    local name="$1"
+    local candidate
+    for candidate in \
+        "$(pwd)/.env" \
+        "${CONFIG_DIR}/${name}.env" \
+        "${CONFIG_DIR}/.env"
+    do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s' "${candidate}"
+            return
+        fi
+    done
+    die "no .env found. Looked in: ./.env, ${CONFIG_DIR}/${name}.env, ${CONFIG_DIR}/.env"
+}
+
+state_file() {
+    local name="$1"
+    printf '%s/%s.port' "${STATE_DIR}" "${name}"
+}
+
+write_state() {
+    local name="$1" port="$2"
+    mkdir -p "${STATE_DIR}"
+    printf '%s\n' "${port}" > "$(state_file "${name}")"
+}
+
+read_state_port() {
+    local name="$1" f
+    f="$(state_file "${name}")"
+    [[ -f "${f}" ]] || return 1
+    cat "${f}"
+}
+
+clear_state() {
+    local name="$1"
+    rm -f "$(state_file "${name}")"
+}
+
+container_running() {
+    local rt="$1" cname="$2"
+    "${rt}" ps --filter "name=^${cname}$" --format '{{.Names}}' 2>/dev/null | grep -qx "${cname}"
+}
+
+container_exists() {
+    local rt="$1" cname="$2"
+    "${rt}" ps -a --filter "name=^${cname}$" --format '{{.Names}}' 2>/dev/null | grep -qx "${cname}"
+}
+
+# --- Subcommands ------------------------------------------------------------
+cmd_build() {
+    local rt tag="${1:-${IMAGE_NAME}}"
+    rt="$(detect_runtime)"
+    log "building image '${tag}' with ${rt} from ${REPO_ROOT}"
+    "${rt}" build -t "${tag}" "${REPO_ROOT}"
+}
+
+cmd_up() {
+    local name cname vname port env_file rt
+    name="$(require_name "${1:-}")"
+    cname="$(container_name "${name}")"
+    vname="$(volume_name "${name}")"
+    rt="$(detect_runtime)"
+
+    if container_running "${rt}" "${cname}"; then
+        port="$(read_state_port "${name}" 2>/dev/null || true)"
+        log "container ${cname} already running${port:+ on port ${port}}"
+        log "attach with: ${SCRIPT_PATH} attach ${name}"
+        return 0
+    fi
+
+    if container_exists "${rt}" "${cname}"; then
+        die "container ${cname} exists but is not running. Run: ${SCRIPT_PATH} down ${name}"
+    fi
+
+    env_file="$(resolve_env_file "${name}")"
+    port="$(port_for_name "${name}")"
+
+    log "name=${name} port=${port} env-file=${env_file}"
+    log "image=${IMAGE_NAME} volume=${vname}"
+
+    "${rt}" run -d \
+        --name "${cname}" \
+        --env-file "${env_file}" \
+        -p "${port}:22" \
+        -v "${vname}:/workspace" \
+        --restart unless-stopped \
+        "${IMAGE_NAME}" >/dev/null
+
+    write_state "${name}" "${port}"
+    log "started ${cname}; attach with: ${SCRIPT_PATH} attach ${name}"
+    log "or directly: ssh dev@localhost -p ${port} -t tmux attach -t main"
+}
+
+cmd_down() {
+    local name cname vname rt purge=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --purge) purge=1; shift ;;
+            *) name="$(require_name "$1")"; shift ;;
+        esac
+    done
+    [[ -n "${name:-}" ]] || die "usage: devenv down <name> [--purge]"
+    cname="$(container_name "${name}")"
+    vname="$(volume_name "${name}")"
+    rt="$(detect_runtime)"
+
+    if container_exists "${rt}" "${cname}"; then
+        log "stopping ${cname}"
+        "${rt}" stop "${cname}" >/dev/null 2>&1 || true
+        log "removing ${cname}"
+        "${rt}" rm -f "${cname}" >/dev/null 2>&1 || true
+    else
+        log "no container named ${cname}"
+    fi
+
+    if [[ "${purge}" -eq 1 ]]; then
+        log "purging volume ${vname}"
+        "${rt}" volume rm "${vname}" >/dev/null 2>&1 || warn "volume ${vname} not removed (in use or absent)"
+    else
+        log "volume ${vname} preserved (use --purge to remove)"
+    fi
+
+    clear_state "${name}"
+}
+
+cmd_list() {
+    local rt
+    rt="$(detect_runtime)"
+    printf '%-20s %-6s %-50s %-15s %s\n' NAME PORT IMAGE STATUS UPTIME
+    # Tab-delimit raw fields so names/images with spaces don't break parsing.
+    local fmt='{{.Names}}	{{.Image}}	{{.Status}}	{{.RunningFor}}'
+    while IFS=$'\t' read -r cname image status uptime; do
+        [[ -n "${cname:-}" ]] || continue
+        case "${cname}" in
+            "${CONTAINER_PREFIX}"*) ;;
+            *) continue ;;
+        esac
+        local short="${cname#${CONTAINER_PREFIX}}"
+        local port
+        port="$(read_state_port "${short}" 2>/dev/null || printf '?')"
+        printf '%-20s %-6s %-50s %-15s %s\n' "${cname}" "${port}" "${image}" "${status}" "${uptime}"
+    done < <("${rt}" ps --format "${fmt}" 2>/dev/null)
+}
+
+cmd_attach() {
+    local name port host="${DEVENV_HOST:-localhost}" user="${DEVENV_USER:-dev}"
+    name="$(require_name "${1:-}")"
+    if ! port="$(read_state_port "${name}")"; then
+        die "no state for ${name}; is it running? (try: ${SCRIPT_PATH} up ${name})"
+    fi
+    log "attaching to ${user}@${host}:${port} (tmux session 'main')"
+    exec ssh "${user}@${host}" -p "${port}" -t tmux attach -t main
+}
+
+cmd_logs() {
+    local name cname rt
+    name="$(require_name "${1:-}")"
+    cname="$(container_name "${name}")"
+    rt="$(detect_runtime)"
+    exec "${rt}" logs -f "${cname}"
+}
+
+usage() {
+    cat >&2 <<'EOF'
+usage: devenv <subcommand> [args]
+
+subcommands:
+  build [tag]        Build image (default tag: localhost/remote-persistent-devenv:latest).
+  up <name>          Start container devenv-<name> (detached).
+  down <name>        Stop and remove container devenv-<name>.
+       [--purge]     Also delete the workspace volume.
+  list               List running devenv containers.
+  attach <name>      ssh + tmux attach to container devenv-<name>.
+  logs <name>        Tail container logs.
+
+env overrides:
+  DEVENV_RUNTIME=docker|podman   Force runtime (default: prefer podman).
+  DEVENV_HOST=<host>             Attach target host (default: localhost).
+  DEVENV_USER=<user>             SSH user (default: dev).
+EOF
+}
+
+# --- Dispatch ---------------------------------------------------------------
+main() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift
+    case "${sub}" in
+        build)  cmd_build  "$@" ;;
+        up)     cmd_up     "$@" ;;
+        down)   cmd_down   "$@" ;;
+        list)   cmd_list   "$@" ;;
+        attach) cmd_attach "$@" ;;
+        logs)   cmd_logs   "$@" ;;
+        -h|--help|help|"") usage; [[ -z "${sub}" ]] && exit 2 || exit 0 ;;
+        *) die "unknown subcommand: ${sub} (run 'devenv help')" ;;
+    esac
+}
+
+main "$@"

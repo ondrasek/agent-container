@@ -106,3 +106,24 @@ The image itself enforces none of this — that's item C's entrypoint and item E
 | `OPENAI_API_KEY`    | Codex (`@openai/codex`) authentication. |
 
 The agents themselves enforce their own keys at run time; the entrypoint just surfaces a warning so the operator notices before they `ssh` in.
+
+## Orchestration
+
+Host-side orchestration is a single Bash script, `bin/devenv`, plus two deployment templates. Full doc: [`docs/orchestration.md`](docs/orchestration.md).
+
+```bash
+bin/devenv build                  # build the image
+bin/devenv up alpha               # start container devenv-alpha (detached)
+bin/devenv up bravo               # start another, in parallel, on a different port
+bin/devenv list                   # see what's running
+bin/devenv attach alpha           # ssh + tmux attach
+bin/devenv logs alpha             # tail container logs
+bin/devenv down alpha             # stop + remove (volume preserved)
+bin/devenv down alpha --purge     # stop + remove + delete workspace volume
+```
+
+**Runtime auto-detection:** `bin/devenv` prefers `podman` over `docker` (the VPS target). Override with `DEVENV_RUNTIME=docker|podman`.
+
+**Templates:**
+- `orchestration/compose.yaml` — Docker Compose, for the local Lima + docker-cli path.
+- `orchestration/devenv.container` — Podman Quadlet template, instantiated per container on the VPS.
