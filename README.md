@@ -127,3 +127,33 @@ bin/devenv down alpha --purge     # stop + remove + delete workspace volume
 **Templates:**
 - `orchestration/compose.yaml` — Docker Compose, for the local Lima + docker-cli path.
 - `orchestration/devenv.container` — Podman Quadlet template, instantiated per container on the VPS.
+
+## Client-side attach
+
+`bin/devenv-attach` is a thin client-side helper that resolves a symbolic container name to the right `ssh + tmux` invocation. It runs **on your laptop**, not in the container, and reads files only — no dependency on `bin/devenv` being installed locally.
+
+```bash
+bin/devenv-attach acme        # remote: read ACME_HOST + ACME_PORT from hosts.conf
+bin/devenv-attach -l alpha    # local:  read port from XDG_STATE_HOME/devenv/alpha.port
+```
+
+Detach is `Ctrl-B d` (tmux default) and returns you to your local shell — `ssh` is `exec`ed with `-t`, so signals and exit codes propagate through.
+
+**Remote config** — `~/.config/devenv/hosts.conf` (or `$XDG_CONFIG_HOME/devenv/hosts.conf`).
+
+Flat `KEY=VALUE` file, sourced by Bash. For each container name `foo`, set `FOO_HOST` and `FOO_PORT`. The name argument is uppercased (and hyphens become underscores) before lookup, so `devenv-attach my-box` reads `MY_BOX_HOST` / `MY_BOX_PORT`. Template: [`docs/devenv-hosts.example`](docs/devenv-hosts.example).
+
+```ini
+ACME_HOST=vps1.example.com
+ACME_PORT=2231
+BLOG_HOST=vps1.example.com
+BLOG_PORT=2247
+```
+
+Why this format: parseable by `source` with no third-party dependency, trivial to hand-edit, and the same primitives a Bash user already knows.
+
+**Local mode** — `devenv-attach -l <name>` connects to `localhost` using the port written by `bin/devenv up` at `$XDG_STATE_HOME/devenv/<name>.port`. This is the path for running the container under Lima on macOS while attaching from the same laptop.
+
+**Env overrides:** `DEVENV_USER=<user>` (default `dev`).
+
+**Errors are actionable** — missing config, missing keys, and missing local state each print the exact file path you need to create or fix. SSH's own exit code is propagated on connection failure.

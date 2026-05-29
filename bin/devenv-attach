@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# devenv-attach — client-side helper that resolves a container name to the
+# right ssh + tmux invocation.
+#
+# Usage:
+#   devenv-attach <name>     Attach to a remote container by symbolic name.
+#                            Reads host + port from ~/.config/devenv/hosts.conf
+#                            (or $XDG_CONFIG_HOME/devenv/hosts.conf).
+#   devenv-attach -l <name>  Attach to a local container by name. Reads the
+#   devenv-attach --local <name>
+#                            port from $XDG_STATE_HOME/devenv/<name>.port
+#                            (the state file written by `bin/devenv up`).
+#
+# Hosts config format (~/.config/devenv/hosts.conf):
+#   Flat KEY=VALUE pairs, sourced by Bash. For each container name `FOO`,
+#   define FOO_HOST and FOO_PORT. Names are uppercased before lookup.
+#   See docs/devenv-hosts.example for a working template.
+#
+# Hard constraints respected:
+#   - No state written anywhere except $XDG_CONFIG_HOME / $XDG_STATE_HOME.
+#   - No dependency on bin/devenv at runtime — this script reads files only.
+#   - Detach (Ctrl+B d) returns to the local shell because ssh runs with -t
+#     and we `exec` it so signals + exit code propagate.
+
+set -euo pipefail
+
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
+readonly HOSTS_CONF="${CONFIG_DIR}/hosts.conf"
+
+die() { printf 'devenv-attach: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat >&2 <<'EOF'
+usage: devenv-attach <name>           # attach to a remote container by name
+       devenv-attach -l|--local <name> # attach to a local container by name
+
+Remote config: ~/.config/devenv/hosts.conf (KEY=VALUE; see docs/devenv-hosts.example)
+Local state:   $XDG_STATE_HOME/devenv/<name>.port (written by bin/devenv up)
+
+env overrides:
+  DEVENV_USER=<user>  SSH user (default: dev)
+EOF
+}
+
+# Normalise a container name to the prefix used in hosts.conf keys:
+# uppercase, hyphens -> underscores. Lowercase shape is enforced by bin/devenv,
+# but we accept either here.
+name_to_key() {
+    local n="$1"
+    n="${n//-/_}"
+    printf '%s' "${n}" | tr '[:lower:]' '[:upper:]'
+}
+
+attach_remote() {
+    local name="$1"
+    local key host_var port_var host port user="${DEVENV_USER:-dev}"
+
+    [[ -f "${HOSTS_CONF}" ]] || die "no hosts config at ${HOSTS_CONF} — create it (see docs/devenv-hosts.example)"
+
+    key="$(name_to_key "${name}")"
+    host_var="${key}_HOST"
+    port_var="${key}_PORT"
+
+    # shellcheck disable=SC1090
+    set -a; source "${HOSTS_CONF}"; set +a
+
+    host="${!host_var:-}"
+    port="${!port_var:-}"
+
+    if [[ -z "${host}" || -z "${port}" ]]; then
+        die "no host configured for ${name} — add ${host_var} and ${port_var} to ${HOSTS_CONF} (see docs/devenv-hosts.example)"
+    fi
+
+    printf 'devenv-attach: %s@%s:%s (tmux session "main")\n' "${user}" "${host}" "${port}" >&2
+    exec ssh "${user}@${host}" -p "${port}" -t tmux attach -t main
+}
+
+attach_local() {
+    local name="$1"
+    local port_file port user="${DEVENV_USER:-dev}"
+
+    port_file="${STATE_DIR}/${name}.port"
+    if [[ ! -f "${port_file}" ]]; then
+        die "no local state for ${name} at ${port_file} — is the container running? (try: bin/devenv up ${name})"
+    fi
+    port="$(cat "${port_file}")"
+    [[ -n "${port}" ]] || die "state file ${port_file} is empty"
+
+    printf 'devenv-attach: %s@localhost:%s (tmux session "main")\n' "${user}" "${port}" >&2
+    exec ssh "${user}@localhost" -p "${port}" -t tmux attach -t main
+}
+
+main() {
+    local mode=remote name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -l|--local) mode=local; shift ;;
+            -h|--help|help) usage; exit 0 ;;
+            --) shift; name="${1:-}"; shift || true; break ;;
+            -*) die "unknown flag: $1 (run 'devenv-attach --help')" ;;
+            *)  name="$1"; shift ;;
+        esac
+    done
+
+    [[ -n "${name}" ]] || { usage; exit 2; }
+
+    case "${mode}" in
+        remote) attach_remote "${name}" ;;
+        local)  attach_local  "${name}" ;;
+    esac
+}
+
+main "$@"
