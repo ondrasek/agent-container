@@ -75,3 +75,34 @@ The container expects to be launched with:
 - Port 22 mapped to a host port chosen by the orchestration layer (item E).
 
 The image itself enforces none of this — that's item C's entrypoint and item E's orchestration. The image is the substrate.
+
+## Entrypoint behavior
+
+`entrypoint.sh` runs as PID 1 inside the container, as the non-root `dev` user. It is idempotent — restarting the container reruns it safely.
+
+**Execution order:**
+
+1. **Debug override.** If the operator passes arguments (`docker run image bash`), the entrypoint `exec`s them and the rest of the flow is skipped.
+2. **Env-var validation.** Required vars must be set and non-empty; missing ones cause an immediate non-zero exit with a message naming the offender. Values are **never logged**.
+3. **SSH host keys.** Generated via `ssh-keygen -A` only if `/etc/ssh/ssh_host_ed25519_key` is absent. This guarantees each container instance gets a distinct SSH identity — a hard requirement for running multiple containers in parallel.
+4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig`; the token itself is never written to disk in the container.
+5. **sshd.** Started in the background via `sudo /usr/sbin/sshd` (daemonized; not `-D`). Listens on port 22 inside the container; map this to a host port via the orchestration layer.
+6. **tmux session.** A detached session named `main` is created with a single shell pane. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main`.
+7. **PID 1 lifecycle.** The script `wait`s on a background `tail -f /dev/null`, keeping PID 1 alive. `SIGTERM` / `SIGINT` trigger a clean shutdown: `tmux kill-server`, then `sudo pkill sshd`, then `exit 0`.
+
+**Required env vars (entrypoint exits non-zero if missing):**
+
+| Variable          | Purpose                                                |
+|-------------------|--------------------------------------------------------|
+| `GH_TOKEN`        | GitHub PAT used by the git credential helper for HTTPS push. |
+| `GIT_USER_NAME`   | `user.name` in the container's gitconfig.              |
+| `GIT_USER_EMAIL`  | `user.email` in the container's gitconfig.             |
+
+**Optional env vars (warned-but-not-failed):**
+
+| Variable            | Purpose                              |
+|---------------------|--------------------------------------|
+| `ANTHROPIC_API_KEY` | Claude Code authentication.          |
+| `OPENAI_API_KEY`    | Codex (`@openai/codex`) authentication. |
+
+The agents themselves enforce their own keys at run time; the entrypoint just surfaces a warning so the operator notices before they `ssh` in.

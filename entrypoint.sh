@@ -1,36 +1,124 @@
 #!/usr/bin/env bash
-# entrypoint.sh — STUB. REPLACED BY ITEM C.
+# entrypoint.sh — container PID 1 for the remote-persistent-devenv image.
 #
-# Item B (image build) only needs a runnable ENTRYPOINT so the image can be
-# smoke-tested for build success and `sshd` foreground startup. The real
-# entrypoint logic — git identity, credential helper, tmux session, env-var
-# validation, host-key generation — lands in item C, which will OVERWRITE
-# this file in place. Keep the path and exec semantics the same so the
-# Dockerfile reference doesn't need to change.
+# Responsibilities (in order):
+#   1. Validate required env vars (fail fast, never log their values).
+#   2. Generate SSH host keys on first run (so each container has a distinct identity).
+#   3. Configure git identity + HTTPS credential helper for the dev user.
+#   4. Start sshd in the background.
+#   5. Start a detached tmux session named 'main' for the dev user.
+#   6. Stay alive as PID 1, forwarding SIGTERM/SIGINT to a clean shutdown.
 #
-# Behavior of this stub:
-#   1. If /etc/ssh has no host keys, generate them (sshd refuses to start otherwise).
-#   2. exec sshd in the foreground so the container's PID 1 is sshd and logs
-#      go to the runtime's log stream.
+# Runs as the non-root 'dev' user. Privileged actions go through passwordless sudo
+# (configured in the Dockerfile). NEVER echoes env-var contents to logs.
 #
-# This stub intentionally does NOT:
-#   - Read GH_TOKEN / GIT_USER_* / provider keys.
-#   - Configure git credential helper.
-#   - Start a tmux session.
-#   - Validate required env vars.
-# All of the above are item C's responsibility.
+# Override: if invoked with arguments, exec them instead of the default flow
+# (e.g. `docker run image bash` for debugging).
 
 set -euo pipefail
 
-# Host keys are deliberately absent from the image (see Dockerfile). Generate
-# on first launch so each container instance has a distinct identity.
-if ! ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
-    sudo ssh-keygen -A
+log() {
+    # Stderr so it interleaves predictably with sshd's stderr logging.
+    printf '[entrypoint] %s\n' "$*" >&2
+}
+
+die() {
+    log "FATAL: $*"
+    exit 1
+}
+
+# --- Debug override ---------------------------------------------------------
+# If the operator passed a command (e.g. `bash`), run it instead of the default
+# sshd+tmux flow. This lets the image be used interactively for debugging.
+if [[ $# -gt 0 ]]; then
+    exec "$@"
 fi
 
-# sshd needs /run/sshd to exist for the privilege separation directory.
+# --- 1. Validate env vars ---------------------------------------------------
+# Required: must be set AND non-empty. We check presence by name only; we never
+# print or trace the values. `set -u` plus :- pattern keeps `set -e` from
+# tripping on unset vars during the check itself.
+require_env() {
+    local name=$1
+    if [[ -z "${!name:-}" ]]; then
+        die "required env var ${name} is missing or empty"
+    fi
+}
+
+require_env GH_TOKEN
+require_env GIT_USER_NAME
+require_env GIT_USER_EMAIL
+
+# Optional: agents will complain themselves if they need a key. Warn-only.
+for opt in ANTHROPIC_API_KEY OPENAI_API_KEY; do
+    if [[ -z "${!opt:-}" ]]; then
+        log "WARNING: optional env var ${opt} is not set; the agent that uses it will fail at run time"
+    fi
+done
+
+# --- 2. SSH host keys -------------------------------------------------------
+# Idempotent: only regenerate if the ed25519 key is absent. ssh-keygen -A
+# creates whichever key types are missing under /etc/ssh/.
+if [[ ! -f /etc/ssh/ssh_host_ed25519_key ]]; then
+    log "Generating SSH host keys..."
+    sudo ssh-keygen -A
+else
+    log "SSH host keys already present, skipping generation"
+fi
+
+# sshd's privilege-separation directory. Idempotent.
 sudo mkdir -p /run/sshd
 sudo chmod 0755 /run/sshd
 
-# Foreground sshd: -D = no daemonize, -e = log to stderr.
-exec sudo /usr/sbin/sshd -D -e
+# --- 3. Git identity + credential helper ------------------------------------
+# Identity is non-secret; logging the name is fine. Email is also non-secret
+# but we still don't echo it — keep the log surface minimal.
+git config --global user.name "${GIT_USER_NAME}"
+git config --global user.email "${GIT_USER_EMAIL}"
+git config --global init.defaultBranch main
+git config --global pull.rebase false
+
+# Credential helper as a shell function. Single quotes are CRITICAL: the body
+# is stored VERBATIM in ~/.gitconfig, so ${GH_TOKEN} is expanded by the helper
+# shell at git-push time from the process env — not by this script now. The
+# token is never written to disk in the container.
+git config --global credential.helper \
+    '!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
+
+log "Configured git identity for ${GIT_USER_NAME}"
+
+# --- 4. sshd ----------------------------------------------------------------
+# Daemonize (no -D) so the entrypoint can continue to start tmux and tail.
+# sshd's own logs go to stderr / syslog per the image's sshd_config.
+sudo /usr/sbin/sshd
+log "sshd listening"
+
+# --- 5. tmux session --------------------------------------------------------
+# Detached session named 'main' with a single shell pane. Idempotent: if a
+# previous incarnation of the session somehow survived (it shouldn't — tmux
+# server dies with PID 1), don't blow up.
+if tmux has-session -t main 2>/dev/null; then
+    log "tmux session 'main' already exists, leaving it alone"
+else
+    tmux new-session -d -s main
+    log "tmux session 'main' ready"
+fi
+
+# --- 6. PID 1 lifecycle + signal handling -----------------------------------
+# Trap SIGTERM/SIGINT for a clean shutdown: stop the tmux server, stop sshd,
+# then exit 0. `tail -f /dev/null &` + `wait` is the canonical pattern that
+# lets bash's trap fire promptly (a foreground `exec tail` would not).
+
+shutdown() {
+    log "shutdown signal received, stopping tmux and sshd"
+    tmux kill-server 2>/dev/null || true
+    # sshd was started via sudo and runs as root; kill it the same way.
+    sudo pkill -TERM -x sshd 2>/dev/null || true
+    exit 0
+}
+
+trap shutdown TERM INT
+
+tail -f /dev/null &
+TAIL_PID=$!
+wait "${TAIL_PID}"
