@@ -6,6 +6,304 @@ Design contract: [`CLAUDE.md`](CLAUDE.md).
 Runtime + base-image decision: [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
 Credential contract: [`docs/credentials.md`](docs/credentials.md).
 
+## How it fits together
+
+```
+laptop                                        VPS (Hetzner / Debian 12)
+------                                        ------------------------
+~/.config/devenv/hosts.conf                   user systemd (linger enabled)
+  ACME_HOST=vps1.example                        |
+  ACME_PORT=2218                                +-- Quadlet: devenv-acme.container
+                                                    |
+$ devenv-attach acme                                +-- container: devenv-acme
+   |                                                       +-- sshd  (port 22 -> host 2218)
+   |  ssh -p 2218 dev@vps1.example -t tmux              +-- tmux session "main"
+   |     attach -t main                                       +-- nvim
+   v                                                          +-- claude
+[ you are now inside tmux on the VPS ]                        +-- codex
+                                                              +-- /workspace (named volume)
+detach (Ctrl-B d)
+  -> back on laptop; agents keep running on the VPS
+```
+
+Key property: **detach is non-destructive at every layer.** Closing the SSH connection leaves tmux running. tmux retains every pane's state. The container stays up because it was launched detached and is either supervised by user systemd (Quadlet) or kept alive by Docker's restart policy. Lingering keeps your user-level systemd alive across SSH logouts. The only way work is lost is if you (or an agent) fail to `git push` — which is why the design contract forbids that.
+
+## Deploy to a Hetzner VPS
+
+This section walks through standing up a fresh always-on environment on a Hetzner Cloud server. Any Debian 12 / Ubuntu 24.04 host works the same way; nothing here is Hetzner-specific beyond Step 1.
+
+### Step 1 — provision the VPS
+
+Hetzner Cloud Console → **Create Server**. The smallest shared-CPU instance is more than enough (the image is ~1.8 GB on disk; idle dev containers cost ~50 MB RAM each). Use **Debian 12** or **Ubuntu 24.04**. Add your laptop's SSH public key during provisioning. You should now be able to `ssh root@<vps-ip>`.
+
+### Step 2 — create an operator user
+
+Don't run dev environments as root. From `root@vps`:
+
+```bash
+adduser --gecos "" --disabled-password ondra        # use your own username
+usermod -aG sudo ondra
+install -d -m 0700 -o ondra -g ondra /home/ondra/.ssh
+cp /root/.ssh/authorized_keys /home/ondra/.ssh/
+chown ondra:ondra /home/ondra/.ssh/authorized_keys
+chmod 0600 /home/ondra/.ssh/authorized_keys
+```
+
+From now on you `ssh ondra@<vps-ip>`. (Disabling root SSH login by editing `/etc/ssh/sshd_config` is a worthwhile next step; out of scope here.)
+
+### Step 3 — install Podman and enable lingering
+
+```bash
+sudo apt-get update
+sudo apt-get install -y podman git netcat-openbsd
+loginctl enable-linger "$USER"
+```
+
+`enable-linger` is **load-bearing** for the always-on model: it keeps your user-level systemd alive even after you SSH out. Without it, any container managed under user systemd (via Quadlet) gets killed when your SSH session ends. Run it once per user, ever.
+
+### Step 4 — clone, configure, build
+
+```bash
+git clone https://github.com/ondrasek/remote-persistent-devenv.git
+cd remote-persistent-devenv
+cp .env.example .env
+chmod 0600 .env
+$EDITOR .env       # fill in GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL, agent API keys
+./bin/devenv build
+```
+
+First build takes ~5-10 minutes (NodeSource, npm globals, neovim tarball). Subsequent builds reuse cached layers.
+
+### Step 5 — start your first container
+
+Two paths. Pick one per container.
+
+**Quick path** — `bin/devenv up`. Runs `podman run -d`. Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
+
+```bash
+./bin/devenv up acme
+# prints something like:
+# [devenv] name=acme port=2218 env-file=/home/ondra/remote-persistent-devenv/.env
+```
+
+Note the port. You'll need it on the laptop side.
+
+**Quadlet path** — recommended for "always-on" production use. systemd supervises the container, restarts it on failure, brings it back on reboot, captures its logs in `journald`:
+
+```bash
+mkdir -p ~/.config/containers/systemd ~/.config/devenv
+cp .env ~/.config/devenv/devenv-acme.env
+chmod 0600 ~/.config/devenv/devenv-acme.env
+
+sed -e 's/${NAME}/acme/g' \
+    -e "s|\${ENV_FILE}|$HOME/.config/devenv/devenv-acme.env|g" \
+    -e 's/${PORT}/2218/g' \
+    orchestration/devenv.container \
+    > ~/.config/containers/systemd/devenv-acme.container
+
+systemctl --user daemon-reload
+systemctl --user start devenv-acme.service        # Quadlet generates the .service from .container
+systemctl --user status devenv-acme.service
+```
+
+To stop / restart / log:
+
+```bash
+systemctl --user stop    devenv-acme.service
+systemctl --user restart devenv-acme.service
+journalctl --user -u devenv-acme.service -f
+```
+
+### Step 6 — grant SSH access from your laptop
+
+The container starts with **no** keys in `dev`'s `authorized_keys` (per the hard constraint that nothing operator-specific lives in the image). One-time setup, on the VPS, after first launch:
+
+```bash
+# inside the container, set up .ssh
+podman exec -u dev devenv-acme install -d -m 0700 /home/dev/.ssh
+
+# copy your laptop's pubkey into the container
+podman exec -u dev -i devenv-acme \
+    tee -a /home/dev/.ssh/authorized_keys < ~/.ssh/authorized_keys >/dev/null
+
+# tighten perms
+podman exec -u dev devenv-acme chmod 0600 /home/dev/.ssh/authorized_keys
+```
+
+(This step is a known wart of the MVP — a future iteration will accept an `AUTHORIZED_KEYS` env var or a mounted file so it happens automatically at container start. Tracked separately.)
+
+### Step 7 — set up `devenv-attach` on the laptop
+
+On your **laptop**, not the VPS:
+
+```bash
+git clone https://github.com/ondrasek/remote-persistent-devenv.git
+sudo ln -s "$PWD/remote-persistent-devenv/bin/devenv-attach" /usr/local/bin/devenv-attach
+
+mkdir -p ~/.config/devenv
+chmod 0700 ~/.config/devenv
+cat >> ~/.config/devenv/hosts.conf <<EOF
+ACME_HOST=<vps-ip-or-dns>
+ACME_PORT=2218
+EOF
+chmod 0600 ~/.config/devenv/hosts.conf
+```
+
+### Step 8 — verify
+
+```bash
+devenv-attach acme
+```
+
+You should land inside a tmux session named `main`, prompt is `dev@<container-id>:/workspace$`. `tmux ls` shows one session. Detach with `Ctrl-B d`. Re-attach to confirm everything's still there.
+
+## Daily use
+
+### Attach to a container
+
+```bash
+devenv-attach acme            # remote, by name from hosts.conf
+devenv-attach -l acme         # local (Lima on macOS); reads port from local state file
+```
+
+Behind the scenes: `ssh dev@<host> -p <port> -t tmux attach -t main`. The `-t` allocates a TTY (required for tmux); `tmux attach -t main` joins the existing session rather than creating a new one (which would mask bugs).
+
+### Working inside tmux
+
+`Ctrl-B` is the tmux prefix. Cheat sheet:
+
+| Keys           | Action                                  |
+|----------------|-----------------------------------------|
+| `Ctrl-B  c`    | New window (a fresh shell)              |
+| `Ctrl-B  ,`    | Rename current window                   |
+| `Ctrl-B  n` / `p` | Next / previous window               |
+| `Ctrl-B  N`    | Jump to window N (`Ctrl-B 0` … `9`)     |
+| `Ctrl-B  %`    | Split pane vertically                   |
+| `Ctrl-B  "`    | Split pane horizontally                 |
+| `Ctrl-B  arrow`| Move between panes                      |
+| `Ctrl-B  z`    | Zoom current pane to full window        |
+| `Ctrl-B  [`    | Enter copy/scrollback mode (`q` to exit)|
+| `Ctrl-B  d`    | **Detach** (the magic key)              |
+
+Typical workflow once attached:
+
+```bash
+cd /workspace
+git clone https://github.com/me/my-project.git
+cd my-project
+
+# Window "edit"
+Ctrl-B ,    edit
+nvim .
+
+# Window "claude"
+Ctrl-B c
+Ctrl-B ,    claude
+cd /workspace/my-project && claude
+
+# Window "codex"
+Ctrl-B c
+Ctrl-B ,    codex
+cd /workspace/my-project && codex
+```
+
+You now have three concurrent windows: nvim, Claude Code, Codex — all running against the same checkout, all surviving SSH disconnects.
+
+### Detach — this is the point
+
+Press **`Ctrl-B d`**. SSH closes, your laptop shell returns. Everything you started inside tmux **keeps running on the VPS**:
+
+- nvim stays open with its unsaved buffers.
+- Agents keep processing whatever you had them on.
+- Background commands (`make`, `pytest --watch`, anything) keep going.
+
+You can close the laptop lid, switch networks, reboot the laptop, or fly to another continent. Reconnect later with `devenv-attach acme` and everything is exactly where you left it.
+
+The chain that makes this work:
+
+1. `ssh` is `exec`ed by `devenv-attach`, not backgrounded — closing it cleanly drops the TTY without killing remote processes.
+2. tmux session `main` was started detached by the container's entrypoint; it has no parent process tied to your SSH session.
+3. The container was started detached (`podman run -d`) and stays running independent of any login.
+4. `loginctl enable-linger` keeps user-level systemd (and therefore the Quadlet-supervised container) alive across all logins / logouts of your VPS user.
+5. The VPS itself is, well, always on. That's what VPSes do.
+
+### View what's running
+
+On the VPS:
+
+```bash
+./bin/devenv list                                       # devenv-managed containers + their ports
+systemctl --user list-units 'devenv-*.service'           # Quadlet-supervised services
+```
+
+Inside the container (after attach):
+
+```bash
+tmux ls                                                  # tmux sessions (just "main" by default)
+tmux lsw -t main                                         # windows in main
+ps -ef                                                   # everything alive in the container
+```
+
+### Run multiple environments in parallel
+
+Each project gets its own container with its own workspace, SSH port, tmux session, and host keys. They don't share state. Spin up a second one:
+
+```bash
+# on the VPS
+./bin/devenv up blog
+# or via Quadlet (repeat Step 5 Quadlet recipe with NAME=blog, a different PORT)
+
+# on the laptop
+cat >> ~/.config/devenv/hosts.conf <<EOF
+BLOG_HOST=<vps-ip-or-dns>
+BLOG_PORT=2247
+EOF
+
+devenv-attach blog                                       # totally separate session
+```
+
+`bin/devenv up` allocates ports deterministically from the container name (hash → 2200-2299 range) so the same name always gets the same port across rebuilds.
+
+### Lose a container, keep your work
+
+The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
+
+- `./bin/devenv down acme` — stops + removes the container. **Workspace volume is kept.** `./bin/devenv up acme` later restores you to the same `/workspace` contents.
+- `./bin/devenv down acme --purge` — also drops the workspace volume. Use when you want a clean slate.
+- VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `./bin/devenv up acme` again. Pushed commits are unaffected either way.
+- Quadlet service crashed — `systemctl --user restart devenv-acme.service`. Look at `journalctl --user -u devenv-acme.service` first.
+
+### Update the image
+
+```bash
+# on the VPS
+cd ~/remote-persistent-devenv
+git pull
+./bin/devenv build
+
+# then restart whichever path you used
+systemctl --user restart devenv-acme.service              # Quadlet path
+# OR
+./bin/devenv down acme && ./bin/devenv up acme            # quick path
+```
+
+The workspace volume is independent of the image, so a rebuild does **not** disturb the contents of `/workspace`.
+
+### Rotate the GitHub PAT
+
+When your `GH_TOKEN` expires:
+
+1. Generate a new PAT on GitHub (same `repo` scope, new expiration).
+2. Update the `.env` file (the one you launched the container from — `~/.config/devenv/devenv-acme.env` for Quadlet, or `./.env` for the quick path).
+3. Restart the container so the new value is loaded into env:
+   ```bash
+   systemctl --user restart devenv-acme.service
+   # OR
+   ./bin/devenv down acme && ./bin/devenv up acme
+   ```
+
+The credential helper reads `$GH_TOKEN` fresh on every push, so the next `git push` after the restart uses the new token.
+
 ## Container image
 
 The image is built from a single `Dockerfile` at the repo root. The same file works under both `docker build` (operator's local Lima + docker-cli setup) and `podman build` (the VPS runtime per ADR 0001).
