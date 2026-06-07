@@ -57,19 +57,25 @@ RUN npm i -g @anthropic-ai/claude-code \
     && npm cache clean --force
 
 # --- Layer 4: Neovim from upstream stable tarball ---------------------------
-# Debian 12's nvim package is too old. The release asset name changed across
-# versions (nvim-linux64.tar.gz -> nvim-linux-x86_64.tar.gz); try both.
+# Debian 12's nvim package is too old. Upstream ships per-architecture tarballs;
+# pick the one matching the build platform (amd64 -> x86_64 / linux64 legacy
+# name; arm64 -> linux-arm64). The asset name for amd64 also changed across
+# releases (nvim-linux64.tar.gz -> nvim-linux-x86_64.tar.gz); fall through.
 RUN set -eux; \
     cd /tmp; \
     BASE="https://github.com/neovim/neovim/releases/latest/download"; \
-    if curl -fsSLO "${BASE}/nvim-linux-x86_64.tar.gz"; then \
-        TARBALL="nvim-linux-x86_64.tar.gz"; \
-        DIR="nvim-linux-x86_64"; \
-    elif curl -fsSLO "${BASE}/nvim-linux64.tar.gz"; then \
-        TARBALL="nvim-linux64.tar.gz"; \
-        DIR="nvim-linux64"; \
-    else \
-        echo "neither nvim-linux-x86_64.tar.gz nor nvim-linux64.tar.gz could be downloaded" >&2; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "${ARCH}" in \
+        amd64) CANDIDATES="nvim-linux-x86_64.tar.gz nvim-linux64.tar.gz" ;; \
+        arm64) CANDIDATES="nvim-linux-arm64.tar.gz" ;; \
+        *) echo "unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    TARBALL=""; \
+    for CAND in ${CANDIDATES}; do \
+        if curl -fsSLO "${BASE}/${CAND}"; then TARBALL="${CAND}"; break; fi; \
+    done; \
+    if [ -z "${TARBALL}" ]; then \
+        echo "no neovim release asset matched for arch=${ARCH} (tried: ${CANDIDATES})" >&2; \
         exit 1; \
     fi; \
     tar -C /usr/local -xzf "${TARBALL}" --strip-components=1; \
@@ -105,7 +111,10 @@ RUN mkdir -p /etc/ssh \
     && chmod 0700 /home/dev/.ssh
 
 # --- Layer 6: entrypoint (most-frequently-changed; STUB until item C) -------
-COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+# Two-step COPY+chmod instead of `COPY --chmod=` so the file builds under both
+# the legacy builder and BuildKit; --chmod requires BuildKit specifically.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 EXPOSE 22
 

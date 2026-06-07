@@ -40,7 +40,7 @@ Layers are ordered cheapest-to-rebuild last, so an edit to the entrypoint (which
 1. **apt base packages** — `ca-certificates`, `curl`, `gnupg`, `git`, `openssh-server`, `tmux`, `sudo`, `locales`, `less`, `jq`, `build-essential`, `python3`, `python3-pip`, `python3-venv`. Single `RUN`; cache cleaned in the same layer.
 2. **Node 22 LTS via NodeSource** — `setup_22.x` then `apt-get install nodejs`. Cache cleaned in the same layer.
 3. **Agent CLIs (global npm installs)** — `@anthropic-ai/claude-code`, `@openai/codex`, `--ignore-scripts @earendil-works/pi-coding-agent`. Changes when an agent releases.
-4. **Neovim upstream tarball** — fetched from `https://github.com/neovim/neovim/releases/latest`, extracted to `/usr/local`. Tries `nvim-linux-x86_64.tar.gz` first, falls back to `nvim-linux64.tar.gz` (asset name changed across releases). Debian's repo `nvim` is too old.
+4. **Neovim upstream tarball** — fetched from `https://github.com/neovim/neovim/releases/latest`, extracted to `/usr/local`. Picks the asset matching `dpkg --print-architecture`: `nvim-linux-x86_64.tar.gz` (with fallback to `nvim-linux64.tar.gz` for older releases) on amd64, `nvim-linux-arm64.tar.gz` on arm64. Debian's repo `nvim` is too old.
 5. **User + sshd config** — non-root `dev` (uid 1000, home `/home/dev`), passwordless sudo via `/etc/sudoers.d/90-dev`, `/workspace` owned by `dev:dev`. sshd configured for key-based dev-only login. **Host keys are deliberately empty in the image** — the entrypoint regenerates them on first run, so each container instance has a distinct SSH identity (a hard requirement for parallel-container safety).
 6. **entrypoint.sh** — last `COPY`, since this is the most-frequently-edited file during development.
 
@@ -51,18 +51,12 @@ Layers are ordered cheapest-to-rebuild last, so an edit to the entrypoint (which
 - No `~/.ssh/authorized_keys` content for `dev`. Operator provides this at run time via volume mount or entrypoint-side fetch (item C / item E).
 - No `.devcontainer/` configs. SSH + tmux is the only supported attach path.
 
-### Image size estimate
+### Image size
 
-Roughly **900 MB - 1.1 GB** uncompressed, broken down approximately:
+Measured on first build (`docker images localhost/remote-persistent-devenv:latest`):
 
-| Layer                   | Approx. size |
-|-------------------------|--------------|
-| `debian:12-slim` base   | ~30 MB       |
-| apt base + build tools  | ~350 MB      |
-| Node 22 LTS             | ~120 MB      |
-| Agent CLIs (npm globals)| ~250 MB      |
-| Neovim tarball          | ~40 MB       |
-| User + sshd config      | <5 MB        |
+- **Uncompressed (`DISK USAGE`):** ~1.84 GB
+- **Compressed (`CONTENT SIZE`):** ~432 MB
 
 `build-essential` and `python3-*` dominate the apt layer. They are kept because pi-coding-agent and most npm packages with native addons need a working C toolchain at install or runtime. Trimming is a future optimization, not an MVP concern.
 
