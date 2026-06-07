@@ -157,3 +157,13 @@ Why this format: parseable by `source` with no third-party dependency, trivial t
 **Env overrides:** `DEVENV_USER=<user>` (default `dev`).
 
 **Errors are actionable** — missing config, missing keys, and missing local state each print the exact file path you need to create or fix. SSH's own exit code is propagated on connection failure.
+
+## Smoke test
+
+`scripts/smoke-test.sh` exercises the full happy path end-to-end: build, up, in-container HTTPS git push via the credential helper, host-side push verification, and torn-down cleanup. It retroactively verifies the deferred acceptance criteria of the credential contract (item D).
+
+```bash
+DEVENV_SMOKE_REPO=your-handle/devenv-smoke-target ./scripts/smoke-test.sh
+```
+
+Pre-flight refuses to run without `docker`/`podman`, an executable `bin/devenv`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).

@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Claude Code harness artifacts (workflow scripts saved per-session)
+.claude/
+
 # OS noise
 .DS_Store
 Thumbs.db
