@@ -182,6 +182,8 @@ bin/devenv-wiz --self-test    # doctests + interop corpus (port hash, key deriva
 
 The two toolchains are interchangeable mid-flight: `bin/devenv up acme` then `bin/devenv-wiz attach acme --local` works, and vice versa. Remote (hosts.conf) targets are attach-only; lifecycle commands act on the local runtime exclusively.
 
+Two deliberate differences from the bash tools: when a name has *both* a hosts.conf entry and a local state file, `devenv-wiz attach` prefers the remote — pass `--local` to get `bin/devenv attach` semantics. And `devenv-wiz down`/`purge` confirm before destroying anything, so scripts must pass `-y`/`--yes` (`bin/devenv down` never prompts).
+
 ### Working inside tmux
 
 `Ctrl-B` is the tmux prefix. Cheat sheet:

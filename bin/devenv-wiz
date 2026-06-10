@@ -24,8 +24,9 @@
 # ============================================================================
 #
 # Divergence (documented): bin/devenv-attach *sources* hosts.conf via bash;
-# this tool parses it line-by-line and never executes it. Values containing
-# `$` or backticks are taken literally, with a one-time warning.
+# this tool parses it line-by-line and never executes it. Quoting and unquoted
+# trailing `# comment`s are handled like bash, but values containing `$` or
+# backticks are taken literally (no expansion), with a one-time warning.
 
 from __future__ import annotations
 
@@ -59,6 +60,11 @@ HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+# ssh argv injection guard: a user/host that begins with '-' would be parsed
+# by ssh as an option (e.g. -oProxyCommand=...). Conservative charsets that
+# can never start with '-'.
+SSH_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+SSH_HOST_RE = re.compile(r"[A-Za-z0-9_\[][A-Za-z0-9.:_\]-]*")
 
 console = Console()
 
@@ -139,14 +145,35 @@ def name_to_key(name: str) -> str:
     return name.replace("-", "_").upper()
 
 
+def resolve_ssh_user(override: str | None = None) -> str:
+    """SSH user from --user / DEVENV_USER / 'dev', charset-checked so it can
+    never be parsed by ssh as an option.
+
+    >>> resolve_ssh_user("dev")
+    'dev'
+    >>> resolve_ssh_user("-oProxyCommand=x")
+    Traceback (most recent call last):
+    ...
+    Fatal: invalid ssh user '-oProxyCommand=x'
+    """
+    user = override or os.environ.get("DEVENV_USER") or "dev"
+    if not SSH_USER_RE.fullmatch(user):
+        die(f"invalid ssh user '{user}'")
+    return user
+
+
 def parse_kv_config(text: str) -> dict[str, str]:
     """Literal KEY=VALUE parser for hosts.conf. Never executes the file.
 
     Skips blank lines and # comments, strips an optional leading 'export ',
-    splits on the first '=', strips one pair of matching quotes.
+    splits on the first '=', honours one pair of matching quotes, and — like
+    bash `source` — drops unquoted trailing ' # comment's (a '#' only starts
+    a comment when preceded by whitespace; 'A=#lit' keeps the '#').
 
     >>> parse_kv_config("# c\\n\\nA=1\\nexport B='two'\\nC=\\"three\\"\\nD=a=b\\n")
     {'A': '1', 'B': 'two', 'C': 'three', 'D': 'a=b'}
+    >>> parse_kv_config('H=vps.example.com # primary box\\nQ="a # b" # c\\nR=#lit\\n')
+    {'H': 'vps.example.com', 'Q': 'a # b', 'R': '#lit'}
     """
     out: dict[str, str] = {}
     for line in text.splitlines():
@@ -158,8 +185,16 @@ def parse_kv_config(text: str) -> dict[str, str]:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        if value[:1] in ("'", '"'):
+            # Quoted: take up to the matching close quote; anything after it
+            # (e.g. a trailing comment) is ignored, as bash would.
+            closing = value.find(value[0], 1)
+            if closing != -1:
+                value = value[1:closing]
+        else:
+            m = re.search(r"\s#", value)
+            if m:
+                value = value[: m.start()].rstrip()
         if key:
             out[key] = value
     return out
@@ -248,9 +283,11 @@ def image_exists(rt: str, tag: str) -> bool:
 
 
 def port_free(port: int) -> bool:
+    # Wildcard bind: `-p {port}:22` publishes on ALL interfaces (parity with
+    # bin/devenv), so probe what will actually be bound, not just loopback.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", port))
+            s.bind(("", port))
         return True
     except OSError:
         return False
@@ -340,7 +377,7 @@ def launch_container(rt: str, name: str, env_file: Path) -> None:
     cname, vname, port = container_name(name), volume_name(name), port_for_name(name)
     if not port_free(port):
         die(
-            f"port {port} on 127.0.0.1 is already in use (port = 2200 + name hash; "
+            f"port {port} is already in use (port = 2200 + name hash; "
             f"collisions are possible). Stop whatever holds it (devenv-wiz list) "
             f"or pick a different name."
         )
@@ -350,6 +387,8 @@ def launch_container(rt: str, name: str, env_file: Path) -> None:
         rt, "run", "-d",
         "--name", cname,
         "--env-file", str(env_file),
+        # Publishes sshd on ALL host interfaces (flag-for-flag parity with
+        # bin/devenv; remote hosts.conf attach needs it). Firewall the VPS.
         "-p", f"{port}:22",
         "-v", f"{vname}:/workspace",
         "--restart", "unless-stopped",
@@ -501,8 +540,12 @@ def resolve_attach_target(
     host_override: str | None = None,
 ) -> tuple[str, str, str, str]:
     """Returns (user, host, port, kind). kind is 'local' or 'remote'."""
-    validate_name(name)
-    user = user_override or os.environ.get("DEVENV_USER") or "dev"
+    # Case-insensitive like bin/devenv-attach: 'My-Box' resolves the same
+    # MY_BOX_* keys (and the same lowercase state file bin/devenv writes).
+    name = validate_name(name.lower())
+    user = resolve_ssh_user(user_override)
+    if host_override is not None and not SSH_HOST_RE.fullmatch(host_override):
+        die(f"invalid ssh host '{host_override}'")
     key = name_to_key(name)
 
     if mode == "remote" and not HOSTS_CONF.is_file():
@@ -693,7 +736,7 @@ def wiz_attach(rt: str) -> None:
             return
 
     kind, name, host, port = sel
-    user = os.environ.get("DEVENV_USER") or "dev"
+    user = resolve_ssh_user()
     if kind == "local":
         port = read_state_port(name)
         if port is None:  # TOCTOU: state file vanished since the picker rendered

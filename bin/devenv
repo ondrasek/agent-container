@@ -78,7 +78,9 @@ volume_name()    { printf '%s%s-workspace' "${CONTAINER_PREFIX}" "$1"; }
 
 # Deterministic port allocation: PORT_BASE + (sum-of-name-chars mod PORT_RANGE).
 # Collisions inside the 100-port window are possible but rare for short names;
-# `up` detects an in-use port and aborts with an actionable message.
+# a busy port surfaces as the runtime's bind error at `run` time (no pre-check
+# here — bin/devenv-wiz probes the port and aborts before `run`). If a failed
+# `run` leaves a Created/Exited container behind, `devenv down <name>` clears it.
 port_for_name() {
     local name="$1"
     local i sum=0
