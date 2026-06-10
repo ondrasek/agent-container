@@ -60,7 +60,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
 console = Console()
-err_console = Console(stderr=True)
+
+
+def eprint(msg: str) -> None:
+    # Plain stderr writer; rich would mangle "[devenv-wiz]" as markup and wrap lines.
+    print(msg, file=sys.stderr)
 
 
 class Fatal(Exception):
@@ -251,7 +255,7 @@ def load_hosts_conf() -> dict[str, str]:
         return {}
     conf = parse_kv_config(HOSTS_CONF.read_text())
     if not _hosts_warned and any("$" in v or "`" in v for v in conf.values()):
-        err_console.print(
+        eprint(
             "[devenv-wiz] WARNING: hosts.conf contains '$' or '`' values; "
             "devenv-wiz does not perform shell expansion (bin/devenv-attach does)."
         )
@@ -286,7 +290,189 @@ def is_tty() -> bool:
 
 # --- commands ----------------------------------------------------------------
 
-# (added in subsequent increments)
+
+def log(msg: str) -> None:
+    eprint(f"[devenv-wiz] {msg}")
+
+
+def warn(msg: str) -> None:
+    eprint(f"[devenv-wiz] WARNING: {msg}")
+
+
+def hint(cmd: str) -> None:
+    console.print(f"hint: {cmd}", style="dim")
+
+
+def do_build(tag: str) -> None:
+    rt = detect_runtime()
+    log(f"building image '{tag}' with {rt} from {REPO_ROOT}")
+    # Inherited stdio: layer progress must stream, never capture.
+    rc = subprocess.run([rt, "build", "-t", tag, str(REPO_ROOT)]).returncode
+    if rc != 0:
+        die(f"build failed (exit {rc})")
+
+
+def launch_container(rt: str, name: str, env_file: Path) -> None:
+    """Start argv must match bin/devenv cmd_up flag-for-flag."""
+    cname, vname, port = container_name(name), volume_name(name), port_for_name(name)
+    if not port_free(port):
+        die(
+            f"port {port} on 127.0.0.1 is already in use (port = 2200 + name hash; "
+            f"collisions are possible). Stop whatever holds it (devenv-wiz list) "
+            f"or pick a different name."
+        )
+    log(f"name={name} port={port} env-file={env_file}")
+    log(f"image={IMAGE_NAME} volume={vname}")
+    r = query([
+        rt, "run", "-d",
+        "--name", cname,
+        "--env-file", str(env_file),
+        "-p", f"{port}:22",
+        "-v", f"{vname}:/workspace",
+        "--restart", "unless-stopped",
+        IMAGE_NAME,
+    ])
+    if r.returncode != 0:
+        die(f"{rt} run failed: {r.stderr.strip()}")
+    write_state(name, port)
+    log(f"started {cname}; attach with: devenv-wiz attach {name}")
+    log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
+
+
+def do_up(name: str, env_file_override: Path | None = None) -> None:
+    validate_name(name)
+    rt = detect_runtime()
+    cname = container_name(name)
+
+    if container_running(rt, cname):
+        port = read_state_port(name)
+        log(f"container {cname} already running" + (f" on port {port}" if port else ""))
+        log(f"attach with: devenv-wiz attach {name}")
+        return
+
+    if container_exists(rt, cname):
+        die(f"container {cname} exists but is not running. Run: devenv-wiz down {name}")
+
+    env_file = env_file_override or resolve_env_file(name)
+    if env_file is None:
+        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
+        die(f"no .env found. Looked in: {cands}")
+
+    if not image_exists(rt, IMAGE_NAME):
+        die(f"image {IMAGE_NAME} not found; run: devenv-wiz build")
+
+    launch_container(rt, name, env_file)
+
+
+def down_container(rt: str, name: str, purge: bool) -> None:
+    cname, vname = container_name(name), volume_name(name)
+    if container_exists(rt, cname):
+        log(f"stopping {cname}")
+        query([rt, "stop", cname])
+        log(f"removing {cname}")
+        query([rt, "rm", "-f", cname])
+    else:
+        log(f"no container named {cname}")
+
+    if purge:
+        log(f"purging volume {vname}")
+        if query([rt, "volume", "rm", vname]).returncode != 0:
+            warn(f"volume {vname} not removed (in use or absent)")
+    else:
+        log(f"volume {vname} preserved (use --purge to remove)")
+
+    clear_state(name)
+
+
+def cli_down(name: str, purge: bool, yes: bool) -> None:
+    validate_name(name)
+    rt = detect_runtime()
+
+    if quadlet_active(name):
+        warn(
+            f"systemd user unit {container_name(name)}.service is active; "
+            f"systemd will restart the container after removal. Manage it via Quadlet instead."
+        )
+        if not yes:
+            eprint("[devenv-wiz] re-run with -y/--yes to proceed despite the active unit")
+            raise typer.Exit(2)
+
+    if not yes:
+        if not is_tty():
+            eprint("[devenv-wiz] refusing destructive 'down' without -y/--yes on a non-TTY")
+            raise typer.Exit(2)
+        what = f"stop and remove {container_name(name)}"
+        if purge:
+            what += f" and DELETE volume {volume_name(name)}"
+        if not questionary.confirm(f"{what}?", default=False).ask():
+            log("aborted")
+            return
+
+    down_container(rt, name, purge)
+
+
+def gather_rows(rt: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    running_short: set[str] = set()
+    r = query([rt, "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"])
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or not parts[0].startswith(CONTAINER_PREFIX):
+            continue
+        cname, image, status, uptime = parts
+        short = cname[len(CONTAINER_PREFIX):]
+        running_short.add(short)
+        rows.append({
+            "name": cname,
+            "port": read_state_port(short) or "?",
+            "image": image,
+            "status": status,
+            "uptime": uptime,
+            "stale": False,
+        })
+    # Orphaned state files: a <name>.port with no running container.
+    if STATE_DIR.is_dir():
+        for f in sorted(STATE_DIR.glob("*.port")):
+            short = f.stem
+            if short in running_short:
+                continue
+            rows.append({
+                "name": container_name(short),
+                "port": read_state_port(short) or "?",
+                "image": "-",
+                "status": "stale",
+                "uptime": "-",
+                "stale": True,
+            })
+    return rows
+
+
+def do_list(as_json: bool) -> None:
+    rt = detect_runtime()
+    rows = gather_rows(rt)
+    if as_json:
+        print(json.dumps(rows, indent=2))
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("NAME", "PORT", "IMAGE", "STATUS", "UPTIME"):
+        table.add_column(col)
+    for row in rows:
+        style = "dim" if row["stale"] else None
+        table.add_row(
+            str(row["name"]), str(row["port"]), str(row["image"]),
+            str(row["status"]), str(row["uptime"]), style=style,
+        )
+    console.print(table)
+
+
+def do_logs(name: str, follow: bool) -> int:
+    validate_name(name)
+    rt = detect_runtime()
+    argv = [rt, "logs"] + (["-f"] if follow else []) + [container_name(name)]
+    try:
+        return subprocess.run(argv).returncode  # inherited stdio
+    except KeyboardInterrupt:
+        return 130
 
 
 # --- wizard ------------------------------------------------------------------
@@ -295,7 +481,7 @@ def is_tty() -> bool:
 
 
 def wizard_loop() -> int:
-    err_console.print("[devenv-wiz] wizard not implemented yet; use subcommands (--help)")
+    eprint("[devenv-wiz] wizard not implemented yet; use subcommands (--help)")
     return 2
 
 
@@ -304,12 +490,13 @@ def wizard_loop() -> int:
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
+    pretty_exceptions_enable=False,
     help="Interactive wizard + CLI for devenv containers (sibling of bin/devenv).",
 )
 
 
 def fatal_exit(e: Fatal) -> "typer.NoReturn":
-    err_console.print(f"[devenv-wiz] FATAL: {e}")
+    eprint(f"[devenv-wiz] FATAL: {e}")
     raise typer.Exit(1)
 
 
@@ -338,6 +525,63 @@ def run_self_test() -> int:
     return 0 if ok else 1
 
 
+@app.command()
+def build(
+    tag: str = typer.Argument(IMAGE_NAME, help="Image tag to build."),
+) -> None:
+    """Build the image at the repo root (streams build output)."""
+    do_build(tag)
+
+
+@app.command()
+def up(
+    name: str = typer.Argument(..., help="Container short name (devenv-<name>)."),
+    env_file: Path | None = typer.Option(
+        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    ),
+) -> None:
+    """Start container devenv-NAME (detached)."""
+    if env_file is not None and not env_file.is_file():
+        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    do_up(name, env_file)
+
+
+@app.command()
+def down(
+    name: str = typer.Argument(..., help="Container short name."),
+    purge: bool = typer.Option(False, "--purge", help="Also delete the workspace volume."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+) -> None:
+    """Stop and remove container devenv-NAME."""
+    cli_down(name, purge, yes)
+
+
+@app.command()
+def purge(
+    name: str = typer.Argument(..., help="Container short name."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+) -> None:
+    """Sugar for: down NAME --purge."""
+    cli_down(name, purge=True, yes=yes)
+
+
+@app.command(name="list")
+def list_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """List running devenv containers (plus stale state files)."""
+    do_list(as_json)
+
+
+@app.command()
+def logs(
+    name: str = typer.Argument(..., help="Container short name."),
+    no_follow: bool = typer.Option(False, "--no-follow", help="Print logs without following."),
+) -> None:
+    """Tail container logs."""
+    raise typer.Exit(do_logs(name, follow=not no_follow))
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -348,7 +592,7 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
     if not is_tty():
-        err_console.print("[devenv-wiz] no TTY; interactive wizard unavailable. Use subcommands (devenv-wiz --help).")
+        eprint("[devenv-wiz] no TTY; interactive wizard unavailable. Use subcommands (devenv-wiz --help).")
         raise typer.Exit(2)
     raise typer.Exit(wizard_loop())
 
@@ -357,5 +601,5 @@ if __name__ == "__main__":
     try:
         app()
     except Fatal as e:
-        err_console.print(f"[devenv-wiz] FATAL: {e}")
+        eprint(f"[devenv-wiz] FATAL: {e}")
         sys.exit(1)
