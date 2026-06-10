@@ -184,6 +184,16 @@ The two toolchains are interchangeable mid-flight: `bin/devenv up acme` then `bi
 
 Two deliberate differences from the bash tools: when a name has *both* a hosts.conf entry and a local state file, `devenv-wiz attach` prefers the remote — pass `--local` to get `bin/devenv attach` semantics. And `devenv-wiz down`/`purge` confirm before destroying anything, so scripts must pass `-y`/`--yes` (`bin/devenv down` never prompts).
 
+The wizard has a pytest suite in `bin/tests/` that pins its interop contract with the bash tools (port hash, naming, env-file resolution, hosts.conf parsing, generated `run`/`ssh` argv). It needs no container runtime or ssh — only uv:
+
+```bash
+uv run --with pytest \
+       --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' \
+       pytest bin/tests
+```
+
+The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync when bumping dependencies in `bin/devenv-wiz`.
+
 ### Working inside tmux
 
 `Ctrl-B` is the tmux prefix. Cheat sheet:
