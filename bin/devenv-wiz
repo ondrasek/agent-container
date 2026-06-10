@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import termios
 from pathlib import Path
 
 import questionary
@@ -188,6 +189,12 @@ def state_file(name: str) -> Path:
 # --- runtime -----------------------------------------------------------------
 
 _hosts_warned = False
+
+# Captured at startup so an abnormal ssh exit can't leave the terminal raw.
+try:
+    _ORIG_TERMIOS = termios.tcgetattr(sys.stdin.fileno()) if sys.stdin.isatty() else None
+except Exception:
+    _ORIG_TERMIOS = None
 
 
 def detect_runtime() -> str:
@@ -465,6 +472,94 @@ def do_list(as_json: bool) -> None:
     console.print(table)
 
 
+def ssh_argv(user: str, host: str, port: str | int) -> list[str]:
+    # The one true attach command; argv list, never a shell string.
+    return ["ssh", f"{user}@{host}", "-p", str(port), "-t", "tmux", "attach", "-t", "main"]
+
+
+def tmux_nest_warning() -> str | None:
+    if os.environ.get("TMUX"):
+        return "already inside tmux; detach the INNER session with Ctrl-B Ctrl-B d"
+    return None
+
+
+def resolve_attach_target(
+    name: str,
+    mode: str,  # "auto" | "local" | "remote"
+    user_override: str | None = None,
+    host_override: str | None = None,
+) -> tuple[str, str, str, str]:
+    """Returns (user, host, port, kind). kind is 'local' or 'remote'."""
+    validate_name(name)
+    user = user_override or os.environ.get("DEVENV_USER") or "dev"
+    key = name_to_key(name)
+
+    if mode == "remote" and not HOSTS_CONF.is_file():
+        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/devenv-hosts.example)")
+
+    entry = hosts_entry(name)
+    if mode == "remote" or (mode == "auto" and entry is not None):
+        if entry is None:
+            die(f"no host configured for {name} — add {key}_HOST and {key}_PORT to {HOSTS_CONF}")
+        host, port = entry
+        return user, host_override or host, port, "remote"
+
+    port = read_state_port(name)
+    if port is None:
+        if mode == "local":
+            die(
+                f"no local state for {name} at {state_file(name)} — is the container "
+                f"running? (try: devenv-wiz up {name})"
+            )
+        die(
+            f"no attach target for {name}; checked {HOSTS_CONF} "
+            f"(no {key}_HOST/{key}_PORT) and {state_file(name)}"
+        )
+    host = host_override or os.environ.get("DEVENV_HOST") or "localhost"
+    return user, host, port, "local"
+
+
+def cli_attach(name: str, mode: str, user_override: str | None, host_override: str | None) -> None:
+    user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
+    if w := tmux_nest_warning():
+        warn(w)  # CLI mode: warn and proceed
+    eprint(f'devenv-wiz: {user}@{host}:{port} (tmux session "main")')
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
+    # and the exit code belong to ssh — identical to bash `exec ssh`.
+    os.execvp("ssh", ssh_argv(user, host, port))
+
+
+def wizard_handover(user: str, host: str, port: str, logs_hint: str = "devenv-wiz logs <name>") -> None:
+    """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
+    target = f"{user}@{host}:{port}"
+    eprint(f'devenv-wiz: {target} (tmux session "main")')
+    sys.stdout.flush()
+    sys.stderr.flush()
+    old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C goes to ssh only
+    try:
+        rc = subprocess.run(ssh_argv(user, host, port)).returncode
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        if _ORIG_TERMIOS is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _ORIG_TERMIOS)
+            except Exception:
+                pass
+    if rc == 0:
+        console.print(
+            f"Detached — tmux session 'main' is still running on {target}; agents keep working."
+        )
+    elif rc == 255:
+        warn(f"ssh could not connect to {target}; check hosts.conf or the container state.")
+    else:
+        warn(
+            f"remote command failed (exit {rc}); likely 'tmux attach' found no session "
+            f"'main'. Check the entrypoint via: {logs_hint}"
+        )
+
+
 def do_logs(name: str, follow: bool) -> int:
     validate_name(name)
     rt = detect_runtime()
@@ -571,6 +666,21 @@ def list_cmd(
 ) -> None:
     """List running devenv containers (plus stale state files)."""
     do_list(as_json)
+
+
+@app.command()
+def attach(
+    name: str = typer.Argument(..., help="Container short name."),
+    local: bool = typer.Option(False, "--local", help="Force local target (state file)."),
+    remote: bool = typer.Option(False, "--remote", help="Force remote target (hosts.conf)."),
+    user: str | None = typer.Option(None, "--user", help="SSH user (default: DEVENV_USER or dev)."),
+    host: str | None = typer.Option(None, "--host", help="Override the resolved host."),
+) -> None:
+    """ssh + tmux attach to container NAME (local state file or hosts.conf)."""
+    if local and remote:
+        raise typer.BadParameter("--local and --remote are mutually exclusive")
+    mode = "local" if local else ("remote" if remote else "auto")
+    cli_attach(name, mode, user, host)
 
 
 @app.command()
