@@ -168,6 +168,20 @@ devenv-attach -l acme         # local (Lima on macOS); reads port from local sta
 
 Behind the scenes: `ssh dev@<host> -p <port> -t tmux attach -t main`. The `-t` allocates a TTY (required for tmux); `tmux attach -t main` joins the existing session rather than creating a new one (which would mask bugs).
 
+### Interactive wizard (devenv-wiz)
+
+`bin/devenv-wiz` is a Python sibling of `bin/devenv` + `devenv-attach` that shares all their on-disk state (container names, port hash, `<name>.port` state files, env-file resolution, `hosts.conf`). It needs nothing but [uv](https://docs.astral.sh/uv/) installed — it is a PEP 723 single-file script.
+
+```bash
+bin/devenv-wiz                # interactive menu: build, start, attach, logs, stop, purge
+bin/devenv-wiz up acme        # every wizard action has a scriptable CLI twin
+bin/devenv-wiz list --json    # machine-readable state (merges runtime ps + state files)
+bin/devenv-wiz attach acme    # hosts.conf -> remote, else local state file; execs ssh
+bin/devenv-wiz --self-test    # doctests + interop corpus (port hash, key derivation)
+```
+
+The two toolchains are interchangeable mid-flight: `bin/devenv up acme` then `bin/devenv-wiz attach acme --local` works, and vice versa. Remote (hosts.conf) targets are attach-only; lifecycle commands act on the local runtime exclusively.
+
 ### Working inside tmux
 
 `Ctrl-B` is the tmux prefix. Cheat sheet:
