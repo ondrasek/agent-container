@@ -531,6 +531,12 @@ def cli_attach(name: str, mode: str, user_override: str | None, host_override: s
     os.execvp("ssh", ssh_argv(user, host, port))
 
 
+def _child_default_sigint() -> None:
+    # SIG_IGN survives exec; without this reset a child spawned while the
+    # parent shields itself from Ctrl-C would ignore SIGINT too.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 def wizard_handover(user: str, host: str, port: str, logs_hint: str = "devenv-wiz logs <name>") -> None:
     """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
     target = f"{user}@{host}:{port}"
@@ -539,7 +545,9 @@ def wizard_handover(user: str, host: str, port: str, logs_hint: str = "devenv-wi
     sys.stderr.flush()
     old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C goes to ssh only
     try:
-        rc = subprocess.run(ssh_argv(user, host, port)).returncode
+        rc = subprocess.run(
+            ssh_argv(user, host, port), preexec_fn=_child_default_sigint
+        ).returncode
     finally:
         signal.signal(signal.SIGINT, old_int)
         if _ORIG_TERMIOS is not None:
