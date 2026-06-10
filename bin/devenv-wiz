@@ -226,6 +226,22 @@ def container_exists(rt: str, cname: str) -> bool:
     return cname in r.stdout.splitlines()
 
 
+def ps_devenv(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
+    """(cname, image, status, uptime) rows for devenv-* containers.
+
+    Go-template + tab split, not --format json: podman and docker JSON
+    shapes are incompatible, the template output is not.
+    """
+    argv = [rt, "ps"] + (["-a"] if include_stopped else [])
+    argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
+    rows = []
+    for line in query(argv).stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[0].startswith(CONTAINER_PREFIX):
+            rows.append((parts[0], parts[1], parts[2], parts[3]))
+    return rows
+
+
 def image_exists(rt: str, tag: str) -> bool:
     # `image inspect` works on both podman and docker (podman's `image exists` does not).
     return query([rt, "image", "inspect", tag]).returncode == 0
@@ -421,12 +437,7 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
 def gather_rows(rt: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     running_short: set[str] = set()
-    r = query([rt, "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"])
-    for line in r.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 4 or not parts[0].startswith(CONTAINER_PREFIX):
-            continue
-        cname, image, status, uptime = parts
+    for cname, image, status, uptime in ps_devenv(rt):
         short = cname[len(CONTAINER_PREFIX):]
         running_short.add(short)
         rows.append({
@@ -579,13 +590,247 @@ def do_logs(name: str, follow: bool) -> int:
 
 
 # --- wizard ------------------------------------------------------------------
+# Lifecycle pickers (start/stop/purge/logs) list LOCAL containers only;
+# remote (hosts.conf) targets appear exclusively in the Attach picker.
 
-# (added in subsequent increments)
+
+def _validate_wiz_name(text: str):  # questionary validator: True or error string
+    return True if NAME_RE.fullmatch(text) else "must match [a-z0-9][a-z0-9_-]*"
+
+
+def _short(cname: str) -> str:
+    return cname[len(CONTAINER_PREFIX):]
+
+
+def wiz_build(rt: str) -> None:
+    tag = questionary.text("image tag", default=IMAGE_NAME).ask()
+    if not tag:
+        return
+    do_build(tag)
+    hint("devenv-wiz build" + (f" {tag}" if tag != IMAGE_NAME else ""))
+
+
+def wiz_up(rt: str) -> None:
+    name = questionary.text("container name", validate=_validate_wiz_name).ask()
+    if not name:
+        return
+    cname = container_name(name)
+
+    if container_running(rt, cname):
+        port = read_state_port(name)
+        log(f"container {cname} already running" + (f" on port {port}" if port else ""))
+        return
+    if container_exists(rt, cname):
+        log(f"container {cname} exists but is stopped — remove it first (Stop / remove)")
+        return
+
+    env_file = resolve_env_file(name)
+    if env_file is None:
+        eprint("[devenv-wiz] no env file found; looked in:")
+        for c in env_file_candidates(name, Path.cwd()):
+            eprint(f"  {c}")
+        target = CONFIG_DIR / f"{name}.env"
+        if questionary.confirm(f"create/edit {target} in $EDITOR now?", default=True).ask():
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            # $EDITOR gets the path only; devenv-wiz never reads env contents.
+            subprocess.run([os.environ.get("EDITOR") or "vi", str(target)])
+            env_file = resolve_env_file(name)
+        if env_file is None:
+            log("still no env file; not starting")
+            return
+
+    if not image_exists(rt, IMAGE_NAME):
+        if not questionary.confirm(f"image {IMAGE_NAME} is missing — build it now?", default=True).ask():
+            return
+        do_build(IMAGE_NAME)
+        if not image_exists(rt, IMAGE_NAME):
+            log("image still missing; not starting")
+            return
+
+    card = Table(show_header=False, box=None, pad_edge=False)
+    card.add_column(style="bold")
+    card.add_column()
+    card.add_row("env-file", str(env_file))  # path only, never contents
+    card.add_row("port", str(port_for_name(name)))
+    card.add_row("volume", volume_name(name))
+    card.add_row("image", IMAGE_NAME)
+    console.print(card)
+
+    if not questionary.confirm(f"start {cname}?", default=True).ask():
+        return
+    launch_container(rt, name, env_file)  # port pre-check + actionable abort inside
+    hint(f"devenv-wiz up {name}")
+
+
+def wiz_attach(rt: str) -> None:
+    choices: list[questionary.Choice] = []
+    for cname, _image, _status, _uptime in ps_devenv(rt):
+        short = _short(cname)
+        port = read_state_port(short) or "?"
+        choices.append(questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", "")))
+    conf = load_hosts_conf()
+    for key in sorted(conf):
+        if not key.endswith("_HOST"):
+            continue
+        base = key[: -len("_HOST")]
+        host, port = conf[key], conf.get(f"{base}_PORT")
+        if not (host and port):
+            continue
+        rname = base.lower()  # round-trips through name_to_key for the hint
+        choices.append(
+            questionary.Choice(f"{rname}  [remote {host}:{port}]", value=("remote", rname, host, port))
+        )
+    if not choices:
+        log("nothing to attach to: no running local containers and no hosts.conf entries")
+        return
+
+    sel = questionary.select("attach to", choices=choices).ask()
+    if sel is None:
+        return
+    if w := tmux_nest_warning():
+        warn(w)
+        if not questionary.confirm("continue attaching?", default=True).ask():
+            return
+
+    kind, name, host, port = sel
+    user = os.environ.get("DEVENV_USER") or "dev"
+    if kind == "local":
+        port = read_state_port(name)
+        if port is None:  # TOCTOU: state file vanished since the picker rendered
+            warn(f"state file for {name} disappeared; is the container still up?")
+            return
+        host = os.environ.get("DEVENV_HOST") or "localhost"
+    wizard_handover(user, host, port, logs_hint=f"devenv-wiz logs {name}")
+    hint(f"devenv-wiz attach {name} --{kind}")
+
+
+def wiz_logs(rt: str) -> None:
+    rows = ps_devenv(rt)
+    if not rows:
+        log("no running devenv containers")
+        return
+    sel = questionary.select("logs for", choices=[_short(r[0]) for r in rows]).ask()
+    if sel is None:
+        return
+    log("streaming logs — Ctrl-C returns to the menu")
+    old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C stops the tail only
+    try:
+        subprocess.run([rt, "logs", "-f", container_name(sel)], preexec_fn=_child_default_sigint)
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+    hint(f"devenv-wiz logs {sel}")
+
+
+def wiz_down(rt: str) -> None:
+    rows = ps_devenv(rt, include_stopped=True)
+    if not rows:
+        log("no devenv containers (running or stopped)")
+        return
+    choices = []
+    for cname, _image, status, _uptime in rows:
+        short = _short(cname)
+        label = f"{short}  [exited]" if status.lower().startswith("exited") else short
+        choices.append(questionary.Choice(label, value=short))
+    sel = questionary.select("stop / remove", choices=choices).ask()
+    if sel is None:
+        return
+    cname, vname = container_name(sel), volume_name(sel)
+
+    if not container_exists(rt, cname):  # TOCTOU re-verify
+        warn(f"container {cname} no longer exists")
+        return
+    if quadlet_active(sel):
+        warn(
+            f"systemd user unit {cname}.service is active; systemd will restart "
+            f"the container after removal. Manage it via Quadlet instead."
+        )
+        if not questionary.confirm("proceed anyway?", default=False).ask():
+            return
+    if not questionary.confirm(f"stop and remove {cname}?", default=False).ask():
+        log("aborted")
+        return
+
+    purge = False
+    if questionary.confirm(f"also delete workspace volume {vname}?", default=False).ask():
+        typed = questionary.text(f"type the container name ({cname}) to confirm volume deletion").ask()
+        if typed == cname:
+            purge = True
+        else:
+            log("name mismatch — volume will be preserved")
+    down_container(rt, sel, purge)  # reports preserved vs purged, clears state
+    hint(f"devenv-wiz down {sel}" + (" --purge" if purge else ""))
+
+
+def _volume_names(rt: str) -> list[str]:
+    out = query([rt, "volume", "ls", "--format", "{{.Name}}"]).stdout.splitlines()
+    return [v for v in out if re.fullmatch(r"devenv-.+-workspace", v)]
+
+
+def wiz_purge_volume(rt: str) -> None:
+    containers = {row[0] for row in ps_devenv(rt, include_stopped=True)}
+    orphans = []
+    for vol in _volume_names(rt):
+        short = vol[len(CONTAINER_PREFIX): -len("-workspace")]
+        if container_name(short) not in containers:
+            orphans.append(vol)
+    if not orphans:
+        log("no orphaned devenv volumes")
+        return
+    sel = questionary.select("purge orphaned volume", choices=orphans).ask()
+    if sel is None:
+        return
+    typed = questionary.text(f"type the volume name ({sel}) to confirm deletion").ask()
+    if typed != sel:
+        log("name mismatch — nothing removed")
+        return
+    if sel not in _volume_names(rt):  # TOCTOU re-verify
+        warn(f"volume {sel} no longer exists")
+        return
+    if query([rt, "volume", "rm", sel]).returncode != 0:
+        warn(f"volume {sel} not removed (in use)")
+    else:
+        log(f"volume {sel} purged")
+    hint(f"{rt} volume rm {sel}")
+
+
+_MENU: list[tuple[str, "object"]] = [
+    ("Provision (build image)", wiz_build),
+    ("Start a container", wiz_up),
+    ("Attach", wiz_attach),
+    ("Logs", wiz_logs),
+    ("Stop / remove", wiz_down),
+    ("Purge orphaned volume", wiz_purge_volume),
+    ("Quit", None),
+]
 
 
 def wizard_loop() -> int:
-    eprint("[devenv-wiz] wizard not implemented yet; use subcommands (--help)")
-    return 2
+    if not is_tty():
+        eprint("[devenv-wiz] no TTY; interactive wizard unavailable. Use subcommands (devenv-wiz --help).")
+        return 2
+    try:
+        rt = detect_runtime()
+    except Fatal as e:
+        eprint(f"[devenv-wiz] FATAL: {e}")
+        return 1
+    actions = dict(_MENU)
+    while True:
+        try:
+            running = len(ps_devenv(rt))
+            hosts = "present" if HOSTS_CONF.is_file() else "absent"
+            console.print(
+                f"runtime: {rt} | running local containers: {running} | hosts.conf: {hosts}",
+                style="dim",
+            )
+            choice = questionary.select("devenv — what now?", choices=[t for t, _ in _MENU]).ask()
+            if choice is None or choice == "Quit":
+                return 0
+            try:
+                actions[choice](rt)
+            except Fatal as e:
+                eprint(f"[devenv-wiz] ERROR: {e}")  # back to the menu, not exit
+        except (KeyboardInterrupt, EOFError):
+            return 0
 
 
 # --- entry -------------------------------------------------------------------
@@ -700,6 +945,12 @@ def logs(
     raise typer.Exit(do_logs(name, follow=not no_follow))
 
 
+@app.command()
+def menu() -> None:
+    """Interactive wizard (same as bare devenv-wiz)."""
+    raise typer.Exit(wizard_loop())
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -707,12 +958,8 @@ def main(
 ) -> None:
     if self_test:
         raise typer.Exit(run_self_test())
-    if ctx.invoked_subcommand is not None:
-        return
-    if not is_tty():
-        eprint("[devenv-wiz] no TTY; interactive wizard unavailable. Use subcommands (devenv-wiz --help).")
-        raise typer.Exit(2)
-    raise typer.Exit(wizard_loop())
+    if ctx.invoked_subcommand is None:
+        raise typer.Exit(wizard_loop())
 
 
 if __name__ == "__main__":
