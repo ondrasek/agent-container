@@ -1,16 +1,3 @@
-# Runtime credentials and per-host config — see docs/credentials.md
-.env
-.env.local
-.env.*.local
-
-# Claude Code harness artifacts (workflow scripts saved per-session)
-.claude/
-
-# OS noise
-.DS_Store
-Thumbs.db
-
-# Editor noise
-*.swp
-*.swo
-.idea/
+__pycache__/
+*.pyc
+.pytest_cache/
