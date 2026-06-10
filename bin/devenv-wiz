@@ -1,0 +1,361 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "typer>=0.12,<1",
+#   "questionary>=2.0,<3",
+#   "rich>=13,<15",
+# ]
+# ///
+#
+# devenv-wiz — interactive wizard + CLI for devenv containers.
+#
+# Python sibling of bin/devenv and bin/devenv-attach. Shares all on-disk
+# state with them: container naming (devenv-<name>), the port hash
+# (2200 + sum-of-char-codes mod 100), state files
+# ($XDG_STATE_HOME/devenv/<name>.port), env-file resolution
+# (./.env -> ~/.config/devenv/<name>.env -> ~/.config/devenv/.env), and
+# the hosts.conf KEY=VALUE format (FOO_HOST / FOO_PORT).
+#
+# ============================================================================
+# INTEROP WARNING: constants and pure helpers below are duplicated from
+# bin/devenv (and the hosts.conf lookup from bin/devenv-attach).
+# Logic duplicated in bin/devenv — change both, or the toolchains diverge.
+# ============================================================================
+#
+# Divergence (documented): bin/devenv-attach *sources* hosts.conf via bash;
+# this tool parses it line-by-line and never executes it. Values containing
+# `$` or backticks are taken literally, with a one-time warning.
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import questionary
+import typer
+from rich.console import Console
+from rich.table import Table
+
+# --- constants ---------------------------------------------------------------
+
+IMAGE_NAME = "localhost/remote-persistent-devenv:latest"
+CONTAINER_PREFIX = "devenv-"
+PORT_BASE = 2200
+PORT_RANGE = 100  # 2200..2299
+
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "devenv"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "devenv"
+HOSTS_CONF = CONFIG_DIR / "hosts.conf"
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+console = Console()
+err_console = Console(stderr=True)
+
+
+class Fatal(Exception):
+    """Fatal error; CLI exits 1, wizard prints and returns to the menu."""
+
+
+def die(msg: str) -> "typer.NoReturn":  # mirrors bash die()
+    raise Fatal(msg)
+
+
+# --- pure helpers ------------------------------------------------------------
+
+
+def validate_name(name: str) -> str:
+    """Same charset rule as bin/devenv require_name.
+
+    >>> validate_name("acme")
+    'acme'
+    >>> validate_name("my-box")
+    'my-box'
+    >>> validate_name("Bad")
+    Traceback (most recent call last):
+    ...
+    Fatal: invalid <name> 'Bad'; must match [a-z0-9][a-z0-9_-]*
+    """
+    if not name:
+        die("missing required <name> argument")
+    if not NAME_RE.fullmatch(name):
+        die(f"invalid <name> '{name}'; must match [a-z0-9][a-z0-9_-]*")
+    return name
+
+
+def container_name(name: str) -> str:
+    """
+    >>> container_name("acme")
+    'devenv-acme'
+    """
+    return f"{CONTAINER_PREFIX}{name}"
+
+
+def volume_name(name: str) -> str:
+    """
+    >>> volume_name("acme")
+    'devenv-acme-workspace'
+    """
+    return f"{CONTAINER_PREFIX}{name}-workspace"
+
+
+def port_for_name(name: str) -> int:
+    """Deterministic port: PORT_BASE + (sum of char codes mod PORT_RANGE).
+
+    Name charset is ASCII-only (enforced by NAME_RE), so ord() matches
+    bash's printf '%d' "'c" exactly.
+
+    >>> port_for_name("acme")
+    2206
+    >>> port_for_name("my-box")
+    2204
+    """
+    return PORT_BASE + (sum(ord(c) for c in name) % PORT_RANGE)
+
+
+def name_to_key(name: str) -> str:
+    """hosts.conf key prefix: hyphens -> underscores, uppercased.
+
+    >>> name_to_key("my-box")
+    'MY_BOX'
+    >>> name_to_key("acme")
+    'ACME'
+    """
+    return name.replace("-", "_").upper()
+
+
+def parse_kv_config(text: str) -> dict[str, str]:
+    """Literal KEY=VALUE parser for hosts.conf. Never executes the file.
+
+    Skips blank lines and # comments, strips an optional leading 'export ',
+    splits on the first '=', strips one pair of matching quotes.
+
+    >>> parse_kv_config("# c\\n\\nA=1\\nexport B='two'\\nC=\\"three\\"\\nD=a=b\\n")
+    {'A': '1', 'B': 'two', 'C': 'three', 'D': 'a=b'}
+    """
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            out[key] = value
+    return out
+
+
+def env_file_candidates(name: str, cwd: Path) -> list[Path]:
+    """Resolution order is the interop contract with bin/devenv.
+
+    >>> [str(p) for p in env_file_candidates("acme", Path("/w"))][0]
+    '/w/.env'
+    """
+    return [cwd / ".env", CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
+
+
+def resolve_env_file(name: str) -> Path | None:
+    # Secret hygiene: only existence checks; contents are never read.
+    for candidate in env_file_candidates(name, Path.cwd()):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def state_file(name: str) -> Path:
+    return STATE_DIR / f"{name}.port"
+
+
+# --- runtime -----------------------------------------------------------------
+
+_hosts_warned = False
+
+
+def detect_runtime() -> str:
+    forced = os.environ.get("DEVENV_RUNTIME")
+    if forced:
+        if forced not in ("podman", "docker"):
+            die(f"DEVENV_RUNTIME must be 'docker' or 'podman', got: {forced}")
+        if not shutil.which(forced):
+            die(f"DEVENV_RUNTIME={forced} but '{forced}' is not on PATH")
+        return forced
+    if shutil.which("podman"):
+        return "podman"
+    if shutil.which("docker"):
+        return "docker"
+    die("neither 'podman' nor 'docker' on PATH (install one, or set DEVENV_RUNTIME)")
+
+
+def query(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def container_running(rt: str, cname: str) -> bool:
+    r = query([rt, "ps", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
+    return cname in r.stdout.splitlines()  # exact match, mirrors grep -qx
+
+
+def container_exists(rt: str, cname: str) -> bool:
+    r = query([rt, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
+    return cname in r.stdout.splitlines()
+
+
+def image_exists(rt: str, tag: str) -> bool:
+    # `image inspect` works on both podman and docker (podman's `image exists` does not).
+    return query([rt, "image", "inspect", tag]).returncode == 0
+
+
+def port_free(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+
+
+def write_state(name: str, port: int) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_file(name).write_text(f"{port}\n")
+
+
+def read_state_port(name: str) -> str | None:
+    f = state_file(name)
+    if not f.is_file():
+        return None
+    return f.read_text().strip() or None
+
+
+def clear_state(name: str) -> None:
+    state_file(name).unlink(missing_ok=True)
+
+
+def load_hosts_conf() -> dict[str, str]:
+    global _hosts_warned
+    if not HOSTS_CONF.is_file():
+        return {}
+    conf = parse_kv_config(HOSTS_CONF.read_text())
+    if not _hosts_warned and any("$" in v or "`" in v for v in conf.values()):
+        err_console.print(
+            "[devenv-wiz] WARNING: hosts.conf contains '$' or '`' values; "
+            "devenv-wiz does not perform shell expansion (bin/devenv-attach does)."
+        )
+        _hosts_warned = True
+    return conf
+
+
+def hosts_entry(name: str) -> tuple[str, str] | None:
+    """(host, port) from hosts.conf, or None unless BOTH keys are present."""
+    conf = load_hosts_conf()
+    key = name_to_key(name)
+    host, port = conf.get(f"{key}_HOST"), conf.get(f"{key}_PORT")
+    if host and port:
+        return host, port
+    return None
+
+
+def quadlet_active(name: str) -> bool:
+    # Best-effort probe; systemctl is absent on macOS — ignore all failures.
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        r = query(["systemctl", "--user", "is-active", f"{container_name(name)}.service"])
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def is_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+# --- commands ----------------------------------------------------------------
+
+# (added in subsequent increments)
+
+
+# --- wizard ------------------------------------------------------------------
+
+# (added in subsequent increments)
+
+
+def wizard_loop() -> int:
+    err_console.print("[devenv-wiz] wizard not implemented yet; use subcommands (--help)")
+    return 2
+
+
+# --- entry -------------------------------------------------------------------
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    help="Interactive wizard + CLI for devenv containers (sibling of bin/devenv).",
+)
+
+
+def fatal_exit(e: Fatal) -> "typer.NoReturn":
+    err_console.print(f"[devenv-wiz] FATAL: {e}")
+    raise typer.Exit(1)
+
+
+def run_self_test() -> int:
+    import doctest
+
+    failures, tests = doctest.testmod(
+        sys.modules[__name__], optionflags=doctest.IGNORE_EXCEPTION_DETAIL
+    )
+    # Corpus computed from bin/devenv's bash port_for_name (hard-coded truth).
+    corpus = {
+        "acme": 2206,
+        "blog": 2220,
+        "scratch": 2244,
+        "my-box": 2204,
+        "a": 2297,
+        "devbox123": 2298,
+    }
+    bad = {n: (port_for_name(n), want) for n, want in corpus.items() if port_for_name(n) != want}
+    keys_ok = name_to_key("my-box") == "MY_BOX" and name_to_key("acme") == "ACME"
+    ok = failures == 0 and not bad and keys_ok
+    print(f"doctests: {tests - failures}/{tests} passed")
+    print(f"port corpus: {'ok' if not bad else f'MISMATCH {bad}'}")
+    print(f"key derivation: {'ok' if keys_ok else 'MISMATCH'}")
+    print("self-test:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    self_test: bool = typer.Option(False, "--self-test", help="Run doctests + interop corpus checks."),
+) -> None:
+    if self_test:
+        raise typer.Exit(run_self_test())
+    if ctx.invoked_subcommand is not None:
+        return
+    if not is_tty():
+        err_console.print("[devenv-wiz] no TTY; interactive wizard unavailable. Use subcommands (devenv-wiz --help).")
+        raise typer.Exit(2)
+    raise typer.Exit(wizard_loop())
+
+
+if __name__ == "__main__":
+    try:
+        app()
+    except Fatal as e:
+        err_console.print(f"[devenv-wiz] FATAL: {e}")
+        sys.exit(1)
