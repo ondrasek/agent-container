@@ -29,8 +29,16 @@ def test_port_for_name_matches_bash(wiz, name, port):
 
 
 def test_port_always_inside_window(wiz):
-    for name in BASH_PORT_CORPUS:
-        assert 2200 <= wiz.port_for_name(name) <= 2299
+    # Sweep far beyond the concrete corpus: the 2200..2299 window must hold
+    # for ANY valid name, not just the hand-computed ones above.
+    import itertools
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    names = [c for c in alphabet]
+    names += [a + b for a, b in itertools.islice(itertools.product(alphabet, "az9_-"), 100)]
+    names += ["x" * n for n in (3, 7, 17, 63, 255)]
+    for name in names:
+        assert wiz.validate_name(name) == name  # only valid names matter
+        assert 2200 <= wiz.port_for_name(name) <= 2299, name
 
 
 def test_port_collision_is_possible_and_deterministic(wiz):
