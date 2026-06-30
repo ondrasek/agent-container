@@ -29,6 +29,7 @@ RUN apt-get update \
         git \
         openssh-server \
         tmux \
+        zsh \
         sudo \
         locales \
         less \
@@ -109,6 +110,37 @@ RUN mkdir -p /etc/ssh \
     && mkdir -p /home/dev/.ssh \
     && chown dev:dev /home/dev/.ssh \
     && chmod 0700 /home/dev/.ssh
+
+# --- Layer 5b: per-container volume mount points + persistent shell env -----
+# Each of these dirs is the mount point of a per-container named volume
+# (devenv-<name>-{claude,codex,pi,shellenv}). Pre-creating them dev-owned
+# (uid 1000) BEFORE the USER switch means a fresh, empty named volume
+# initializes dev-owned too — the runtime seeds a new volume from the image
+# directory's contents AND ownership/permissions. Without this the volume
+# would come up root-owned and the agents could not write their credentials.
+#
+# pi-coding-agent's config/auth dir is ~/.pi (verified: package.json piConfig
+# .configDir = ".pi"; dist/config.js getAgentDir() -> ~/.pi/agent, auth.json
+# at ~/.pi/agent/auth.json). Overridable at runtime via PI_CODING_AGENT_DIR.
+# The credential dirs are 0700; .devenv (shell env, non-secret) is 0755.
+#
+# Shell-env wiring: agents and the operator drop KEY=VALUE exports in
+# ~/.devenv/env (on the shellenv volume, so it survives down/up). BOTH bash and
+# zsh source it, guarded so a malformed file cannot break the shell. dev's
+# LOGIN SHELL stays bash (sshd/tmux/entrypoint assume bash); zsh is available
+# but not the default. tmux panes are interactive non-login bash and read
+# ~/.bashrc, so the hook fires there; ~/.bash_profile sources ~/.bashrc so
+# SSH login shells get it too.
+RUN set -eux; \
+    mkdir -p /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.devenv; \
+    chown -R dev:dev /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.devenv; \
+    chmod 0700 /home/dev/.claude /home/dev/.codex /home/dev/.pi; \
+    chmod 0755 /home/dev/.devenv; \
+    HOOK='if [ -f "$HOME/.devenv/env" ]; then set -a; . "$HOME/.devenv/env"; set +a; fi'; \
+    printf '\n# devenv: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.bashrc; \
+    printf '# devenv: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.zshrc; \
+    printf '# devenv: ensure SSH login shells load ~/.bashrc (and the env hook)\n[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >> /home/dev/.bash_profile; \
+    chown dev:dev /home/dev/.bashrc /home/dev/.zshrc /home/dev/.bash_profile
 
 # --- Layer 6: entrypoint (most-frequently-changed; STUB until item C) -------
 # Two-step COPY+chmod instead of `COPY --chmod=` so the file builds under both

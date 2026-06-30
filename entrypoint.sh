@@ -49,12 +49,39 @@ require_env GH_TOKEN
 require_env GIT_USER_NAME
 require_env GIT_USER_EMAIL
 
-# Optional: agents will complain themselves if they need a key. Warn-only.
+# Optional: agents can authenticate either via these keys OR via interactive
+# login inside the container ('claude login' / 'codex login'), whose OAuth
+# credential persists on the per-container volume and auto-refreshes. So an
+# absent key is only a NOTE, not a hard failure.
 for opt in ANTHROPIC_API_KEY OPENAI_API_KEY; do
     if [[ -z "${!opt:-}" ]]; then
-        log "WARNING: optional env var ${opt} is not set; the agent that uses it will fail at run time"
+        log "NOTE: optional env var ${opt} is not set. Either set it in .env, or run the agent's interactive login inside the container (e.g. 'claude login' / 'codex login'); that credential persists on this container's volume across restarts."
     fi
 done
+
+# --- 1b. Seed persistent shell-env template ---------------------------------
+# /home/dev/.devenv lives on the per-container 'shellenv' named volume and is
+# sourced into every interactive bash/zsh shell (see Dockerfile). On first boot
+# the volume is empty, so drop a commented template explaining its purpose.
+# Idempotent: never overwrite an existing file, and never echo its contents.
+DEVENV_ENV_FILE="/home/dev/.devenv/env"
+if [[ ! -f "${DEVENV_ENV_FILE}" ]]; then
+    log "seeding persistent shell-env template at ${DEVENV_ENV_FILE}"
+    mkdir -p /home/dev/.devenv
+    cat > "${DEVENV_ENV_FILE}" <<'EOF'
+# ~/.devenv/env — persistent shell environment for this devenv container.
+#
+# This file lives on the per-container 'shellenv' named volume, so it survives
+# `devenv down` / `devenv up` and crashes (it is dropped only by `down --purge`).
+# It is sourced with `set -a` into every interactive bash and zsh shell,
+# including tmux panes. Keep it to simple KEY=VALUE / export lines.
+#
+# Example:
+#   export FOO=bar
+EOF
+else
+    log "persistent shell-env file already present, leaving it alone"
+fi
 
 # --- 2. SSH host keys -------------------------------------------------------
 # Idempotent: only regenerate if the ed25519 key is absent. ssh-keygen -A
