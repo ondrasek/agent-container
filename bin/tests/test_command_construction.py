@@ -38,17 +38,78 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
 
     wiz.launch_container("podman", "acme", env_file)
 
+    # Five per-container named volumes in the canonical order, then --restart.
+    # This argv must stay byte-for-byte identical to bin/devenv cmd_up.
     assert capture_query == [[
         "podman", "run", "-d",
         "--name", "devenv-acme",
         "--env-file", str(env_file),
         "-p", "2206:22",
         "-v", "devenv-acme-workspace:/workspace",
+        "-v", "devenv-acme-claude:/home/dev/.claude",
+        "-v", "devenv-acme-codex:/home/dev/.codex",
+        "-v", "devenv-acme-pi:/home/dev/.pi",
+        "-v", "devenv-acme-shellenv:/home/dev/.devenv",
         "--restart", "unless-stopped",
         "localhost/remote-persistent-devenv:latest",
     ]]
     # state file written for bin/devenv interop
     assert wiz.read_state_port("acme") == "2206"
+
+
+def test_launch_container_appends_binds_after_volumes(wiz, capture_query, monkeypatch, tmp_path):
+    monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    env_file, _ = make_env_file(tmp_path)
+
+    wiz.launch_container(
+        "podman", "acme", env_file,
+        ["/abs/host:/opt/data", "/another:/workspace/another"],
+    )
+
+    (argv,) = capture_query
+    # Binds land immediately after the five standard volumes, before --restart.
+    ri = argv.index("--restart")
+    assert argv[ri - 4:ri] == [
+        "-v", "/abs/host:/opt/data",
+        "-v", "/another:/workspace/another",
+    ]
+    assert argv[ri:] == ["--restart", "unless-stopped", "localhost/remote-persistent-devenv:latest"]
+    # First -v is still the workspace volume (parity with bin/devenv).
+    assert argv[argv.index("-v") + 1] == "devenv-acme-workspace:/workspace"
+
+
+# --- bind-mount resolution (--mount) -----------------------------------------
+
+
+def test_resolve_bind_mount_default_container_path(wiz, tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert wiz.resolve_bind_mount(str(d)) == f"{d.resolve()}:/workspace/proj"
+
+
+def test_resolve_bind_mount_explicit_container_path(wiz, tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert wiz.resolve_bind_mount(f"{d}:/opt/data") == f"{d.resolve()}:/opt/data"
+
+
+def test_resolve_bind_mount_rejects_missing_dir(wiz, tmp_path):
+    with pytest.raises(wiz.Fatal, match="does not exist or is not a directory"):
+        wiz.resolve_bind_mount(str(tmp_path / "nope"))
+
+
+def test_resolve_bind_mount_rejects_relative_container_path(wiz, tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    with pytest.raises(wiz.Fatal, match="must be absolute"):
+        wiz.resolve_bind_mount(f"{d}:relative/path")
+
+
+def test_resolve_bind_mount_rejects_file(wiz, tmp_path):
+    f = tmp_path / "file.txt"
+    f.write_text("x")
+    with pytest.raises(wiz.Fatal, match="is not a directory"):
+        wiz.resolve_bind_mount(str(f))
 
 
 def test_launch_container_never_inlines_secrets(wiz, capture_query, monkeypatch, tmp_path):
@@ -120,6 +181,30 @@ def test_do_up_resolves_env_file_and_runs(up_env, capture_query, monkeypatch, tm
     assert argv[argv.index("--env-file") + 1] == str(work / ".env")
 
 
+def test_do_up_threads_mounts_through_to_argv(up_env, capture_query, monkeypatch, tmp_path):
+    wiz = up_env
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env").write_text("TOKEN=x\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(work)
+    wiz.do_up("acme", mounts=[str(proj)])
+    (argv,) = capture_query
+    assert "-v" in argv and f"{proj.resolve()}:/workspace/proj" in argv
+
+
+def test_do_up_rejects_bad_mount_before_any_runtime_call(up_env, capture_query, monkeypatch, tmp_path):
+    wiz = up_env
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env").write_text("TOKEN=x\n")
+    monkeypatch.chdir(work)
+    with pytest.raises(wiz.Fatal, match="does not exist or is not a directory"):
+        wiz.do_up("acme", mounts=[str(tmp_path / "missing")])
+    assert capture_query == []
+
+
 def test_do_up_dies_without_env_file(up_env, capture_query, monkeypatch, tmp_path):
     wiz = up_env
     work = tmp_path / "work"
@@ -160,6 +245,30 @@ def test_do_up_rejects_invalid_name_before_any_runtime_call(up_env, capture_quer
     with pytest.raises(wiz.Fatal, match="invalid <name>"):
         wiz.do_up("Bad Name")
     assert capture_query == []
+
+
+# --- down / purge volume removal ----------------------------------------------------
+
+
+def test_down_purge_removes_all_five_volumes(wiz, capture_query, monkeypatch):
+    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
+    wiz.write_state("acme", 2206)
+    wiz.down_container("podman", "acme", purge=True)
+    removed = [c[3] for c in capture_query if c[:3] == ["podman", "volume", "rm"]]
+    assert removed == [
+        "devenv-acme-workspace",
+        "devenv-acme-claude",
+        "devenv-acme-codex",
+        "devenv-acme-pi",
+        "devenv-acme-shellenv",
+    ]
+    assert wiz.read_state_port("acme") is None  # state cleared
+
+
+def test_down_without_purge_removes_no_volumes(wiz, capture_query, monkeypatch):
+    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: True)
+    wiz.down_container("podman", "acme", purge=False)
+    assert not any(c[:3] == ["podman", "volume", "rm"] for c in capture_query)
 
 
 # --- attach argv -------------------------------------------------------------------

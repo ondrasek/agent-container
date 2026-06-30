@@ -40,6 +40,7 @@ import subprocess
 import sys
 import termios
 from pathlib import Path
+from typing import List
 
 import questionary
 import typer
@@ -118,6 +119,100 @@ def volume_name(name: str) -> str:
     'devenv-acme-workspace'
     """
     return f"{CONTAINER_PREFIX}{name}-workspace"
+
+
+def claude_volume_name(name: str) -> str:
+    """
+    >>> claude_volume_name("acme")
+    'devenv-acme-claude'
+    """
+    return f"{CONTAINER_PREFIX}{name}-claude"
+
+
+def codex_volume_name(name: str) -> str:
+    """
+    >>> codex_volume_name("acme")
+    'devenv-acme-codex'
+    """
+    return f"{CONTAINER_PREFIX}{name}-codex"
+
+
+def pi_volume_name(name: str) -> str:
+    """
+    >>> pi_volume_name("acme")
+    'devenv-acme-pi'
+    """
+    return f"{CONTAINER_PREFIX}{name}-pi"
+
+
+def shellenv_volume_name(name: str) -> str:
+    """
+    >>> shellenv_volume_name("acme")
+    'devenv-acme-shellenv'
+    """
+    return f"{CONTAINER_PREFIX}{name}-shellenv"
+
+
+def all_volume_mounts(name: str) -> list[str]:
+    """The five per-container '-v' volume args, in the canonical fixed order
+    shared byte-for-byte with bin/devenv cmd_up (workspace, claude, codex, pi,
+    shellenv). pi-coding-agent's config/auth dir is ~/.pi (verified from the
+    package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
+
+    >>> all_volume_mounts("acme")
+    ['devenv-acme-workspace:/workspace', 'devenv-acme-claude:/home/dev/.claude', 'devenv-acme-codex:/home/dev/.codex', 'devenv-acme-pi:/home/dev/.pi', 'devenv-acme-shellenv:/home/dev/.devenv']
+    """
+    return [
+        f"{volume_name(name)}:/workspace",
+        f"{claude_volume_name(name)}:/home/dev/.claude",
+        f"{codex_volume_name(name)}:/home/dev/.codex",
+        f"{pi_volume_name(name)}:/home/dev/.pi",
+        f"{shellenv_volume_name(name)}:/home/dev/.devenv",
+    ]
+
+
+def per_container_volumes(name: str) -> list[str]:
+    """All per-container volume NAMES, canonical order; used by --purge.
+
+    >>> per_container_volumes("acme")
+    ['devenv-acme-workspace', 'devenv-acme-claude', 'devenv-acme-codex', 'devenv-acme-pi', 'devenv-acme-shellenv']
+    """
+    return [
+        volume_name(name),
+        claude_volume_name(name),
+        codex_volume_name(name),
+        pi_volume_name(name),
+        shellenv_volume_name(name),
+    ]
+
+
+def resolve_bind_mount(spec: str) -> str:
+    """Resolve a '--mount HOSTDIR[:CONTAINERPATH]' spec into an absolute,
+    read-write '-v' value, mirroring bin/devenv resolve_bind_mount.
+
+    HOSTDIR is resolved to an absolute real path (Path.resolve()) and must be
+    an existing directory. CONTAINERPATH defaults to /workspace/<basename>; if
+    given explicitly it must be absolute. No secret/env value ever reaches argv.
+
+    Lima prerequisite: the host dir must sit under a path the Lima VM exposes
+    WRITABLE (set `writable: true` on the relevant mount and restart Lima),
+    otherwise the bind is read-only inside the VM.
+    """
+    host, sep, container = spec.partition(":")
+    if not host:
+        die(f"--mount: empty host directory in '{spec}'")
+    p = Path(host)
+    if not p.is_dir():
+        die(f"--mount: host path '{host}' does not exist or is not a directory")
+    abs_host = str(p.resolve())
+    if sep:  # an explicit ':' was present
+        if not container:
+            die(f"--mount: empty container path in '{spec}'")
+        if not container.startswith("/"):
+            die(f"--mount: container path '{container}' must be absolute")
+    else:
+        container = f"/workspace/{Path(abs_host).name}"
+    return f"{abs_host}:{container}"
 
 
 def port_for_name(name: str) -> int:
@@ -372,8 +467,13 @@ def do_build(tag: str) -> None:
         die(f"build failed (exit {rc})")
 
 
-def launch_container(rt: str, name: str, env_file: Path) -> None:
-    """Start argv must match bin/devenv cmd_up flag-for-flag."""
+def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | None = None) -> None:
+    """Start argv must match bin/devenv cmd_up flag-for-flag.
+
+    `mounts` are already-resolved '<abs-host>:<container>' bind specs (from
+    resolve_bind_mount); they are appended after the standard per-container
+    volumes and before --restart, identically to bin/devenv.
+    """
     cname, vname, port = container_name(name), volume_name(name), port_for_name(name)
     if not port_free(port):
         die(
@@ -383,17 +483,21 @@ def launch_container(rt: str, name: str, env_file: Path) -> None:
         )
     log(f"name={name} port={port} env-file={env_file}")
     log(f"image={IMAGE_NAME} volume={vname}")
-    r = query([
+    argv = [
         rt, "run", "-d",
         "--name", cname,
         "--env-file", str(env_file),
         # Publishes sshd on ALL host interfaces (flag-for-flag parity with
         # bin/devenv; remote hosts.conf attach needs it). Firewall the VPS.
         "-p", f"{port}:22",
-        "-v", f"{vname}:/workspace",
-        "--restart", "unless-stopped",
-        IMAGE_NAME,
-    ])
+    ]
+    # Standard per-container volumes (canonical order), then optional binds.
+    for vol in all_volume_mounts(name):
+        argv += ["-v", vol]
+    for m in (mounts or []):
+        argv += ["-v", m]
+    argv += ["--restart", "unless-stopped", IMAGE_NAME]
+    r = query(argv)
     if r.returncode != 0:
         die(f"{rt} run failed: {r.stderr.strip()}")
     write_state(name, port)
@@ -401,8 +505,10 @@ def launch_container(rt: str, name: str, env_file: Path) -> None:
     log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
 
 
-def do_up(name: str, env_file_override: Path | None = None) -> None:
+def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | None = None) -> None:
     validate_name(name)
+    # Resolve binds up front so a bad --mount aborts before any runtime call.
+    resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     rt = detect_runtime()
     cname = container_name(name)
 
@@ -423,11 +529,11 @@ def do_up(name: str, env_file_override: Path | None = None) -> None:
     if not image_exists(rt, IMAGE_NAME):
         die(f"image {IMAGE_NAME} not found; run: devenv-wiz build")
 
-    launch_container(rt, name, env_file)
+    launch_container(rt, name, env_file, resolved_mounts)
 
 
 def down_container(rt: str, name: str, purge: bool) -> None:
-    cname, vname = container_name(name), volume_name(name)
+    cname = container_name(name)
     if container_exists(rt, cname):
         log(f"stopping {cname}")
         query([rt, "stop", cname])
@@ -436,12 +542,16 @@ def down_container(rt: str, name: str, purge: bool) -> None:
     else:
         log(f"no container named {cname}")
 
+    # --purge drops ALL per-container volumes (workspace + claude + codex + pi +
+    # shellenv), tolerating absence; plain down preserves every one of them.
+    vols = per_container_volumes(name)
     if purge:
-        log(f"purging volume {vname}")
-        if query([rt, "volume", "rm", vname]).returncode != 0:
-            warn(f"volume {vname} not removed (in use or absent)")
+        for vname in vols:
+            log(f"purging volume {vname}")
+            if query([rt, "volume", "rm", vname]).returncode != 0:
+                warn(f"volume {vname} not removed (in use or absent)")
     else:
-        log(f"volume {vname} preserved (use --purge to remove)")
+        log(f"volumes preserved (use --purge to remove): {', '.join(vols)}")
 
     clear_state(name)
 
@@ -465,7 +575,7 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
             raise typer.Exit(2)
         what = f"stop and remove {container_name(name)}"
         if purge:
-            what += f" and DELETE volume {volume_name(name)}"
+            what += f" and DELETE all per-container volumes ({', '.join(per_container_volumes(name))})"
         if not questionary.confirm(f"{what}?", default=False).ask():
             log("aborted")
             return
@@ -690,19 +800,30 @@ def wiz_up(rt: str) -> None:
             log("image still missing; not starting")
             return
 
+    # Optional single host-dir bind (empty = none). Resolved now so a bad path
+    # surfaces before the confirmation card; Fatal returns to the menu.
+    mounts: list[str] = []
+    mount_dir = questionary.text(
+        "host directory to mount read-write (empty = none)", default=""
+    ).ask()
+    if mount_dir:
+        mounts = [resolve_bind_mount(mount_dir)]
+
     card = Table(show_header=False, box=None, pad_edge=False)
     card.add_column(style="bold")
     card.add_column()
     card.add_row("env-file", str(env_file))  # path only, never contents
     card.add_row("port", str(port_for_name(name)))
-    card.add_row("volume", volume_name(name))
+    card.add_row("volumes", ", ".join(per_container_volumes(name)))
+    if mounts:
+        card.add_row("bind", mounts[0])
     card.add_row("image", IMAGE_NAME)
     console.print(card)
 
     if not questionary.confirm(f"start {cname}?", default=True).ask():
         return
-    launch_container(rt, name, env_file)  # port pre-check + actionable abort inside
-    hint(f"devenv-wiz up {name}")
+    launch_container(rt, name, env_file, mounts)  # port pre-check + actionable abort inside
+    hint(f"devenv-wiz up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
 def wiz_attach(rt: str) -> None:
@@ -777,7 +898,7 @@ def wiz_down(rt: str) -> None:
     sel = questionary.select("stop / remove", choices=choices).ask()
     if sel is None:
         return
-    cname, vname = container_name(sel), volume_name(sel)
+    cname = container_name(sel)
 
     if not container_exists(rt, cname):  # TOCTOU re-verify
         warn(f"container {cname} no longer exists")
@@ -794,12 +915,15 @@ def wiz_down(rt: str) -> None:
         return
 
     purge = False
-    if questionary.confirm(f"also delete workspace volume {vname}?", default=False).ask():
+    vols = per_container_volumes(sel)
+    if questionary.confirm(
+        f"also delete ALL per-container volumes ({', '.join(vols)})?", default=False
+    ).ask():
         typed = questionary.text(f"type the container name ({cname}) to confirm volume deletion").ask()
         if typed == cname:
             purge = True
         else:
-            log("name mismatch — volume will be preserved")
+            log("name mismatch — volumes will be preserved")
     down_container(rt, sel, purge)  # reports preserved vs purged, clears state
     hint(f"devenv-wiz down {sel}" + (" --purge" if purge else ""))
 
@@ -930,11 +1054,18 @@ def up(
     env_file: Path | None = typer.Option(
         None, "--env-file", help="Bypass env-file resolution; path must exist."
     ),
+    mount: List[str] = typer.Option(
+        None,
+        "--mount",
+        help="Bind-mount a host dir read-write (repeatable): HOSTDIR[:CONTAINERPATH]. "
+        "Default CONTAINERPATH is /workspace/<basename>. Lima: host dir must be "
+        "under a writable Lima mount.",
+    ),
 ) -> None:
     """Start container devenv-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_up(name, env_file)
+    do_up(name, env_file, mount or [])
 
 
 @app.command()
