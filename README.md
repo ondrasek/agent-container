@@ -294,10 +294,76 @@ devenv-attach blog                                       # totally separate sess
 
 The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
 
-- `./bin/devenv down acme` — stops + removes the container. **Workspace volume is kept.** `./bin/devenv up acme` later restores you to the same `/workspace` contents.
-- `./bin/devenv down acme --purge` — also drops the workspace volume. Use when you want a clean slate.
+- `./bin/devenv down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`) and the shell-env volume (`~/.devenv`). `./bin/devenv up acme` later restores the same `/workspace` contents *and* your agent logins.
+- `./bin/devenv down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv). Use for a true clean slate; you will re-`login` to the agents afterward.
 - VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `./bin/devenv up acme` again. Pushed commits are unaffected either way.
 - Quadlet service crashed — `systemctl --user restart devenv-acme.service`. Look at `journalctl --user -u devenv-acme.service` first.
+
+### Log in to agents (persists across restarts)
+
+You don't have to put provider API keys in `.env`. Each container has its own
+persistent volume for each agent's credentials, so you can **log in once,
+interactively, inside the container** and it survives `down`/`up` and crashes:
+
+```bash
+./bin/devenv attach acme        # or: devenv-wiz attach acme
+# then, inside the tmux session:
+claude          # run /login and follow the prompt
+codex login
+```
+
+The headless SSH login flow shows a URL — open it in your laptop's browser,
+authorize, and paste the code back into the container. The credential lands on
+that container's `~/.claude` / `~/.codex` / `~/.pi` volume and the agent
+auto-refreshes it, so "log in once" effectively means "indefinitely" — strictly
+better than a static key in `.env`, which never refreshes.
+
+**Per-container = per-account.** Because each container name has its own
+credential volumes, `devenv up work` and `devenv up personal` can be logged into
+different Claude/Codex accounts at the same time with no cross-talk. (You can
+still set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in `.env` instead — they're now
+optional. `GH_TOKEN` and git identity remain required.)
+
+> The login credential persists on a host-side named volume (inside the Lima VM
+> on macOS). That's an accepted trade-off — see [`docs/credentials.md`](docs/credentials.md).
+> `down --purge` deletes it.
+
+### Persistent shell environment
+
+Each container mounts a `~/.devenv` volume holding an `env` file that is sourced
+into **every** bash and zsh session (login, SSH, and tmux panes). Use it for
+per-container exports, aliases, or extra secrets that should outlive the
+container:
+
+```bash
+# inside the container — the file is seeded with a commented template on first boot
+nvim ~/.devenv/env       # add lines like:  export FOO=bar
+# new shells (or: source ~/.devenv/env) pick it up; it survives down/up.
+```
+
+It's read with `set -a` semantics, so plain `KEY=VALUE` lines are exported. A
+malformed file can't break your shell — the source hook is guarded.
+
+### Mount a host directory (optional)
+
+To give a container read/write access to a directory on your machine, pass
+`--mount` at `up` (repeatable). With no `--mount`, nothing extra is mounted:
+
+```bash
+./bin/devenv up acme --mount ~/code/myproject
+#   -> appears inside the container at /workspace/myproject (read/write)
+
+# explicit target, and more than one:
+./bin/devenv up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
+```
+
+`devenv-wiz up acme --mount ~/code/myproject` does the same.
+
+> **macOS / Lima prerequisite:** the host directory must sit inside a **writable**
+> Lima mount, or the container sees it read-only / not at all. If R/W fails, add
+> the path to your Lima VM's config under `mounts:` with `writable: true` and
+> restart the VM (`limactl edit <vm>` then `limactl restart <vm>`). The commit-
+> and-push discipline still applies to any git repo you mount this way.
 
 ### Update the image
 

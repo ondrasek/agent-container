@@ -92,8 +92,19 @@ GitHub's HTTPS endpoint accepts `x-access-token` as the username for any PAT.
 | Token in image layers                    | Not possible              | `.env` is injected at runtime, not built in.                                                            |
 | Token in container logs                  | Operator responsibility   | Don't `echo $GH_TOKEN`. Entrypoint scripts avoid logging env contents.                                  |
 | Long-lived broad-scope PAT               | Mitigated by hygiene      | Use `repo`-scoped PATs with explicit expiration. Rotate.                                                |
+| Agent OAuth credential on a named volume | **Accepted**              | Interactive `claude`/`codex`/`pi` login persists to a per-container volume (inside the Lima VM on macOS). Restrict access to the runtime's volume storage. `down --purge` deletes it. |
 
 If hardening is needed later, the upgrade path is: switch `GH_TOKEN` to a compose `secrets:` block (or `podman secret` on the VPS), keep `.env` for non-secret config, and read `/run/secrets/gh-token` in the entrypoint instead of `$GH_TOKEN`. One-line change in the helper.
+
+### Agent provider auth: keys vs. interactive login
+
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in `.env` are **optional**. The
+recommended path — especially for Claude/Codex **subscription** accounts — is to
+log in interactively inside the container (`claude` → `/login`, `codex login`).
+Each container has its own persistent credential volume (`~/.claude`, `~/.codex`,
+`~/.pi`), so you log in once and the agent auto-refreshes the token across
+restarts; per-container volumes give per-account isolation. `GH_TOKEN` and git
+identity remain **required** (git push is non-interactive by design).
 
 ## Out of scope (deferred)
 
