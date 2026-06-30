@@ -74,7 +74,57 @@ require_name() {
 }
 
 container_name() { printf '%s%s' "${CONTAINER_PREFIX}" "$1"; }
-volume_name()    { printf '%s%s-workspace' "${CONTAINER_PREFIX}" "$1"; }
+# Per-container named volumes. Workspace is the original; the others persist
+# each agent's login/config dir so an interactive 'claude login' / 'codex login'
+# survives down/up (see docs/credentials.md). Order here is the contract shared
+# with bin/devenv-wiz (run argv) and with cmd_down --purge.
+volume_name()          { printf '%s%s-workspace' "${CONTAINER_PREFIX}" "$1"; }
+claude_volume_name()   { printf '%s%s-claude'    "${CONTAINER_PREFIX}" "$1"; }
+codex_volume_name()    { printf '%s%s-codex'     "${CONTAINER_PREFIX}" "$1"; }
+pi_volume_name()       { printf '%s%s-pi'        "${CONTAINER_PREFIX}" "$1"; }
+shellenv_volume_name() { printf '%s%s-shellenv'  "${CONTAINER_PREFIX}" "$1"; }
+
+# All per-container volume names, in the canonical order (workspace, claude,
+# codex, pi, shellenv). Used by cmd_down --purge / the purge path.
+all_volume_names() {
+    local name="$1"
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+        "$(volume_name "${name}")" \
+        "$(claude_volume_name "${name}")" \
+        "$(codex_volume_name "${name}")" \
+        "$(pi_volume_name "${name}")" \
+        "$(shellenv_volume_name "${name}")"
+}
+
+# Resolve a --mount spec 'HOSTDIR[:CONTAINERPATH]' into an absolute '-v' value
+# (read-write). HOSTDIR is resolved to an absolute REAL path via cd + `pwd -P`
+# (portable on macOS, where GNU `realpath` may be absent) and must be an
+# existing directory. CONTAINERPATH defaults to /workspace/<basename>; if given
+# explicitly it must be absolute.
+#
+# Lima prerequisite: the host dir must sit under a path the Lima VM exposes
+# WRITABLE (set `writable: true` on the relevant mount in the Lima config and
+# `limactl stop/start`), otherwise the bind is read-only inside the VM and the
+# container cannot write back. No secret/env value is ever placed on argv.
+resolve_bind_mount() {
+    local spec="$1" host container abs
+    if [[ "${spec}" == *:* ]]; then
+        host="${spec%%:*}"
+        container="${spec#*:}"
+    else
+        host="${spec}"
+        container=""
+    fi
+    [[ -n "${host}" ]] || die "--mount: empty host directory in '${spec}'"
+    [[ -d "${host}" ]] || die "--mount: host path '${host}' does not exist or is not a directory"
+    abs="$(cd "${host}" 2>/dev/null && pwd -P)" || die "--mount: cannot resolve host path '${host}'"
+    if [[ -z "${container}" ]]; then
+        container="/workspace/$(basename "${abs}")"
+    else
+        [[ "${container}" == /* ]] || die "--mount: container path '${container}' must be absolute"
+    fi
+    printf '%s:%s' "${abs}" "${container}"
+}
 
 # Deterministic port allocation: PORT_BASE + (sum-of-name-chars mod PORT_RANGE).
 # Collisions inside the 100-port window are possible but rare for short names;
@@ -148,10 +198,34 @@ cmd_build() {
 }
 
 cmd_up() {
-    local name cname vname port env_file rt
-    name="$(require_name "${1:-}")"
+    local name="" cname port env_file rt
+    local -a bind_mounts=()
+    # Parse: <name> plus zero or more repeatable '--mount HOSTDIR[:CONTAINERPATH]'.
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mount)
+                shift
+                [[ $# -gt 0 ]] || die "--mount requires HOSTDIR[:CONTAINERPATH]"
+                bind_mounts+=("$(resolve_bind_mount "$1")")
+                shift
+                ;;
+            --mount=*)
+                bind_mounts+=("$(resolve_bind_mount "${1#--mount=}")")
+                shift
+                ;;
+            -*)
+                die "unknown option for up: $1"
+                ;;
+            *)
+                [[ -z "${name}" ]] || die "unexpected extra argument: $1"
+                name="$(require_name "$1")"
+                shift
+                ;;
+        esac
+    done
+    [[ -n "${name}" ]] || die "usage: devenv up <name> [--mount HOSTDIR[:CONTAINERPATH]]..."
+
     cname="$(container_name "${name}")"
-    vname="$(volume_name "${name}")"
     rt="$(detect_runtime)"
 
     if container_running "${rt}" "${cname}"; then
@@ -169,15 +243,28 @@ cmd_up() {
     port="$(port_for_name "${name}")"
 
     log "name=${name} port=${port} env-file=${env_file}"
-    log "image=${IMAGE_NAME} volume=${vname}"
+    log "image=${IMAGE_NAME} volume=$(volume_name "${name}")"
 
-    "${rt}" run -d \
-        --name "${cname}" \
-        --env-file "${env_file}" \
-        -p "${port}:22" \
-        -v "${vname}:/workspace" \
-        --restart unless-stopped \
-        "${IMAGE_NAME}" >/dev/null
+    # Standard per-container volumes first, in the canonical order shared with
+    # bin/devenv-wiz; then any optional --mount binds; then --restart + image.
+    local -a run_args=(
+        run -d
+        --name "${cname}"
+        --env-file "${env_file}"
+        -p "${port}:22"
+        -v "$(volume_name "${name}"):/workspace"
+        -v "$(claude_volume_name "${name}"):/home/dev/.claude"
+        -v "$(codex_volume_name "${name}"):/home/dev/.codex"
+        -v "$(pi_volume_name "${name}"):/home/dev/.pi"
+        -v "$(shellenv_volume_name "${name}"):/home/dev/.devenv"
+    )
+    local m
+    for m in "${bind_mounts[@]+"${bind_mounts[@]}"}"; do
+        run_args+=(-v "${m}")
+    done
+    run_args+=(--restart unless-stopped "${IMAGE_NAME}")
+
+    "${rt}" "${run_args[@]}" >/dev/null
 
     write_state "${name}" "${port}"
     log "started ${cname}; attach with: ${SCRIPT_PATH} attach ${name}"
@@ -185,7 +272,7 @@ cmd_up() {
 }
 
 cmd_down() {
-    local name cname vname rt purge=0
+    local name cname rt purge=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --purge) purge=1; shift ;;
@@ -194,7 +281,6 @@ cmd_down() {
     done
     [[ -n "${name:-}" ]] || die "usage: devenv down <name> [--purge]"
     cname="$(container_name "${name}")"
-    vname="$(volume_name "${name}")"
     rt="$(detect_runtime)"
 
     if container_exists "${rt}" "${cname}"; then
@@ -206,11 +292,21 @@ cmd_down() {
         log "no container named ${cname}"
     fi
 
+    # --purge drops ALL per-container volumes (workspace + claude + codex + pi +
+    # shellenv), tolerating absence; plain down preserves every one of them.
+    local -a vols=()
+    local v
+    while IFS= read -r v; do
+        [[ -n "${v}" ]] && vols+=("${v}")
+    done < <(all_volume_names "${name}")
+
     if [[ "${purge}" -eq 1 ]]; then
-        log "purging volume ${vname}"
-        "${rt}" volume rm "${vname}" >/dev/null 2>&1 || warn "volume ${vname} not removed (in use or absent)"
+        for v in "${vols[@]}"; do
+            log "purging volume ${v}"
+            "${rt}" volume rm "${v}" >/dev/null 2>&1 || warn "volume ${v} not removed (in use or absent)"
+        done
     else
-        log "volume ${vname} preserved (use --purge to remove)"
+        log "volumes preserved (use --purge to remove): ${vols[*]}"
     fi
 
     clear_state "${name}"
@@ -260,8 +356,13 @@ usage: devenv <subcommand> [args]
 subcommands:
   build [tag]        Build image (default tag: localhost/remote-persistent-devenv:latest).
   up <name>          Start container devenv-<name> (detached).
+       [--mount HOSTDIR[:CONTAINERPATH]]
+                     Bind-mount a host dir read-write (repeatable). Default
+                     CONTAINERPATH is /workspace/<basename>. Lima: the host dir
+                     must be under a writable Lima mount.
   down <name>        Stop and remove container devenv-<name>.
-       [--purge]     Also delete the workspace volume.
+       [--purge]     Also delete ALL per-container volumes (workspace, claude,
+                     codex, pi, shellenv).
   list               List running devenv containers.
   attach <name>      ssh + tmux attach to container devenv-<name>.
   logs <name>        Tail container logs.
