@@ -1127,11 +1127,14 @@ def menu() -> None:
 
 @app.command()
 def completions(
-    shell: str = typer.Argument(..., help="Shell to emit completion for: bash or zsh."),
+    # Optional + manual validation so bad/missing shell routes through die()
+    # (exit 1, '[devenv-wiz] FATAL:' style) matching bin/devenv cmd_completions,
+    # not Typer's exit-2 required-argument error.
+    shell: str = typer.Argument("", help="Shell to emit completion for: bash or zsh."),
 ) -> None:
     """Print the checked-in completion script for bash or zsh."""
     if shell not in ("bash", "zsh"):
-        raise typer.BadParameter("shell must be 'bash' or 'zsh'")
+        die("usage: devenv-wiz completions <bash|zsh>")
     # REPO_ROOT is Path(__file__).resolve()-based, so this works under a symlink.
     script = REPO_ROOT / "completions" / f"devenv-wiz.{shell}"
     if not script.is_file():

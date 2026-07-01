@@ -8,52 +8,72 @@
 # bash-completion package loaded (graceful fallback below).
 #
 # Container names are sourced directly in-shell — devenv-wiz/uv is NEVER spun
-# up on TAB. The candidate set is the de-duplicated union of:
+# up on TAB. Candidate names come from:
 #   * basenames of ${XDG_STATE_HOME:-$HOME/.local/state}/devenv/*.port (minus .port)
 #   * hosts.conf keys ending in _HOST, lowercased with '_' -> '-'
 # Missing dirs/files are tolerated silently. hosts.conf is parsed with shell
-# builtins only and never executed/sourced.
+# builtins only and NEVER executed/sourced. Candidates are matched against the
+# current word manually (never via `compgen -W`, which re-expands words and
+# would execute a `$(...)`/backtick embedded in a hostile name).
 
-__devenv_wiz_names() {
+# State-only names (local containers): safe source for down/logs/purge.
+__devenv_wiz_names_local() {
     local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
-    local hosts="${config_dir}/hosts.conf"
-    local f base line key
-    {
-        if [[ -d "${state_dir}" ]]; then
-            for f in "${state_dir}"/*.port; do
-                [[ -e "${f}" ]] || continue
-                base="${f##*/}"
-                printf '%s\n' "${base%.port}"
-            done
-        fi
-        if [[ -f "${hosts}" ]]; then
-            # KEY=VALUE parse, builtins only; the file is NEVER sourced.
-            while IFS= read -r line || [[ -n "${line}" ]]; do
-                line="${line#"${line%%[![:space:]]*}"}"          # ltrim
-                [[ -z "${line}" || "${line:0:1}" == "#" ]] && continue
-                line="${line#export }"
-                line="${line#"${line%%[![:space:]]*}"}"          # ltrim again
-                key="${line%%=*}"
-                key="${key%"${key##*[![:space:]]}"}"             # rtrim
-                case "${key}" in
-                    *_HOST) ;;
-                    *) continue ;;
-                esac
-                key="${key%_HOST}"
-                key="${key//_/-}"                                 # inverse of name_to_key
-                printf '%s\n' "${key}" | tr '[:upper:]' '[:lower:]'
-            done < "${hosts}"
-        fi
-    } | LC_ALL=C sort -u
+    local f base
+    [[ -d "${state_dir}" ]] || return 0
+    for f in "${state_dir}"/*.port; do
+        [[ -e "${f}" ]] || continue
+        base="${f##*/}"
+        printf '%s\n' "${base%.port}"
+    done
 }
 
-_devenv_wiz_filedir_d() {
+# hosts.conf-derived names (remote targets): only meaningful for attach.
+__devenv_wiz_names_hosts() {
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
+    local hosts="${config_dir}/hosts.conf"
+    local line key
+    [[ -f "${hosts}" ]] || return 0
+    # KEY=VALUE parse, builtins only; the file is NEVER sourced.
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"          # ltrim
+        [[ -z "${line}" || "${line:0:1}" == "#" ]] && continue
+        line="${line#export }"
+        line="${line#"${line%%[![:space:]]*}"}"          # ltrim again
+        key="${line%%=*}"
+        key="${key%"${key##*[![:space:]]}"}"             # rtrim
+        case "${key}" in
+            *_HOST) ;;
+            *) continue ;;
+        esac
+        key="${key%_HOST}"
+        key="${key//_/-}"                                 # inverse of name_to_key
+        printf '%s\n' "${key}" | tr '[:upper:]' '[:lower:]'
+    done < "${hosts}"
+}
+
+# Union (local + remote), de-duplicated: used by up/attach.
+__devenv_wiz_names() {
+    { __devenv_wiz_names_local; __devenv_wiz_names_hosts; } | LC_ALL=C sort -u
+}
+
+# Append names emitted by $1 that prefix-match $cur to COMPREPLY, WITHOUT the
+# word re-expansion `compgen -W` performs (which would run command
+# substitutions embedded in a hostile name). $cur is set by the caller.
+__devenv_wiz_add_names() {
+    local n
+    while IFS= read -r n; do
+        [[ -n "${n}" && "${n}" == "${cur}"* ]] && COMPREPLY+=("${n}")
+    done < <("$1")
+}
+
+_devenv_wiz_filedir() {
+    local kind="${1:-}"  # 'd' => directories only, else files
     if declare -F _filedir >/dev/null 2>&1; then
-        _filedir -d
+        _filedir ${kind:+"-${kind}"}
     else
         local IFS=$'\n'
-        COMPREPLY=( $(compgen -d -- "${cur}") )
+        COMPREPLY=( $(compgen ${kind:+-${kind}} -- "${cur}") )
     fi
 }
 
@@ -86,31 +106,36 @@ _devenv_wiz() {
         return 0
     fi
 
+    COMPREPLY=()
     case "${sub}" in
         up)
             if [[ "${prev}" == "--mount" ]]; then
-                _devenv_wiz_filedir_d
+                _devenv_wiz_filedir d       # --mount takes a directory
+                return 0
+            fi
+            if [[ "${prev}" == "--env-file" ]]; then
+                _devenv_wiz_filedir          # --env-file takes a file path
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--mount" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--mount --env-file" -- "${cur}") )
                 return 0
             fi
-            COMPREPLY=( $(compgen -W "$(__devenv_wiz_names)" -- "${cur}") )
+            __devenv_wiz_add_names __devenv_wiz_names       # arbitrary name; union is fine
             ;;
         down)
             if [[ "${cur}" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--purge -y --yes" -- "${cur}") )
                 return 0
             fi
-            COMPREPLY=( $(compgen -W "$(__devenv_wiz_names)" -- "${cur}") )
+            __devenv_wiz_add_names __devenv_wiz_names_local # local runtime only
             ;;
         purge)
             if [[ "${cur}" == -* ]]; then
                 COMPREPLY=( $(compgen -W "-y --yes" -- "${cur}") )
                 return 0
             fi
-            COMPREPLY=( $(compgen -W "$(__devenv_wiz_names)" -- "${cur}") )
+            __devenv_wiz_add_names __devenv_wiz_names_local # local runtime only
             ;;
         list)
             if [[ "${cur}" == -* ]]; then
@@ -126,14 +151,14 @@ _devenv_wiz() {
                 COMPREPLY=( $(compgen -W "--local --remote --user --host" -- "${cur}") )
                 return 0
             fi
-            COMPREPLY=( $(compgen -W "$(__devenv_wiz_names)" -- "${cur}") )
+            __devenv_wiz_add_names __devenv_wiz_names       # local + remote hosts.conf
             ;;
         logs)
             if [[ "${cur}" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--no-follow" -- "${cur}") )
                 return 0
             fi
-            COMPREPLY=( $(compgen -W "$(__devenv_wiz_names)" -- "${cur}") )
+            __devenv_wiz_add_names __devenv_wiz_names_local # local runtime only
             ;;
         completions)
             COMPREPLY=( $(compgen -W "bash zsh" -- "${cur}") )

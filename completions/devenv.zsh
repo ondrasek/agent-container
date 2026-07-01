@@ -10,36 +10,52 @@
 # (symlink bin/devenv into ~/.local/bin).
 #
 # Container names are gathered directly in-shell — no docker/podman/python is
-# invoked on TAB. Candidate set = de-duplicated union of:
+# invoked on TAB. Candidate names come from:
 #   * basenames of ${XDG_STATE_HOME:-$HOME/.local/state}/devenv/*.port (minus .port)
 #   * hosts.conf keys ending in _HOST, lowercased with '_' -> '-'
 # Missing dirs/files are tolerated silently. hosts.conf is parsed with shell
-# builtins only and never executed/sourced.
+# builtins only and never executed/sourced. Names go through `compadd -a`
+# (array add), so an embedded `$(...)` in a hostile name is never expanded.
 
-__devenv_names() {
-    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
-    local hosts="${config_dir}/hosts.conf"
-    local -aU names
-    local f line key
+# Gather state-file names into the caller's `names` array.
+__devenv_gather_local() {
+    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/devenv" f
     for f in "$state_dir"/*.port(N); do
         names+=("${f:t:r}")
     done
-    if [[ -f "$hosts" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            line="${line#"${line%%[![:space:]]*}"}"
-            [[ -z "$line" || "$line" == '#'* ]] && continue
-            line="${line#export }"
-            line="${line#"${line%%[![:space:]]*}"}"
-            key="${line%%=*}"
-            key="${key%"${key##*[![:space:]]}"}"
-            [[ "$key" == *_HOST ]] || continue
-            key="${key%_HOST}"
-            key="${key//_/-}"
-            key="${(L)key}"
-            names+=("$key")
-        done < "$hosts"
-    fi
+}
+
+# Gather hosts.conf-derived names into the caller's `names` array.
+__devenv_gather_hosts() {
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
+    local hosts="${config_dir}/hosts.conf" line key
+    [[ -f "$hosts" ]] || return
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$line" || "$line" == '#'* ]] && continue
+        line="${line#export }"
+        line="${line#"${line%%[![:space:]]*}"}"
+        key="${line%%=*}"
+        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$key" == *_HOST ]] || continue
+        key="${key%_HOST}"
+        key="${key//_/-}"
+        names+=("${(L)key}")
+    done < "$hosts"
+}
+
+# State-only names (local containers): safe source for down/logs.
+__devenv_names_local() {
+    local -aU names
+    __devenv_gather_local
+    compadd -a names
+}
+
+# Union (local + remote): used by up/attach.
+__devenv_names() {
+    local -aU names
+    __devenv_gather_local
+    __devenv_gather_hosts
     compadd -a names
 }
 
@@ -76,9 +92,12 @@ _devenv() {
                 down)
                     _arguments \
                         '--purge[Also delete all per-container volumes]' \
-                        '*:container:__devenv_names'
+                        '*:container:__devenv_names_local'
                     ;;
-                attach|logs)
+                logs)
+                    _arguments '*:container:__devenv_names_local'
+                    ;;
+                attach)
                     _arguments '*:container:__devenv_names'
                     ;;
                 completions)
