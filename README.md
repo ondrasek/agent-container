@@ -194,6 +194,48 @@ uv run --with pytest \
 
 The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync when bumping dependencies in `bin/devenv-wiz`.
 
+### Shell completions
+
+Both CLIs ship bash and zsh completions under [`completions/`](completions/):
+subcommands, per-subcommand flags (including the repeatable `--mount`), and
+**container-name completion** for `up` / `down` / `attach` / `logs` / `purge`.
+Names are gathered directly in the shell from your state files
+(`$XDG_STATE_HOME/devenv/*.port`) and `hosts.conf` — no `docker`, `podman`, or
+`uv` is spawned on Tab, so completion stays instant and works offline.
+
+Completion triggers on the command **name**, so put the tools on your `PATH`
+(this also lets the `build` / `completions` subcommands find the repo):
+
+```bash
+# add the repo's bin/ to PATH (in ~/.bashrc or ~/.zshrc)
+export PATH="$HOME/remote-persistent-devenv/bin:$PATH"
+```
+
+**bash** — source the scripts (works with or without the `bash-completion`
+package):
+
+```bash
+# ~/.bashrc
+source "$HOME/remote-persistent-devenv/completions/devenv.bash"
+source "$HOME/remote-persistent-devenv/completions/devenv-wiz.bash"
+# or generate them: devenv completions bash > ~/.local/share/bash-completion/completions/devenv
+```
+
+**zsh** — drop the scripts onto `$fpath` as `_devenv` / `_devenv-wiz`, then
+`compinit`:
+
+```zsh
+mkdir -p ~/.zfunc
+devenv     completions zsh > ~/.zfunc/_devenv
+devenv-wiz completions zsh > ~/.zfunc/_devenv-wiz
+# ~/.zshrc, before compinit:
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+The completion scripts are covered by `bin/tests/test_completions.sh` (bash
+only, no runtime needed): `bin/tests/test_completions.sh`.
+
 ### Working inside tmux
 
 `Ctrl-B` is the tmux prefix. Cheat sheet:
