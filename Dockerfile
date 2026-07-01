@@ -128,9 +128,16 @@ RUN mkdir -p /etc/ssh \
 # ~/.devenv/env (on the shellenv volume, so it survives down/up). BOTH bash and
 # zsh source it, guarded so a malformed file cannot break the shell. dev's
 # LOGIN SHELL stays bash (sshd/tmux/entrypoint assume bash); zsh is available
-# but not the default. tmux panes are interactive non-login bash and read
-# ~/.bashrc, so the hook fires there; ~/.bash_profile sources ~/.bashrc so
-# SSH login shells get it too.
+# but not the default.
+#
+# The hook lives in ~/.bashrc (read by interactive shells). Login shells — SSH
+# login sessions AND tmux panes (tmux spawns the default shell as a LOGIN shell
+# when no default-command is set) — read ~/.bash_profile, not ~/.bashrc, so
+# ~/.bash_profile must chain to ~/.bashrc. We source Debian's stock ~/.profile
+# to do that: it sources ~/.bashrc under bash (firing the hook) AND restores the
+# ~/.local/bin + ~/bin PATH additions that ~/.bash_profile would otherwise shadow
+# (e.g. for `pip install --user` tools). This bash_profile->profile->bashrc chain
+# is load-bearing for login-shell panes; do not "simplify" it away.
 RUN set -eux; \
     mkdir -p /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.devenv; \
     chown -R dev:dev /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.devenv; \
@@ -139,7 +146,7 @@ RUN set -eux; \
     HOOK='if [ -f "$HOME/.devenv/env" ]; then set -a; . "$HOME/.devenv/env"; set +a; fi'; \
     printf '\n# devenv: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.bashrc; \
     printf '# devenv: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.zshrc; \
-    printf '# devenv: ensure SSH login shells load ~/.bashrc (and the env hook)\n[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >> /home/dev/.bash_profile; \
+    printf '# devenv: login shells load ~/.profile (sources ~/.bashrc + adds ~/.local/bin to PATH)\n[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> /home/dev/.bash_profile; \
     chown dev:dev /home/dev/.bashrc /home/dev/.zshrc /home/dev/.bash_profile
 
 # --- Layer 6: entrypoint (most-frequently-changed; STUB until item C) -------
