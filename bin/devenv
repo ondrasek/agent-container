@@ -35,8 +35,21 @@ readonly PORT_RANGE=100  # 2200..2299
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
 
-readonly SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-readonly REPO_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
+# Resolve this script's real directory, following symlinks (portable; macOS bash
+# 3.2 has no `readlink -f`). Lets `build` and `completions` locate the repo even
+# when bin/devenv is symlinked onto PATH (e.g. ~/.local/bin/devenv).
+_devenv_resolve_dir() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [[ -h "${src}" ]]; do
+        dir="$(cd -P "$(dirname "${src}")" >/dev/null 2>&1 && pwd)"
+        src="$(readlink "${src}")"
+        [[ "${src}" != /* ]] && src="${dir}/${src}"
+    done
+    cd -P "$(dirname "${src}")" >/dev/null 2>&1 && pwd
+}
+readonly SCRIPT_DIR="$(_devenv_resolve_dir)"
+readonly SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # --- Logging ----------------------------------------------------------------
 log()  { printf '[devenv] %s\n' "$*" >&2; }
@@ -349,6 +362,17 @@ cmd_logs() {
     exec "${rt}" logs -f "${cname}"
 }
 
+cmd_completions() {
+    local shell="${1:-}"
+    case "${shell}" in
+        bash|zsh) ;;
+        *) die "usage: devenv completions <bash|zsh>" ;;
+    esac
+    local script="${REPO_ROOT}/completions/devenv.${shell}"
+    [[ -f "${script}" ]] || die "completion script not found: ${script}"
+    cat "${script}"
+}
+
 usage() {
     cat >&2 <<'EOF'
 usage: devenv <subcommand> [args]
@@ -366,6 +390,7 @@ subcommands:
   list               List running devenv containers.
   attach <name>      ssh + tmux attach to container devenv-<name>.
   logs <name>        Tail container logs.
+  completions <sh>   Print the bash|zsh completion script (see completions/).
 
 env overrides:
   DEVENV_RUNTIME=docker|podman   Force runtime (default: prefer podman).
@@ -385,6 +410,7 @@ main() {
         list)   cmd_list   "$@" ;;
         attach) cmd_attach "$@" ;;
         logs)   cmd_logs   "$@" ;;
+        completions) cmd_completions "$@" ;;
         -h|--help|help|"") usage; [[ -z "${sub}" ]] && exit 2 || exit 0 ;;
         *) die "unknown subcommand: ${sub} (run 'devenv help')" ;;
     esac

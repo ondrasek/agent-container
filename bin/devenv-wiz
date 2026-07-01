@@ -1125,6 +1125,20 @@ def menu() -> None:
     raise typer.Exit(wizard_loop())
 
 
+@app.command()
+def completions(
+    shell: str = typer.Argument(..., help="Shell to emit completion for: bash or zsh."),
+) -> None:
+    """Print the checked-in completion script for bash or zsh."""
+    if shell not in ("bash", "zsh"):
+        raise typer.BadParameter("shell must be 'bash' or 'zsh'")
+    # REPO_ROOT is Path(__file__).resolve()-based, so this works under a symlink.
+    script = REPO_ROOT / "completions" / f"devenv-wiz.{shell}"
+    if not script.is_file():
+        die(f"completion script not found: {script}")
+    sys.stdout.write(script.read_text())
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
