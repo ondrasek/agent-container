@@ -36,11 +36,11 @@ def test_help_exits_zero(wiz):
     result = runner.invoke(wiz.app, ["--help"])
     assert result.exit_code == 0
     assert "Usage" in result.output
-    for sub in ("build", "up", "down", "list", "attach", "logs", "purge", "menu"):
+    for sub in ("build", "up", "down", "list", "attach", "logs", "purge", "menu", "completions"):
         assert sub in result.output
 
 
-@pytest.mark.parametrize("sub", ["up", "down", "attach", "logs", "list", "build", "purge"])
+@pytest.mark.parametrize("sub", ["up", "down", "attach", "logs", "list", "build", "purge", "completions"])
 def test_subcommand_help_exits_zero(wiz, sub):
     result = runner.invoke(wiz.app, [sub, "--help"])
     assert result.exit_code == 0
@@ -99,6 +99,31 @@ def test_down_without_yes_refuses_on_non_tty(wiz, monkeypatch):
     result = runner.invoke(wiz.app, ["down", "acme"])
     assert result.exit_code == 2
     assert "-y/--yes" in combined_output(result)
+
+
+# --- completions subcommand --------------------------------------------------------
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_completions_prints_checked_in_script(wiz, shell):
+    result = runner.invoke(wiz.app, ["completions", shell])
+    assert result.exit_code == 0
+    expected = (wiz.REPO_ROOT / "completions" / f"devenv-wiz.{shell}").read_text()
+    assert result.output == expected
+
+
+def test_completions_invalid_shell_is_fatal_not_traceback(wiz):
+    result = runner.invoke(wiz.app, ["completions", "fish"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, wiz.Fatal)
+    assert "usage: devenv-wiz completions <bash|zsh>" in str(result.exception)
+    assert "Traceback" not in combined_output(result)
+
+
+def test_completions_missing_arg_is_fatal(wiz):
+    result = runner.invoke(wiz.app, ["completions"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, wiz.Fatal)
 
 
 # --- self-test interop corpus ------------------------------------------------------

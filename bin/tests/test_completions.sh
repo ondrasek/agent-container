@@ -101,10 +101,85 @@ test_tool() {
     assert_has  "${tool}:up-flag" "--mount" "${COMPREPLY[@]}"
     assert_lacks "${tool}:up-flag" "acme"   "${COMPREPLY[@]}"
 
-    # 5) 'attach <TAB>' completes container names
+    # 5) 'attach <TAB>' completes container names (local + remote union)
     run_comp "${func}" "${tool}" "attach" ""
     assert_has "${tool}:attach-name" "blog" "${COMPREPLY[@]}"
     assert_has "${tool}:attach-name" "vps"  "${COMPREPLY[@]}"
+
+    # 6) 'completions <TAB>' offers bash/zsh
+    run_comp "${func}" "${tool}" "completions" ""
+    assert_has "${tool}:completions" "bash" "${COMPREPLY[@]}"
+    assert_has "${tool}:completions" "zsh"  "${COMPREPLY[@]}"
+
+    # 7) bare subcommand set includes completions + down
+    run_comp "${func}" "${tool}" ""
+    assert_has "${tool}:subcmd" "completions" "${COMPREPLY[@]}"
+    assert_has "${tool}:subcmd" "down"        "${COMPREPLY[@]}"
+
+    # 8) down/logs complete LOCAL names only (state), not remote hosts.conf names
+    run_comp "${func}" "${tool}" "down" ""
+    assert_has  "${tool}:down-local" "acme" "${COMPREPLY[@]}"
+    assert_lacks "${tool}:down-local" "vps" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "logs" ""
+    assert_has  "${tool}:logs-local" "blog"   "${COMPREPLY[@]}"
+    assert_lacks "${tool}:logs-local" "my-box" "${COMPREPLY[@]}"
+
+    # 9) 'down --<TAB>' completes flags
+    run_comp "${func}" "${tool}" "down" "--"
+    assert_has "${tool}:down-flag" "--purge" "${COMPREPLY[@]}"
+
+    # 10) wiz-only surface: --env-file on up, and purge/list/logs/attach flags
+    if [[ "${tool}" == "devenv-wiz" ]]; then
+        run_comp "${func}" "${tool}" "up" "--"
+        assert_has "${tool}:up-flag" "--env-file" "${COMPREPLY[@]}"
+        assert_has "${tool}:up-flag" "--mount"    "${COMPREPLY[@]}"
+        run_comp "${func}" "${tool}" "purge" "--"
+        assert_has "${tool}:purge-flag" "--yes" "${COMPREPLY[@]}"
+        run_comp "${func}" "${tool}" "list" "--"
+        assert_has "${tool}:list-flag" "--json" "${COMPREPLY[@]}"
+        run_comp "${func}" "${tool}" "logs" "--"
+        assert_has "${tool}:logs-flag" "--no-follow" "${COMPREPLY[@]}"
+        run_comp "${func}" "${tool}" "attach" "--"
+        assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
+    fi
+}
+
+# COMPL-1 regression: a hostile hosts.conf key or state-file name carrying a
+# $(...) payload must NEVER execute when the bash completion runs. Uses a fresh
+# sandbox with relative-path payloads and runs the completer from inside it.
+test_security_no_exec() {
+    local tool="$1" func="$2" script="${REPO_ROOT}/completions/$1.bash"
+    local sbx; sbx="$(mktemp -d)"
+    mkdir -p "${sbx}/state/devenv" "${sbx}/config/devenv"
+    : > "${sbx}/state/devenv/\$(touch PWNED-state).port"
+    printf '$(touch PWNED-hosts)_HOST=x\n' > "${sbx}/config/devenv/hosts.conf"
+    (
+        cd "${sbx}" || exit 0
+        export XDG_STATE_HOME="${sbx}/state" XDG_CONFIG_HOME="${sbx}/config"
+        # shellcheck disable=SC1090
+        source "${script}"
+        cur=""; COMP_WORDS=("${tool}" attach ""); COMP_CWORD=2; COMPREPLY=()
+        "${func}" 2>/dev/null || true
+    )
+    if [[ -e "${sbx}/PWNED-state" || -e "${sbx}/PWNED-hosts" ]]; then
+        fail=$((fail + 1)); note "FAIL: ${tool}: completion EXECUTED code from a hostile name"
+    else
+        pass=$((pass + 1))
+    fi
+    rm -rf "${sbx}"
+}
+
+# F4: exercise the zsh name gatherers (guarded — skipped if zsh is absent).
+test_zsh_names() {
+    command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping zsh name tests"; return; }
+    local n out script="${REPO_ROOT}/completions/devenv.zsh"
+    out="$(zsh -c "source '${script}'; local -aU names; __devenv_gather_local; __devenv_gather_hosts; print -l -- \$names" 2>/dev/null)"
+    for n in acme blog my-box vps; do
+        if printf '%s\n' "${out}" | grep -qxF "${n}"; then pass=$((pass + 1)); else fail=$((fail + 1)); note "FAIL: zsh union missing '${n}'"; fi
+    done
+    out="$(zsh -c "source '${script}'; local -aU names; __devenv_gather_local; print -l -- \$names" 2>/dev/null)"
+    if printf '%s\n' "${out}" | grep -qxF "acme"; then pass=$((pass + 1)); else fail=$((fail + 1)); note "FAIL: zsh local missing 'acme'"; fi
+    if printf '%s\n' "${out}" | grep -qxF "vps"; then fail=$((fail + 1)); note "FAIL: zsh local should exclude remote 'vps'"; else pass=$((pass + 1)); fi
 }
 
 setup_sandbox
@@ -112,6 +187,13 @@ trap teardown_sandbox EXIT
 
 test_tool devenv     _devenv     __devenv_names
 test_tool devenv-wiz _devenv_wiz __devenv_wiz_names
+
+note "--- security: no code execution from hostile names ---"
+test_security_no_exec devenv     _devenv
+test_security_no_exec devenv-wiz _devenv_wiz
+
+note "--- zsh name gatherers ---"
+test_zsh_names
 
 note ""
 note "completion tests: ${pass} passed, ${fail} failed"

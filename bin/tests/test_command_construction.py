@@ -112,6 +112,23 @@ def test_resolve_bind_mount_rejects_file(wiz, tmp_path):
         wiz.resolve_bind_mount(str(f))
 
 
+def test_resolve_bind_mount_makes_relative_host_absolute(wiz, tmp_path, monkeypatch):
+    # A relative host dir must become absolute (would fail if .resolve() dropped).
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert wiz.resolve_bind_mount("proj") == f"{(tmp_path / 'proj').resolve()}:/workspace/proj"
+
+
+def test_resolve_bind_mount_dereferences_symlinked_host(wiz, tmp_path):
+    # The load-bearing pwd -P / Path.resolve() behavior: a symlinked host dir
+    # resolves to its real target, and the container basename follows the target.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert wiz.resolve_bind_mount(str(link)) == f"{real.resolve()}:/workspace/real"
+
+
 def test_launch_container_never_inlines_secrets(wiz, capture_query, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
     env_file, secret = make_env_file(tmp_path)
