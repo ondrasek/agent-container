@@ -56,27 +56,44 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-env"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 
+def _is_repo_checkout(base: "Path") -> bool:
+    """Best-effort test that `base` is an agent-env checkout.
+
+    Keyed on `completions/agent-env.bash` (plus a Dockerfile for the build
+    context): a repo-specific sentinel rather than the generic `Dockerfile` +
+    `completions/` dir pair, which is common to unrelated trees. Requiring the
+    exact file _completion_script reads (bin/agent-env: REPO_ROOT/completions/
+    agent-env.<shell>) also makes the marker and that consumed path the same
+    invariant — a recognized checkout can never then serve stale package data.
+    This is a heuristic, not a guaranteed false-positive-free identifier.
+    """
+    return (base / "Dockerfile").is_file() and (base / "completions" / "agent-env.bash").is_file()
+
+
 def _find_repo_root() -> "Path | None":
     """Locate the repo checkout in a way that survives a non-editable install.
 
     A wheel copies this module into site-packages, so Path(__file__) no longer
     points inside the repo. Resolution order:
-      1. AGENT_ENV_REPO (explicit operator override), expanded + resolved.
-      2. Walk up from this file, then from cwd, looking for a directory that
-         holds BOTH a Dockerfile and a completions/ dir (the marker that
-         identifies THIS repo, avoiding false positives on unrelated trees).
+      1. AGENT_ENV_REPO (explicit operator override): trusted only when it
+         satisfies the checkout marker (see _is_repo_checkout); a wrong/typo'd
+         path yields None rather than a bogus root (build then dies actionably).
+      2. Walk up from this file, then from cwd, looking for a dir that matches
+         the marker.
     Returns None when no checkout is reachable — client subcommands still work
     (completions falls back to bundled package data; build fails actionably).
+    Note: this cannot die here — it runs at import, before Fatal/die exist.
     """
     env = os.environ.get("AGENT_ENV_REPO")
     if env:
-        return Path(env).expanduser().resolve()
+        base = Path(env).expanduser().resolve()
+        return base if _is_repo_checkout(base) else None
     here = Path(__file__).resolve()
-    for base in (here.parent.parent, *here.parents):
-        if (base / "Dockerfile").is_file() and (base / "completions").is_dir():
+    for base in here.parents:
+        if _is_repo_checkout(base):
             return base
     for base in (Path.cwd(), *Path.cwd().parents):
-        if (base / "Dockerfile").is_file() and (base / "completions").is_dir():
+        if _is_repo_checkout(base):
             return base
     return None
 
@@ -522,11 +539,19 @@ def do_build(tag: str, context: "Path | None" = None) -> None:
     # `build` is the one subcommand that needs a repo checkout: a docker build
     # context IS a checkout. Resolve it explicitly (a PyPI install has REPO_ROOT
     # is None) and fail actionably rather than with a traceback.
-    ctx = context or (
-        Path(os.environ["AGENT_ENV_REPO"]).expanduser().resolve()
-        if os.environ.get("AGENT_ENV_REPO")
-        else REPO_ROOT
-    )
+    ctx = context
+    if ctx is None:
+        env = os.environ.get("AGENT_ENV_REPO")
+        if env:
+            base = Path(env).expanduser().resolve()
+            if not _is_repo_checkout(base):
+                die(
+                    f"AGENT_ENV_REPO={env} is not an agent-env checkout "
+                    "(missing Dockerfile/completions/agent-env.bash)"
+                )
+            ctx = base
+        else:
+            ctx = REPO_ROOT
     if ctx is None:
         die(
             "no repo checkout for the docker build context; run from a checkout, "

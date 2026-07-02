@@ -124,12 +124,37 @@ def test_main_guard_routes_through_cli():
 
 
 def test_find_repo_root_honours_agent_env_repo(wiz, monkeypatch, tmp_path):
-    # AGENT_ENV_REPO wins: a fake checkout (Dockerfile + completions/) resolves.
+    # AGENT_ENV_REPO wins when it satisfies the checkout marker (Dockerfile +
+    # completions/agent-env.bash — the repo-specific sentinel).
     checkout = tmp_path / "fake-checkout"
     (checkout / "completions").mkdir(parents=True)
     (checkout / "Dockerfile").write_text("FROM scratch\n")
+    (checkout / "completions" / "agent-env.bash").write_text("# complete\n")
     monkeypatch.setenv("AGENT_ENV_REPO", str(checkout))
     assert wiz._find_repo_root() == checkout.resolve()
+
+
+def test_find_repo_root_rejects_agent_env_repo_without_marker(wiz, monkeypatch, tmp_path):
+    # A wrong/typo'd override that lacks the sentinel is NOT trusted: it resolves
+    # to None (build then dies actionably) rather than a bogus root. A bare
+    # Dockerfile + empty completions/ dir is no longer sufficient.
+    stray = tmp_path / "not-a-checkout"
+    (stray / "completions").mkdir(parents=True)
+    (stray / "Dockerfile").write_text("FROM scratch\n")
+    monkeypatch.setenv("AGENT_ENV_REPO", str(stray))
+    assert wiz._find_repo_root() is None
+
+
+def test_do_build_dies_on_invalid_agent_env_repo(wiz, monkeypatch, tmp_path):
+    # AGENT_ENV_REPO set but not a checkout -> actionable Fatal naming the var,
+    # before any runtime call.
+    stray = tmp_path / "not-a-checkout"
+    stray.mkdir()
+    monkeypatch.setattr(wiz, "REPO_ROOT", None)
+    monkeypatch.setenv("AGENT_ENV_REPO", str(stray))
+    with pytest.raises(wiz.Fatal) as exc:
+        wiz.do_build("localhost/agent-env:latest")
+    assert "is not an agent-env checkout" in str(exc.value)
 
 
 def test_find_repo_root_is_none_without_checkout(wiz, monkeypatch, tmp_path):
