@@ -213,12 +213,36 @@ when bumping dependencies in `bin/agent-env` (and in `pyproject.toml`).
 `--no-project` keeps the run hermetic: the root `pyproject.toml` otherwise puts
 `uv run` in project mode and would sync a `.venv/` at the repo root.
 
-### Install as a uv tool
+### Install from PyPI
 
-Install `agent-env` onto your `PATH` as a uv-managed tool. The install **must be
-editable** — `agent-env` reads sibling repo files (the `Dockerfile` for `build`'s
-context, `completions/` for `completions`), so a non-editable install (which
-copies the module into the venv) breaks those:
+Once published, install `agent-env` onto your `PATH` from PyPI — no checkout
+required:
+
+```bash
+uv tool install agent-env      # or: pipx install agent-env
+agent-env --help
+```
+
+A PyPI install is a **client tool**: `up`, `down`, `list`, `attach`, `logs`,
+`purge`, and `completions` all work standalone (the completion scripts are
+bundled as package data). The one exception is **`build`**, which needs a repo
+checkout to use as the docker build context. Point it at one explicitly:
+
+```bash
+agent-env build --context /path/to/agent-env
+# or, once, for the session:
+export AGENT_ENV_REPO=/path/to/agent-env
+agent-env build
+```
+
+`AGENT_ENV_REPO` (or an auto-detected checkout you happen to run from) also lets
+the standalone install read the on-disk `completions/` instead of the bundled
+copy — handy when hacking on the completions.
+
+### Install as a uv tool (editable, for development)
+
+For working **on** `agent-env`, install it editable so `git pull` keeps the
+`PATH` command current and `build` / `completions` resolve the live repo files:
 
 ```bash
 uv tool install --editable /path/to/agent-env
@@ -229,7 +253,7 @@ uv tool uninstall agent-env
 
 The `uv run --script bin/agent-env` path and the oh-my-zsh plugin are unaffected
 by installing the tool; if the repo's `bin/` is also on `PATH` (e.g. via the
-plugin), both resolve to the same editable code — harmless.
+plugin), both resolve to the same code — harmless.
 
 ### Shell completions
 
@@ -669,3 +693,24 @@ AGENT_ENV_SMOKE_REPO=your-handle/agent-env-smoke-target ./scripts/smoke-test.sh
 ```
 
 Pre-flight refuses to run without `docker`/`podman`, `uv` plus `bin/agent-env`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).
+
+## Releasing
+
+`agent-env` publishes to PyPI via **Trusted Publishing** (OIDC — no API tokens
+stored in the repo). To cut a release:
+
+1. Bump `version` in `pyproject.toml`, commit, and push.
+2. Wait for `.github/workflows/ci.yml` to go green (it runs the pytest suite and
+   `uv build` on every push/PR, so a release only ever fires on a passing tree).
+3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+Pushing a `v*` tag triggers `.github/workflows/publish.yml`, which builds the
+sdist + wheel with `uv build` and uploads them through
+`pypa/gh-action-pypi-publish` using a short-lived OIDC token. **One-time setup:**
+the operator configures the [PyPI trusted publisher](https://docs.pypi.org/trusted-publishers/)
+for the `agent-env` project (owner `ondrasek`, repo `agent-env`, workflow
+`publish.yml`, environment `release`) — after that, releases need no secrets.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
