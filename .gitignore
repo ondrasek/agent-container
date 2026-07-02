@@ -19,3 +19,9 @@ Thumbs.db
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Packaging / uv project mode (root pyproject.toml)
+.venv/
+*.egg-info/
+dist/
+build/

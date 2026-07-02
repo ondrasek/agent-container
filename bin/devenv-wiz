@@ -1153,9 +1153,19 @@ def main(
         raise typer.Exit(wizard_loop())
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Console-script entry point for `uv tool install` (see pyproject.toml).
+
+    uv's generated launcher does `from devenv_wiz import cli; sys.exit(cli())`,
+    so the Fatal -> exit-1 handling that used to live only in the __main__ guard
+    is hoisted here. NOT named `main` — that is already the Typer @app.callback.
+    """
     try:
         app()
     except Fatal as e:
         eprint(f"[devenv-wiz] FATAL: {e}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli()
