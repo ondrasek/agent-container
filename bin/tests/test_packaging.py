@@ -1,14 +1,14 @@
 """Packaging integrity guards (runtime-free; no uv/docker/ssh).
 
 Keeps the two dependency declarations, the console-script entry point, the
-importable-module symlink, and the __main__ routing consistent, so the
-`uv tool install` path and the `uv run --script` path can't silently diverge.
+wheel force-include mapping (module + completions as package data), and the
+__main__ routing consistent, so the `uv tool install` / PyPI path and the
+`uv run --script` path can't silently diverge.
 """
 
 from __future__ import annotations
 
 import ast
-import os
 import sys
 import tomllib
 from pathlib import Path
@@ -52,10 +52,46 @@ def test_pyproject_requires_python_matches_pep723():
 
 def test_entry_point_module_and_attr_resolve(wiz):
     # [project.scripts] agent-env = "<module>:<attr>"; the module name must be
-    # 'agent_env' (the symlink's basename) and the attr must exist + be callable.
+    # 'agent_env' (the force-included module name) and the attr must exist +
+    # be callable.
     module_name, _, attr = _pyproject()["project"]["scripts"]["agent-env"].partition(":")
     assert module_name == "agent_env"
     assert hasattr(wiz, attr) and callable(getattr(wiz, attr))
+
+
+def test_wheel_force_include_ships_module_and_completions():
+    # The non-editable wheel must copy the single-file script in as
+    # agent_env/__init__.py and bundle both completion scripts as package data
+    # (agent_env/completions/*), so a PyPI install has the module AND the
+    # completions without a repo checkout.
+    force_include = (
+        _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    )
+    assert force_include["bin/agent-env"] == "agent_env/__init__.py"
+    assert force_include["completions/agent-env.bash"] == "agent_env/completions/agent-env.bash"
+    assert force_include["completions/agent-env.zsh"] == "agent_env/completions/agent-env.zsh"
+
+
+def test_wheel_bypasses_selection():
+    # There is no conventionally-named package dir, so hatchling's auto file
+    # selection must be bypassed (force-include supplies everything).
+    assert _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["bypass-selection"] is True
+
+
+def test_no_module_symlink_remains():
+    # The old bin/agent_env.py importable-module symlink is gone; force-include
+    # now supplies the `agent_env` module name.
+    assert not (REPO_ROOT / "bin" / "agent_env.py").exists()
+
+
+def test_pyproject_declares_mit_license_and_metadata():
+    proj = _pyproject()["project"]
+    assert proj["license"] == "MIT"
+    assert proj["license-files"] == ["LICENSE"]
+    assert (REPO_ROOT / "LICENSE").is_file()
+    assert proj["description"]
+    assert proj["readme"] == "README.md"
+    assert proj["urls"]["Homepage"] == "https://github.com/ondrasek/agent-env"
 
 
 def test_cli_translates_fatal_to_exit_one(wiz, monkeypatch):
@@ -65,13 +101,6 @@ def test_cli_translates_fatal_to_exit_one(wiz, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         wiz.cli()
     assert exc.value.code == 1
-
-
-def test_module_symlink_integrity():
-    link = REPO_ROOT / "bin" / "agent_env.py"
-    assert link.is_symlink(), "bin/agent_env.py must be a symlink (mode 120000)"
-    assert os.readlink(link) == "agent-env"
-    assert link.resolve().samefile(SCRIPT_PATH)
 
 
 def test_main_guard_routes_through_cli():
@@ -89,3 +118,45 @@ def test_main_guard_routes_through_cli():
     stmt = guard.body[0]
     assert isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
     assert isinstance(stmt.value.func, ast.Name) and stmt.value.func.id == "cli"
+
+
+# --- location-independent REPO_ROOT + gated build ------------------------------
+
+
+def test_find_repo_root_honours_agent_env_repo(wiz, monkeypatch, tmp_path):
+    # AGENT_ENV_REPO wins: a fake checkout (Dockerfile + completions/) resolves.
+    checkout = tmp_path / "fake-checkout"
+    (checkout / "completions").mkdir(parents=True)
+    (checkout / "Dockerfile").write_text("FROM scratch\n")
+    monkeypatch.setenv("AGENT_ENV_REPO", str(checkout))
+    assert wiz._find_repo_root() == checkout.resolve()
+
+
+def test_find_repo_root_is_none_without_checkout(wiz, monkeypatch, tmp_path):
+    # No AGENT_ENV_REPO, __file__ relocated out of any repo, and cwd moved to a
+    # marker-free dir -> the resolver returns None (mirrors a PyPI install).
+    monkeypatch.delenv("AGENT_ENV_REPO", raising=False)
+    stray = tmp_path / "site-packages" / "agent_env" / "__init__.py"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("")
+    monkeypatch.setattr(wiz, "__file__", str(stray))
+    monkeypatch.chdir(tmp_path)
+    assert wiz._find_repo_root() is None
+
+
+def test_do_build_dies_without_context_or_checkout(wiz, monkeypatch):
+    # REPO_ROOT None + no --context + no AGENT_ENV_REPO -> actionable Fatal
+    # (not a traceback), and before any runtime call.
+    monkeypatch.delenv("AGENT_ENV_REPO", raising=False)
+    monkeypatch.setattr(wiz, "REPO_ROOT", None)
+    with pytest.raises(wiz.Fatal) as exc:
+        wiz.do_build("localhost/agent-env:latest")
+    assert "no repo checkout for the docker build context" in str(exc.value)
+
+
+def test_completion_script_reads_from_checkout(wiz):
+    # In dev / script mode REPO_ROOT resolves via the __file__ marker, so the
+    # completion text comes straight off disk.
+    assert wiz.REPO_ROOT is not None
+    text = wiz._completion_script("bash")
+    assert text == (wiz.REPO_ROOT / "completions" / "agent-env.bash").read_text()
