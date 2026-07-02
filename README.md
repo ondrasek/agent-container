@@ -205,7 +205,7 @@ uv tool upgrade devenv-wiz     # after dependency bumps
 uv tool uninstall devenv-wiz
 ```
 
-This only installs the Python wizard; `bin/devenv` (bash) is not a Python package — symlink it separately (see the oh-my-zsh plugin or the `~/.local/bin` symlink in the deploy notes). If the repo's `bin/` is also on `PATH` (e.g. via the oh-my-zsh plugin), both `~/.local/bin/devenv-wiz` and `bin/devenv-wiz` resolve to the same editable code — harmless. The `uv run --script bin/devenv-wiz` path and the oh-my-zsh plugin are unaffected by installing the tool.
+This only installs the Python wizard; `bin/devenv` (bash) is not a Python package — symlink it separately (via the oh-my-zsh plugin, or the `~/.local/bin` symlink shown under [Shell completions](#shell-completions)). If the repo's `bin/` is also on `PATH` (e.g. via the oh-my-zsh plugin), both `~/.local/bin/devenv-wiz` and `bin/devenv-wiz` resolve to the same editable code — harmless. The `uv run --script bin/devenv-wiz` path and the oh-my-zsh plugin are unaffected by installing the tool.
 
 ### Shell completions
 

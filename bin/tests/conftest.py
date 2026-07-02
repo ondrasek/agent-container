@@ -1,10 +1,11 @@
 """Pytest fixtures for the bin/devenv-wiz suite.
 
 devenv-wiz is a PEP 723 single-file script without a .py extension, so the
-suite loads it via SourceFileLoader. Run it with uv (no project venv needed);
-the --with pins mirror the script's own inline metadata:
+suite loads it via SourceFileLoader. Run it with uv; --no-project keeps the run
+hermetic (the root pyproject.toml otherwise puts uv in project mode) and the
+--with pins mirror the script's own inline metadata:
 
-    uv run --with pytest \
+    uv run --no-project --with pytest \
            --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' \
            pytest bin/tests
 
