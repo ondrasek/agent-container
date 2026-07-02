@@ -55,6 +55,14 @@ def test_container_and_volume_naming(wiz):
     assert wiz.volume_name("acme") == "devenv-acme-workspace"
     assert wiz.container_name("my-box") == "devenv-my-box"
     assert wiz.volume_name("my-box") == "devenv-my-box-workspace"
+    # Each per-container naming helper has its own explicit contract assertion
+    # rather than relying on doctest/argv side-coverage (the canonical order is
+    # workspace, claude, codex, pi, shellenv, tmux — shared with bin/devenv).
+    assert wiz.claude_volume_name("acme") == "devenv-acme-claude"
+    assert wiz.codex_volume_name("acme") == "devenv-acme-codex"
+    assert wiz.pi_volume_name("acme") == "devenv-acme-pi"
+    assert wiz.shellenv_volume_name("acme") == "devenv-acme-shellenv"
+    assert wiz.tmux_volume_name("acme") == "devenv-acme-tmux"
 
 
 # --- name validation: ^[a-z0-9][a-z0-9_-]*$ ------------------------------------
