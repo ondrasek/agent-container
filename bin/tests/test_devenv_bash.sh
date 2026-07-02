@@ -57,6 +57,15 @@ esac
 EOF
 chmod +x "${STUB}/docker"
 
+# Stub 'ssh' so cmd_attach's `exec ssh ...` is captured, not executed: each argv
+# element on its own line in the capture file. Lets us assert the attach remote
+# command (with and without --window) matches the parity contract.
+cat > "${STUB}/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${DEVENV_CAPTURE}"
+EOF
+chmod +x "${STUB}/ssh"
+
 run_devenv() {  # run_devenv <args...>; resets + fills ${CAP}; returns devenv's rc
     : > "${CAP}"
     ( cd "${WORK}" \
@@ -108,6 +117,29 @@ if run_devenv up acme --mount "${SB}/does-not-exist"; then bad "--mount missing 
 if run_devenv up acme --mount; then bad "--mount with no arg should exit nonzero"; else ok; fi
 # unexpected extra positional errors
 if run_devenv up acme extra; then bad "extra positional should exit nonzero"; else ok; fi
+
+# --- 3b. attach --window: select-then-attach single remote arg --------------
+# State for acme was written by the section-1/2 `up acme` runs; attach reads it.
+run_devenv attach acme
+expected_attach="dev@localhost
+-p
+2206
+-t
+tmux
+attach
+-t
+main"
+check_eq "attach acme argv == canonical (no --window)" "${expected_attach}" "$(cat "${CAP}")"
+run_devenv attach acme --window edit
+expected_attach_w="dev@localhost
+-p
+2206
+-t
+tmux select-window -t main:edit 2>/dev/null; exec tmux attach -t main"
+check_eq "attach --window == select-then-attach single remote arg" "${expected_attach_w}" "$(cat "${CAP}")"
+# an invalid window name is rejected BEFORE ssh is ever invoked
+if run_devenv attach acme --window 'a b'; then bad "attach invalid --window should exit nonzero"; else ok; fi
+check_eq "attach invalid --window makes no ssh call" "" "$(cat "${CAP}")"
 
 # --- 4. --purge removes all 6 volumes; plain down removes none --------------
 run_devenv down acme --purge

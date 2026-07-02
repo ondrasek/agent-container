@@ -313,6 +313,47 @@ def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
     ]
 
 
+# --- attach --window ---------------------------------------------------------------
+
+
+def test_ssh_argv_with_window_selects_then_attaches_single_arg(wiz):
+    argv = wiz.ssh_argv("dev", "localhost", 2206, "agents")
+    # Prefix unchanged; the remote command is ONE compound string (select then attach).
+    assert argv[:5] == ["ssh", "dev@localhost", "-p", "2206", "-t"]
+    assert argv[5:] == [
+        "tmux select-window -t main:agents 2>/dev/null; exec tmux attach -t main"
+    ]
+    assert len(argv) == 6  # -t is followed by exactly one remote-command arg
+
+
+def test_ssh_argv_without_window_is_unchanged(wiz):
+    # Parity guard: the no-window argv must never gain the compound form.
+    assert wiz.ssh_argv("dev", "localhost", 2206) == [
+        "ssh", "dev@localhost", "-p", "2206", "-t", "tmux", "attach", "-t", "main",
+    ]
+
+
+def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
+    wiz.write_state("acme", 2206)
+    execs: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
+    wiz.cli_attach("acme", "local", None, None, "edit")
+    assert execs == [(
+        "ssh",
+        ["ssh", "dev@localhost", "-p", "2206", "-t",
+         "tmux select-window -t main:edit 2>/dev/null; exec tmux attach -t main"],
+    )]
+
+
+def test_cli_attach_rejects_bad_window_before_exec(wiz, monkeypatch):
+    wiz.write_state("acme", 2206)
+    execs: list = []
+    monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, argv)))
+    with pytest.raises(wiz.Fatal, match="invalid tmux window"):
+        wiz.cli_attach("acme", "local", None, None, "a; rm -rf ~")
+    assert execs == []  # never reached ssh
+
+
 # --- attach target resolution --------------------------------------------------------
 
 

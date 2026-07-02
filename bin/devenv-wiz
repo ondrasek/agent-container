@@ -66,6 +66,9 @@ NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 # can never start with '-'.
 SSH_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 SSH_HOST_RE = re.compile(r"[A-Za-z0-9_\[][A-Za-z0-9.:_\]-]*")
+# tmux window name: embedded in the ssh remote command (attach --window), so it
+# is charset-validated. Matches the entrypoint / bin/devenv window charset.
+WINDOW_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 console = Console()
 
@@ -266,6 +269,22 @@ def resolve_ssh_user(override: str | None = None) -> str:
     if not SSH_USER_RE.fullmatch(user):
         die(f"invalid ssh user '{user}'")
     return user
+
+
+def validate_window(window: str) -> str:
+    """tmux window name guard: it is embedded in the ssh remote shell command,
+    so reject anything outside the safe charset before building it.
+
+    >>> validate_window("agents")
+    'agents'
+    >>> validate_window("a; rm -rf ~")
+    Traceback (most recent call last):
+    ...
+    Fatal: invalid tmux window 'a; rm -rf ~'; must match [A-Za-z0-9._-]+
+    """
+    if not WINDOW_RE.fullmatch(window):
+        die(f"invalid tmux window '{window}'; must match [A-Za-z0-9._-]+")
+    return window
 
 
 def parse_kv_config(text: str) -> dict[str, str]:
@@ -643,9 +662,17 @@ def do_list(as_json: bool) -> None:
     console.print(table)
 
 
-def ssh_argv(user: str, host: str, port: str | int) -> list[str]:
-    # The one true attach command; argv list, never a shell string.
-    return ["ssh", f"{user}@{host}", "-p", str(port), "-t", "tmux", "attach", "-t", "main"]
+def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
+    # The one true attach command; argv list, never a shell string. Without a
+    # window the argv is unchanged (bin/devenv parity). With one, the remote
+    # command is a SINGLE compound string that selects the window (tolerating
+    # its absence) THEN attaches — select-window works on a detached session.
+    base = ["ssh", f"{user}@{host}", "-p", str(port), "-t"]
+    if window:
+        return base + [
+            f"tmux select-window -t main:{window} 2>/dev/null; exec tmux attach -t main"
+        ]
+    return base + ["tmux", "attach", "-t", "main"]
 
 
 def tmux_nest_warning() -> str | None:
@@ -694,16 +721,27 @@ def resolve_attach_target(
     return user, host, port, "local"
 
 
-def cli_attach(name: str, mode: str, user_override: str | None, host_override: str | None) -> None:
+def cli_attach(
+    name: str,
+    mode: str,
+    user_override: str | None,
+    host_override: str | None,
+    window: str | None = None,
+) -> None:
+    # Validate the window BEFORE resolving/building the command (it is embedded
+    # in the remote shell string).
+    if window:
+        validate_window(window)
     user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
     if w := tmux_nest_warning():
         warn(w)  # CLI mode: warn and proceed
-    eprint(f'devenv-wiz: {user}@{host}:{port} (tmux session "main")')
+    session = f'"main"' + (f', window "{window}"' if window else "")
+    eprint(f"devenv-wiz: {user}@{host}:{port} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
     # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
     # and the exit code belong to ssh — identical to bash `exec ssh`.
-    os.execvp("ssh", ssh_argv(user, host, port))
+    os.execvp("ssh", ssh_argv(user, host, port, window))
 
 
 def _child_default_sigint() -> None:
@@ -712,16 +750,23 @@ def _child_default_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
-def wizard_handover(user: str, host: str, port: str, logs_hint: str = "devenv-wiz logs <name>") -> None:
+def wizard_handover(
+    user: str,
+    host: str,
+    port: str,
+    logs_hint: str = "devenv-wiz logs <name>",
+    window: str | None = None,
+) -> None:
     """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
     target = f"{user}@{host}:{port}"
-    eprint(f'devenv-wiz: {target} (tmux session "main")')
+    session = f'"main"' + (f', window "{window}"' if window else "")
+    eprint(f"devenv-wiz: {target} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
     old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C goes to ssh only
     try:
         rc = subprocess.run(
-            ssh_argv(user, host, port), preexec_fn=_child_default_sigint
+            ssh_argv(user, host, port, window), preexec_fn=_child_default_sigint
         ).returncode
     finally:
         signal.signal(signal.SIGINT, old_int)
@@ -867,6 +912,12 @@ def wiz_attach(rt: str) -> None:
         if not questionary.confirm("continue attaching?", default=True).ask():
             return
 
+    # Optional window to select before attaching (empty = session default).
+    # Validated now so a bad name aborts back to the menu (Fatal is caught there).
+    window = questionary.text("window to select (empty = default)", default="").ask() or None
+    if window:
+        validate_window(window)
+
     kind, name, host, port = sel
     user = resolve_ssh_user()
     if kind == "local":
@@ -875,8 +926,8 @@ def wiz_attach(rt: str) -> None:
             warn(f"state file for {name} disappeared; is the container still up?")
             return
         host = os.environ.get("DEVENV_HOST") or "localhost"
-    wizard_handover(user, host, port, logs_hint=f"devenv-wiz logs {name}")
-    hint(f"devenv-wiz attach {name} --{kind}")
+    wizard_handover(user, host, port, logs_hint=f"devenv-wiz logs {name}", window=window)
+    hint(f"devenv-wiz attach {name} --{kind}" + (f" --window {window}" if window else ""))
 
 
 def wiz_logs(rt: str) -> None:
@@ -1113,12 +1164,15 @@ def attach(
     remote: bool = typer.Option(False, "--remote", help="Force remote target (hosts.conf)."),
     user: str | None = typer.Option(None, "--user", help="SSH user (default: DEVENV_USER or dev)."),
     host: str | None = typer.Option(None, "--host", help="Override the resolved host."),
+    window: str | None = typer.Option(
+        None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
+    ),
 ) -> None:
     """ssh + tmux attach to container NAME (local state file or hosts.conf)."""
     if local and remote:
         raise typer.BadParameter("--local and --remote are mutually exclusive")
     mode = "local" if local else ("remote" if remote else "auto")
-    cli_attach(name, mode, user, host)
+    cli_attach(name, mode, user, host, window)
 
 
 @app.command()

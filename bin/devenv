@@ -35,6 +35,10 @@ readonly PORT_RANGE=100  # 2200..2299
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
 
+# tmux window names are embedded in the ssh remote command (attach --window), so
+# they are charset-validated before use. Matches the entrypoint's window charset.
+readonly WINDOW_RE='^[A-Za-z0-9._-]+$'
+
 # Resolve this script's real directory, following symlinks (portable; macOS bash
 # 3.2 has no `readlink -f`). Lets `build` and `completions` locate the repo even
 # when bin/devenv is symlinked onto PATH (e.g. ~/.local/bin/devenv).
@@ -350,10 +354,36 @@ cmd_list() {
 }
 
 cmd_attach() {
-    local name port host="${DEVENV_HOST:-localhost}" user="${DEVENV_USER:-dev}"
-    name="$(require_name "${1:-}")"
+    local name="" window="" port host="${DEVENV_HOST:-localhost}" user="${DEVENV_USER:-dev}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -w|--window)
+                shift
+                [[ $# -gt 0 ]] || die "--window requires a NAME"
+                window="$1"; shift ;;
+            --window=*) window="${1#--window=}"; shift ;;
+            -*) die "unknown option for attach: $1" ;;
+            *)
+                [[ -z "${name}" ]] || die "unexpected extra argument: $1"
+                name="$1"; shift ;;
+        esac
+    done
+    name="$(require_name "${name}")"
+    # Validate BEFORE building the remote command: the window name is embedded
+    # in a remote shell string, so a bad value must never reach ssh.
+    if [[ -n "${window}" ]]; then
+        [[ "${window}" =~ ${WINDOW_RE} ]] \
+            || die "invalid --window '${window}'; must match [A-Za-z0-9._-]+"
+    fi
     if ! port="$(read_state_port "${name}")"; then
         die "no state for ${name}; is it running? (try: ${SCRIPT_PATH} up ${name})"
+    fi
+    if [[ -n "${window}" ]]; then
+        # select-window works on a detached session, so ordering is correct;
+        # passed as a SINGLE remote-command argument.
+        log "attaching to ${user}@${host}:${port} (tmux session 'main', window '${window}')"
+        exec ssh "${user}@${host}" -p "${port}" -t \
+            "tmux select-window -t main:${window} 2>/dev/null; exec tmux attach -t main"
     fi
     log "attaching to ${user}@${host}:${port} (tmux session 'main')"
     exec ssh "${user}@${host}" -p "${port}" -t tmux attach -t main
@@ -394,6 +424,7 @@ subcommands:
                      codex, pi, shellenv, tmux).
   list               List running devenv containers.
   attach <name>      ssh + tmux attach to container devenv-<name>.
+       [--window NAME] Select tmux window NAME (in session 'main') before attaching.
   logs <name>        Tail container logs.
   completions <sh>   Print the bash|zsh completion script (see completions/).
 

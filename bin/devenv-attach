@@ -28,12 +28,18 @@ readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
 readonly HOSTS_CONF="${CONFIG_DIR}/hosts.conf"
 
+# tmux window names are embedded in the ssh remote command (--window), so they
+# are charset-validated before use (matches the entrypoint window charset).
+readonly WINDOW_RE='^[A-Za-z0-9._-]+$'
+
 die() { printf 'devenv-attach: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat >&2 <<'EOF'
-usage: devenv-attach <name>           # attach to a remote container by name
-       devenv-attach -l|--local <name> # attach to a local container by name
+usage: devenv-attach [-w NAME] <name>            # attach to a remote container by name
+       devenv-attach -l|--local [-w NAME] <name> # attach to a local container by name
+
+  -w, --window NAME  Select tmux window NAME (in session 'main') before attaching.
 
 Remote config: ~/.config/devenv/hosts.conf (KEY=VALUE; see docs/devenv-hosts.example)
 Local state:   $XDG_STATE_HOME/devenv/<name>.port (written by bin/devenv up)
@@ -41,6 +47,21 @@ Local state:   $XDG_STATE_HOME/devenv/<name>.port (written by bin/devenv up)
 env overrides:
   DEVENV_USER=<user>  SSH user (default: dev)
 EOF
+}
+
+# Build + exec the ssh attach for a resolved target. With a window name the
+# remote command is a SINGLE compound string: select-window (tolerating a
+# missing window) THEN attach. Without one, the exact legacy argv is preserved.
+exec_attach() {
+    local user="$1" host="$2" port="$3" window="$4"
+    if [[ -n "${window}" ]]; then
+        printf 'devenv-attach: %s@%s:%s (tmux session "main", window "%s")\n' \
+            "${user}" "${host}" "${port}" "${window}" >&2
+        exec ssh "${user}@${host}" -p "${port}" -t \
+            "tmux select-window -t main:${window} 2>/dev/null; exec tmux attach -t main"
+    fi
+    printf 'devenv-attach: %s@%s:%s (tmux session "main")\n' "${user}" "${host}" "${port}" >&2
+    exec ssh "${user}@${host}" -p "${port}" -t tmux attach -t main
 }
 
 # Normalise a container name to the prefix used in hosts.conf keys:
@@ -53,7 +74,7 @@ name_to_key() {
 }
 
 attach_remote() {
-    local name="$1"
+    local name="$1" window="${2:-}"
     local key host_var port_var host port user="${DEVENV_USER:-dev}"
 
     [[ -f "${HOSTS_CONF}" ]] || die "no hosts config at ${HOSTS_CONF} — create it (see docs/devenv-hosts.example)"
@@ -72,12 +93,11 @@ attach_remote() {
         die "no host configured for ${name} — add ${host_var} and ${port_var} to ${HOSTS_CONF} (see docs/devenv-hosts.example)"
     fi
 
-    printf 'devenv-attach: %s@%s:%s (tmux session "main")\n' "${user}" "${host}" "${port}" >&2
-    exec ssh "${user}@${host}" -p "${port}" -t tmux attach -t main
+    exec_attach "${user}" "${host}" "${port}" "${window}"
 }
 
 attach_local() {
-    local name="$1"
+    local name="$1" window="${2:-}"
     local port_file port user="${DEVENV_USER:-dev}"
 
     port_file="${STATE_DIR}/${name}.port"
@@ -87,15 +107,19 @@ attach_local() {
     port="$(cat "${port_file}")"
     [[ -n "${port}" ]] || die "state file ${port_file} is empty"
 
-    printf 'devenv-attach: %s@localhost:%s (tmux session "main")\n' "${user}" "${port}" >&2
-    exec ssh "${user}@localhost" -p "${port}" -t tmux attach -t main
+    exec_attach "${user}" "localhost" "${port}" "${window}"
 }
 
 main() {
-    local mode=remote name=""
+    local mode=remote name="" window=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -l|--local) mode=local; shift ;;
+            -w|--window)
+                shift
+                [[ $# -gt 0 ]] || die "--window requires a NAME"
+                window="$1"; shift ;;
+            --window=*) window="${1#--window=}"; shift ;;
             -h|--help|help) usage; exit 0 ;;
             --) shift; name="${1:-}"; shift || true; break ;;
             -*) die "unknown flag: $1 (run 'devenv-attach --help')" ;;
@@ -104,10 +128,16 @@ main() {
     done
 
     [[ -n "${name}" ]] || { usage; exit 2; }
+    # Validate BEFORE building the remote command (window is embedded in a
+    # remote shell string; a bad value must never reach ssh).
+    if [[ -n "${window}" ]]; then
+        [[ "${window}" =~ ${WINDOW_RE} ]] \
+            || die "invalid --window '${window}'; must match [A-Za-z0-9._-]+"
+    fi
 
     case "${mode}" in
-        remote) attach_remote "${name}" ;;
-        local)  attach_local  "${name}" ;;
+        remote) attach_remote "${name}" "${window}" ;;
+        local)  attach_local  "${name}" "${window}" ;;
     esac
 }
 
