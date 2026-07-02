@@ -573,7 +573,7 @@ def down_container(rt: str, name: str, purge: bool) -> None:
         log(f"no container named {cname}")
 
     # --purge drops ALL per-container volumes (workspace + claude + codex + pi +
-    # shellenv), tolerating absence; plain down preserves every one of them.
+    # shellenv + tmux), tolerating absence; plain down preserves every one of them.
     vols = per_container_volumes(name)
     if purge:
         for vname in vols:
