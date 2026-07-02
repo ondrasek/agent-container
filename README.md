@@ -345,7 +345,7 @@ Inside the container (after attach):
 
 ```bash
 tmux ls                                                  # tmux sessions (just "main" by default)
-tmux lsw -t main                                         # windows in main
+tmux lsw -t main                                         # windows in main (default: shell, edit, agents)
 ps -ef                                                   # everything alive in the container
 ```
 
@@ -373,8 +373,8 @@ devenv-attach blog                                       # totally separate sess
 
 The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
 
-- `./bin/devenv down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`) and the shell-env volume (`~/.devenv`). `./bin/devenv up acme` later restores the same `/workspace` contents *and* your agent logins.
-- `./bin/devenv down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv). Use for a true clean slate; you will re-`login` to the agents afterward.
+- `./bin/devenv down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.devenv`), and the tmux-config volume (`~/.config/tmux`). `./bin/devenv up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf`.
+- `./bin/devenv down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux). Use for a true clean slate; you will re-`login` to the agents afterward.
 - VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `./bin/devenv up acme` again. Pushed commits are unaffected either way.
 - Quadlet service crashed — `systemctl --user restart devenv-acme.service`. Look at `journalctl --user -u devenv-acme.service` first.
 
@@ -422,6 +422,22 @@ nvim ~/.devenv/env       # add lines like:  export FOO=bar
 
 It's read with `set -a` semantics, so plain `KEY=VALUE` lines are exported. A
 malformed file can't break your shell — the source hook is guarded.
+
+### Persistent tmux config
+
+Each container also mounts a `~/.config/tmux` volume (XDG standard; tmux 3.x
+reads `~/.config/tmux/tmux.conf`). Drop your `tmux.conf` and any
+[tpm](https://github.com/tmux-plugins/tpm) plugins there and they survive
+`down`/`up`:
+
+```bash
+# inside the container
+nvim ~/.config/tmux/tmux.conf    # e.g. set -g mouse on
+tmux source ~/.config/tmux/tmux.conf   # or start a fresh session to pick it up
+```
+
+The default window layout (`shell edit agents`) is set by the entrypoint via
+`DEVENV_TMUX_WINDOWS`; see [Entrypoint behavior](#entrypoint-behavior).
 
 ### Mount a host directory (optional)
 
@@ -550,7 +566,7 @@ The image itself enforces none of this — that's item C's entrypoint and item E
 3. **SSH host keys.** Generated via `ssh-keygen -A` only if `/etc/ssh/ssh_host_ed25519_key` is absent. This guarantees each container instance gets a distinct SSH identity — a hard requirement for running multiple containers in parallel.
 4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig`; the token itself is never written to disk in the container.
 5. **sshd.** Started in the background via `sudo /usr/sbin/sshd` (daemonized; not `-D`). Listens on port 22 inside the container; map this to a host port via the orchestration layer.
-6. **tmux session.** A detached session named `main` is created with a single shell pane. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main`.
+6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `DEVENV_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `DEVENV_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `bin/devenv attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.
 7. **PID 1 lifecycle.** The script `wait`s on a background `tail -f /dev/null`, keeping PID 1 alive. `SIGTERM` / `SIGINT` trigger a clean shutdown: `tmux kill-server`, then `sudo pkill sshd`, then `exit 0`.
 
 **Required env vars (entrypoint exits non-zero if missing):**
@@ -580,9 +596,10 @@ bin/devenv up alpha               # start container devenv-alpha (detached)
 bin/devenv up bravo               # start another, in parallel, on a different port
 bin/devenv list                   # see what's running
 bin/devenv attach alpha           # ssh + tmux attach
+bin/devenv attach alpha --window edit  # attach and select the 'edit' window
 bin/devenv logs alpha             # tail container logs
-bin/devenv down alpha             # stop + remove (volume preserved)
-bin/devenv down alpha --purge     # stop + remove + delete workspace volume
+bin/devenv down alpha             # stop + remove (all volumes preserved)
+bin/devenv down alpha --purge     # stop + remove + delete ALL per-container volumes
 ```
 
 **Runtime auto-detection:** `bin/devenv` prefers `podman` over `docker` (the VPS target). Override with `DEVENV_RUNTIME=docker|podman`.
@@ -596,9 +613,12 @@ bin/devenv down alpha --purge     # stop + remove + delete workspace volume
 `bin/devenv-attach` is a thin client-side helper that resolves a symbolic container name to the right `ssh + tmux` invocation. It runs **on your laptop**, not in the container, and reads files only — no dependency on `bin/devenv` being installed locally.
 
 ```bash
-bin/devenv-attach acme        # remote: read ACME_HOST + ACME_PORT from hosts.conf
-bin/devenv-attach -l alpha    # local:  read port from XDG_STATE_HOME/devenv/alpha.port
+bin/devenv-attach acme            # remote: read ACME_HOST + ACME_PORT from hosts.conf
+bin/devenv-attach -l alpha        # local:  read port from XDG_STATE_HOME/devenv/alpha.port
+bin/devenv-attach -w edit acme    # select the 'edit' tmux window on attach
 ```
+
+`-w`/`--window NAME` (also available on `bin/devenv attach` and `devenv-wiz attach`) selects a tmux window in session `main` before attaching, so you land where you want. The name is validated against `[A-Za-z0-9._-]+`. If the window does not exist, tmux stays on the current one and still attaches.
 
 Detach is `Ctrl-B d` (tmux default) and returns you to your local shell — `ssh` is `exec`ed with `-t`, so signals and exit codes propagate through.
 

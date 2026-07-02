@@ -28,16 +28,17 @@ bin/devenv up bravo
 # See what's running.
 bin/devenv list
 
-# Attach (ssh + tmux).
+# Attach (ssh + tmux). Optionally select a tmux window in session 'main'.
 bin/devenv attach alpha
+bin/devenv attach alpha --window edit
 
 # Tail container logs.
 bin/devenv logs alpha
 
-# Tear down (workspace volume preserved).
+# Tear down (all per-container volumes preserved).
 bin/devenv down alpha
 
-# Tear down AND delete the workspace volume.
+# Tear down AND delete ALL per-container volumes.
 bin/devenv down alpha --purge
 ```
 
@@ -47,6 +48,7 @@ bin/devenv down alpha --purge
 |--------------------|--------------------------------------|-------------------------------|
 | Container          | `devenv-<name>`                      | `devenv-alpha`                |
 | Workspace volume   | `devenv-<name>-workspace`            | `devenv-alpha-workspace`      |
+| Per-container volumes | `devenv-<name>-{workspace,claude,codex,pi,shellenv,tmux}` | `devenv-alpha-tmux` |
 | Image              | `localhost/remote-persistent-devenv:latest` | (shared across containers) |
 | Quadlet unit       | `devenv-<name>.container`            | `devenv-alpha.container`      |
 
@@ -70,8 +72,8 @@ If you need to override (e.g. you already have something on 2218), edit the stat
 
 ## Volume layout
 
-- One **named volume per container**: `devenv-<name>-workspace`, mounted at `/workspace` inside the container.
-- The volume **survives `devenv down`** — only `down --purge` removes it.
+- **Six named volumes per container**: `devenv-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume `-shellenv` (`~/.devenv`), and the tmux-config volume `-tmux` (`~/.config/tmux`).
+- The volumes **survive `devenv down`** — only `down --purge` removes them (all six).
 - Hard constraint: **the container is ephemeral**. The volume is for **scratch + uncommitted work in flight**, not durable state. Every agent commits and pushes; if you lose the volume, you lose only un-pushed work.
 
 ## `.env` file lookup
