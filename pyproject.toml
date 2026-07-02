@@ -1,8 +1,8 @@
 # Packaging for `uv tool install --editable .` (see README "Install as a uv tool").
 #
-# devenv-wiz is a single PEP 723 script (bin/devenv-wiz) that also runs via
+# agent-env is a single PEP 723 script (bin/agent-env) that also runs via
 # `uv run --script`. This pyproject exposes it as an installable console script
-# WITHOUT duplicating code: the sibling symlink bin/devenv_wiz.py -> devenv-wiz
+# WITHOUT duplicating code: the sibling symlink bin/agent_env.py -> agent-env
 # gives the hyphenated, extensionless file an importable module name, and an
 # EDITABLE install path-redirects to it (no copy) so Path(__file__).resolve()
 # still lands inside the repo — which is what keeps REPO_ROOT correct for
@@ -16,10 +16,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "devenv-wiz"
+name = "agent-env"
 version = "0.1.0"
 requires-python = ">=3.11"
-# Mirror the PEP 723 dependency block in bin/devenv-wiz EXACTLY — keep in sync.
+# Mirror the PEP 723 dependency block in bin/agent-env EXACTLY — keep in sync.
 dependencies = [
     "typer>=0.12,<1",
     "questionary>=2.0,<3",
@@ -27,10 +27,10 @@ dependencies = [
 ]
 
 [project.scripts]
-devenv-wiz = "devenv_wiz:cli"
+agent-env = "agent_env:cli"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["bin/devenv_wiz.py"]
+only-include = ["bin/agent_env.py"]
 
 [tool.hatch.build.targets.wheel.sources]
-"bin" = ""  # install bin/devenv_wiz.py as the top-level module `devenv_wiz`
+"bin" = ""  # install bin/agent_env.py as the top-level module `agent_env`

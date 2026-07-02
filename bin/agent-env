@@ -8,25 +8,23 @@
 # ]
 # ///
 #
-# devenv-wiz — interactive wizard + CLI for devenv containers.
-#
-# Python sibling of bin/devenv and bin/devenv-attach. Shares all on-disk
-# state with them: container naming (devenv-<name>), the port hash
-# (2200 + sum-of-char-codes mod 100), state files
-# ($XDG_STATE_HOME/devenv/<name>.port), env-file resolution
-# (./.env -> ~/.config/devenv/<name>.env -> ~/.config/devenv/.env), and
-# the hosts.conf KEY=VALUE format (FOO_HOST / FOO_PORT).
+# agent-env — interactive wizard + CLI for agent-env containers.
 #
 # ============================================================================
-# INTEROP WARNING: constants and pure helpers below are duplicated from
-# bin/devenv (and the hosts.conf lookup from bin/devenv-attach).
-# Logic duplicated in bin/devenv — change both, or the toolchains diverge.
+# This script is the SINGLE SOURCE OF TRUTH for the agent-env on-disk contract.
+# Everything below — container naming (agent-env-<name>), the port hash
+# (2200 + sum-of-char-codes mod 100), the per-name state files
+# ($XDG_STATE_HOME/agent-env/<name>.port), the env-file resolution order
+# (./.env -> ~/.config/agent-env/<name>.env -> ~/.config/agent-env/.env), and
+# the hosts.conf KEY=VALUE format (FOO_HOST / FOO_PORT) — is defined here and
+# only here. The shell completions read the same state files directly; keep
+# them in step with the constants in this file.
 # ============================================================================
 #
-# Divergence (documented): bin/devenv-attach *sources* hosts.conf via bash;
-# this tool parses it line-by-line and never executes it. Quoting and unquoted
-# trailing `# comment`s are handled like bash, but values containing `$` or
-# backticks are taken literally (no expansion), with a one-time warning.
+# hosts.conf handling: this tool parses hosts.conf line-by-line and NEVER
+# executes/sources it. Quoting and unquoted trailing `# comment`s are handled
+# like bash `source`, but values containing `$` or backticks are taken
+# literally (no expansion), with a one-time warning.
 
 from __future__ import annotations
 
@@ -49,13 +47,13 @@ from rich.table import Table
 
 # --- constants ---------------------------------------------------------------
 
-IMAGE_NAME = "localhost/remote-persistent-devenv:latest"
-CONTAINER_PREFIX = "devenv-"
+IMAGE_NAME = "localhost/agent-env:latest"
+CONTAINER_PREFIX = "agent-env-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
 
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "devenv"
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "devenv"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-env"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-env"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -67,14 +65,14 @@ NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 SSH_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 SSH_HOST_RE = re.compile(r"[A-Za-z0-9_\[][A-Za-z0-9.:_\]-]*")
 # tmux window name: embedded in the ssh remote command (attach --window), so it
-# is charset-validated. Matches the entrypoint / bin/devenv window charset.
+# is charset-validated. Matches the entrypoint / agent-env window charset.
 WINDOW_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 console = Console()
 
 
 def eprint(msg: str) -> None:
-    # Plain stderr writer; rich would mangle "[devenv-wiz]" as markup and wrap lines.
+    # Plain stderr writer; rich would mangle "[agent-env]" as markup and wrap lines.
     print(msg, file=sys.stderr)
 
 
@@ -82,7 +80,7 @@ class Fatal(Exception):
     """Fatal error; CLI exits 1, wizard prints and returns to the menu."""
 
 
-def die(msg: str) -> "typer.NoReturn":  # mirrors bash die()
+def die(msg: str) -> "typer.NoReturn":  # cli() turns Fatal into exit 1
     raise Fatal(msg)
 
 
@@ -90,7 +88,7 @@ def die(msg: str) -> "typer.NoReturn":  # mirrors bash die()
 
 
 def validate_name(name: str) -> str:
-    """Same charset rule as bin/devenv require_name.
+    """Validate the container short-name charset: ^[a-z0-9][a-z0-9_-]*$.
 
     >>> validate_name("acme")
     'acme'
@@ -111,7 +109,7 @@ def validate_name(name: str) -> str:
 def container_name(name: str) -> str:
     """
     >>> container_name("acme")
-    'devenv-acme'
+    'agent-env-acme'
     """
     return f"{CONTAINER_PREFIX}{name}"
 
@@ -119,7 +117,7 @@ def container_name(name: str) -> str:
 def volume_name(name: str) -> str:
     """
     >>> volume_name("acme")
-    'devenv-acme-workspace'
+    'agent-env-acme-workspace'
     """
     return f"{CONTAINER_PREFIX}{name}-workspace"
 
@@ -127,7 +125,7 @@ def volume_name(name: str) -> str:
 def claude_volume_name(name: str) -> str:
     """
     >>> claude_volume_name("acme")
-    'devenv-acme-claude'
+    'agent-env-acme-claude'
     """
     return f"{CONTAINER_PREFIX}{name}-claude"
 
@@ -135,7 +133,7 @@ def claude_volume_name(name: str) -> str:
 def codex_volume_name(name: str) -> str:
     """
     >>> codex_volume_name("acme")
-    'devenv-acme-codex'
+    'agent-env-acme-codex'
     """
     return f"{CONTAINER_PREFIX}{name}-codex"
 
@@ -143,7 +141,7 @@ def codex_volume_name(name: str) -> str:
 def pi_volume_name(name: str) -> str:
     """
     >>> pi_volume_name("acme")
-    'devenv-acme-pi'
+    'agent-env-acme-pi'
     """
     return f"{CONTAINER_PREFIX}{name}-pi"
 
@@ -151,7 +149,7 @@ def pi_volume_name(name: str) -> str:
 def shellenv_volume_name(name: str) -> str:
     """
     >>> shellenv_volume_name("acme")
-    'devenv-acme-shellenv'
+    'agent-env-acme-shellenv'
     """
     return f"{CONTAINER_PREFIX}{name}-shellenv"
 
@@ -160,26 +158,26 @@ def tmux_volume_name(name: str) -> str:
     """Persists ~/.config/tmux (tmux.conf + tpm plugins) across down/up.
 
     >>> tmux_volume_name("acme")
-    'devenv-acme-tmux'
+    'agent-env-acme-tmux'
     """
     return f"{CONTAINER_PREFIX}{name}-tmux"
 
 
 def all_volume_mounts(name: str) -> list[str]:
     """The six per-container '-v' volume args, in the canonical fixed order
-    shared byte-for-byte with bin/devenv cmd_up (workspace, claude, codex, pi,
-    shellenv, tmux). pi-coding-agent's config/auth dir is ~/.pi (verified from
+    (workspace, claude, codex, pi, shellenv, tmux). pi-coding-agent's
+    config/auth dir is ~/.pi (verified from
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['devenv-acme-workspace:/workspace', 'devenv-acme-claude:/home/dev/.claude', 'devenv-acme-codex:/home/dev/.codex', 'devenv-acme-pi:/home/dev/.pi', 'devenv-acme-shellenv:/home/dev/.devenv', 'devenv-acme-tmux:/home/dev/.config/tmux']
+    ['agent-env-acme-workspace:/workspace', 'agent-env-acme-claude:/home/dev/.claude', 'agent-env-acme-codex:/home/dev/.codex', 'agent-env-acme-pi:/home/dev/.pi', 'agent-env-acme-shellenv:/home/dev/.agent-env', 'agent-env-acme-tmux:/home/dev/.config/tmux']
     """
     return [
         f"{volume_name(name)}:/workspace",
         f"{claude_volume_name(name)}:/home/dev/.claude",
         f"{codex_volume_name(name)}:/home/dev/.codex",
         f"{pi_volume_name(name)}:/home/dev/.pi",
-        f"{shellenv_volume_name(name)}:/home/dev/.devenv",
+        f"{shellenv_volume_name(name)}:/home/dev/.agent-env",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
     ]
 
@@ -188,7 +186,7 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['devenv-acme-workspace', 'devenv-acme-claude', 'devenv-acme-codex', 'devenv-acme-pi', 'devenv-acme-shellenv', 'devenv-acme-tmux']
+    ['agent-env-acme-workspace', 'agent-env-acme-claude', 'agent-env-acme-codex', 'agent-env-acme-pi', 'agent-env-acme-shellenv', 'agent-env-acme-tmux']
     """
     return [
         volume_name(name),
@@ -202,7 +200,7 @@ def per_container_volumes(name: str) -> list[str]:
 
 def resolve_bind_mount(spec: str) -> str:
     """Resolve a '--mount HOSTDIR[:CONTAINERPATH]' spec into an absolute,
-    read-write '-v' value, mirroring bin/devenv resolve_bind_mount.
+    read-write '-v' value.
 
     HOSTDIR is resolved to an absolute real path (Path.resolve()) and must be
     an existing directory. CONTAINERPATH defaults to /workspace/<basename>; if
@@ -255,7 +253,7 @@ def name_to_key(name: str) -> str:
 
 
 def resolve_ssh_user(override: str | None = None) -> str:
-    """SSH user from --user / DEVENV_USER / 'dev', charset-checked so it can
+    """SSH user from --user / AGENT_ENV_USER / 'dev', charset-checked so it can
     never be parsed by ssh as an option.
 
     >>> resolve_ssh_user("dev")
@@ -265,7 +263,7 @@ def resolve_ssh_user(override: str | None = None) -> str:
     ...
     Fatal: invalid ssh user '-oProxyCommand=x'
     """
-    user = override or os.environ.get("DEVENV_USER") or "dev"
+    user = override or os.environ.get("AGENT_ENV_USER") or "dev"
     if not SSH_USER_RE.fullmatch(user):
         die(f"invalid ssh user '{user}'")
     return user
@@ -326,7 +324,7 @@ def parse_kv_config(text: str) -> dict[str, str]:
 
 
 def env_file_candidates(name: str, cwd: Path) -> list[Path]:
-    """Resolution order is the interop contract with bin/devenv.
+    """Env-file resolution order (./.env, then per-name, then shared default).
 
     >>> [str(p) for p in env_file_candidates("acme", Path("/w"))][0]
     '/w/.env'
@@ -358,18 +356,25 @@ except Exception:
 
 
 def detect_runtime() -> str:
-    forced = os.environ.get("DEVENV_RUNTIME")
+    """Resolve the container runtime.
+
+    AGENT_ENV_RUNTIME (validated docker|podman, must be on PATH) always wins.
+    Otherwise the default is platform-aware: on macOS the operator runs Lima +
+    docker-cli, so prefer docker then podman; on Linux (the VPS) prefer podman
+    then docker. Dies if neither is installed.
+    """
+    forced = os.environ.get("AGENT_ENV_RUNTIME")
     if forced:
         if forced not in ("podman", "docker"):
-            die(f"DEVENV_RUNTIME must be 'docker' or 'podman', got: {forced}")
+            die(f"AGENT_ENV_RUNTIME must be 'docker' or 'podman', got: {forced}")
         if not shutil.which(forced):
-            die(f"DEVENV_RUNTIME={forced} but '{forced}' is not on PATH")
+            die(f"AGENT_ENV_RUNTIME={forced} but '{forced}' is not on PATH")
         return forced
-    if shutil.which("podman"):
-        return "podman"
-    if shutil.which("docker"):
-        return "docker"
-    die("neither 'podman' nor 'docker' on PATH (install one, or set DEVENV_RUNTIME)")
+    order = ("docker", "podman") if sys.platform.startswith("darwin") else ("podman", "docker")
+    for rt in order:
+        if shutil.which(rt):
+            return rt
+    die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_ENV_RUNTIME)")
 
 
 def query(argv: list[str]) -> subprocess.CompletedProcess:
@@ -386,8 +391,8 @@ def container_exists(rt: str, cname: str) -> bool:
     return cname in r.stdout.splitlines()
 
 
-def ps_devenv(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
-    """(cname, image, status, uptime) rows for devenv-* containers.
+def ps_agent_env(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
+    """(cname, image, status, uptime) rows for agent-env-* containers.
 
     Go-template + tab split, not --format json: podman and docker JSON
     shapes are incompatible, the template output is not.
@@ -409,7 +414,7 @@ def image_exists(rt: str, tag: str) -> bool:
 
 def port_free(port: int) -> bool:
     # Wildcard bind: `-p {port}:22` publishes on ALL interfaces (parity with
-    # bin/devenv), so probe what will actually be bound, not just loopback.
+    # agent-env), so probe what will actually be bound, not just loopback.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", port))
@@ -441,8 +446,8 @@ def load_hosts_conf() -> dict[str, str]:
     conf = parse_kv_config(HOSTS_CONF.read_text())
     if not _hosts_warned and any("$" in v or "`" in v for v in conf.values()):
         eprint(
-            "[devenv-wiz] WARNING: hosts.conf contains '$' or '`' values; "
-            "devenv-wiz does not perform shell expansion (bin/devenv-attach does)."
+            "[agent-env] WARNING: hosts.conf contains '$' or '`' values; "
+            "agent-env does not perform shell expansion (agent-env does)."
         )
         _hosts_warned = True
     return conf
@@ -477,11 +482,11 @@ def is_tty() -> bool:
 
 
 def log(msg: str) -> None:
-    eprint(f"[devenv-wiz] {msg}")
+    eprint(f"[agent-env] {msg}")
 
 
 def warn(msg: str) -> None:
-    eprint(f"[devenv-wiz] WARNING: {msg}")
+    eprint(f"[agent-env] WARNING: {msg}")
 
 
 def hint(cmd: str) -> None:
@@ -498,17 +503,17 @@ def do_build(tag: str) -> None:
 
 
 def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | None = None) -> None:
-    """Start argv must match bin/devenv cmd_up flag-for-flag.
+    """Build and run the container start argv.
 
     `mounts` are already-resolved '<abs-host>:<container>' bind specs (from
     resolve_bind_mount); they are appended after the standard per-container
-    volumes and before --restart, identically to bin/devenv.
+    volumes and before --restart.
     """
     cname, vname, port = container_name(name), volume_name(name), port_for_name(name)
     if not port_free(port):
         die(
             f"port {port} is already in use (port = 2200 + name hash; "
-            f"collisions are possible). Stop whatever holds it (devenv-wiz list) "
+            f"collisions are possible). Stop whatever holds it (agent-env list) "
             f"or pick a different name."
         )
     log(f"name={name} port={port} env-file={env_file}")
@@ -517,8 +522,8 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
         rt, "run", "-d",
         "--name", cname,
         "--env-file", str(env_file),
-        # Publishes sshd on ALL host interfaces (flag-for-flag parity with
-        # bin/devenv; remote hosts.conf attach needs it). Firewall the VPS.
+        # Publishes sshd on ALL host interfaces (remote hosts.conf attach needs
+        # it). Firewall the VPS.
         "-p", f"{port}:22",
     ]
     # Standard per-container volumes (canonical order), then optional binds.
@@ -531,7 +536,7 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
     if r.returncode != 0:
         die(f"{rt} run failed: {r.stderr.strip()}")
     write_state(name, port)
-    log(f"started {cname}; attach with: devenv-wiz attach {name}")
+    log(f"started {cname}; attach with: agent-env attach {name}")
     log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
 
 
@@ -545,11 +550,11 @@ def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | 
     if container_running(rt, cname):
         port = read_state_port(name)
         log(f"container {cname} already running" + (f" on port {port}" if port else ""))
-        log(f"attach with: devenv-wiz attach {name}")
+        log(f"attach with: agent-env attach {name}")
         return
 
     if container_exists(rt, cname):
-        die(f"container {cname} exists but is not running. Run: devenv-wiz down {name}")
+        die(f"container {cname} exists but is not running. Run: agent-env down {name}")
 
     env_file = env_file_override or resolve_env_file(name)
     if env_file is None:
@@ -557,7 +562,7 @@ def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | 
         die(f"no .env found. Looked in: {cands}")
 
     if not image_exists(rt, IMAGE_NAME):
-        die(f"image {IMAGE_NAME} not found; run: devenv-wiz build")
+        die(f"image {IMAGE_NAME} not found; run: agent-env build")
 
     launch_container(rt, name, env_file, resolved_mounts)
 
@@ -596,12 +601,12 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
             f"systemd will restart the container after removal. Manage it via Quadlet instead."
         )
         if not yes:
-            eprint("[devenv-wiz] re-run with -y/--yes to proceed despite the active unit")
+            eprint("[agent-env] re-run with -y/--yes to proceed despite the active unit")
             raise typer.Exit(2)
 
     if not yes:
         if not is_tty():
-            eprint("[devenv-wiz] refusing destructive 'down' without -y/--yes on a non-TTY")
+            eprint("[agent-env] refusing destructive 'down' without -y/--yes on a non-TTY")
             raise typer.Exit(2)
         what = f"stop and remove {container_name(name)}"
         if purge:
@@ -616,7 +621,7 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
 def gather_rows(rt: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     running_short: set[str] = set()
-    for cname, image, status, uptime in ps_devenv(rt):
+    for cname, image, status, uptime in ps_agent_env(rt):
         short = cname[len(CONTAINER_PREFIX):]
         running_short.add(short)
         rows.append({
@@ -664,7 +669,7 @@ def do_list(as_json: bool) -> None:
 
 def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
     # The one true attach command; argv list, never a shell string. Without a
-    # window the argv is unchanged (bin/devenv parity). With one, the remote
+    # window the argv is unchanged (agent-env parity). With one, the remote
     # command is a SINGLE compound string that selects the window (tolerating
     # its absence) THEN attaches — select-window works on a detached session.
     base = ["ssh", f"{user}@{host}", "-p", str(port), "-t"]
@@ -688,8 +693,8 @@ def resolve_attach_target(
     host_override: str | None = None,
 ) -> tuple[str, str, str, str]:
     """Returns (user, host, port, kind). kind is 'local' or 'remote'."""
-    # Case-insensitive like bin/devenv-attach: 'My-Box' resolves the same
-    # MY_BOX_* keys (and the same lowercase state file bin/devenv writes).
+    # Case-insensitive like agent-env: 'My-Box' resolves the same
+    # MY_BOX_* keys (and the same lowercase state file agent-env writes).
     name = validate_name(name.lower())
     user = resolve_ssh_user(user_override)
     if host_override is not None and not SSH_HOST_RE.fullmatch(host_override):
@@ -697,7 +702,7 @@ def resolve_attach_target(
     key = name_to_key(name)
 
     if mode == "remote" and not HOSTS_CONF.is_file():
-        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/devenv-hosts.example)")
+        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/agent-env-hosts.example)")
 
     entry = hosts_entry(name)
     if mode == "remote" or (mode == "auto" and entry is not None):
@@ -711,13 +716,13 @@ def resolve_attach_target(
         if mode == "local":
             die(
                 f"no local state for {name} at {state_file(name)} — is the container "
-                f"running? (try: devenv-wiz up {name})"
+                f"running? (try: agent-env up {name})"
             )
         die(
             f"no attach target for {name}; checked {HOSTS_CONF} "
             f"(no {key}_HOST/{key}_PORT) and {state_file(name)}"
         )
-    host = host_override or os.environ.get("DEVENV_HOST") or "localhost"
+    host = host_override or os.environ.get("AGENT_ENV_HOST") or "localhost"
     return user, host, port, "local"
 
 
@@ -736,7 +741,7 @@ def cli_attach(
     if w := tmux_nest_warning():
         warn(w)  # CLI mode: warn and proceed
     session = f'"main"' + (f', window "{window}"' if window else "")
-    eprint(f"devenv-wiz: {user}@{host}:{port} (tmux session {session})")
+    eprint(f"agent-env: {user}@{host}:{port} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
     # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
@@ -754,13 +759,13 @@ def wizard_handover(
     user: str,
     host: str,
     port: str,
-    logs_hint: str = "devenv-wiz logs <name>",
+    logs_hint: str = "agent-env logs <name>",
     window: str | None = None,
 ) -> None:
     """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
     target = f"{user}@{host}:{port}"
     session = f'"main"' + (f', window "{window}"' if window else "")
-    eprint(f"devenv-wiz: {target} (tmux session {session})")
+    eprint(f"agent-env: {target} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
     old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C goes to ssh only
@@ -816,7 +821,7 @@ def wiz_build(rt: str) -> None:
     if not tag:
         return
     do_build(tag)
-    hint("devenv-wiz build" + (f" {tag}" if tag != IMAGE_NAME else ""))
+    hint("agent-env build" + (f" {tag}" if tag != IMAGE_NAME else ""))
 
 
 def wiz_up(rt: str) -> None:
@@ -835,13 +840,13 @@ def wiz_up(rt: str) -> None:
 
     env_file = resolve_env_file(name)
     if env_file is None:
-        eprint("[devenv-wiz] no env file found; looked in:")
+        eprint("[agent-env] no env file found; looked in:")
         for c in env_file_candidates(name, Path.cwd()):
             eprint(f"  {c}")
         target = CONFIG_DIR / f"{name}.env"
         if questionary.confirm(f"create/edit {target} in $EDITOR now?", default=True).ask():
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            # $EDITOR gets the path only; devenv-wiz never reads env contents.
+            # $EDITOR gets the path only; agent-env never reads env contents.
             subprocess.run([os.environ.get("EDITOR") or "vi", str(target)])
             env_file = resolve_env_file(name)
         if env_file is None:
@@ -879,12 +884,12 @@ def wiz_up(rt: str) -> None:
     if not questionary.confirm(f"start {cname}?", default=True).ask():
         return
     launch_container(rt, name, env_file, mounts)  # port pre-check + actionable abort inside
-    hint(f"devenv-wiz up {name}" + (f" --mount {mount_dir}" if mounts else ""))
+    hint(f"agent-env up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
 def wiz_attach(rt: str) -> None:
     choices: list[questionary.Choice] = []
-    for cname, _image, _status, _uptime in ps_devenv(rt):
+    for cname, _image, _status, _uptime in ps_agent_env(rt):
         short = _short(cname)
         port = read_state_port(short) or "?"
         choices.append(questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", "")))
@@ -925,15 +930,15 @@ def wiz_attach(rt: str) -> None:
         if port is None:  # TOCTOU: state file vanished since the picker rendered
             warn(f"state file for {name} disappeared; is the container still up?")
             return
-        host = os.environ.get("DEVENV_HOST") or "localhost"
-    wizard_handover(user, host, port, logs_hint=f"devenv-wiz logs {name}", window=window)
-    hint(f"devenv-wiz attach {name} --{kind}" + (f" --window {window}" if window else ""))
+        host = os.environ.get("AGENT_ENV_HOST") or "localhost"
+    wizard_handover(user, host, port, logs_hint=f"agent-env logs {name}", window=window)
+    hint(f"agent-env attach {name} --{kind}" + (f" --window {window}" if window else ""))
 
 
 def wiz_logs(rt: str) -> None:
-    rows = ps_devenv(rt)
+    rows = ps_agent_env(rt)
     if not rows:
-        log("no running devenv containers")
+        log("no running agent-env containers")
         return
     sel = questionary.select("logs for", choices=[_short(r[0]) for r in rows]).ask()
     if sel is None:
@@ -944,13 +949,13 @@ def wiz_logs(rt: str) -> None:
         subprocess.run([rt, "logs", "-f", container_name(sel)], preexec_fn=_child_default_sigint)
     finally:
         signal.signal(signal.SIGINT, old_int)
-    hint(f"devenv-wiz logs {sel}")
+    hint(f"agent-env logs {sel}")
 
 
 def wiz_down(rt: str) -> None:
-    rows = ps_devenv(rt, include_stopped=True)
+    rows = ps_agent_env(rt, include_stopped=True)
     if not rows:
-        log("no devenv containers (running or stopped)")
+        log("no agent-env containers (running or stopped)")
         return
     choices = []
     for cname, _image, status, _uptime in rows:
@@ -987,23 +992,23 @@ def wiz_down(rt: str) -> None:
         else:
             log("name mismatch — volumes will be preserved")
     down_container(rt, sel, purge)  # reports preserved vs purged, clears state
-    hint(f"devenv-wiz down {sel}" + (" --purge" if purge else ""))
+    hint(f"agent-env down {sel}" + (" --purge" if purge else ""))
 
 
 def _volume_names(rt: str) -> list[str]:
     out = query([rt, "volume", "ls", "--format", "{{.Name}}"]).stdout.splitlines()
-    return [v for v in out if re.fullmatch(r"devenv-.+-workspace", v)]
+    return [v for v in out if re.fullmatch(r"agent-env-.+-workspace", v)]
 
 
 def wiz_purge_volume(rt: str) -> None:
-    containers = {row[0] for row in ps_devenv(rt, include_stopped=True)}
+    containers = {row[0] for row in ps_agent_env(rt, include_stopped=True)}
     orphans = []
     for vol in _volume_names(rt):
         short = vol[len(CONTAINER_PREFIX): -len("-workspace")]
         if container_name(short) not in containers:
             orphans.append(vol)
     if not orphans:
-        log("no orphaned devenv volumes")
+        log("no orphaned agent-env volumes")
         return
     sel = questionary.select("purge orphaned volume", choices=orphans).ask()
     if sel is None:
@@ -1035,29 +1040,29 @@ _MENU: list[tuple[str, "object"]] = [
 
 def wizard_loop() -> int:
     if not is_tty():
-        eprint("[devenv-wiz] no TTY; interactive wizard unavailable. Use subcommands (devenv-wiz --help).")
+        eprint("[agent-env] no TTY; interactive wizard unavailable. Use subcommands (agent-env --help).")
         return 2
     try:
         rt = detect_runtime()
     except Fatal as e:
-        eprint(f"[devenv-wiz] FATAL: {e}")
+        eprint(f"[agent-env] FATAL: {e}")
         return 1
     actions = dict(_MENU)
     while True:
         try:
-            running = len(ps_devenv(rt))
+            running = len(ps_agent_env(rt))
             hosts = "present" if HOSTS_CONF.is_file() else "absent"
             console.print(
                 f"runtime: {rt} | running local containers: {running} | hosts.conf: {hosts}",
                 style="dim",
             )
-            choice = questionary.select("devenv — what now?", choices=[t for t, _ in _MENU]).ask()
+            choice = questionary.select("agent-env — what now?", choices=[t for t, _ in _MENU]).ask()
             if choice is None or choice == "Quit":
                 return 0
             try:
                 actions[choice](rt)
             except Fatal as e:
-                eprint(f"[devenv-wiz] ERROR: {e}")  # back to the menu, not exit
+                eprint(f"[agent-env] ERROR: {e}")  # back to the menu, not exit
         except (KeyboardInterrupt, EOFError):
             return 0
 
@@ -1068,12 +1073,12 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
     pretty_exceptions_enable=False,
-    help="Interactive wizard + CLI for devenv containers (sibling of bin/devenv).",
+    help="Interactive wizard + CLI for agent-env containers.",
 )
 
 
 def fatal_exit(e: Fatal) -> "typer.NoReturn":
-    eprint(f"[devenv-wiz] FATAL: {e}")
+    eprint(f"[agent-env] FATAL: {e}")
     raise typer.Exit(1)
 
 
@@ -1083,7 +1088,7 @@ def run_self_test() -> int:
     failures, tests = doctest.testmod(
         sys.modules[__name__], optionflags=doctest.IGNORE_EXCEPTION_DETAIL
     )
-    # Corpus computed from bin/devenv's bash port_for_name (hard-coded truth).
+    # Hard-coded port corpus: pins the deterministic port hash against regressions.
     corpus = {
         "acme": 2206,
         "blog": 2220,
@@ -1112,7 +1117,7 @@ def build(
 
 @app.command()
 def up(
-    name: str = typer.Argument(..., help="Container short name (devenv-<name>)."),
+    name: str = typer.Argument(..., help="Container short name (agent-env-<name>)."),
     env_file: Path | None = typer.Option(
         None, "--env-file", help="Bypass env-file resolution; path must exist."
     ),
@@ -1124,7 +1129,7 @@ def up(
         "under a writable Lima mount.",
     ),
 ) -> None:
-    """Start container devenv-NAME (detached)."""
+    """Start container agent-env-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
     do_up(name, env_file, mount or [])
@@ -1136,7 +1141,7 @@ def down(
     purge: bool = typer.Option(False, "--purge", help="Also delete the workspace volume."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
-    """Stop and remove container devenv-NAME."""
+    """Stop and remove container agent-env-NAME."""
     cli_down(name, purge, yes)
 
 
@@ -1153,7 +1158,7 @@ def purge(
 def list_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
-    """List running devenv containers (plus stale state files)."""
+    """List running agent-env containers (plus stale state files)."""
     do_list(as_json)
 
 
@@ -1162,7 +1167,7 @@ def attach(
     name: str = typer.Argument(..., help="Container short name."),
     local: bool = typer.Option(False, "--local", help="Force local target (state file)."),
     remote: bool = typer.Option(False, "--remote", help="Force remote target (hosts.conf)."),
-    user: str | None = typer.Option(None, "--user", help="SSH user (default: DEVENV_USER or dev)."),
+    user: str | None = typer.Option(None, "--user", help="SSH user (default: AGENT_ENV_USER or dev)."),
     host: str | None = typer.Option(None, "--host", help="Override the resolved host."),
     window: str | None = typer.Option(
         None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
@@ -1186,22 +1191,21 @@ def logs(
 
 @app.command()
 def menu() -> None:
-    """Interactive wizard (same as bare devenv-wiz)."""
+    """Interactive wizard (same as bare agent-env)."""
     raise typer.Exit(wizard_loop())
 
 
 @app.command()
 def completions(
-    # Optional + manual validation so bad/missing shell routes through die()
-    # (exit 1, '[devenv-wiz] FATAL:' style) matching bin/devenv cmd_completions,
-    # not Typer's exit-2 required-argument error.
+    # Optional + manual validation so a bad/missing shell routes through die()
+    # (exit 1, '[agent-env] FATAL:' style), not Typer's exit-2 required-arg error.
     shell: str = typer.Argument("", help="Shell to emit completion for: bash or zsh."),
 ) -> None:
     """Print the checked-in completion script for bash or zsh."""
     if shell not in ("bash", "zsh"):
-        die("usage: devenv-wiz completions <bash|zsh>")
+        die("usage: agent-env completions <bash|zsh>")
     # REPO_ROOT is Path(__file__).resolve()-based, so this works under a symlink.
-    script = REPO_ROOT / "completions" / f"devenv-wiz.{shell}"
+    script = REPO_ROOT / "completions" / f"agent-env.{shell}"
     if not script.is_file():
         die(f"completion script not found: {script}")
     sys.stdout.write(script.read_text())
@@ -1210,7 +1214,7 @@ def completions(
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    self_test: bool = typer.Option(False, "--self-test", help="Run doctests + interop corpus checks."),
+    self_test: bool = typer.Option(False, "--self-test", help="Run doctests + port-hash corpus checks."),
 ) -> None:
     if self_test:
         raise typer.Exit(run_self_test())
@@ -1221,14 +1225,14 @@ def main(
 def cli() -> None:
     """Console-script entry point for `uv tool install` (see pyproject.toml).
 
-    uv's generated launcher does `from devenv_wiz import cli; sys.exit(cli())`,
+    uv's generated launcher does `from agent_env import cli; sys.exit(cli())`,
     so the Fatal -> exit-1 handling that used to live only in the __main__ guard
     is hoisted here. NOT named `main` — that is already the Typer @app.callback.
     """
     try:
         app()
     except Fatal as e:
-        eprint(f"[devenv-wiz] FATAL: {e}")
+        eprint(f"[agent-env] FATAL: {e}")
         sys.exit(1)
 
 
