@@ -144,6 +144,11 @@ check_eq "attach invalid --window makes no ssh call" "" "$(cat "${CAP}")"
 # --- 4. --purge removes all 6 volumes; plain down removes none --------------
 run_devenv down acme --purge
 check_eq "down --purge removes 6 volumes" "6" "$(grep -c '^VOLRM ' "${CAP}")"
+# Assert the EXACT six volume names (not just the count): a regression that
+# dropped tmux while duplicating another entry would still count 6.
+for vol in workspace claude codex pi shellenv tmux; do
+    if grep -qxF "VOLRM devenv-acme-${vol}" "${CAP}"; then ok; else bad "down --purge removes devenv-acme-${vol}"; fi
+done
 run_devenv down acme
 check_eq "down (no --purge) removes 0 volumes" "0" "$(grep -c '^VOLRM ' "${CAP}" || true)"
 
