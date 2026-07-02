@@ -1,11 +1,18 @@
 # CI gate for agent-env: runs the runtime-free pytest suite and builds the
-# distributions on every push and PR, so a release tag only ever fires on green.
+# distributions on every push and PR. This does NOT run on tag pushes; the
+# release itself is gated by publish.yml, which re-runs the suite before build.
 name: ci
 
 on:
   push:
     branches: ["**"]
   pull_request:
+
+# Cancel superseded runs for the same ref so rapid successive pushes don't pile
+# up runners (does not dedupe the push/pull_request pair — different refs).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
