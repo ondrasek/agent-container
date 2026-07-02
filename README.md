@@ -187,12 +187,25 @@ Two deliberate differences from the bash tools: when a name has *both* a hosts.c
 The wizard has a pytest suite in `bin/tests/` that pins its interop contract with the bash tools (port hash, naming, env-file resolution, hosts.conf parsing, generated `run`/`ssh` argv). It needs no container runtime or ssh — only uv:
 
 ```bash
-uv run --with pytest \
+uv run --no-project --with pytest \
        --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' \
        pytest bin/tests
 ```
 
-The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync when bumping dependencies in `bin/devenv-wiz`.
+The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync when bumping dependencies in `bin/devenv-wiz` (and in `pyproject.toml`). `--no-project` keeps the run hermetic: the root `pyproject.toml` otherwise puts `uv run` in project mode and would sync a `.venv/` at the repo root.
+
+### Install as a uv tool
+
+`devenv-wiz` can be installed onto your `PATH` as a uv-managed tool. The install **must be editable** — `devenv-wiz` reads sibling repo files (the `Dockerfile` for `build`'s context, `completions/` for `completions`), so a non-editable install (which copies the module into the venv) breaks those:
+
+```bash
+uv tool install --editable /path/to/remote-persistent-devenv
+#   installs ~/.local/bin/devenv-wiz; `git pull` keeps it current (editable)
+uv tool upgrade devenv-wiz     # after dependency bumps
+uv tool uninstall devenv-wiz
+```
+
+This only installs the Python wizard; `bin/devenv` (bash) is not a Python package — symlink it separately (see the oh-my-zsh plugin or the `~/.local/bin` symlink in the deploy notes). If the repo's `bin/` is also on `PATH` (e.g. via the oh-my-zsh plugin), both `~/.local/bin/devenv-wiz` and `bin/devenv-wiz` resolve to the same editable code — harmless. The `uv run --script bin/devenv-wiz` path and the oh-my-zsh plugin are unaffected by installing the tool.
 
 ### Shell completions
 
