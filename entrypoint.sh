@@ -64,10 +64,15 @@ done
 # sourced into every interactive bash/zsh shell (see Dockerfile). On first boot
 # the volume is empty, so drop a commented template explaining its purpose.
 # Idempotent: never overwrite an existing file, and never echo its contents.
-DEVENV_ENV_FILE="/home/dev/.devenv/env"
+# Home base is /home/dev in the image (deliberately hardcoded, not $HOME, since
+# the runtime may not export HOME for the non-root user). DEVENV_HOME lets the
+# off-container test harness redirect this one path; production leaves it unset
+# so the default is byte-identical to the previous behavior.
+DEVENV_HOME="${DEVENV_HOME:-/home/dev}"
+DEVENV_ENV_FILE="${DEVENV_HOME}/.devenv/env"
 if [[ ! -f "${DEVENV_ENV_FILE}" ]]; then
     log "seeding persistent shell-env template at ${DEVENV_ENV_FILE}"
-    mkdir -p /home/dev/.devenv
+    mkdir -p "${DEVENV_HOME}/.devenv"
     cat > "${DEVENV_ENV_FILE}" <<'EOF'
 # ~/.devenv/env — persistent shell environment for this devenv container.
 #
