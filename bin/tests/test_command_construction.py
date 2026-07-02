@@ -38,7 +38,7 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
 
     wiz.launch_container("podman", "acme", env_file)
 
-    # Five per-container named volumes in the canonical order, then --restart.
+    # Six per-container named volumes in the canonical order, then --restart.
     # This argv must stay byte-for-byte identical to bin/devenv cmd_up.
     assert capture_query == [[
         "podman", "run", "-d",
@@ -50,6 +50,7 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
         "-v", "devenv-acme-codex:/home/dev/.codex",
         "-v", "devenv-acme-pi:/home/dev/.pi",
         "-v", "devenv-acme-shellenv:/home/dev/.devenv",
+        "-v", "devenv-acme-tmux:/home/dev/.config/tmux",
         "--restart", "unless-stopped",
         "localhost/remote-persistent-devenv:latest",
     ]]
@@ -267,7 +268,7 @@ def test_do_up_rejects_invalid_name_before_any_runtime_call(up_env, capture_quer
 # --- down / purge volume removal ----------------------------------------------------
 
 
-def test_down_purge_removes_all_five_volumes(wiz, capture_query, monkeypatch):
+def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
     monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
     wiz.write_state("acme", 2206)
     wiz.down_container("podman", "acme", purge=True)
@@ -278,6 +279,7 @@ def test_down_purge_removes_all_five_volumes(wiz, capture_query, monkeypatch):
         "devenv-acme-codex",
         "devenv-acme-pi",
         "devenv-acme-shellenv",
+        "devenv-acme-tmux",
     ]
     assert wiz.read_state_port("acme") is None  # state cleared
 

@@ -153,14 +153,23 @@ def shellenv_volume_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}-shellenv"
 
 
+def tmux_volume_name(name: str) -> str:
+    """Persists ~/.config/tmux (tmux.conf + tpm plugins) across down/up.
+
+    >>> tmux_volume_name("acme")
+    'devenv-acme-tmux'
+    """
+    return f"{CONTAINER_PREFIX}{name}-tmux"
+
+
 def all_volume_mounts(name: str) -> list[str]:
-    """The five per-container '-v' volume args, in the canonical fixed order
+    """The six per-container '-v' volume args, in the canonical fixed order
     shared byte-for-byte with bin/devenv cmd_up (workspace, claude, codex, pi,
-    shellenv). pi-coding-agent's config/auth dir is ~/.pi (verified from the
-    package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
+    shellenv, tmux). pi-coding-agent's config/auth dir is ~/.pi (verified from
+    the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['devenv-acme-workspace:/workspace', 'devenv-acme-claude:/home/dev/.claude', 'devenv-acme-codex:/home/dev/.codex', 'devenv-acme-pi:/home/dev/.pi', 'devenv-acme-shellenv:/home/dev/.devenv']
+    ['devenv-acme-workspace:/workspace', 'devenv-acme-claude:/home/dev/.claude', 'devenv-acme-codex:/home/dev/.codex', 'devenv-acme-pi:/home/dev/.pi', 'devenv-acme-shellenv:/home/dev/.devenv', 'devenv-acme-tmux:/home/dev/.config/tmux']
     """
     return [
         f"{volume_name(name)}:/workspace",
@@ -168,6 +177,7 @@ def all_volume_mounts(name: str) -> list[str]:
         f"{codex_volume_name(name)}:/home/dev/.codex",
         f"{pi_volume_name(name)}:/home/dev/.pi",
         f"{shellenv_volume_name(name)}:/home/dev/.devenv",
+        f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
     ]
 
 
@@ -175,7 +185,7 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['devenv-acme-workspace', 'devenv-acme-claude', 'devenv-acme-codex', 'devenv-acme-pi', 'devenv-acme-shellenv']
+    ['devenv-acme-workspace', 'devenv-acme-claude', 'devenv-acme-codex', 'devenv-acme-pi', 'devenv-acme-shellenv', 'devenv-acme-tmux']
     """
     return [
         volume_name(name),
@@ -183,6 +193,7 @@ def per_container_volumes(name: str) -> list[str]:
         codex_volume_name(name),
         pi_volume_name(name),
         shellenv_volume_name(name),
+        tmux_volume_name(name),
     ]
 
 
