@@ -223,10 +223,18 @@ uv tool install agent-env      # or: pipx install agent-env
 agent-env --help
 ```
 
-A PyPI install is a **client tool**: `up`, `down`, `list`, `attach`, `logs`,
-`purge`, and `completions` all work standalone (the completion scripts are
-bundled as package data). The one exception is **`build`**, which needs a repo
-checkout to use as the docker build context. Point it at one explicitly:
+A PyPI install is primarily a **client / attach tool**: `attach`, `list`,
+`logs`, `down`, `purge`, and `completions` all work standalone (the completion
+scripts are bundled as package data). Two commands still need a repo checkout on
+the host they run on:
+
+- **`build`** needs a checkout as the docker build context.
+- **`up`** needs the image `localhost/agent-env:latest` to already exist locally
+  (it dies otherwise). No prebuilt image is published to any registry, so
+  producing it requires `build` — hence a checkout. On a fresh host the server
+  side still needs a checkout; a pure-PyPI install alone cannot `up` a container.
+
+Point `build` at a checkout explicitly:
 
 ```bash
 agent-env build --context /path/to/agent-env
@@ -700,13 +708,16 @@ Pre-flight refuses to run without `docker`/`podman`, `uv` plus `bin/agent-env`, 
 stored in the repo). To cut a release:
 
 1. Bump `version` in `pyproject.toml`, commit, and push.
-2. Wait for `.github/workflows/ci.yml` to go green (it runs the pytest suite and
-   `uv build` on every push/PR, so a release only ever fires on a passing tree).
+2. Confirm `.github/workflows/ci.yml` is green for that commit (it runs the
+   pytest suite and `uv build` on every push/PR). CI does not run on tag pushes,
+   so this is a check on the pushed commit, not an automatic gate on the tag.
 3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-Pushing a `v*` tag triggers `.github/workflows/publish.yml`, which builds the
-sdist + wheel with `uv build` and uploads them through
-`pypa/gh-action-pypi-publish` using a short-lived OIDC token. **One-time setup:**
+Pushing a `v*` tag triggers `.github/workflows/publish.yml`, which **re-runs the
+pytest suite**, then builds the sdist + wheel with `uv build` and uploads them
+through `pypa/gh-action-pypi-publish` using a short-lived OIDC token. Because the
+suite runs first in the `build` job and `publish` `needs: build`, a red tagged
+commit fails the build and never reaches PyPI. **One-time setup:**
 the operator configures the [PyPI trusted publisher](https://docs.pypi.org/trusted-publishers/)
 for the `agent-env` project (owner `ondrasek`, repo `agent-env`, workflow
 `publish.yml`, environment `release`) — after that, releases need no secrets.
