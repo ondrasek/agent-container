@@ -997,7 +997,7 @@ def wiz_down(rt: str) -> None:
 
 def _volume_names(rt: str) -> list[str]:
     out = query([rt, "volume", "ls", "--format", "{{.Name}}"]).stdout.splitlines()
-    return [v for v in out if re.fullmatch(r"agent-env-.+-workspace", v)]
+    return [v for v in out if re.fullmatch(re.escape(CONTAINER_PREFIX) + r".+-workspace", v)]
 
 
 def wiz_purge_volume(rt: str) -> None:
