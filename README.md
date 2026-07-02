@@ -1,8 +1,6 @@
-# remote-persistent-devenv
+# agent-env
 
 Always-on, containerized development environment for a single operator. Hosts AI coding agents (Claude Code, Codex, pi-coding-agent), `nvim`, `tmux`, and `git` behind OpenSSH. Designed to run on a personal Linux VPS and be attached to over `ssh`.
-
-> The CLI is **`agent-env`** (`bin/agent-env`). The git repository directory keeps its historical name `remote-persistent-devenv`; renaming the GitHub repo is a separate operator decision and is out of scope here.
 
 Design contract: [`CLAUDE.md`](CLAUDE.md).
 Runtime + base-image decision: [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
@@ -70,8 +68,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ### Step 4 — clone, configure, build
 
 ```bash
-git clone https://github.com/ondrasek/remote-persistent-devenv.git
-cd remote-persistent-devenv
+git clone https://github.com/ondrasek/agent-env.git
+cd agent-env
 cp .env.example .env
 chmod 0600 .env
 $EDITOR .env       # fill in GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL, agent API keys
@@ -92,7 +90,7 @@ Two paths. Pick one per container.
 ```bash
 agent-env up acme
 # prints something like:
-# [agent-env] name=acme port=2218 env-file=/home/ondra/remote-persistent-devenv/.env
+# [agent-env] name=acme port=2218 env-file=/home/ondra/agent-env/.env
 ```
 
 Note the port. You'll need it on the laptop side.
@@ -147,8 +145,8 @@ On your **laptop**, not the VPS. Install the same CLI (it runs client-side for
 attach) and point it at the VPS via `hosts.conf`:
 
 ```bash
-git clone https://github.com/ondrasek/remote-persistent-devenv.git
-uv tool install --editable ./remote-persistent-devenv   # puts `agent-env` on PATH
+git clone https://github.com/ondrasek/agent-env.git
+uv tool install --editable ./agent-env   # puts `agent-env` on PATH
 
 mkdir -p ~/.config/agent-env
 chmod 0700 ~/.config/agent-env
@@ -223,7 +221,7 @@ context, `completions/` for `completions`), so a non-editable install (which
 copies the module into the venv) breaks those:
 
 ```bash
-uv tool install --editable /path/to/remote-persistent-devenv
+uv tool install --editable /path/to/agent-env
 #   installs ~/.local/bin/agent-env; `git pull` keeps it current (editable)
 uv tool upgrade agent-env     # after dependency bumps
 uv tool uninstall agent-env
@@ -247,7 +245,7 @@ Completion triggers on the command **name**, so put the tool on your `PATH`
 
 ```bash
 # add the repo's bin/ to PATH (in ~/.bashrc or ~/.zshrc)
-export PATH="$HOME/remote-persistent-devenv/bin:$PATH"
+export PATH="$HOME/agent-env/bin:$PATH"
 ```
 
 **bash** — source the script (works with or without the `bash-completion`
@@ -255,7 +253,7 @@ package):
 
 ```bash
 # ~/.bashrc
-source "$HOME/remote-persistent-devenv/completions/agent-env.bash"
+source "$HOME/agent-env/completions/agent-env.bash"
 # or generate it: agent-env completions bash > ~/.local/share/bash-completion/completions/agent-env
 ```
 
@@ -274,7 +272,7 @@ bundles PATH wiring, the completion, and aliases (`ae`, `aeu`, `aea`, `ael`).
 Symlink it into your custom plugins dir and enable it:
 
 ```zsh
-ln -s "$HOME/Git/ondrasek/remote-persistent-devenv/completions/oh-my-zsh/agent-env" \
+ln -s "$HOME/Git/ondrasek/agent-env/completions/oh-my-zsh/agent-env" \
       "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/agent-env"
 # then add `agent-env` to plugins=(...) in ~/.zshrc:
 #   plugins=(git agent-env)
@@ -485,7 +483,7 @@ agent-env up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
 
 ```bash
 # on the VPS
-cd ~/remote-persistent-devenv
+cd ~/agent-env
 git pull
 agent-env build
 
