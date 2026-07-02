@@ -2,6 +2,8 @@
 
 Always-on, containerized development environment for a single operator. Hosts AI coding agents (Claude Code, Codex, pi-coding-agent), `nvim`, `tmux`, and `git` behind OpenSSH. Designed to run on a personal Linux VPS and be attached to over `ssh`.
 
+> The CLI is **`agent-env`** (`bin/agent-env`). The git repository directory keeps its historical name `remote-persistent-devenv`; renaming the GitHub repo is a separate operator decision and is out of scope here.
+
 Design contract: [`CLAUDE.md`](CLAUDE.md).
 Runtime + base-image decision: [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
 Credential contract: [`docs/credentials.md`](docs/credentials.md).
@@ -11,11 +13,11 @@ Credential contract: [`docs/credentials.md`](docs/credentials.md).
 ```
 laptop                                        VPS (Hetzner / Debian 12)
 ------                                        ------------------------
-~/.config/devenv/hosts.conf                   user systemd (linger enabled)
+~/.config/agent-env/hosts.conf                   user systemd (linger enabled)
   ACME_HOST=vps1.example                        |
-  ACME_PORT=2218                                +-- Quadlet: devenv-acme.container
+  ACME_PORT=2218                                +-- Quadlet: agent-env-acme.container
                                                     |
-$ devenv-attach acme                                +-- container: devenv-acme
+$ agent-env attach acme                                +-- container: agent-env-acme
    |                                                       +-- sshd  (port 22 -> host 2218)
    |  ssh -p 2218 dev@vps1.example -t tmux              +-- tmux session "main"
    |     attach -t main                                       +-- nvim
@@ -57,6 +59,10 @@ From now on you `ssh ondra@<vps-ip>`. (Disabling root SSH login by editing `/etc
 sudo apt-get update
 sudo apt-get install -y podman git netcat-openbsd
 loginctl enable-linger "$USER"
+
+# uv — needed only for the `agent-env` CLI (Quick path below). The Quadlet path
+# drives podman via systemd and needs neither uv nor agent-env.
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 `enable-linger` is **load-bearing** for the always-on model: it keeps your user-level systemd alive even after you SSH out. Without it, any container managed under user systemd (via Quadlet) gets killed when your SSH session ends. Run it once per user, ever.
@@ -69,21 +75,24 @@ cd remote-persistent-devenv
 cp .env.example .env
 chmod 0600 .env
 $EDITOR .env       # fill in GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL, agent API keys
-./bin/devenv build
+uv tool install --editable .   # puts `agent-env` on PATH (editable; needs uv)
+agent-env build
 ```
 
-First build takes ~5-10 minutes (NodeSource, npm globals, neovim tarball). Subsequent builds reuse cached layers.
+(If you prefer not to install the tool, `uv run --script bin/agent-env build`
+runs it in place.) First build takes ~5-10 minutes (NodeSource, npm globals,
+neovim tarball). Subsequent builds reuse cached layers.
 
 ### Step 5 — start your first container
 
 Two paths. Pick one per container.
 
-**Quick path** — `bin/devenv up`. Runs `podman run -d`. Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
+**Quick path** — `agent-env up` (needs `uv` + `agent-env`, installed in Step 4). Runs `podman run -d`. Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
 
 ```bash
-./bin/devenv up acme
+agent-env up acme
 # prints something like:
-# [devenv] name=acme port=2218 env-file=/home/ondra/remote-persistent-devenv/.env
+# [agent-env] name=acme port=2218 env-file=/home/ondra/remote-persistent-devenv/.env
 ```
 
 Note the port. You'll need it on the laptop side.
@@ -91,27 +100,27 @@ Note the port. You'll need it on the laptop side.
 **Quadlet path** — recommended for "always-on" production use. systemd supervises the container, restarts it on failure, brings it back on reboot, captures its logs in `journald`:
 
 ```bash
-mkdir -p ~/.config/containers/systemd ~/.config/devenv
-cp .env ~/.config/devenv/devenv-acme.env
-chmod 0600 ~/.config/devenv/devenv-acme.env
+mkdir -p ~/.config/containers/systemd ~/.config/agent-env
+cp .env ~/.config/agent-env/agent-env-acme.env
+chmod 0600 ~/.config/agent-env/agent-env-acme.env
 
 sed -e 's/${NAME}/acme/g' \
-    -e "s|\${ENV_FILE}|$HOME/.config/devenv/devenv-acme.env|g" \
+    -e "s|\${ENV_FILE}|$HOME/.config/agent-env/agent-env-acme.env|g" \
     -e 's/${PORT}/2218/g' \
-    orchestration/devenv.container \
-    > ~/.config/containers/systemd/devenv-acme.container
+    orchestration/agent-env.container \
+    > ~/.config/containers/systemd/agent-env-acme.container
 
 systemctl --user daemon-reload
-systemctl --user start devenv-acme.service        # Quadlet generates the .service from .container
-systemctl --user status devenv-acme.service
+systemctl --user start agent-env-acme.service        # Quadlet generates the .service from .container
+systemctl --user status agent-env-acme.service
 ```
 
 To stop / restart / log:
 
 ```bash
-systemctl --user stop    devenv-acme.service
-systemctl --user restart devenv-acme.service
-journalctl --user -u devenv-acme.service -f
+systemctl --user stop    agent-env-acme.service
+systemctl --user restart agent-env-acme.service
+journalctl --user -u agent-env-acme.service -f
 ```
 
 ### Step 6 — grant SSH access from your laptop
@@ -120,39 +129,40 @@ The container starts with **no** keys in `dev`'s `authorized_keys` (per the hard
 
 ```bash
 # inside the container, set up .ssh
-podman exec -u dev devenv-acme install -d -m 0700 /home/dev/.ssh
+podman exec -u dev agent-env-acme install -d -m 0700 /home/dev/.ssh
 
 # copy your laptop's pubkey into the container
-podman exec -u dev -i devenv-acme \
+podman exec -u dev -i agent-env-acme \
     tee -a /home/dev/.ssh/authorized_keys < ~/.ssh/authorized_keys >/dev/null
 
 # tighten perms
-podman exec -u dev devenv-acme chmod 0600 /home/dev/.ssh/authorized_keys
+podman exec -u dev agent-env-acme chmod 0600 /home/dev/.ssh/authorized_keys
 ```
 
 (This step is a known wart of the MVP — a future iteration will accept an `AUTHORIZED_KEYS` env var or a mounted file so it happens automatically at container start. Tracked separately.)
 
-### Step 7 — set up `devenv-attach` on the laptop
+### Step 7 — set up `agent-env` on the laptop
 
-On your **laptop**, not the VPS:
+On your **laptop**, not the VPS. Install the same CLI (it runs client-side for
+attach) and point it at the VPS via `hosts.conf`:
 
 ```bash
 git clone https://github.com/ondrasek/remote-persistent-devenv.git
-sudo ln -s "$PWD/remote-persistent-devenv/bin/devenv-attach" /usr/local/bin/devenv-attach
+uv tool install --editable ./remote-persistent-devenv   # puts `agent-env` on PATH
 
-mkdir -p ~/.config/devenv
-chmod 0700 ~/.config/devenv
-cat >> ~/.config/devenv/hosts.conf <<EOF
+mkdir -p ~/.config/agent-env
+chmod 0700 ~/.config/agent-env
+cat >> ~/.config/agent-env/hosts.conf <<EOF
 ACME_HOST=<vps-ip-or-dns>
 ACME_PORT=2218
 EOF
-chmod 0600 ~/.config/devenv/hosts.conf
+chmod 0600 ~/.config/agent-env/hosts.conf
 ```
 
 ### Step 8 — verify
 
 ```bash
-devenv-attach acme
+agent-env attach acme
 ```
 
 You should land inside a tmux session named `main`, prompt is `dev@<container-id>:/workspace$`. `tmux ls` shows one session. Detach with `Ctrl-B d`. Re-attach to confirm everything's still there.
@@ -162,29 +172,37 @@ You should land inside a tmux session named `main`, prompt is `dev@<container-id
 ### Attach to a container
 
 ```bash
-devenv-attach acme            # remote, by name from hosts.conf
-devenv-attach -l acme         # local (Lima on macOS); reads port from local state file
+agent-env attach acme            # auto: hosts.conf -> remote, else local state file
+agent-env attach --local acme    # local (Lima on macOS); reads port from local state file
 ```
 
 Behind the scenes: `ssh dev@<host> -p <port> -t tmux attach -t main`. The `-t` allocates a TTY (required for tmux); `tmux attach -t main` joins the existing session rather than creating a new one (which would mask bugs).
 
-### Interactive wizard (devenv-wiz)
+### The `agent-env` CLI
 
-`bin/devenv-wiz` is a Python sibling of `bin/devenv` + `devenv-attach` that shares all their on-disk state (container names, port hash, `<name>.port` state files, env-file resolution, `hosts.conf`). It needs nothing but [uv](https://docs.astral.sh/uv/) installed — it is a PEP 723 single-file script.
+`agent-env` is the single command for the whole lifecycle — build, start, attach,
+logs, stop, purge — plus an interactive wizard when run with no arguments. It is a
+PEP 723 single-file script (`bin/agent-env`) and needs nothing but
+[uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
-bin/devenv-wiz                # interactive menu: build, start, attach, logs, stop, purge
-bin/devenv-wiz up acme        # every wizard action has a scriptable CLI twin
-bin/devenv-wiz list --json    # machine-readable state (merges runtime ps + state files)
-bin/devenv-wiz attach acme    # hosts.conf -> remote, else local state file; execs ssh
-bin/devenv-wiz --self-test    # doctests + interop corpus (port hash, key derivation)
+agent-env                # interactive menu: build, start, attach, logs, stop, purge
+agent-env up acme        # every menu action has a scriptable subcommand
+agent-env list --json    # machine-readable state (merges runtime ps + state files)
+agent-env attach acme    # hosts.conf -> remote, else local state file; execs ssh
+agent-env --self-test    # doctests + port-hash corpus (port hash, key derivation)
 ```
 
-The two toolchains are interchangeable mid-flight: `bin/devenv up acme` then `bin/devenv-wiz attach acme --local` works, and vice versa. Remote (hosts.conf) targets are attach-only; lifecycle commands act on the local runtime exclusively.
+It keeps all state on disk (container names, the port hash, `<name>.port` state
+files, env-file resolution, `hosts.conf`) so a container that dies loses nothing.
+`attach` resolves a target as remote when the name has a `hosts.conf` entry, else
+local from the state file — pass `--local`/`--remote` to force one. `down`/`purge`
+confirm before destroying anything, so scripts must pass `-y`/`--yes`.
 
-Two deliberate differences from the bash tools: when a name has *both* a hosts.conf entry and a local state file, `devenv-wiz attach` prefers the remote — pass `--local` to get `bin/devenv attach` semantics. And `devenv-wiz down`/`purge` confirm before destroying anything, so scripts must pass `-y`/`--yes` (`bin/devenv down` never prompts).
-
-The wizard has a pytest suite in `bin/tests/` that pins its interop contract with the bash tools (port hash, naming, env-file resolution, hosts.conf parsing, generated `run`/`ssh` argv). It needs no container runtime or ssh — only uv:
+The CLI has a pytest suite in `bin/tests/` that pins its on-disk contract (port
+hash, naming, env-file resolution, hosts.conf parsing, generated `run`/`ssh`
+argv) and the platform-aware runtime default. It needs no container runtime or
+ssh — only uv:
 
 ```bash
 uv run --no-project --with pytest \
@@ -192,31 +210,39 @@ uv run --no-project --with pytest \
        pytest bin/tests
 ```
 
-The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync when bumping dependencies in `bin/devenv-wiz` (and in `pyproject.toml`). `--no-project` keeps the run hermetic: the root `pyproject.toml` otherwise puts `uv run` in project mode and would sync a `.venv/` at the repo root.
+The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync
+when bumping dependencies in `bin/agent-env` (and in `pyproject.toml`).
+`--no-project` keeps the run hermetic: the root `pyproject.toml` otherwise puts
+`uv run` in project mode and would sync a `.venv/` at the repo root.
 
 ### Install as a uv tool
 
-`devenv-wiz` can be installed onto your `PATH` as a uv-managed tool. The install **must be editable** — `devenv-wiz` reads sibling repo files (the `Dockerfile` for `build`'s context, `completions/` for `completions`), so a non-editable install (which copies the module into the venv) breaks those:
+Install `agent-env` onto your `PATH` as a uv-managed tool. The install **must be
+editable** — `agent-env` reads sibling repo files (the `Dockerfile` for `build`'s
+context, `completions/` for `completions`), so a non-editable install (which
+copies the module into the venv) breaks those:
 
 ```bash
 uv tool install --editable /path/to/remote-persistent-devenv
-#   installs ~/.local/bin/devenv-wiz; `git pull` keeps it current (editable)
-uv tool upgrade devenv-wiz     # after dependency bumps
-uv tool uninstall devenv-wiz
+#   installs ~/.local/bin/agent-env; `git pull` keeps it current (editable)
+uv tool upgrade agent-env     # after dependency bumps
+uv tool uninstall agent-env
 ```
 
-This only installs the Python wizard; `bin/devenv` (bash) is not a Python package — symlink it separately (via the oh-my-zsh plugin, or the `~/.local/bin` symlink shown under [Shell completions](#shell-completions)). If the repo's `bin/` is also on `PATH` (e.g. via the oh-my-zsh plugin), both `~/.local/bin/devenv-wiz` and `bin/devenv-wiz` resolve to the same editable code — harmless. The `uv run --script bin/devenv-wiz` path and the oh-my-zsh plugin are unaffected by installing the tool.
+The `uv run --script bin/agent-env` path and the oh-my-zsh plugin are unaffected
+by installing the tool; if the repo's `bin/` is also on `PATH` (e.g. via the
+plugin), both resolve to the same editable code — harmless.
 
 ### Shell completions
 
-Both CLIs ship bash and zsh completions under [`completions/`](completions/):
+`agent-env` ships bash and zsh completions under [`completions/`](completions/):
 subcommands, per-subcommand flags (including the repeatable `--mount`), and
 **container-name completion** for `up` / `down` / `attach` / `logs` / `purge`.
 Names are gathered directly in the shell from your state files
-(`$XDG_STATE_HOME/devenv/*.port`) and `hosts.conf` — no `docker`, `podman`, or
+(`$XDG_STATE_HOME/agent-env/*.port`) and `hosts.conf` — no `docker`, `podman`, or
 `uv` is spawned on Tab, so completion stays instant and works offline.
 
-Completion triggers on the command **name**, so put the tools on your `PATH`
+Completion triggers on the command **name**, so put the tool on your `PATH`
 (this also lets the `build` / `completions` subcommands find the repo):
 
 ```bash
@@ -224,52 +250,49 @@ Completion triggers on the command **name**, so put the tools on your `PATH`
 export PATH="$HOME/remote-persistent-devenv/bin:$PATH"
 ```
 
-**bash** — source the scripts (works with or without the `bash-completion`
+**bash** — source the script (works with or without the `bash-completion`
 package):
 
 ```bash
 # ~/.bashrc
-source "$HOME/remote-persistent-devenv/completions/devenv.bash"
-source "$HOME/remote-persistent-devenv/completions/devenv-wiz.bash"
-# or generate them: devenv completions bash > ~/.local/share/bash-completion/completions/devenv
+source "$HOME/remote-persistent-devenv/completions/agent-env.bash"
+# or generate it: agent-env completions bash > ~/.local/share/bash-completion/completions/agent-env
 ```
 
-**zsh** — drop the scripts onto `$fpath` as `_devenv` / `_devenv-wiz`, then
-`compinit`:
+**zsh** — drop the script onto `$fpath` as `_agent-env`, then `compinit`:
 
 ```zsh
 mkdir -p ~/.zfunc
-devenv     completions zsh > ~/.zfunc/_devenv
-devenv-wiz completions zsh > ~/.zfunc/_devenv-wiz
+agent-env completions zsh > ~/.zfunc/_agent-env
 # ~/.zshrc, before compinit:
 fpath=(~/.zfunc $fpath)
 autoload -Uz compinit && compinit
 ```
 
-**oh-my-zsh** — a plugin under [`completions/oh-my-zsh/devenv/`](completions/oh-my-zsh/devenv/)
-bundles PATH wiring, both CLIs' completions, and aliases (`dv`, `dvw`, `dva`,
-`dvl`, `dvu`). Symlink it into your custom plugins dir and enable it:
+**oh-my-zsh** — a plugin under [`completions/oh-my-zsh/agent-env/`](completions/oh-my-zsh/agent-env/)
+bundles PATH wiring, the completion, and aliases (`ae`, `aeu`, `aea`, `ael`).
+Symlink it into your custom plugins dir and enable it:
 
 ```zsh
-ln -s "$HOME/Git/ondrasek/remote-persistent-devenv/completions/oh-my-zsh/devenv" \
-      "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/devenv"
-# then add `devenv` to plugins=(...) in ~/.zshrc:
-#   plugins=(git devenv)
+ln -s "$HOME/Git/ondrasek/remote-persistent-devenv/completions/oh-my-zsh/agent-env" \
+      "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/agent-env"
+# then add `agent-env` to plugins=(...) in ~/.zshrc:
+#   plugins=(git agent-env)
 ```
 
-`DEVENV_REPO` is the path to this repo checkout; the plugin auto-detects it from
+`AGENT_ENV_REPO` is the path to this repo checkout; the plugin auto-detects it from
 its own symlink-resolved location, so a symlink install needs no configuration.
-(If you *copy* the plugin dir instead of symlinking, set `DEVENV_REPO=<repo>` in
+(If you *copy* the plugin dir instead of symlinking, set `AGENT_ENV_REPO=<repo>` in
 `~/.zshrc` before oh-my-zsh loads.)
 
 For `PATH`, the plugin prefers the canonical user bin dir — `$XDG_BIN_HOME`, or
-`~/.local/bin` when that's unset. If `devenv`/`devenv-wiz` are symlinked there
-(e.g. `ln -s "$DEVENV_REPO/bin/"* "${XDG_BIN_HOME:-$HOME/.local/bin}/"`) it puts
-that dir on `PATH`; otherwise it falls back to the repo's own `bin/`, so the
-plugin works with or without a separate install step. This alone makes both CLIs
-callable with completions — no manual `PATH` or `~/.zfunc` edits.
+`~/.local/bin` when that's unset. If `agent-env` is symlinked there
+(e.g. `ln -s "$AGENT_ENV_REPO/bin/agent-env" "${XDG_BIN_HOME:-$HOME/.local/bin}/"`)
+it puts that dir on `PATH`; otherwise it falls back to the repo's own `bin/`, so
+the plugin works with or without a separate install step. This alone makes
+`agent-env` callable with completions — no manual `PATH` or `~/.zfunc` edits.
 
-The completion scripts and the oh-my-zsh plugin are covered by
+The completion script and the oh-my-zsh plugin are covered by
 `bin/tests/test_completions.sh` (needs only bash; the zsh/omz cases are skipped
 when zsh is absent).
 
@@ -322,11 +345,11 @@ Press **`Ctrl-B d`**. SSH closes, your laptop shell returns. Everything you star
 - Agents keep processing whatever you had them on.
 - Background commands (`make`, `pytest --watch`, anything) keep going.
 
-You can close the laptop lid, switch networks, reboot the laptop, or fly to another continent. Reconnect later with `devenv-attach acme` and everything is exactly where you left it.
+You can close the laptop lid, switch networks, reboot the laptop, or fly to another continent. Reconnect later with `agent-env attach acme` and everything is exactly where you left it.
 
 The chain that makes this work:
 
-1. `ssh` is `exec`ed by `devenv-attach`, not backgrounded — closing it cleanly drops the TTY without killing remote processes.
+1. `ssh` is `exec`ed by `agent-env attach`, not backgrounded — closing it cleanly drops the TTY without killing remote processes.
 2. tmux session `main` was started detached by the container's entrypoint; it has no parent process tied to your SSH session.
 3. The container was started detached (`podman run -d`) and stays running independent of any login.
 4. `loginctl enable-linger` keeps user-level systemd (and therefore the Quadlet-supervised container) alive across all logins / logouts of your VPS user.
@@ -337,8 +360,8 @@ The chain that makes this work:
 On the VPS:
 
 ```bash
-./bin/devenv list                                       # devenv-managed containers + their ports
-systemctl --user list-units 'devenv-*.service'           # Quadlet-supervised services
+agent-env list                                       # agent-env-managed containers + their ports
+systemctl --user list-units 'agent-env-*.service'           # Quadlet-supervised services
 ```
 
 Inside the container (after attach):
@@ -355,28 +378,28 @@ Each project gets its own container with its own workspace, SSH port, tmux sessi
 
 ```bash
 # on the VPS
-./bin/devenv up blog
+agent-env up blog
 # or via Quadlet (repeat Step 5 Quadlet recipe with NAME=blog, a different PORT)
 
 # on the laptop
-cat >> ~/.config/devenv/hosts.conf <<EOF
+cat >> ~/.config/agent-env/hosts.conf <<EOF
 BLOG_HOST=<vps-ip-or-dns>
 BLOG_PORT=2247
 EOF
 
-devenv-attach blog                                       # totally separate session
+agent-env attach blog                                       # totally separate session
 ```
 
-`bin/devenv up` allocates ports deterministically from the container name (hash → 2200-2299 range) so the same name always gets the same port across rebuilds.
+`agent-env up` allocates ports deterministically from the container name (hash → 2200-2299 range) so the same name always gets the same port across rebuilds.
 
 ### Lose a container, keep your work
 
 The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
 
-- `./bin/devenv down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.devenv`), and the tmux-config volume (`~/.config/tmux`). `./bin/devenv up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf`.
-- `./bin/devenv down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux). Use for a true clean slate; you will re-`login` to the agents afterward.
-- VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `./bin/devenv up acme` again. Pushed commits are unaffected either way.
-- Quadlet service crashed — `systemctl --user restart devenv-acme.service`. Look at `journalctl --user -u devenv-acme.service` first.
+- `agent-env down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-env`), and the tmux-config volume (`~/.config/tmux`). `agent-env up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf`.
+- `agent-env down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux). Use for a true clean slate; you will re-`login` to the agents afterward.
+- VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `agent-env up acme` again. Pushed commits are unaffected either way.
+- Quadlet service crashed — `systemctl --user restart agent-env-acme.service`. Look at `journalctl --user -u agent-env-acme.service` first.
 
 ### Log in to agents (persists across restarts)
 
@@ -385,7 +408,7 @@ persistent volume for each agent's credentials, so you can **log in once,
 interactively, inside the container** and it survives `down`/`up` and crashes:
 
 ```bash
-./bin/devenv attach acme        # or: devenv-wiz attach acme
+agent-env attach acme        # or: agent-env attach acme
 # then, inside the tmux session:
 claude          # run /login and follow the prompt
 codex login
@@ -398,7 +421,7 @@ auto-refreshes it, so "log in once" effectively means "indefinitely" — strictl
 better than a static key in `.env`, which never refreshes.
 
 **Per-container = per-account.** Because each container name has its own
-credential volumes, `devenv up work` and `devenv up personal` can be logged into
+credential volumes, `agent-env up work` and `agent-env up personal` can be logged into
 different Claude/Codex accounts at the same time with no cross-talk. (You can
 still set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in `.env` instead — they're now
 optional. `GH_TOKEN` and git identity remain required.)
@@ -409,15 +432,15 @@ optional. `GH_TOKEN` and git identity remain required.)
 
 ### Persistent shell environment
 
-Each container mounts a `~/.devenv` volume holding an `env` file that is sourced
+Each container mounts a `~/.agent-env` volume holding an `env` file that is sourced
 into **every** bash and zsh session (login, SSH, and tmux panes). Use it for
 per-container exports, aliases, or extra secrets that should outlive the
 container:
 
 ```bash
 # inside the container — the file is seeded with a commented template on first boot
-nvim ~/.devenv/env       # add lines like:  export FOO=bar
-# new shells (or: source ~/.devenv/env) pick it up; it survives down/up.
+nvim ~/.agent-env/env       # add lines like:  export FOO=bar
+# new shells (or: source ~/.agent-env/env) pick it up; it survives down/up.
 ```
 
 It's read with `set -a` semantics, so plain `KEY=VALUE` lines are exported. A
@@ -437,7 +460,7 @@ tmux source ~/.config/tmux/tmux.conf   # or start a fresh session to pick it up
 ```
 
 The default window layout (`shell edit agents`) is set by the entrypoint via
-`DEVENV_TMUX_WINDOWS`; see [Entrypoint behavior](#entrypoint-behavior).
+`AGENT_ENV_TMUX_WINDOWS`; see [Entrypoint behavior](#entrypoint-behavior).
 
 ### Mount a host directory (optional)
 
@@ -445,14 +468,14 @@ To give a container read/write access to a directory on your machine, pass
 `--mount` at `up` (repeatable). With no `--mount`, nothing extra is mounted:
 
 ```bash
-./bin/devenv up acme --mount ~/code/myproject
+agent-env up acme --mount ~/code/myproject
 #   -> appears inside the container at /workspace/myproject (read/write)
 
 # explicit target, and more than one:
-./bin/devenv up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
+agent-env up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
 ```
 
-`devenv-wiz up acme --mount ~/code/myproject` does the same.
+`agent-env up acme --mount ~/code/myproject` does the same.
 
 > **macOS / Lima prerequisite:** the host directory must sit inside a **writable**
 > Lima mount, or the container sees it read-only / not at all. If R/W fails, add
@@ -466,12 +489,12 @@ To give a container read/write access to a directory on your machine, pass
 # on the VPS
 cd ~/remote-persistent-devenv
 git pull
-./bin/devenv build
+agent-env build
 
 # then restart whichever path you used
-systemctl --user restart devenv-acme.service              # Quadlet path
+systemctl --user restart agent-env-acme.service              # Quadlet path
 # OR
-./bin/devenv down acme && ./bin/devenv up acme            # quick path
+agent-env down acme && agent-env up acme            # quick path
 ```
 
 The workspace volume is independent of the image, so a rebuild does **not** disturb the contents of `/workspace`.
@@ -481,12 +504,12 @@ The workspace volume is independent of the image, so a rebuild does **not** dist
 When your `GH_TOKEN` expires:
 
 1. Generate a new PAT on GitHub (same `repo` scope, new expiration).
-2. Update the `.env` file (the one you launched the container from — `~/.config/devenv/devenv-acme.env` for Quadlet, or `./.env` for the quick path).
+2. Update the `.env` file (the one you launched the container from — `~/.config/agent-env/agent-env-acme.env` for Quadlet, or `./.env` for the quick path).
 3. Restart the container so the new value is loaded into env:
    ```bash
-   systemctl --user restart devenv-acme.service
+   systemctl --user restart agent-env-acme.service
    # OR
-   ./bin/devenv down acme && ./bin/devenv up acme
+   agent-env down acme && agent-env up acme
    ```
 
 The credential helper reads `$GH_TOKEN` fresh on every push, so the next `git push` after the restart uses the new token.
@@ -498,9 +521,9 @@ The image is built from a single `Dockerfile` at the repo root. The same file wo
 ### Build
 
 ```bash
-docker build -t devenv:latest .
+docker build -t agent-env:latest .
 # or, on the VPS:
-podman build -t devenv:latest .
+podman build -t agent-env:latest .
 ```
 
 No build args. No secrets. Credentials are injected **only at `run` time** via `--env-file .env` (see [`docs/credentials.md`](docs/credentials.md)).
@@ -510,12 +533,12 @@ No build args. No secrets. Credentials are injected **only at `run` time** via `
 The entrypoint shipped with item B is a **stub** — it just generates SSH host keys and execs `sshd` in the foreground. Real entrypoint logic (git identity, credential helper, tmux session) lands in item C. Until then, a successful build + a container that stays running is the bar:
 
 ```bash
-docker build -t devenv:latest .
-docker run --rm -d --name devenv-smoke devenv:latest
-docker exec devenv-smoke nvim --version | head -n1
-docker exec devenv-smoke node --version
-docker exec devenv-smoke claude --version || true
-docker stop devenv-smoke
+docker build -t agent-env:latest .
+docker run --rm -d --name agent-env-smoke agent-env:latest
+docker exec agent-env-smoke nvim --version | head -n1
+docker exec agent-env-smoke node --version
+docker exec agent-env-smoke claude --version || true
+docker stop agent-env-smoke
 ```
 
 ### Layering rationale
@@ -538,7 +561,7 @@ Layers are ordered cheapest-to-rebuild last, so an edit to the entrypoint (which
 
 ### Image size
 
-Measured on first build (`docker images localhost/remote-persistent-devenv:latest`):
+Measured on first build (`docker images localhost/agent-env:latest`):
 
 - **Uncompressed (`DISK USAGE`):** ~1.84 GB
 - **Compressed (`CONTENT SIZE`):** ~432 MB
@@ -566,7 +589,7 @@ The image itself enforces none of this — that's item C's entrypoint and item E
 3. **SSH host keys.** Generated via `ssh-keygen -A` only if `/etc/ssh/ssh_host_ed25519_key` is absent. This guarantees each container instance gets a distinct SSH identity — a hard requirement for running multiple containers in parallel.
 4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig`; the token itself is never written to disk in the container.
 5. **sshd.** Started in the background via `sudo /usr/sbin/sshd` (daemonized; not `-D`). Listens on port 22 inside the container; map this to a host port via the orchestration layer.
-6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `DEVENV_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `DEVENV_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `bin/devenv attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.
+6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `AGENT_ENV_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `AGENT_ENV_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `agent-env attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.
 7. **PID 1 lifecycle.** The script `wait`s on a background `tail -f /dev/null`, keeping PID 1 alive. `SIGTERM` / `SIGINT` trigger a clean shutdown: `tmux kill-server`, then `sudo pkill sshd`, then `exit 0`.
 
 **Required env vars (entrypoint exits non-zero if missing):**
@@ -588,43 +611,43 @@ The agents themselves enforce their own keys at run time; the entrypoint just su
 
 ## Orchestration
 
-Host-side orchestration is a single Bash script, `bin/devenv`, plus two deployment templates. Full doc: [`docs/orchestration.md`](docs/orchestration.md).
+Host-side orchestration is the single `agent-env` CLI, plus two deployment templates. Full doc: [`docs/orchestration.md`](docs/orchestration.md).
 
 ```bash
-bin/devenv build                  # build the image
-bin/devenv up alpha               # start container devenv-alpha (detached)
-bin/devenv up bravo               # start another, in parallel, on a different port
-bin/devenv list                   # see what's running
-bin/devenv attach alpha           # ssh + tmux attach
-bin/devenv attach alpha --window edit  # attach and select the 'edit' window
-bin/devenv logs alpha             # tail container logs
-bin/devenv down alpha             # stop + remove (all volumes preserved)
-bin/devenv down alpha --purge     # stop + remove + delete ALL per-container volumes
+agent-env build                  # build the image
+agent-env up alpha               # start container agent-env-alpha (detached)
+agent-env up bravo               # start another, in parallel, on a different port
+agent-env list                   # see what's running
+agent-env attach alpha           # ssh + tmux attach
+agent-env attach alpha --window edit  # attach and select the 'edit' window
+agent-env logs alpha             # tail container logs
+agent-env down alpha             # stop + remove (all volumes preserved)
+agent-env down alpha --purge     # stop + remove + delete ALL per-container volumes
 ```
 
-**Runtime auto-detection:** `bin/devenv` prefers `podman` over `docker` (the VPS target). Override with `DEVENV_RUNTIME=docker|podman`.
+**Runtime auto-detection:** the default is platform-aware — on macOS (Lima + docker-cli) `agent-env` prefers `docker`, on Linux (the VPS) it prefers `podman`, falling back to the other. Override with `AGENT_ENV_RUNTIME=docker|podman`.
 
 **Templates:**
 - `orchestration/compose.yaml` — Docker Compose, for the local Lima + docker-cli path.
-- `orchestration/devenv.container` — Podman Quadlet template, instantiated per container on the VPS.
+- `orchestration/agent-env.container` — Podman Quadlet template, instantiated per container on the VPS.
 
 ## Client-side attach
 
-`bin/devenv-attach` is a thin client-side helper that resolves a symbolic container name to the right `ssh + tmux` invocation. It runs **on your laptop**, not in the container, and reads files only — no dependency on `bin/devenv` being installed locally.
+`agent-env attach` resolves a symbolic container name to the right `ssh + tmux` invocation. It runs **on your laptop** (reading `hosts.conf` and local state files) and hands over to `ssh`:
 
 ```bash
-bin/devenv-attach acme            # remote: read ACME_HOST + ACME_PORT from hosts.conf
-bin/devenv-attach -l alpha        # local:  read port from XDG_STATE_HOME/devenv/alpha.port
-bin/devenv-attach -w edit acme    # select the 'edit' tmux window on attach
+agent-env attach acme                 # remote: read ACME_HOST + ACME_PORT from hosts.conf
+agent-env attach --local alpha        # local:  read port from XDG_STATE_HOME/agent-env/alpha.port
+agent-env attach --window edit acme   # select the 'edit' tmux window on attach
 ```
 
-`-w`/`--window NAME` (also available on `bin/devenv attach` and `devenv-wiz attach`) selects a tmux window in session `main` before attaching, so you land where you want. The name is validated against `[A-Za-z0-9._-]+`. If the window does not exist, tmux stays on the current one and still attaches.
+`--window`/`-w NAME` selects a tmux window in session `main` before attaching, so you land where you want. The name is validated against `[A-Za-z0-9._-]+`. If the window does not exist, tmux stays on the current one and still attaches.
 
 Detach is `Ctrl-B d` (tmux default) and returns you to your local shell — `ssh` is `exec`ed with `-t`, so signals and exit codes propagate through.
 
-**Remote config** — `~/.config/devenv/hosts.conf` (or `$XDG_CONFIG_HOME/devenv/hosts.conf`).
+**Remote config** — `~/.config/agent-env/hosts.conf` (or `$XDG_CONFIG_HOME/agent-env/hosts.conf`).
 
-Flat `KEY=VALUE` file, sourced by Bash. For each container name `foo`, set `FOO_HOST` and `FOO_PORT`. The name argument is uppercased (and hyphens become underscores) before lookup, so `devenv-attach my-box` reads `MY_BOX_HOST` / `MY_BOX_PORT`. Template: [`docs/devenv-hosts.example`](docs/devenv-hosts.example).
+Flat `KEY=VALUE` file. For each container name `foo`, set `FOO_HOST` and `FOO_PORT`. The name argument is uppercased (and hyphens become underscores) before lookup, so `agent-env attach my-box` reads `MY_BOX_HOST` / `MY_BOX_PORT`. Template: [`docs/agent-env-hosts.example`](docs/agent-env-hosts.example).
 
 ```ini
 ACME_HOST=vps1.example.com
@@ -633,11 +656,11 @@ BLOG_HOST=vps1.example.com
 BLOG_PORT=2247
 ```
 
-Why this format: parseable by `source` with no third-party dependency, trivial to hand-edit, and the same primitives a Bash user already knows.
+Why this format: trivial to hand-edit and the same primitives a shell user already knows. `agent-env` parses it line-by-line and **never** sources or executes it (values with `$` or backticks are taken literally, with a one-time warning).
 
-**Local mode** — `devenv-attach -l <name>` connects to `localhost` using the port written by `bin/devenv up` at `$XDG_STATE_HOME/devenv/<name>.port`. This is the path for running the container under Lima on macOS while attaching from the same laptop.
+**Local mode** — `agent-env attach --local <name>` connects to `localhost` using the port written by `agent-env up` at `$XDG_STATE_HOME/agent-env/<name>.port`. This is the path for running the container under Lima on macOS while attaching from the same laptop.
 
-**Env overrides:** `DEVENV_USER=<user>` (default `dev`).
+**Env overrides:** `AGENT_ENV_USER=<user>` (default `dev`), `AGENT_ENV_HOST=<host>` (default `localhost` for local targets).
 
 **Errors are actionable** — missing config, missing keys, and missing local state each print the exact file path you need to create or fix. SSH's own exit code is propagated on connection failure.
 
@@ -646,7 +669,7 @@ Why this format: parseable by `source` with no third-party dependency, trivial t
 `scripts/smoke-test.sh` exercises the full happy path end-to-end: build, up, in-container HTTPS git push via the credential helper, host-side push verification, and torn-down cleanup. It retroactively verifies the deferred acceptance criteria of the credential contract (item D).
 
 ```bash
-DEVENV_SMOKE_REPO=your-handle/devenv-smoke-target ./scripts/smoke-test.sh
+AGENT_ENV_SMOKE_REPO=your-handle/agent-env-smoke-target ./scripts/smoke-test.sh
 ```
 
-Pre-flight refuses to run without `docker`/`podman`, an executable `bin/devenv`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).
+Pre-flight refuses to run without `docker`/`podman`, `uv` plus `bin/agent-env`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).

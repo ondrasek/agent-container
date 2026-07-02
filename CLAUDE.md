@@ -20,6 +20,7 @@ These are load-bearing design decisions, not preferences:
 ## Decisions
 
 - **Runtime + base image:** Podman + `debian:12-slim`. See [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
+- **CLI:** a single tool, `agent-env` (`bin/agent-env`) — a PEP 723 uv script (Typer + questionary + rich) covering the whole lifecycle (build/up/attach/logs/down/purge) plus an interactive wizard. Installable via `uv tool install --editable .` (editable is mandatory; the script reads sibling repo files). Its on-disk contract (container names `agent-env-<name>`, the `2200 + name-hash` port, `$XDG_STATE_HOME/agent-env/<name>.port` state files, `~/.config/agent-env/hosts.conf`) is the single source of truth; the shell completions read the same state files. Runtime default is platform-aware (docker-first on macOS, podman-first on Linux); override with `AGENT_ENV_RUNTIME`.
 
 ## Architecture sketch (to be built)
 

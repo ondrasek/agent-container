@@ -31,7 +31,7 @@ or in compose:
 
 ```yaml
 services:
-  devenv:
+  agent-env:
     env_file: .env
 ```
 
@@ -39,7 +39,7 @@ services:
 
 ```ini
 [Container]
-EnvironmentFile=/etc/devenv/devenv.env
+EnvironmentFile=/etc/agent-env/agent-env.env
 ```
 
 The host-side file path is operator-managed; the container only sees env vars.
