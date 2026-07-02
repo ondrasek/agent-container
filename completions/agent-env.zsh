@@ -113,6 +113,7 @@ _agent-env() {
                         '--remote[Force remote target (hosts.conf)]' \
                         '--user[SSH user (default: AGENT_ENV_USER or dev)]:user:' \
                         '--host[Override the resolved host]:host:_hosts' \
+                        '(--window -w)'{--window,-w}'[Select tmux window NAME before attaching]:window:' \
                         '*:container:__agent_env_names'
                     ;;
                 logs)

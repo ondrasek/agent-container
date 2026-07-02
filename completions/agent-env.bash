@@ -143,12 +143,12 @@ _agent_env() {
             fi
             ;;
         attach)
-            # --user/--host take a value we don't complete; suppress name fallback.
-            if [[ "${prev}" == "--user" || "${prev}" == "--host" ]]; then
+            # --user/--host/--window take a value we don't complete; suppress name fallback.
+            if [[ "${prev}" == "--user" || "${prev}" == "--host" || "${prev}" == "--window" || "${prev}" == "-w" ]]; then
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--local --remote --user --host" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--local --remote --user --host --window -w" -- "${cur}") )
                 return 0
             fi
             __agent_env_add_names __agent_env_names       # local + remote hosts.conf
