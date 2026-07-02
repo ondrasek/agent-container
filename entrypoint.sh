@@ -150,12 +150,16 @@ else
         log "tmux session 'main' ready (single default window)"
     else
         # First window carries the session and is named after the first entry.
-        tmux new-session -d -s main -n "${valid_windows[0]}"
+        # Capture its window id so we can reselect it UNAMBIGUOUSLY below: an
+        # all-numeric name (permitted by the charset) would otherwise be read by
+        # `select-window -t main:NAME` as a window INDEX, landing on the wrong
+        # window. The #{window_id} form (e.g. '@0') is never index-ambiguous.
+        first_id="$(tmux new-session -d -P -F '#{window_id}' -s main -n "${valid_windows[0]}")"
         for (( wi = 1; wi < ${#valid_windows[@]}; wi++ )); do
             tmux new-window -t main -n "${valid_windows[wi]}"
         done
-        # Select the first window so an attach lands there.
-        tmux select-window -t "main:${valid_windows[0]}"
+        # Select the first window so an attach lands there (by id, not name).
+        tmux select-window -t "${first_id}"
         log "tmux session 'main' ready with ${#valid_windows[@]} window(s)"
     fi
 fi
