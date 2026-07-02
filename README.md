@@ -244,10 +244,17 @@ ln -s "$HOME/Git/ondrasek/remote-persistent-devenv/completions/oh-my-zsh/devenv"
 #   plugins=(git devenv)
 ```
 
-The plugin auto-detects the repo from the symlink and puts `bin/` on `PATH`, so
-this alone makes `devenv`/`devenv-wiz` callable with completions — no separate
-PATH or `~/.zfunc` step. (If you *copy* the dir instead of symlinking, export
-`DEVENV_REPO=<repo>` in `~/.zshrc` before oh-my-zsh loads.)
+`DEVENV_REPO` is the path to this repo checkout; the plugin auto-detects it from
+its own symlink-resolved location, so a symlink install needs no configuration.
+(If you *copy* the plugin dir instead of symlinking, set `DEVENV_REPO=<repo>` in
+`~/.zshrc` before oh-my-zsh loads.)
+
+For `PATH`, the plugin prefers the canonical user bin dir — `$XDG_BIN_HOME`, or
+`~/.local/bin` when that's unset. If `devenv`/`devenv-wiz` are symlinked there
+(e.g. `ln -s "$DEVENV_REPO/bin/"* "${XDG_BIN_HOME:-$HOME/.local/bin}/"`) it puts
+that dir on `PATH`; otherwise it falls back to the repo's own `bin/`, so the
+plugin works with or without a separate install step. This alone makes both CLIs
+callable with completions — no manual `PATH` or `~/.zfunc` edits.
 
 The completion scripts and the oh-my-zsh plugin are covered by
 `bin/tests/test_completions.sh` (needs only bash; the zsh/omz cases are skipped

@@ -188,8 +188,13 @@ test_omz_plugin() {
     command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping omz plugin test"; return; }
     local plugin="${REPO_ROOT}/completions/oh-my-zsh/devenv/devenv.plugin.zsh"
     if [[ ! -f "${plugin}" ]]; then fail=$((fail + 1)); note "FAIL: omz plugin file missing"; return; fi
-    local out
-    out="$(zsh -c "
+    local out label empty_bin filled_bin
+    empty_bin="$(mktemp -d)"                        # XDG bin WITHOUT the tools
+    filled_bin="$(mktemp -d)"; : > "${filled_bin}/devenv-wiz"  # XDG bin WITH the tool
+
+    # Case 1: tools absent from XDG bin -> plugin falls back to repo/bin, and
+    # wires completions + aliases.
+    out="$(XDG_BIN_HOME="${empty_bin}" zsh -c "
         autoload -Uz compinit && compinit -u
         source '${plugin}'
         print -r -- \"PATHHIT=\$([[ \":\$PATH:\" == *\":\${DEVENV_REPO}/bin:\"* ]] && echo yes || echo no)\"
@@ -198,14 +203,26 @@ test_omz_plugin() {
         print -r -- \"COMPDEFWIZ=\${_comps[devenv-wiz]:-none}\"
         alias dv >/dev/null 2>&1 && print -r -- 'ALIAS=ok'
     " 2>/dev/null)"
-    local label
     for label in "PATHHIT=yes" "COMPFUNC=defined" "COMPDEF=_devenv" "COMPDEFWIZ=_devenv-wiz" "ALIAS=ok"; do
         if printf '%s\n' "${out}" | grep -qxF "${label}"; then
             pass=$((pass + 1))
         else
-            fail=$((fail + 1)); note "FAIL: omz plugin missing '${label}' (got: ${out//$'\n'/ | })"
+            fail=$((fail + 1)); note "FAIL: omz(no-xdg) missing '${label}' (got: ${out//$'\n'/ | })"
         fi
     done
+
+    # Case 2: tool present in XDG_BIN_HOME -> plugin prefers it over repo/bin.
+    out="$(XDG_BIN_HOME="${filled_bin}" zsh -c "
+        source '${plugin}'
+        print -r -- \"XDGHIT=\$([[ \":\$PATH:\" == *\":${filled_bin}:\"* ]] && echo yes || echo no)\"
+    " 2>/dev/null)"
+    if printf '%s\n' "${out}" | grep -qxF "XDGHIT=yes"; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1)); note "FAIL: omz did not prefer XDG_BIN_HOME (got: ${out})"
+    fi
+
+    rm -rf "${empty_bin}" "${filled_bin}"
 }
 
 setup_sandbox

@@ -21,9 +21,19 @@
 : ${DEVENV_REPO:=${0:A:h:h:h:h}}
 
 # --- shell integration: put the tools on PATH ------------------------------
-if [[ -d "$DEVENV_REPO/bin" ]]; then
-    [[ ":$PATH:" == *":$DEVENV_REPO/bin:"* ]] || export PATH="$DEVENV_REPO/bin:$PATH"
-fi
+# Prefer the canonical user bin dir, respecting $XDG_BIN_HOME and defaulting to
+# ~/.local/bin. If devenv/devenv-wiz are installed (symlinked) there, just ensure
+# that dir is on PATH; otherwise fall back to the repo's own bin/ so the plugin
+# works with no separate install step. (The tools themselves already honor
+# XDG_STATE_HOME / XDG_CONFIG_HOME for their state and config.)
+() {
+    local xdg_bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
+    if [[ -e "$xdg_bin/devenv-wiz" || -e "$xdg_bin/devenv" ]]; then
+        [[ ":$PATH:" == *":$xdg_bin:"* ]] || export PATH="$xdg_bin:$PATH"
+    elif [[ -d "$DEVENV_REPO/bin" ]]; then
+        [[ ":$PATH:" == *":$DEVENV_REPO/bin:"* ]] || export PATH="$DEVENV_REPO/bin:$PATH"
+    fi
+}
 
 # --- completions -----------------------------------------------------------
 # Source the canonical dual-mode scripts; when sourced (not autoloaded) they
