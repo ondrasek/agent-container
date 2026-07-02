@@ -1,33 +1,33 @@
-#compdef devenv-wiz
-# zsh completion for `devenv-wiz` (bin/devenv-wiz).
+#compdef agent-env
+# zsh completion for `agent-env` (bin/agent-env).
 #
-# Install (autoload):  copy/symlink this file as `_devenv-wiz` into a dir on
+# Install (autoload):  copy/symlink this file as `_agent-env` into a dir on
 #                      $fpath (e.g. ~/.zfunc), then `autoload -U compinit && compinit`.
-# Install (source):    source /path/to/completions/devenv-wiz.zsh from ~/.zshrc
+# Install (source):    source /path/to/completions/agent-env.zsh from ~/.zshrc
 #                      AFTER `compinit` has run.
 #
-# Completion keys off the command NAME, so `devenv-wiz` must be on PATH
-# (symlink bin/devenv-wiz into ~/.local/bin).
+# Completion keys off the command NAME, so `agent-env` must be on PATH
+# (symlink bin/agent-env into ~/.local/bin).
 #
-# Container names are gathered directly in-shell — devenv-wiz/uv is NEVER spun
+# Container names are gathered directly in-shell — agent-env/uv is NEVER spun
 # up on TAB. Candidate names come from:
-#   * basenames of ${XDG_STATE_HOME:-$HOME/.local/state}/devenv/*.port (minus .port)
+#   * basenames of ${XDG_STATE_HOME:-$HOME/.local/state}/agent-env/*.port (minus .port)
 #   * hosts.conf keys ending in _HOST, lowercased with '_' -> '-'
 # Missing dirs/files are tolerated silently. hosts.conf is parsed with shell
 # builtins only and never executed/sourced. Names go through `compadd -a`
 # (array add), so an embedded `$(...)` in a hostile name is never expanded.
 
 # Gather state-file names into the caller's `names` array.
-__devenv_wiz_gather_local() {
-    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/devenv" f
+__agent_env_gather_local() {
+    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-env" f
     for f in "$state_dir"/*.port(N); do
         names+=("${f:t:r}")
     done
 }
 
 # Gather hosts.conf-derived names into the caller's `names` array.
-__devenv_wiz_gather_hosts() {
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/devenv"
+__agent_env_gather_hosts() {
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/agent-env"
     local hosts="${config_dir}/hosts.conf" line key
     [[ -f "$hosts" ]] || return
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -45,21 +45,21 @@ __devenv_wiz_gather_hosts() {
 }
 
 # State-only names (local containers): safe source for down/logs/purge.
-__devenv_wiz_names_local() {
+__agent_env_names_local() {
     local -aU names
-    __devenv_wiz_gather_local
+    __agent_env_gather_local
     compadd -a names
 }
 
 # Union (local + remote): used by up/attach.
-__devenv_wiz_names() {
+__agent_env_names() {
     local -aU names
-    __devenv_wiz_gather_local
-    __devenv_wiz_gather_hosts
+    __agent_env_gather_local
+    __agent_env_gather_hosts
     compadd -a names
 }
 
-_devenv-wiz() {
+_agent-env() {
     local context state state_descr line
     typeset -A opt_args
     local -a cmds
@@ -83,7 +83,7 @@ _devenv-wiz() {
 
     case $state in
         command)
-            _describe -t commands 'devenv-wiz command' cmds
+            _describe -t commands 'agent-env command' cmds
             ;;
         args)
             case $line[1] in
@@ -91,18 +91,18 @@ _devenv-wiz() {
                     _arguments \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
-                        '*:container:__devenv_wiz_names'
+                        '*:container:__agent_env_names'
                     ;;
                 down)
                     _arguments \
                         '--purge[Also delete all per-container volumes]' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
-                        '*:container:__devenv_wiz_names_local'
+                        '*:container:__agent_env_names_local'
                     ;;
                 purge)
                     _arguments \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
-                        '*:container:__devenv_wiz_names_local'
+                        '*:container:__agent_env_names_local'
                     ;;
                 list)
                     _arguments '--json[Emit machine-readable JSON]'
@@ -111,14 +111,14 @@ _devenv-wiz() {
                     _arguments \
                         '--local[Force local target (state file)]' \
                         '--remote[Force remote target (hosts.conf)]' \
-                        '--user[SSH user (default: DEVENV_USER or dev)]:user:' \
+                        '--user[SSH user (default: AGENT_ENV_USER or dev)]:user:' \
                         '--host[Override the resolved host]:host:_hosts' \
-                        '*:container:__devenv_wiz_names'
+                        '*:container:__agent_env_names'
                     ;;
                 logs)
                     _arguments \
                         '--no-follow[Print logs without following]' \
-                        '*:container:__devenv_wiz_names_local'
+                        '*:container:__agent_env_names_local'
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh)'
@@ -128,9 +128,9 @@ _devenv-wiz() {
     esac
 }
 
-# Dual-mode: works whether autoloaded from $fpath as `_devenv-wiz` or sourced.
-if [[ "$funcstack[1]" == "_devenv-wiz" ]]; then
-    _devenv-wiz "$@"
+# Dual-mode: works whether autoloaded from $fpath as `_agent-env` or sourced.
+if [[ "$funcstack[1]" == "_agent-env" ]]; then
+    _agent-env "$@"
 else
-    (( $+functions[compdef] )) && compdef _devenv-wiz devenv-wiz
+    (( $+functions[compdef] )) && compdef _agent-env agent-env
 fi

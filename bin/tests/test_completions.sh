@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Shell-based tests for the bash completion scripts (completions/*.bash).
+# Shell-based tests for the bash completion script (completions/agent-env.bash).
 #
 # Run:  bin/tests/test_completions.sh        (needs only bash)
 #
-# Sources each completion in a sandboxed HOME/XDG with fixture *.port and
+# Sources the completion in a sandboxed HOME/XDG with fixture *.port and
 # hosts.conf files, drives the completion functions with synthetic
 # COMP_WORDS/COMP_CWORD, and asserts the expected candidate sets. No docker/
 # podman/uv is involved. Exits non-zero on the first failure.
@@ -50,10 +50,10 @@ setup_sandbox() {
     SANDBOX="$(mktemp -d)"
     export XDG_STATE_HOME="${SANDBOX}/state"
     export XDG_CONFIG_HOME="${SANDBOX}/config"
-    mkdir -p "${XDG_STATE_HOME}/devenv" "${XDG_CONFIG_HOME}/devenv"
-    printf '2206\n' > "${XDG_STATE_HOME}/devenv/acme.port"
-    printf '2220\n' > "${XDG_STATE_HOME}/devenv/blog.port"
-    cat > "${XDG_CONFIG_HOME}/devenv/hosts.conf" <<'EOF'
+    mkdir -p "${XDG_STATE_HOME}/agent-env" "${XDG_CONFIG_HOME}/agent-env"
+    printf '2206\n' > "${XDG_STATE_HOME}/agent-env/acme.port"
+    printf '2220\n' > "${XDG_STATE_HOME}/agent-env/blog.port"
+    cat > "${XDG_CONFIG_HOME}/agent-env/hosts.conf" <<'EOF'
 # sample hosts
 VPS_HOST=vps.example.com
 VPS_PORT=2222
@@ -74,8 +74,12 @@ run_comp() {
     "${func}" 2>/dev/null || true
 }
 
+# The single CLI has the full surface: subcommands, per-subcommand flags
+# (including --env-file / --mount / --json / --no-follow / attach targets), and
+# container-name completion sourced directly from state + hosts.conf.
 test_tool() {
-    local tool="$1" func="$2" names_func="$3" script="${REPO_ROOT}/completions/$1.bash"
+    local tool="agent-env" func="_agent_env" names_func="__agent_env_names"
+    local script="${REPO_ROOT}/completions/agent-env.bash"
     note "--- ${tool} (${script}) ---"
     # shellcheck disable=SC1090
     source "${script}"
@@ -96,10 +100,11 @@ test_tool() {
     assert_has "${tool}:up-name" "acme" "${COMPREPLY[@]}"
     assert_has "${tool}:up-name" "my-box" "${COMPREPLY[@]}"
 
-    # 4) 'up --<TAB>' completes flags (--mount), not names
+    # 4) 'up --<TAB>' completes flags (--mount / --env-file), not names
     run_comp "${func}" "${tool}" "up" "--"
-    assert_has  "${tool}:up-flag" "--mount" "${COMPREPLY[@]}"
-    assert_lacks "${tool}:up-flag" "acme"   "${COMPREPLY[@]}"
+    assert_has  "${tool}:up-flag" "--mount"    "${COMPREPLY[@]}"
+    assert_has  "${tool}:up-flag" "--env-file" "${COMPREPLY[@]}"
+    assert_lacks "${tool}:up-flag" "acme"      "${COMPREPLY[@]}"
 
     # 5) 'attach <TAB>' completes container names (local + remote union)
     run_comp "${func}" "${tool}" "attach" ""
@@ -124,35 +129,29 @@ test_tool() {
     assert_has  "${tool}:logs-local" "blog"   "${COMPREPLY[@]}"
     assert_lacks "${tool}:logs-local" "my-box" "${COMPREPLY[@]}"
 
-    # 9) 'down --<TAB>' completes flags
+    # 9) per-subcommand flag surfaces
     run_comp "${func}" "${tool}" "down" "--"
     assert_has "${tool}:down-flag" "--purge" "${COMPREPLY[@]}"
-
-    # 10) wiz-only surface: --env-file on up, and purge/list/logs/attach flags
-    if [[ "${tool}" == "devenv-wiz" ]]; then
-        run_comp "${func}" "${tool}" "up" "--"
-        assert_has "${tool}:up-flag" "--env-file" "${COMPREPLY[@]}"
-        assert_has "${tool}:up-flag" "--mount"    "${COMPREPLY[@]}"
-        run_comp "${func}" "${tool}" "purge" "--"
-        assert_has "${tool}:purge-flag" "--yes" "${COMPREPLY[@]}"
-        run_comp "${func}" "${tool}" "list" "--"
-        assert_has "${tool}:list-flag" "--json" "${COMPREPLY[@]}"
-        run_comp "${func}" "${tool}" "logs" "--"
-        assert_has "${tool}:logs-flag" "--no-follow" "${COMPREPLY[@]}"
-        run_comp "${func}" "${tool}" "attach" "--"
-        assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
-    fi
+    run_comp "${func}" "${tool}" "purge" "--"
+    assert_has "${tool}:purge-flag" "--yes" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "list" "--"
+    assert_has "${tool}:list-flag" "--json" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "logs" "--"
+    assert_has "${tool}:logs-flag" "--no-follow" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "attach" "--"
+    assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
 }
 
 # COMPL-1 regression: a hostile hosts.conf key or state-file name carrying a
 # $(...) payload must NEVER execute when the bash completion runs. Uses a fresh
 # sandbox with relative-path payloads and runs the completer from inside it.
 test_security_no_exec() {
-    local tool="$1" func="$2" script="${REPO_ROOT}/completions/$1.bash"
+    local tool="agent-env" func="_agent_env"
+    local script="${REPO_ROOT}/completions/agent-env.bash"
     local sbx; sbx="$(mktemp -d)"
-    mkdir -p "${sbx}/state/devenv" "${sbx}/config/devenv"
-    : > "${sbx}/state/devenv/\$(touch PWNED-state).port"
-    printf '$(touch PWNED-hosts)_HOST=x\n' > "${sbx}/config/devenv/hosts.conf"
+    mkdir -p "${sbx}/state/agent-env" "${sbx}/config/agent-env"
+    : > "${sbx}/state/agent-env/\$(touch PWNED-state).port"
+    printf '$(touch PWNED-hosts)_HOST=x\n' > "${sbx}/config/agent-env/hosts.conf"
     (
         cd "${sbx}" || exit 0
         export XDG_STATE_HOME="${sbx}/state" XDG_CONFIG_HOME="${sbx}/config"
@@ -172,38 +171,37 @@ test_security_no_exec() {
 # F4: exercise the zsh name gatherers (guarded — skipped if zsh is absent).
 test_zsh_names() {
     command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping zsh name tests"; return; }
-    local n out script="${REPO_ROOT}/completions/devenv.zsh"
-    out="$(zsh -c "source '${script}'; local -aU names; __devenv_gather_local; __devenv_gather_hosts; print -l -- \$names" 2>/dev/null)"
+    local n out script="${REPO_ROOT}/completions/agent-env.zsh"
+    out="$(zsh -c "source '${script}'; local -aU names; __agent_env_gather_local; __agent_env_gather_hosts; print -l -- \$names" 2>/dev/null)"
     for n in acme blog my-box vps; do
         if printf '%s\n' "${out}" | grep -qxF "${n}"; then pass=$((pass + 1)); else fail=$((fail + 1)); note "FAIL: zsh union missing '${n}'"; fi
     done
-    out="$(zsh -c "source '${script}'; local -aU names; __devenv_gather_local; print -l -- \$names" 2>/dev/null)"
+    out="$(zsh -c "source '${script}'; local -aU names; __agent_env_gather_local; print -l -- \$names" 2>/dev/null)"
     if printf '%s\n' "${out}" | grep -qxF "acme"; then pass=$((pass + 1)); else fail=$((fail + 1)); note "FAIL: zsh local missing 'acme'"; fi
     if printf '%s\n' "${out}" | grep -qxF "vps"; then fail=$((fail + 1)); note "FAIL: zsh local should exclude remote 'vps'"; else pass=$((pass + 1)); fi
 }
 
 # oh-my-zsh plugin: simulate omz's load order (compinit, then source the plugin)
-# and assert it wires PATH, registers completions, and defines aliases.
+# and assert it wires PATH, registers the completion, and defines aliases.
 test_omz_plugin() {
     command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping omz plugin test"; return; }
-    local plugin="${REPO_ROOT}/completions/oh-my-zsh/devenv/devenv.plugin.zsh"
+    local plugin="${REPO_ROOT}/completions/oh-my-zsh/agent-env/agent-env.plugin.zsh"
     if [[ ! -f "${plugin}" ]]; then fail=$((fail + 1)); note "FAIL: omz plugin file missing"; return; fi
     local out label empty_bin filled_bin
-    empty_bin="$(mktemp -d)"                        # XDG bin WITHOUT the tools
-    filled_bin="$(mktemp -d)"; : > "${filled_bin}/devenv-wiz"  # XDG bin WITH the tool
+    empty_bin="$(mktemp -d)"                        # XDG bin WITHOUT the tool
+    filled_bin="$(mktemp -d)"; : > "${filled_bin}/agent-env"  # XDG bin WITH the tool
 
-    # Case 1: tools absent from XDG bin -> plugin falls back to repo/bin, and
-    # wires completions + aliases.
+    # Case 1: tool absent from XDG bin -> plugin falls back to repo/bin, and
+    # wires the completion + aliases.
     out="$(XDG_BIN_HOME="${empty_bin}" zsh -c "
         autoload -Uz compinit && compinit -u
         source '${plugin}'
-        print -r -- \"PATHHIT=\$([[ \":\$PATH:\" == *\":\${DEVENV_REPO}/bin:\"* ]] && echo yes || echo no)\"
-        print -r -- \"COMPFUNC=\${functions[_devenv]:+defined}\"
-        print -r -- \"COMPDEF=\${_comps[devenv]:-none}\"
-        print -r -- \"COMPDEFWIZ=\${_comps[devenv-wiz]:-none}\"
-        alias dv >/dev/null 2>&1 && print -r -- 'ALIAS=ok'
+        print -r -- \"PATHHIT=\$([[ \":\$PATH:\" == *\":\${AGENT_ENV_REPO}/bin:\"* ]] && echo yes || echo no)\"
+        print -r -- \"COMPFUNC=\${functions[_agent-env]:+defined}\"
+        print -r -- \"COMPDEF=\${_comps[agent-env]:-none}\"
+        alias ae >/dev/null 2>&1 && print -r -- 'ALIAS=ok'
     " 2>/dev/null)"
-    for label in "PATHHIT=yes" "COMPFUNC=defined" "COMPDEF=_devenv" "COMPDEFWIZ=_devenv-wiz" "ALIAS=ok"; do
+    for label in "PATHHIT=yes" "COMPFUNC=defined" "COMPDEF=_agent-env" "ALIAS=ok"; do
         if printf '%s\n' "${out}" | grep -qxF "${label}"; then
             pass=$((pass + 1))
         else
@@ -228,12 +226,10 @@ test_omz_plugin() {
 setup_sandbox
 trap teardown_sandbox EXIT
 
-test_tool devenv     _devenv     __devenv_names
-test_tool devenv-wiz _devenv_wiz __devenv_wiz_names
+test_tool
 
 note "--- security: no code execution from hostile names ---"
-test_security_no_exec devenv     _devenv
-test_security_no_exec devenv-wiz _devenv_wiz
+test_security_no_exec
 
 note "--- zsh name gatherers ---"
 test_zsh_names
