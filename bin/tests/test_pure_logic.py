@@ -1,6 +1,7 @@
-"""Pure-logic interop tests: every value here is the byte-for-byte contract
-with bin/devenv / bin/devenv-attach. Expected ports were computed by running
-bin/devenv's own bash port_for_name() — do not 'fix' them from the Python side.
+"""Pure-logic tests: every value here pins the byte-for-byte on-disk contract
+that agent-env defines — the port hash, container/volume naming, env-file
+resolution order, and hosts.conf parsing. These constants are load-bearing;
+the shell completions read the same state files, so do not 'fix' them casually.
 """
 
 from __future__ import annotations
@@ -9,8 +10,8 @@ import pytest
 
 # --- port hash: 2200 + (sum of char codes mod 100) ---------------------------
 
-# Ground truth from: bash bin/devenv port_for_name (sum-of-ASCII mod 100).
-BASH_PORT_CORPUS = {
+# Ground truth: the deterministic port hash (2200 + sum-of-ASCII mod 100).
+PORT_CORPUS = {
     "acme": 2206,       # 406 % 100 = 6
     "blog": 2220,       # 420
     "scratch": 2244,    # 744
@@ -23,8 +24,8 @@ BASH_PORT_CORPUS = {
 }
 
 
-@pytest.mark.parametrize(("name", "port"), sorted(BASH_PORT_CORPUS.items()))
-def test_port_for_name_matches_bash(wiz, name, port):
+@pytest.mark.parametrize(("name", "port"), sorted(PORT_CORPUS.items()))
+def test_port_for_name_matches_corpus(wiz, name, port):
     assert wiz.port_for_name(name) == port
 
 
@@ -42,8 +43,8 @@ def test_port_always_inside_window(wiz):
 
 
 def test_port_collision_is_possible_and_deterministic(wiz):
-    # 'zz' and 'scratch' hash to the same port — the bash tool behaves
-    # identically; the wizard must not "helpfully" disambiguate.
+    # 'zz' and 'scratch' hash to the same port — a deterministic collision;
+    # agent-env must not "helpfully" disambiguate.
     assert wiz.port_for_name("zz") == wiz.port_for_name("scratch") == 2244
 
 
@@ -51,18 +52,18 @@ def test_port_collision_is_possible_and_deterministic(wiz):
 
 
 def test_container_and_volume_naming(wiz):
-    assert wiz.container_name("acme") == "devenv-acme"
-    assert wiz.volume_name("acme") == "devenv-acme-workspace"
-    assert wiz.container_name("my-box") == "devenv-my-box"
-    assert wiz.volume_name("my-box") == "devenv-my-box-workspace"
+    assert wiz.container_name("acme") == "agent-env-acme"
+    assert wiz.volume_name("acme") == "agent-env-acme-workspace"
+    assert wiz.container_name("my-box") == "agent-env-my-box"
+    assert wiz.volume_name("my-box") == "agent-env-my-box-workspace"
     # Each per-container naming helper has its own explicit contract assertion
     # rather than relying on doctest/argv side-coverage (the canonical order is
-    # workspace, claude, codex, pi, shellenv, tmux — shared with bin/devenv).
-    assert wiz.claude_volume_name("acme") == "devenv-acme-claude"
-    assert wiz.codex_volume_name("acme") == "devenv-acme-codex"
-    assert wiz.pi_volume_name("acme") == "devenv-acme-pi"
-    assert wiz.shellenv_volume_name("acme") == "devenv-acme-shellenv"
-    assert wiz.tmux_volume_name("acme") == "devenv-acme-tmux"
+    # workspace, claude, codex, pi, shellenv, tmux).
+    assert wiz.claude_volume_name("acme") == "agent-env-acme-claude"
+    assert wiz.codex_volume_name("acme") == "agent-env-acme-codex"
+    assert wiz.pi_volume_name("acme") == "agent-env-acme-pi"
+    assert wiz.shellenv_volume_name("acme") == "agent-env-acme-shellenv"
+    assert wiz.tmux_volume_name("acme") == "agent-env-acme-tmux"
 
 
 # --- name validation: ^[a-z0-9][a-z0-9_-]*$ ------------------------------------
@@ -217,16 +218,16 @@ def test_xdg_defaults_fall_back_to_home(load_wiz, tmp_path):
     # With XDG vars unset, paths must match bash's ${XDG_*:-$HOME/...} defaults.
     home = tmp_path / "home"
     mod = load_wiz(home=home, xdg_state=None, xdg_config=None)
-    assert mod.STATE_DIR == home / ".local/state" / "devenv"
-    assert mod.CONFIG_DIR == home / ".config" / "devenv"
-    assert mod.HOSTS_CONF == home / ".config" / "devenv" / "hosts.conf"
+    assert mod.STATE_DIR == home / ".local/state" / "agent-env"
+    assert mod.CONFIG_DIR == home / ".config" / "agent-env"
+    assert mod.HOSTS_CONF == home / ".config" / "agent-env" / "hosts.conf"
 
 
 def test_xdg_env_vars_override_home(load_wiz, tmp_path):
     state, config = tmp_path / "s", tmp_path / "c"
     mod = load_wiz(xdg_state=state, xdg_config=config)
-    assert mod.STATE_DIR == state / "devenv"
-    assert mod.CONFIG_DIR == config / "devenv"
+    assert mod.STATE_DIR == state / "agent-env"
+    assert mod.CONFIG_DIR == config / "agent-env"
 
 
 # --- state file round-trip ---------------------------------------------------------
@@ -236,7 +237,7 @@ def test_state_write_read_round_trip(wiz):
     wiz.write_state("acme", 2206)
     f = wiz.state_file("acme")
     assert f == wiz.STATE_DIR / "acme.port"
-    assert f.read_text() == "2206\n"  # exact bytes bin/devenv writes/expects
+    assert f.read_text() == "2206\n"  # exact bytes agent-env writes; completions read these
     assert wiz.read_state_port("acme") == "2206"
 
 
@@ -254,41 +255,61 @@ def test_clear_state(wiz):
     wiz.clear_state("acme")  # idempotent on missing file
 
 
-# --- runtime detection ----------------------------------------------------------------
+# --- runtime detection (platform-aware default) --------------------------------------
 
 
-def test_runtime_prefers_podman(wiz, fake_bin, monkeypatch):
+def test_runtime_default_is_docker_on_macos(wiz, fake_bin, monkeypatch):
+    # macOS operator runs Lima + docker-cli: with BOTH present, prefer docker.
+    monkeypatch.setattr(wiz.sys, "platform", "darwin")
+    monkeypatch.setenv("PATH", str(fake_bin("podman", "docker")))
+    assert wiz.detect_runtime() == "docker"
+
+
+def test_runtime_default_is_podman_on_linux(wiz, fake_bin, monkeypatch):
+    # Linux VPS runs podman: with BOTH present, prefer podman.
+    monkeypatch.setattr(wiz.sys, "platform", "linux")
     monkeypatch.setenv("PATH", str(fake_bin("podman", "docker")))
     assert wiz.detect_runtime() == "podman"
 
 
-def test_runtime_falls_back_to_docker(wiz, fake_bin, monkeypatch):
+def test_runtime_macos_falls_back_to_podman_when_docker_absent(wiz, fake_bin, monkeypatch):
+    monkeypatch.setattr(wiz.sys, "platform", "darwin")
+    monkeypatch.setenv("PATH", str(fake_bin("podman")))
+    assert wiz.detect_runtime() == "podman"
+
+
+def test_runtime_linux_falls_back_to_docker_when_podman_absent(wiz, fake_bin, monkeypatch):
+    monkeypatch.setattr(wiz.sys, "platform", "linux")
     monkeypatch.setenv("PATH", str(fake_bin("docker")))
     assert wiz.detect_runtime() == "docker"
 
 
 def test_runtime_neither_present(wiz, fake_bin, monkeypatch):
+    monkeypatch.setattr(wiz.sys, "platform", "linux")
     monkeypatch.setenv("PATH", str(fake_bin()))
     with pytest.raises(wiz.Fatal, match="neither 'podman' nor 'docker'"):
         wiz.detect_runtime()
 
 
-def test_runtime_override_wins_over_preference(wiz, fake_bin, monkeypatch):
-    monkeypatch.setenv("PATH", str(fake_bin("podman", "docker")))
-    monkeypatch.setenv("DEVENV_RUNTIME", "docker")
-    assert wiz.detect_runtime() == "docker"
+def test_runtime_override_wins_over_platform_default(wiz, fake_bin, monkeypatch):
+    # AGENT_ENV_RUNTIME beats the platform preference on both OSes.
+    for platform, forced in (("darwin", "podman"), ("linux", "docker")):
+        monkeypatch.setattr(wiz.sys, "platform", platform)
+        monkeypatch.setenv("PATH", str(fake_bin("podman", "docker")))
+        monkeypatch.setenv("AGENT_ENV_RUNTIME", forced)
+        assert wiz.detect_runtime() == forced
 
 
 def test_runtime_override_must_be_on_path(wiz, fake_bin, monkeypatch):
     monkeypatch.setenv("PATH", str(fake_bin("docker")))
-    monkeypatch.setenv("DEVENV_RUNTIME", "podman")
+    monkeypatch.setenv("AGENT_ENV_RUNTIME", "podman")
     with pytest.raises(wiz.Fatal, match="not on PATH"):
         wiz.detect_runtime()
 
 
 def test_runtime_override_rejects_unknown_value(wiz, fake_bin, monkeypatch):
     monkeypatch.setenv("PATH", str(fake_bin("podman")))
-    monkeypatch.setenv("DEVENV_RUNTIME", "containerd")
+    monkeypatch.setenv("AGENT_ENV_RUNTIME", "containerd")
     with pytest.raises(wiz.Fatal, match="must be 'docker' or 'podman'"):
         wiz.detect_runtime()
 
@@ -298,7 +319,7 @@ def test_runtime_override_rejects_unknown_value(wiz, fake_bin, monkeypatch):
 
 def test_resolve_ssh_user_default_and_env(wiz, monkeypatch):
     assert wiz.resolve_ssh_user() == "dev"
-    monkeypatch.setenv("DEVENV_USER", "ops")
+    monkeypatch.setenv("AGENT_ENV_USER", "ops")
     assert wiz.resolve_ssh_user() == "ops"
     assert wiz.resolve_ssh_user("admin") == "admin"  # explicit override beats env
 

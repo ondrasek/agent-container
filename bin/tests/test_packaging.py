@@ -22,7 +22,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 
 def _pep723_metadata() -> dict:
-    """Parse the '# /// script ... # ///' PEP 723 block from bin/devenv-wiz."""
+    """Parse the '# /// script ... # ///' PEP 723 block from bin/agent-env."""
     lines = SCRIPT_PATH.read_text().splitlines()
     start = end = None
     for i, line in enumerate(lines):
@@ -51,26 +51,26 @@ def test_pyproject_requires_python_matches_pep723():
 
 
 def test_entry_point_module_and_attr_resolve(wiz):
-    # [project.scripts] devenv-wiz = "<module>:<attr>"; the module name must be
-    # 'devenv_wiz' (the symlink's basename) and the attr must exist + be callable.
-    module_name, _, attr = _pyproject()["project"]["scripts"]["devenv-wiz"].partition(":")
-    assert module_name == "devenv_wiz"
+    # [project.scripts] agent-env = "<module>:<attr>"; the module name must be
+    # 'agent_env' (the symlink's basename) and the attr must exist + be callable.
+    module_name, _, attr = _pyproject()["project"]["scripts"]["agent-env"].partition(":")
+    assert module_name == "agent_env"
     assert hasattr(wiz, attr) and callable(getattr(wiz, attr))
 
 
 def test_cli_translates_fatal_to_exit_one(wiz, monkeypatch):
     # The entry point must turn a Fatal into exit 1 (not a traceback). With an
     # isolated HOME, 'attach acme --local' has no state file -> Fatal.
-    monkeypatch.setattr(sys, "argv", ["devenv-wiz", "attach", "acme", "--local"])
+    monkeypatch.setattr(sys, "argv", ["agent-env", "attach", "acme", "--local"])
     with pytest.raises(SystemExit) as exc:
         wiz.cli()
     assert exc.value.code == 1
 
 
 def test_module_symlink_integrity():
-    link = REPO_ROOT / "bin" / "devenv_wiz.py"
-    assert link.is_symlink(), "bin/devenv_wiz.py must be a symlink (mode 120000)"
-    assert os.readlink(link) == "devenv-wiz"
+    link = REPO_ROOT / "bin" / "agent_env.py"
+    assert link.is_symlink(), "bin/agent_env.py must be a symlink (mode 120000)"
+    assert os.readlink(link) == "agent-env"
     assert link.resolve().samefile(SCRIPT_PATH)
 
 

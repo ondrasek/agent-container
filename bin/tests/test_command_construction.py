@@ -39,22 +39,22 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
     wiz.launch_container("podman", "acme", env_file)
 
     # Six per-container named volumes in the canonical order, then --restart.
-    # This argv must stay byte-for-byte identical to bin/devenv cmd_up.
+    # This argv is the load-bearing container start command; pin it exactly.
     assert capture_query == [[
         "podman", "run", "-d",
-        "--name", "devenv-acme",
+        "--name", "agent-env-acme",
         "--env-file", str(env_file),
         "-p", "2206:22",
-        "-v", "devenv-acme-workspace:/workspace",
-        "-v", "devenv-acme-claude:/home/dev/.claude",
-        "-v", "devenv-acme-codex:/home/dev/.codex",
-        "-v", "devenv-acme-pi:/home/dev/.pi",
-        "-v", "devenv-acme-shellenv:/home/dev/.devenv",
-        "-v", "devenv-acme-tmux:/home/dev/.config/tmux",
+        "-v", "agent-env-acme-workspace:/workspace",
+        "-v", "agent-env-acme-claude:/home/dev/.claude",
+        "-v", "agent-env-acme-codex:/home/dev/.codex",
+        "-v", "agent-env-acme-pi:/home/dev/.pi",
+        "-v", "agent-env-acme-shellenv:/home/dev/.agent-env",
+        "-v", "agent-env-acme-tmux:/home/dev/.config/tmux",
         "--restart", "unless-stopped",
-        "localhost/remote-persistent-devenv:latest",
+        "localhost/agent-env:latest",
     ]]
-    # state file written for bin/devenv interop
+    # state file written (the completions and `attach` read it)
     assert wiz.read_state_port("acme") == "2206"
 
 
@@ -74,9 +74,9 @@ def test_launch_container_appends_binds_after_volumes(wiz, capture_query, monkey
         "-v", "/abs/host:/opt/data",
         "-v", "/another:/workspace/another",
     ]
-    assert argv[ri:] == ["--restart", "unless-stopped", "localhost/remote-persistent-devenv:latest"]
-    # First -v is still the workspace volume (parity with bin/devenv).
-    assert argv[argv.index("-v") + 1] == "devenv-acme-workspace:/workspace"
+    assert argv[ri:] == ["--restart", "unless-stopped", "localhost/agent-env:latest"]
+    # First -v is still the workspace volume.
+    assert argv[argv.index("-v") + 1] == "agent-env-acme-workspace:/workspace"
 
 
 # --- bind-mount resolution (--mount) -----------------------------------------
@@ -151,7 +151,7 @@ def test_launch_container_port_is_name_hash(wiz, capture_query, monkeypatch, tmp
     wiz.launch_container("podman", "my-box", env_file)
     (argv,) = capture_query
     assert argv[argv.index("-p") + 1] == "2204:22"
-    assert argv[argv.index("-v") + 1] == "devenv-my-box-workspace:/workspace"
+    assert argv[argv.index("-v") + 1] == "agent-env-my-box-workspace:/workspace"
 
 
 def test_launch_container_aborts_on_busy_port(wiz, capture_query, monkeypatch, tmp_path):
@@ -274,12 +274,12 @@ def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
     wiz.down_container("podman", "acme", purge=True)
     removed = [c[3] for c in capture_query if c[:3] == ["podman", "volume", "rm"]]
     assert removed == [
-        "devenv-acme-workspace",
-        "devenv-acme-claude",
-        "devenv-acme-codex",
-        "devenv-acme-pi",
-        "devenv-acme-shellenv",
-        "devenv-acme-tmux",
+        "agent-env-acme-workspace",
+        "agent-env-acme-claude",
+        "agent-env-acme-codex",
+        "agent-env-acme-pi",
+        "agent-env-acme-shellenv",
+        "agent-env-acme-tmux",
     ]
     assert wiz.read_state_port("acme") is None  # state cleared
 
@@ -367,10 +367,10 @@ def test_resolve_local_from_state_file(wiz):
     assert wiz.resolve_attach_target("acme", "local") == ("dev", "localhost", "2206", "local")
 
 
-def test_resolve_local_honours_devenv_host_and_user(wiz, monkeypatch):
+def test_resolve_local_honours_agent_env_host_and_user(wiz, monkeypatch):
     wiz.write_state("acme", 2206)
-    monkeypatch.setenv("DEVENV_HOST", "lima-vm")
-    monkeypatch.setenv("DEVENV_USER", "ops")
+    monkeypatch.setenv("AGENT_ENV_HOST", "lima-vm")
+    monkeypatch.setenv("AGENT_ENV_USER", "ops")
     assert wiz.resolve_attach_target("acme", "local") == ("ops", "lima-vm", "2206", "local")
 
 
@@ -394,7 +394,7 @@ def test_resolve_auto_falls_back_to_local_state(wiz):
     assert wiz.resolve_attach_target("acme", "auto") == ("dev", "localhost", "2206", "local")
 
 
-def test_resolve_name_is_case_insensitive_like_devenv_attach(wiz):
+def test_resolve_name_is_case_insensitive(wiz):
     write_hosts(wiz, "MY_BOX_HOST=vps.example.com\nMY_BOX_PORT=2204\n")
     assert wiz.resolve_attach_target("My-Box", "remote")[1] == "vps.example.com"
 
@@ -430,15 +430,15 @@ def test_resolve_rejects_host_option_injection(wiz):
 
 
 def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
-    monkeypatch.setattr(wiz, "ps_devenv", lambda rt, include_stopped=False: [
-        ("devenv-acme", "localhost/remote-persistent-devenv:latest", "Up 2 hours", "2 hours ago"),
+    monkeypatch.setattr(wiz, "ps_agent_env", lambda rt, include_stopped=False: [
+        ("agent-env-acme", "localhost/agent-env:latest", "Up 2 hours", "2 hours ago"),
     ])
     wiz.write_state("acme", 2206)
     wiz.write_state("ghost", 2299)
     rows = wiz.gather_rows("podman")
     by_name = {r["name"]: r for r in rows}
-    assert by_name["devenv-acme"]["port"] == "2206"
-    assert by_name["devenv-acme"]["stale"] is False
-    assert by_name["devenv-ghost"]["port"] == "2299"
-    assert by_name["devenv-ghost"]["stale"] is True
-    assert by_name["devenv-ghost"]["status"] == "stale"
+    assert by_name["agent-env-acme"]["port"] == "2206"
+    assert by_name["agent-env-acme"]["stale"] is False
+    assert by_name["agent-env-ghost"]["port"] == "2299"
+    assert by_name["agent-env-ghost"]["stale"] is True
+    assert by_name["agent-env-ghost"]["status"] == "stale"
