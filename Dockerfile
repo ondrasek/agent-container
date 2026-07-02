@@ -106,14 +106,14 @@ RUN mkdir -p /etc/ssh \
         echo 'ChallengeResponseAuthentication no'; \
         echo 'PrintMotd no'; \
         echo 'AcceptEnv LANG LC_*'; \
-    } > /etc/ssh/sshd_config.d/10-devenv.conf \
+    } > /etc/ssh/sshd_config.d/10-agent-env.conf \
     && mkdir -p /home/dev/.ssh \
     && chown dev:dev /home/dev/.ssh \
     && chmod 0700 /home/dev/.ssh
 
 # --- Layer 5b: per-container volume mount points + persistent shell env -----
 # Each of these dirs is the mount point of a per-container named volume
-# (devenv-<name>-{claude,codex,pi,shellenv,tmux}). Pre-creating them dev-owned
+# (agent-env-<name>-{claude,codex,pi,shellenv,tmux}). Pre-creating them dev-owned
 # (uid 1000) BEFORE the USER switch means a fresh, empty named volume
 # initializes dev-owned too — the runtime seeds a new volume from the image
 # directory's contents AND ownership/permissions. Without this the volume
@@ -122,13 +122,13 @@ RUN mkdir -p /etc/ssh \
 # pi-coding-agent's config/auth dir is ~/.pi (verified: package.json piConfig
 # .configDir = ".pi"; dist/config.js getAgentDir() -> ~/.pi/agent, auth.json
 # at ~/.pi/agent/auth.json). Overridable at runtime via PI_CODING_AGENT_DIR.
-# The credential dirs are 0700; .devenv (shell env) and .config/tmux (tmux.conf
+# The credential dirs are 0700; .agent-env (shell env) and .config/tmux (tmux.conf
 # + tpm plugins) are non-secret and 0755. ~/.config/tmux is XDG-standard: tmux
 # 3.x on debian:12 reads ~/.config/tmux/tmux.conf, so persisting that dir on its
 # own named volume carries the operator's tmux.conf/plugins across down/up.
 #
 # Shell-env wiring: agents and the operator drop KEY=VALUE exports in
-# ~/.devenv/env (on the shellenv volume, so it survives down/up). BOTH bash and
+# ~/.agent-env/env (on the shellenv volume, so it survives down/up). BOTH bash and
 # zsh source it, guarded so a malformed file cannot break the shell. dev's
 # LOGIN SHELL stays bash (sshd/tmux/entrypoint assume bash); zsh is available
 # but not the default.
@@ -142,14 +142,14 @@ RUN mkdir -p /etc/ssh \
 # (e.g. for `pip install --user` tools). This bash_profile->profile->bashrc chain
 # is load-bearing for login-shell panes; do not "simplify" it away.
 RUN set -eux; \
-    mkdir -p /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.devenv /home/dev/.config/tmux; \
-    chown -R dev:dev /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.devenv /home/dev/.config; \
+    mkdir -p /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.agent-env /home/dev/.config/tmux; \
+    chown -R dev:dev /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.agent-env /home/dev/.config; \
     chmod 0700 /home/dev/.claude /home/dev/.codex /home/dev/.pi; \
-    chmod 0755 /home/dev/.devenv /home/dev/.config/tmux; \
-    HOOK='if [ -f "$HOME/.devenv/env" ]; then set -a; . "$HOME/.devenv/env"; set +a; fi'; \
-    printf '\n# devenv: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.bashrc; \
-    printf '# devenv: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.zshrc; \
-    printf '# devenv: login shells load ~/.profile (sources ~/.bashrc + adds ~/.local/bin to PATH)\n[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> /home/dev/.bash_profile; \
+    chmod 0755 /home/dev/.agent-env /home/dev/.config/tmux; \
+    HOOK='if [ -f "$HOME/.agent-env/env" ]; then set -a; . "$HOME/.agent-env/env"; set +a; fi'; \
+    printf '\n# agent-env: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.bashrc; \
+    printf '# agent-env: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.zshrc; \
+    printf '# agent-env: login shells load ~/.profile (sources ~/.bashrc + adds ~/.local/bin to PATH)\n[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> /home/dev/.bash_profile; \
     chown dev:dev /home/dev/.bashrc /home/dev/.zshrc /home/dev/.bash_profile
 
 # --- Layer 6: entrypoint (most-frequently-changed; STUB until item C) -------

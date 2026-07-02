@@ -1,13 +1,13 @@
-# devenv.container — Podman Quadlet TEMPLATE for VPS use.
+# agent-env.container — Podman Quadlet TEMPLATE for VPS use.
 #
-# This is a TEMPLATE. `bin/devenv` substitutes the ${NAME}, ${PORT}, and
-# ${ENV_FILE} placeholders below and installs the instantiated unit at
-# ~/.config/containers/systemd/devenv-<name>.container. One .container file
-# per running container; do NOT edit the installed copies directly.
+# This is a TEMPLATE. The operator substitutes the ${NAME}, ${PORT}, and
+# ${ENV_FILE} placeholders below (see docs/orchestration.md) and installs the
+# instantiated unit at ~/.config/containers/systemd/agent-env-<name>.container.
+# One .container file per running container; do NOT edit the installed copies.
 #
 # After install, the operator runs:
 #   systemctl --user daemon-reload
-#   systemctl --user start devenv-<name>.service
+#   systemctl --user start agent-env-<name>.service
 #
 # (Quadlet translates each .container into a .service at daemon-reload time.)
 #
@@ -16,15 +16,15 @@
 # instantiations with different ${NAME} produce two non-colliding units.
 
 [Unit]
-Description=Remote persistent dev environment (${NAME})
+Description=agent-env — remote persistent dev environment (${NAME})
 After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=localhost/remote-persistent-devenv:latest
-ContainerName=devenv-${NAME}
+Image=localhost/agent-env:latest
+ContainerName=agent-env-${NAME}
 PublishPort=${PORT}:22
-Volume=devenv-${NAME}-workspace:/workspace
+Volume=agent-env-${NAME}-workspace:/workspace
 EnvironmentFile=${ENV_FILE}
 # UTC unless the .env overrides TZ.
 Timezone=UTC

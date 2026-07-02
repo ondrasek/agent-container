@@ -10,9 +10,9 @@
 #
 # Prerequisites (script refuses to run otherwise):
 #   - docker or podman on PATH
-#   - bin/devenv executable
+#   - uv on PATH (agent-env is a PEP 723 uv script) and bin/agent-env present
 #   - ./.env present with GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL non-empty
-#   - DEVENV_SMOKE_REPO env var: "owner/name" of a GitHub repo your GH_TOKEN
+#   - AGENT_ENV_SMOKE_REPO env var: "owner/name" of a GitHub repo your GH_TOKEN
 #     can push to. Defaults are intentionally NOT provided — pick a repo you
 #     own, since we will push a heartbeat commit to it.
 #
@@ -27,9 +27,11 @@
 set -euo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-readonly DEVENV="${REPO_ROOT}/bin/devenv"
+# agent-env is a single PEP 723 script; invoke it via uv (array preserves argv).
+readonly AGENT_ENV_BIN="${REPO_ROOT}/bin/agent-env"
+readonly AGENT_ENV=(uv run --no-project --script "${AGENT_ENV_BIN}")
 readonly INSTANCE="smoketest"
-readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-env"
 
 # --- Logging ----------------------------------------------------------------
 # Never interpolate secret env vars into log lines. Phase headers only.
@@ -41,9 +43,9 @@ fail()  { printf '\n[FAIL] %s\n' "$1" >&2; exit 1; }
 cleanup() {
     local rc=$?
     phase "cleanup"
-    if [[ -x "$DEVENV" ]]; then
-        "$DEVENV" down "$INSTANCE" --purge >/dev/null 2>&1 || true
-        info "container devenv-${INSTANCE} removed (purged volume)"
+    if [[ -f "${AGENT_ENV_BIN}" ]]; then
+        "${AGENT_ENV[@]}" down "$INSTANCE" --purge >/dev/null 2>&1 || true
+        info "container agent-env-${INSTANCE} removed (purged volume)"
     fi
     rm -rf "$VERIFY_DIR" 2>/dev/null || true
     if [[ $rc -eq 0 ]]; then
@@ -53,7 +55,7 @@ cleanup() {
     fi
     exit "$rc"
 }
-VERIFY_DIR="$(mktemp -d -t devenv-smoke.XXXXXX)"
+VERIFY_DIR="$(mktemp -d -t agent-env-smoke.XXXXXX)"
 trap cleanup EXIT INT TERM
 
 # --- Phase 1: pre-flight ----------------------------------------------------
@@ -63,8 +65,9 @@ command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 \
     || fail "neither docker nor podman on PATH"
 info "container runtime present"
 
-[[ -x "$DEVENV" ]] || fail "bin/devenv missing or not executable"
-info "bin/devenv ready"
+command -v uv >/dev/null 2>&1 || fail "uv not on PATH (agent-env is a uv script)"
+[[ -f "${AGENT_ENV_BIN}" ]] || fail "bin/agent-env missing"
+info "uv + bin/agent-env ready"
 
 [[ -f "${REPO_ROOT}/.env" ]] || fail ".env not found at repo root (copy .env.example and fill in)"
 # Source .env without exposing values to logs. Only read names afterward.
@@ -80,17 +83,17 @@ for var in GH_TOKEN GIT_USER_NAME GIT_USER_EMAIL; do
 done
 info ".env required keys present"
 
-: "${DEVENV_SMOKE_REPO:?DEVENV_SMOKE_REPO must be set to owner/name of a GitHub repo your GH_TOKEN can push to}"
-info "target repo: ${DEVENV_SMOKE_REPO}"
+: "${AGENT_ENV_SMOKE_REPO:?AGENT_ENV_SMOKE_REPO must be set to owner/name of a GitHub repo your GH_TOKEN can push to}"
+info "target repo: ${AGENT_ENV_SMOKE_REPO}"
 
 # --- Phase 2: build ---------------------------------------------------------
 phase "build image"
-"$DEVENV" build >/dev/null
+"${AGENT_ENV[@]}" build >/dev/null
 info "image built"
 
 # --- Phase 3: up ------------------------------------------------------------
 phase "launch container"
-"$DEVENV" up "$INSTANCE"
+"${AGENT_ENV[@]}" up "$INSTANCE"
 PORT_FILE="${STATE_DIR}/${INSTANCE}.port"
 [[ -f "$PORT_FILE" ]] || fail "port state file missing: $PORT_FILE"
 PORT="$(cat "$PORT_FILE")"
@@ -106,7 +109,7 @@ for i in {1..30}; do
     sleep 1
     if [[ $i -eq 30 ]]; then
         # Surface container logs for diagnostic if sshd never came up.
-        "$DEVENV" logs "$INSTANCE" >&2 || true
+        "${AGENT_ENV[@]}" logs "$INSTANCE" >&2 || true
         fail "sshd did not become ready within 30s on port ${PORT}"
     fi
 done
@@ -117,23 +120,23 @@ phase "in-container push"
 # We use the runtime's exec rather than ssh to avoid host-key trust setup
 # during a smoke test. The credential helper from item C is exercised either
 # way — what matters is git running inside the container with GH_TOKEN in env.
-RUNTIME="${DEVENV_RUNTIME:-}"
+RUNTIME="${AGENT_ENV_RUNTIME:-}"
 if [[ -z "$RUNTIME" ]]; then
     if command -v podman >/dev/null 2>&1; then RUNTIME=podman
     else RUNTIME=docker; fi
 fi
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-CLONE_URL="https://github.com/${DEVENV_SMOKE_REPO}.git"
+CLONE_URL="https://github.com/${AGENT_ENV_SMOKE_REPO}.git"
 
 # Build a small heredoc'd script and pipe it in so we never put $GH_TOKEN in
 # argv. The container already has it via --env-file at `up` time.
-"$RUNTIME" exec -i "devenv-${INSTANCE}" bash -s <<INNER
+"$RUNTIME" exec -i "agent-env-${INSTANCE}" bash -s <<INNER
 set -euo pipefail
 cd /workspace
 rm -rf smoke-target
 git clone "${CLONE_URL}" smoke-target >/dev/null 2>&1 \\
-    || { echo "[in-container] clone failed — check DEVENV_SMOKE_REPO and GH_TOKEN scope" >&2; exit 11; }
+    || { echo "[in-container] clone failed — check AGENT_ENV_SMOKE_REPO and GH_TOKEN scope" >&2; exit 11; }
 cd smoke-target
 echo "smoke ${TIMESTAMP}" >> SMOKE_LOG.md
 git add SMOKE_LOG.md
@@ -149,7 +152,7 @@ cd "$VERIFY_DIR"
 GIT_ASKPASS=/bin/true \
     git -c "credential.helper=!f() { echo username=x-access-token; echo password=${GH_TOKEN}; }; f" \
     clone --depth 1 "$CLONE_URL" verify >/dev/null 2>&1 \
-    || fail "could not re-clone ${DEVENV_SMOKE_REPO} from host"
+    || fail "could not re-clone ${AGENT_ENV_SMOKE_REPO} from host"
 if ! grep -q "smoke ${TIMESTAMP}" verify/SMOKE_LOG.md 2>/dev/null; then
     fail "heartbeat line not visible on origin — push may not have landed"
 fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# entrypoint.sh — container PID 1 for the remote-persistent-devenv image.
+# entrypoint.sh — container PID 1 for the agent-env image.
 #
 # Responsibilities (in order):
 #   1. Validate required env vars (fail fast, never log their values).
@@ -60,24 +60,24 @@ for opt in ANTHROPIC_API_KEY OPENAI_API_KEY; do
 done
 
 # --- 1b. Seed persistent shell-env template ---------------------------------
-# /home/dev/.devenv lives on the per-container 'shellenv' named volume and is
+# /home/dev/.agent-env lives on the per-container 'shellenv' named volume and is
 # sourced into every interactive bash/zsh shell (see Dockerfile). On first boot
 # the volume is empty, so drop a commented template explaining its purpose.
 # Idempotent: never overwrite an existing file, and never echo its contents.
 # Home base is /home/dev in the image (deliberately hardcoded, not $HOME, since
-# the runtime may not export HOME for the non-root user). DEVENV_HOME lets the
+# the runtime may not export HOME for the non-root user). AGENT_ENV_HOME lets the
 # off-container test harness redirect this one path; production leaves it unset
 # so the default is byte-identical to the previous behavior.
-DEVENV_HOME="${DEVENV_HOME:-/home/dev}"
-DEVENV_ENV_FILE="${DEVENV_HOME}/.devenv/env"
-if [[ ! -f "${DEVENV_ENV_FILE}" ]]; then
-    log "seeding persistent shell-env template at ${DEVENV_ENV_FILE}"
-    mkdir -p "${DEVENV_HOME}/.devenv"
-    cat > "${DEVENV_ENV_FILE}" <<'EOF'
-# ~/.devenv/env — persistent shell environment for this devenv container.
+AGENT_ENV_HOME="${AGENT_ENV_HOME:-/home/dev}"
+AGENT_ENV_ENV_FILE="${AGENT_ENV_HOME}/.agent-env/env"
+if [[ ! -f "${AGENT_ENV_ENV_FILE}" ]]; then
+    log "seeding persistent shell-env template at ${AGENT_ENV_ENV_FILE}"
+    mkdir -p "${AGENT_ENV_HOME}/.agent-env"
+    cat > "${AGENT_ENV_ENV_FILE}" <<'EOF'
+# ~/.agent-env/env — persistent shell environment for this agent-env container.
 #
 # This file lives on the per-container 'shellenv' named volume, so it survives
-# `devenv down` / `devenv up` and crashes (it is dropped only by `down --purge`).
+# `agent-env down` / `agent-env up` and crashes (it is dropped only by `down --purge`).
 # It is sourced with `set -a` into every interactive bash and zsh shell,
 # including tmux panes. Keep it to simple KEY=VALUE / export lines.
 #
@@ -127,8 +127,8 @@ log "sshd listening"
 
 # --- 5. tmux session --------------------------------------------------------
 # Detached session named 'main'. On first creation, build a configurable set of
-# windows from DEVENV_TMUX_WINDOWS (space-separated names). Default when unset:
-# "shell edit agents". Opt-out: setting DEVENV_TMUX_WINDOWS to an EMPTY string
+# windows from AGENT_ENV_TMUX_WINDOWS (space-separated names). Default when unset:
+# "shell edit agents". Opt-out: setting AGENT_ENV_TMUX_WINDOWS to an EMPTY string
 # creates just a single default window (today's behavior). Windows are BARE
 # SHELLS — agents are NEVER auto-launched via send-keys. Idempotent: the layout
 # is built only inside the has-session guard (when the session does not already
@@ -140,7 +140,7 @@ if tmux has-session -t main 2>/dev/null; then
 else
     # '-' (not ':-') so an unset var falls back to the default layout while an
     # explicitly-empty value is honored as an opt-out.
-    tmux_windows="${DEVENV_TMUX_WINDOWS-shell edit agents}"
+    tmux_windows="${AGENT_ENV_TMUX_WINDOWS-shell edit agents}"
     valid_windows=()
     for w in ${tmux_windows}; do
         if [[ "${w}" =~ ^[A-Za-z0-9._-]+$ ]]; then
