@@ -182,6 +182,32 @@ test_zsh_names() {
     if printf '%s\n' "${out}" | grep -qxF "vps"; then fail=$((fail + 1)); note "FAIL: zsh local should exclude remote 'vps'"; else pass=$((pass + 1)); fi
 }
 
+# oh-my-zsh plugin: simulate omz's load order (compinit, then source the plugin)
+# and assert it wires PATH, registers completions, and defines aliases.
+test_omz_plugin() {
+    command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping omz plugin test"; return; }
+    local plugin="${REPO_ROOT}/completions/oh-my-zsh/devenv/devenv.plugin.zsh"
+    if [[ ! -f "${plugin}" ]]; then fail=$((fail + 1)); note "FAIL: omz plugin file missing"; return; fi
+    local out
+    out="$(zsh -c "
+        autoload -Uz compinit && compinit -u
+        source '${plugin}'
+        print -r -- \"PATHHIT=\$([[ \":\$PATH:\" == *\":\${DEVENV_REPO}/bin:\"* ]] && echo yes || echo no)\"
+        print -r -- \"COMPFUNC=\${functions[_devenv]:+defined}\"
+        print -r -- \"COMPDEF=\${_comps[devenv]:-none}\"
+        print -r -- \"COMPDEFWIZ=\${_comps[devenv-wiz]:-none}\"
+        alias dv >/dev/null 2>&1 && print -r -- 'ALIAS=ok'
+    " 2>/dev/null)"
+    local label
+    for label in "PATHHIT=yes" "COMPFUNC=defined" "COMPDEF=_devenv" "COMPDEFWIZ=_devenv-wiz" "ALIAS=ok"; do
+        if printf '%s\n' "${out}" | grep -qxF "${label}"; then
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1)); note "FAIL: omz plugin missing '${label}' (got: ${out//$'\n'/ | })"
+        fi
+    done
+}
+
 setup_sandbox
 trap teardown_sandbox EXIT
 
@@ -194,6 +220,9 @@ test_security_no_exec devenv-wiz _devenv_wiz
 
 note "--- zsh name gatherers ---"
 test_zsh_names
+
+note "--- oh-my-zsh plugin ---"
+test_omz_plugin
 
 note ""
 note "completion tests: ${pass} passed, ${fail} failed"

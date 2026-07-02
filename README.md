@@ -233,8 +233,25 @@ fpath=(~/.zfunc $fpath)
 autoload -Uz compinit && compinit
 ```
 
-The completion scripts are covered by `bin/tests/test_completions.sh` (bash
-only, no runtime needed): `bin/tests/test_completions.sh`.
+**oh-my-zsh** — a plugin under [`completions/oh-my-zsh/devenv/`](completions/oh-my-zsh/devenv/)
+bundles PATH wiring, both CLIs' completions, and aliases (`dv`, `dvw`, `dva`,
+`dvl`, `dvu`). Symlink it into your custom plugins dir and enable it:
+
+```zsh
+ln -s "$HOME/Git/ondrasek/remote-persistent-devenv/completions/oh-my-zsh/devenv" \
+      "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/devenv"
+# then add `devenv` to plugins=(...) in ~/.zshrc:
+#   plugins=(git devenv)
+```
+
+The plugin auto-detects the repo from the symlink and puts `bin/` on `PATH`, so
+this alone makes `devenv`/`devenv-wiz` callable with completions — no separate
+PATH or `~/.zfunc` step. (If you *copy* the dir instead of symlinking, export
+`DEVENV_REPO=<repo>` in `~/.zshrc` before oh-my-zsh loads.)
+
+The completion scripts and the oh-my-zsh plugin are covered by
+`bin/tests/test_completions.sh` (needs only bash; the zsh/omz cases are skipped
+when zsh is absent).
 
 ### Working inside tmux
 
