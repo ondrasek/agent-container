@@ -1,15 +1,16 @@
-# Packaging for `uv tool install --editable .` (see README "Install as a uv tool").
+# Packaging for a NON-editable install from PyPI (`uv tool install agent-env`,
+# `pipx install agent-env`) as well as `uv tool install --editable .` for dev.
 #
 # agent-env is a single PEP 723 script (bin/agent-env) that also runs via
-# `uv run --script`. This pyproject exposes it as an installable console script
-# WITHOUT duplicating code: the sibling symlink bin/agent_env.py -> agent-env
-# gives the hyphenated, extensionless file an importable module name, and an
-# EDITABLE install path-redirects to it (no copy) so Path(__file__).resolve()
-# still lands inside the repo — which is what keeps REPO_ROOT correct for
-# `build`'s docker context and the `completions` command.
-#
-# A non-editable install would copy the module into site-packages and break
-# REPO_ROOT; --editable is mandatory (documented in the README).
+# `uv run --script`. The wheel ships that one file as the `agent_env` module and
+# bundles the shell completions as package data (agent_env/completions/*), via a
+# force-include mapping — no code is duplicated and no symlink is needed. Because
+# a non-editable install copies the module out of the repo, REPO_ROOT is resolved
+# location-independently at runtime (see _find_repo_root in bin/agent-env):
+# client subcommands (up/down/list/attach/logs/purge/completions) work standalone,
+# and `completions` falls back to the bundled package data. Only `build` needs a
+# repo checkout for its docker build context — supply one via AGENT_ENV_REPO or
+# `--context` (documented in the README).
 
 [build-system]
 requires = ["hatchling"]
@@ -18,7 +19,25 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-env"
 version = "0.1.0"
+description = "Always-on containerized dev environment for AI coding agents, driven over SSH+tmux."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ondrej Krajicek", email = "ondrej.krajicek@ideastatica.com" }]
+keywords = ["devcontainer", "docker", "podman", "tmux", "ssh", "ai-agents", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
 # Mirror the PEP 723 dependency block in bin/agent-env EXACTLY — keep in sync.
 dependencies = [
     "typer>=0.12,<1",
@@ -26,11 +45,21 @@ dependencies = [
     "rich>=13,<15",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ondrasek/agent-env"
+Repository = "https://github.com/ondrasek/agent-env"
+Issues = "https://github.com/ondrasek/agent-env/issues"
+
 [project.scripts]
 agent-env = "agent_env:cli"
 
+# Ship the single-file script as the `agent_env` module and the completion
+# scripts as package data. bypass-selection is required because there is no
+# conventionally-named package/module directory for hatchling to auto-detect.
 [tool.hatch.build.targets.wheel]
-only-include = ["bin/agent_env.py"]
+bypass-selection = true
 
-[tool.hatch.build.targets.wheel.sources]
-"bin" = ""  # install bin/agent_env.py as the top-level module `agent_env`
+[tool.hatch.build.targets.wheel.force-include]
+"bin/agent-env" = "agent_env/__init__.py"
+"completions/agent-env.bash" = "agent_env/completions/agent-env.bash"
+"completions/agent-env.zsh" = "agent_env/completions/agent-env.zsh"

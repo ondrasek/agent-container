@@ -56,7 +56,32 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-env"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+def _find_repo_root() -> "Path | None":
+    """Locate the repo checkout in a way that survives a non-editable install.
+
+    A wheel copies this module into site-packages, so Path(__file__) no longer
+    points inside the repo. Resolution order:
+      1. AGENT_ENV_REPO (explicit operator override), expanded + resolved.
+      2. Walk up from this file, then from cwd, looking for a directory that
+         holds BOTH a Dockerfile and a completions/ dir (the marker that
+         identifies THIS repo, avoiding false positives on unrelated trees).
+    Returns None when no checkout is reachable — client subcommands still work
+    (completions falls back to bundled package data; build fails actionably).
+    """
+    env = os.environ.get("AGENT_ENV_REPO")
+    if env:
+        return Path(env).expanduser().resolve()
+    here = Path(__file__).resolve()
+    for base in (here.parent.parent, *here.parents):
+        if (base / "Dockerfile").is_file() and (base / "completions").is_dir():
+            return base
+    for base in (Path.cwd(), *Path.cwd().parents):
+        if (base / "Dockerfile").is_file() and (base / "completions").is_dir():
+            return base
+    return None
+
+
+REPO_ROOT = _find_repo_root()
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 # ssh argv injection guard: a user/host that begins with '-' would be parsed
@@ -493,11 +518,24 @@ def hint(cmd: str) -> None:
     console.print(f"hint: {cmd}", style="dim")
 
 
-def do_build(tag: str) -> None:
+def do_build(tag: str, context: "Path | None" = None) -> None:
+    # `build` is the one subcommand that needs a repo checkout: a docker build
+    # context IS a checkout. Resolve it explicitly (a PyPI install has REPO_ROOT
+    # is None) and fail actionably rather than with a traceback.
+    ctx = context or (
+        Path(os.environ["AGENT_ENV_REPO"]).expanduser().resolve()
+        if os.environ.get("AGENT_ENV_REPO")
+        else REPO_ROOT
+    )
+    if ctx is None:
+        die(
+            "no repo checkout for the docker build context; run from a checkout, "
+            "set AGENT_ENV_REPO=<checkout>, or pass --context <dir>"
+        )
     rt = detect_runtime()
-    log(f"building image '{tag}' with {rt} from {REPO_ROOT}")
+    log(f"building image '{tag}' with {rt} from {ctx}")
     # Inherited stdio: layer progress must stream, never capture.
-    rc = subprocess.run([rt, "build", "-t", tag, str(REPO_ROOT)]).returncode
+    rc = subprocess.run([rt, "build", "-t", tag, str(ctx)]).returncode
     if rc != 0:
         die(f"build failed (exit {rc})")
 
@@ -1110,9 +1148,15 @@ def run_self_test() -> int:
 @app.command()
 def build(
     tag: str = typer.Argument(IMAGE_NAME, help="Image tag to build."),
+    context: Path | None = typer.Option(
+        None,
+        "--context",
+        help="Docker build context (repo checkout). Defaults to AGENT_ENV_REPO "
+        "or the auto-detected checkout; required when installed from PyPI.",
+    ),
 ) -> None:
-    """Build the image at the repo root (streams build output)."""
-    do_build(tag)
+    """Build the image from a repo checkout (streams build output)."""
+    do_build(tag, context)
 
 
 @app.command()
@@ -1195,20 +1239,38 @@ def menu() -> None:
     raise typer.Exit(wizard_loop())
 
 
+def _completion_script(shell: str) -> str:
+    """Return the bash/zsh completion script text.
+
+    Prefers the on-disk checkout (dev / `uv run --script`, where REPO_ROOT
+    resolves via the __file__ marker); falls back to the completions bundled as
+    package data in a non-editable PyPI install (where REPO_ROOT is None).
+    """
+    if REPO_ROOT is not None:
+        p = REPO_ROOT / "completions" / f"agent-env.{shell}"
+        if p.is_file():
+            return p.read_text()
+    try:
+        import importlib.resources as ir
+
+        res = ir.files("agent_env").joinpath(f"completions/agent-env.{shell}")
+        if res.is_file():
+            return res.read_text()
+    except (ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError):
+        pass
+    die(f"completion script for '{shell}' not found (need a checkout or an installed package)")
+
+
 @app.command()
 def completions(
     # Optional + manual validation so a bad/missing shell routes through die()
     # (exit 1, '[agent-env] FATAL:' style), not Typer's exit-2 required-arg error.
     shell: str = typer.Argument("", help="Shell to emit completion for: bash or zsh."),
 ) -> None:
-    """Print the checked-in completion script for bash or zsh."""
+    """Print the completion script for bash or zsh (from a checkout or package data)."""
     if shell not in ("bash", "zsh"):
         die("usage: agent-env completions <bash|zsh>")
-    # REPO_ROOT is Path(__file__).resolve()-based, so this works under a symlink.
-    script = REPO_ROOT / "completions" / f"agent-env.{shell}"
-    if not script.is_file():
-        die(f"completion script not found: {script}")
-    sys.stdout.write(script.read_text())
+    sys.stdout.write(_completion_script(shell))
 
 
 @app.callback(invoke_without_command=True)
