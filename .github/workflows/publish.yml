@@ -1,0 +1,45 @@
+# Publish agent-env to PyPI via Trusted Publishing (OIDC — no stored secrets).
+#
+# Trigger: pushing a tag matching v* (e.g. v0.1.0). Builds an sdist + wheel with
+# `uv build` and uploads them with pypa/gh-action-pypi-publish, which mints a
+# short-lived OIDC token. The operator configures the PyPI trusted publisher once
+# (project: agent-env, owner: ondrasek, repo: agent-env, workflow: publish.yml,
+# environment: release) — no API token is ever stored in the repo.
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build distributions
+        run: uv build
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # OIDC token for Trusted Publishing
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
