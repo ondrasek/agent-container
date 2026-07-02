@@ -121,14 +121,43 @@ sudo /usr/sbin/sshd
 log "sshd listening"
 
 # --- 5. tmux session --------------------------------------------------------
-# Detached session named 'main' with a single shell pane. Idempotent: if a
-# previous incarnation of the session somehow survived (it shouldn't — tmux
-# server dies with PID 1), don't blow up.
+# Detached session named 'main'. On first creation, build a configurable set of
+# windows from DEVENV_TMUX_WINDOWS (space-separated names). Default when unset:
+# "shell edit agents". Opt-out: setting DEVENV_TMUX_WINDOWS to an EMPTY string
+# creates just a single default window (today's behavior). Windows are BARE
+# SHELLS — agents are NEVER auto-launched via send-keys. Idempotent: the layout
+# is built only inside the has-session guard (when the session does not already
+# exist), so a restart never duplicates windows. Each requested window name is
+# validated against a safe charset before it reaches tmux; invalid names are
+# skipped, never forwarded unsanitized. No env-var value is ever echoed.
 if tmux has-session -t main 2>/dev/null; then
     log "tmux session 'main' already exists, leaving it alone"
 else
-    tmux new-session -d -s main
-    log "tmux session 'main' ready"
+    # '-' (not ':-') so an unset var falls back to the default layout while an
+    # explicitly-empty value is honored as an opt-out.
+    tmux_windows="${DEVENV_TMUX_WINDOWS-shell edit agents}"
+    valid_windows=()
+    for w in ${tmux_windows}; do
+        if [[ "${w}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            valid_windows+=("${w}")
+        else
+            log "skipping invalid tmux window name (must match [A-Za-z0-9._-]+)"
+        fi
+    done
+    if [[ ${#valid_windows[@]} -eq 0 ]]; then
+        # Opt-out (empty var) or every requested name rejected: single window.
+        tmux new-session -d -s main
+        log "tmux session 'main' ready (single default window)"
+    else
+        # First window carries the session and is named after the first entry.
+        tmux new-session -d -s main -n "${valid_windows[0]}"
+        for (( wi = 1; wi < ${#valid_windows[@]}; wi++ )); do
+            tmux new-window -t main -n "${valid_windows[wi]}"
+        done
+        # Select the first window so an attach lands there.
+        tmux select-window -t "main:${valid_windows[0]}"
+        log "tmux session 'main' ready with ${#valid_windows[@]} window(s)"
+    fi
 fi
 
 # --- 6. PID 1 lifecycle + signal handling -----------------------------------
