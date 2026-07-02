@@ -65,7 +65,7 @@ run_devenv() {  # run_devenv <args...>; resets + fills ${CAP}; returns devenv's 
            "${DEVENV}" "$@" >/dev/null 2>&1 )
 }
 
-# --- 1. 'up' argv: the 5-volume / flag / image parity contract --------------
+# --- 1. 'up' argv: the 6-volume / flag / image parity contract --------------
 run_devenv up acme
 expected_up="run
 -d
@@ -85,6 +85,8 @@ devenv-acme-codex:/home/dev/.codex
 devenv-acme-pi:/home/dev/.pi
 -v
 devenv-acme-shellenv:/home/dev/.devenv
+-v
+devenv-acme-tmux:/home/dev/.config/tmux
 --restart
 unless-stopped
 ${IMAGE}"
@@ -95,10 +97,10 @@ md="${SB}/proj"; mkdir -p "${md}"
 absmd="$(cd "${md}" && pwd -P)"
 run_devenv up acme --mount "${md}"
 if grep -qxF "${absmd}:/workspace/proj" "${CAP}"; then ok; else bad "--mount default target /workspace/<basename>"; fi
-# no --mount => no extra -v beyond the 5 standard volumes
+# no --mount => no extra -v beyond the 6 standard volumes
 run_devenv up acme
 nv="$(grep -cxF -- '-v' "${CAP}")"
-check_eq "no --mount => exactly 5 -v flags" "5" "${nv}"
+check_eq "no --mount => exactly 6 -v flags" "6" "${nv}"
 
 # --- 3. --mount rejects a non-existent host dir -----------------------------
 if run_devenv up acme --mount "${SB}/does-not-exist"; then bad "--mount missing dir should exit nonzero"; else ok; fi
@@ -107,9 +109,9 @@ if run_devenv up acme --mount; then bad "--mount with no arg should exit nonzero
 # unexpected extra positional errors
 if run_devenv up acme extra; then bad "extra positional should exit nonzero"; else ok; fi
 
-# --- 4. --purge removes all 5 volumes; plain down removes none --------------
+# --- 4. --purge removes all 6 volumes; plain down removes none --------------
 run_devenv down acme --purge
-check_eq "down --purge removes 5 volumes" "5" "$(grep -c '^VOLRM ' "${CAP}")"
+check_eq "down --purge removes 6 volumes" "6" "$(grep -c '^VOLRM ' "${CAP}")"
 run_devenv down acme
 check_eq "down (no --purge) removes 0 volumes" "0" "$(grep -c '^VOLRM ' "${CAP}" || true)"
 

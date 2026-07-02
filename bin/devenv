@@ -96,17 +96,21 @@ claude_volume_name()   { printf '%s%s-claude'    "${CONTAINER_PREFIX}" "$1"; }
 codex_volume_name()    { printf '%s%s-codex'     "${CONTAINER_PREFIX}" "$1"; }
 pi_volume_name()       { printf '%s%s-pi'        "${CONTAINER_PREFIX}" "$1"; }
 shellenv_volume_name() { printf '%s%s-shellenv'  "${CONTAINER_PREFIX}" "$1"; }
+# Persists the operator's ~/.config/tmux (tmux.conf + tpm plugins) across
+# down/up. Joins the canonical order AFTER shellenv.
+tmux_volume_name()     { printf '%s%s-tmux'       "${CONTAINER_PREFIX}" "$1"; }
 
 # All per-container volume names, in the canonical order (workspace, claude,
-# codex, pi, shellenv). Used by cmd_down --purge / the purge path.
+# codex, pi, shellenv, tmux). Used by cmd_down --purge / the purge path.
 all_volume_names() {
     local name="$1"
-    printf '%s\n%s\n%s\n%s\n%s\n' \
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$(volume_name "${name}")" \
         "$(claude_volume_name "${name}")" \
         "$(codex_volume_name "${name}")" \
         "$(pi_volume_name "${name}")" \
-        "$(shellenv_volume_name "${name}")"
+        "$(shellenv_volume_name "${name}")" \
+        "$(tmux_volume_name "${name}")"
 }
 
 # Resolve a --mount spec 'HOSTDIR[:CONTAINERPATH]' into an absolute '-v' value
@@ -270,6 +274,7 @@ cmd_up() {
         -v "$(codex_volume_name "${name}"):/home/dev/.codex"
         -v "$(pi_volume_name "${name}"):/home/dev/.pi"
         -v "$(shellenv_volume_name "${name}"):/home/dev/.devenv"
+        -v "$(tmux_volume_name "${name}"):/home/dev/.config/tmux"
     )
     local m
     for m in "${bind_mounts[@]+"${bind_mounts[@]}"}"; do
@@ -306,7 +311,7 @@ cmd_down() {
     fi
 
     # --purge drops ALL per-container volumes (workspace + claude + codex + pi +
-    # shellenv), tolerating absence; plain down preserves every one of them.
+    # shellenv + tmux), tolerating absence; plain down preserves every one of them.
     local -a vols=()
     local v
     while IFS= read -r v; do
@@ -386,7 +391,7 @@ subcommands:
                      must be under a writable Lima mount.
   down <name>        Stop and remove container devenv-<name>.
        [--purge]     Also delete ALL per-container volumes (workspace, claude,
-                     codex, pi, shellenv).
+                     codex, pi, shellenv, tmux).
   list               List running devenv containers.
   attach <name>      ssh + tmux attach to container devenv-<name>.
   logs <name>        Tail container logs.
