@@ -97,6 +97,35 @@ def test_validate_name_rejects_empty(wiz):
         wiz.validate_name("")
 
 
+# --- tmux window-name validation (embedded in the ssh remote command) -----------
+
+
+@pytest.mark.parametrize("window", ["shell", "edit", "agents", "win.1", "a_b-c9", "0"])
+def test_validate_window_accepts(wiz, window):
+    assert wiz.validate_window(window) == window
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        "a;b",           # command separator
+        "$(x)",          # command substitution
+        "a b",           # whitespace (bash would word-split into two args)
+        "`id`",          # backtick substitution
+        "a|b",
+        "a&b",
+        "a>b",
+        "",              # empty is not a valid window name
+        "win\n",
+    ],
+)
+def test_validate_window_rejects_injection(wiz, window):
+    # The window name is interpolated into the remote shell string, so anything
+    # outside [A-Za-z0-9._-]+ must die before it can reach ssh.
+    with pytest.raises(wiz.Fatal, match="invalid tmux window"):
+        wiz.validate_window(window)
+
+
 # --- hosts.conf key normalization ----------------------------------------------
 
 
