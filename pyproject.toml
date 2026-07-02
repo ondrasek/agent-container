@@ -25,11 +25,13 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ondrej Krajicek", email = "ondrej.krajicek@ideastatica.com" }]
-keywords = ["devcontainer", "docker", "podman", "tmux", "ssh", "ai-agents", "cli"]
+keywords = ["dev-environment", "remote-development", "docker", "podman", "tmux", "ssh", "ai-agents", "cli"]
+# NOTE: no `License ::` trove classifier — the SPDX `license = "MIT"` above emits
+# `License-Expression: MIT` (Metadata 2.4); under PEP 639 a license classifier
+# alongside an SPDX expression is redundant/deprecated (setuptools>=78 errors).
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
