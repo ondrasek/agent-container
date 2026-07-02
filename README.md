@@ -408,7 +408,7 @@ persistent volume for each agent's credentials, so you can **log in once,
 interactively, inside the container** and it survives `down`/`up` and crashes:
 
 ```bash
-agent-env attach acme        # or: agent-env attach acme
+agent-env attach acme        # or: agent-env attach --local acme
 # then, inside the tmux session:
 claude          # run /login and follow the prompt
 codex login
@@ -474,8 +474,6 @@ agent-env up acme --mount ~/code/myproject
 # explicit target, and more than one:
 agent-env up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
 ```
-
-`agent-env up acme --mount ~/code/myproject` does the same.
 
 > **macOS / Lima prerequisite:** the host directory must sit inside a **writable**
 > Lima mount, or the container sees it read-only / not at all. If R/W fails, add
