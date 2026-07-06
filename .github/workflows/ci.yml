@@ -29,5 +29,17 @@ jobs:
           uv run --no-project --with pytest
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
           pytest bin/tests
+      - name: Install shell-test tools
+        # tmux + zsh so the entrypoint-layout and zsh/oh-my-zsh completion suites
+        # run their full assertion set instead of self-skipping.
+        run: sudo apt-get update && sudo apt-get install -y tmux zsh
+      - name: Run shell test suites
+        # These bash suites (entrypoint credential/tmux logic + completions) are
+        # NOT collected by pytest, so they must run as their own step or they
+        # silently rot. Any non-zero exit fails the job.
+        run: |
+          bash bin/tests/test_entrypoint.sh
+          bash bin/tests/test_entrypoint_tmux_layout.sh
+          bash bin/tests/test_completions.sh
       - name: Build distributions
         run: uv build

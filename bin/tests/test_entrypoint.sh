@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Executes entrypoint.sh against STUBBED tmux/sudo/git/tail to assert its tmux
-# window-layout logic — the piece with zero prior coverage. No container, no
-# real sshd/tmux, nothing privileged.
+# window-layout logic AND its git credential/identity + require_env behavior —
+# the pieces with zero prior coverage. No container, no real sshd/tmux, nothing
+# privileged.
 #
 # Run:  bin/tests/test_entrypoint.sh
 #
-# Covers the four contract behaviors:
+# Covers:
 #   1. AGENT_CONTAINER_TMUX_WINDOWS unset      -> windows 'shell edit agents' (${VAR-default}).
 #   2. AGENT_CONTAINER_TMUX_WINDOWS=''         -> single default window (opt-out path).
 #   3. an injection name is SKIPPED, never forwarded to tmux, and fires no
 #      command substitution ('a;b' and '$(touch PWNED)').
 #   4. idempotency: the has-session guard means a restart never rebuilds windows.
+#   5. git credential helper is scoped to https://github.com (never the global
+#      `credential.helper`), and git identity is configured from the env vars —
+#      the mechanism behind the non-interactive-push hard constraint.
+#   6. require_env: a missing/empty required var aborts with a naming message
+#      and a non-zero exit, before sshd/tmux start.
 #
-# Mechanics: `sudo` and `git` are no-op stubs (so ssh-keygen/sshd/git config
-# never run), `tail` exits immediately (so the PID-1 `tail -f /dev/null; wait`
-# returns instead of blocking), and `tmux` is a dispatcher that records
+# Mechanics: `sudo` is a no-op stub, `git` records its argv (so the credential
+# helper / identity config can be asserted while still exiting 0), `tail` exits
+# immediately (so the PID-1 `tail -f /dev/null; wait` returns instead of
+# blocking), and `tmux` is a dispatcher that records
 # new-session/new-window/select-window argv and models has-session via a
 # per-run sentinel file. AGENT_CONTAINER_HOME redirects the shell-env seeding path into a
 # writable tmpdir. bash word-splits ${AGENT_CONTAINER_TMUX_WINDOWS}, so a valid injection
@@ -46,22 +53,30 @@ bad() { fail=$((fail + 1)); note "FAIL: $1"; }
 cap_hasx()  { grep -qxF "$1" "${CAP}"; }              # exact captured line present
 cap_has()   { grep -qF  "$1" "${CAP}"; }             # substring present anywhere
 cap_count() { grep -c "^$1" "${CAP}" 2>/dev/null || true; }  # grep -c prints 0 itself
+git_has()   { grep -qF "$1" "${GITCAP}"; }           # substring present in git argv log
 log_has()   { grep -qF "$1" "${LOG}"; }
 
 SB="$(mktemp -d)"
 trap 'rm -rf "${SB}"' EXIT
 STUB="${SB}/stub"; mkdir -p "${STUB}"
 CAP="${SB}/capture"
+GITCAP="${SB}/gitcapture"
 LOG="${SB}/log"
 STATE="${SB}/stubstate"; mkdir -p "${STATE}"
 HOMEDIR="${SB}/home"; mkdir -p "${HOMEDIR}"
 WORK="${SB}/work"; mkdir -p "${WORK}"
 
-# no-op privileged/identity commands.
-for cmd in sudo git; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/${cmd}"
-    chmod +x "${STUB}/${cmd}"
-done
+# no-op privileged command (ssh-keygen/sshd/mkdir all run through sudo).
+printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/sudo"
+chmod +x "${STUB}/sudo"
+# git recorder: append the argv to the capture log (space-joined is fine for the
+# substring assertions), then exit 0 so identity/credential config never fails.
+cat > "${STUB}/git" <<'EOF'
+#!/usr/bin/env bash
+printf 'git %s\n' "$*" >> "${AGENT_CONTAINER_GIT_CAPTURE}"
+exit 0
+EOF
+chmod +x "${STUB}/git"
 # tail: return immediately so `tail -f /dev/null & wait` unblocks and PID-1 exits.
 printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/tail"
 chmod +x "${STUB}/tail"
@@ -93,12 +108,13 @@ reset_session() { rm -f "${STATE}/exists"; }
 # run_entrypoint <mode>; mode is __unset__ | __empty__ | any literal value.
 run_entrypoint() {
     local mode="$1"
-    : > "${CAP}"; : > "${LOG}"
+    : > "${CAP}"; : > "${GITCAP}"; : > "${LOG}"
     (
         cd "${WORK}" || exit 99
         export GH_TOKEN=x GIT_USER_NAME='Test User' GIT_USER_EMAIL='t@example.com'
         export HOME="${HOMEDIR}" AGENT_CONTAINER_HOME="${HOMEDIR}"
         export AGENT_CONTAINER_CAPTURE="${CAP}" AGENT_CONTAINER_STUB_STATE="${STATE}"
+        export AGENT_CONTAINER_GIT_CAPTURE="${GITCAP}"
         export PATH="${STUB}:${PATH}"
         unset AGENT_CONTAINER_TMUX_WINDOWS
         case "${mode}" in
@@ -108,6 +124,25 @@ run_entrypoint() {
         esac
         bash "${ENTRY}" >/dev/null 2>"${LOG}"
     )
+}
+
+# run_missing <varname>: run the entrypoint with one required var unset (others
+# valid) and print its exit code. Captures the entrypoint's stderr into LOG.
+run_missing() {
+    local missing="$1"
+    : > "${CAP}"; : > "${GITCAP}"; : > "${LOG}"
+    (
+        cd "${WORK}" || exit 99
+        export GH_TOKEN=x GIT_USER_NAME='Test User' GIT_USER_EMAIL='t@example.com'
+        export HOME="${HOMEDIR}" AGENT_CONTAINER_HOME="${HOMEDIR}"
+        export AGENT_CONTAINER_CAPTURE="${CAP}" AGENT_CONTAINER_STUB_STATE="${STATE}"
+        export AGENT_CONTAINER_GIT_CAPTURE="${GITCAP}"
+        export PATH="${STUB}:${PATH}"
+        unset AGENT_CONTAINER_TMUX_WINDOWS
+        unset "${missing}"
+        bash "${ENTRY}" >/dev/null 2>"${LOG}"
+    )
+    printf '%s' "$?"
 }
 
 # --- 1. unset AGENT_CONTAINER_TMUX_WINDOWS -> default 'shell edit agents' --------------
@@ -158,6 +193,32 @@ check_eq "idempotency: pass 2 makes no new-session"   "0" "$(cap_count 'new-sess
 check_eq "idempotency: pass 2 makes no new-window"    "0" "$(cap_count 'new-window')"
 check_eq "idempotency: pass 2 makes no select-window" "0" "$(cap_count 'select-window')"
 if log_has "already exists, leaving it alone"; then ok; else bad "idempotency: pass 2 logs the guard"; fi
+
+# --- 5. git credential helper scoping + identity -----------------------------
+# The helper MUST be registered under credential.https://github.com.helper, not
+# the global credential.helper, so ${GH_TOKEN} is never offered to other hosts.
+# (Substring 'credential.helper' cannot appear inside the scoped key
+# 'credential.https://github.com.helper', so it uniquely flags the global form.)
+reset_session
+run_entrypoint __unset__
+if git_has 'credential.https://github.com.helper'; then ok; else bad "cred: helper is scoped to https://github.com"; fi
+if git_has 'credential.helper '; then bad "cred: global unscoped credential.helper must NOT be set"; else ok; fi
+# The token itself is stored as the literal '${GH_TOKEN}' (expanded at push
+# time), never the resolved value — assert the literal is present.
+if git_has 'password=${GH_TOKEN}'; then ok; else bad "cred: helper body carries literal \${GH_TOKEN}"; fi
+# Identity is configured from the env vars.
+if git_has 'user.name Test User';      then ok; else bad "identity: user.name configured"; fi
+if git_has 'user.email t@example.com'; then ok; else bad "identity: user.email configured"; fi
+
+# --- 6. require_env: a missing required var aborts before sshd/tmux -----------
+for v in GH_TOKEN GIT_USER_NAME GIT_USER_EMAIL; do
+    reset_session
+    rc="$(run_missing "${v}")"
+    check_eq "require_env(${v}): non-zero exit" "1" "${rc}"
+    if log_has "required env var ${v} is missing"; then ok; else bad "require_env(${v}): names the offender"; fi
+    # Aborts BEFORE the tmux layout is built.
+    if cap_has 'new-session'; then bad "require_env(${v}): must abort before tmux starts"; else ok; fi
+done
 
 note ""
 note "entrypoint tmux tests: ${pass} passed, ${fail} failed"
