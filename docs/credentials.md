@@ -46,12 +46,14 @@ The host-side file path is operator-managed; the container only sees env vars.
 
 ## Git push contract
 
-HTTPS, not SSH. The entrypoint (item C) configures a git credential helper that returns `$GH_TOKEN` from process env on demand:
+HTTPS, not SSH. The entrypoint configures a git credential helper that returns `$GH_TOKEN` from process env on demand, **scoped to `https://github.com`** so the token is never offered to any other host:
 
 ```sh
-git config --global credential.helper \
+git config --global credential.https://github.com.helper \
   '!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
 ```
+
+The URL scope is a deliberate safeguard: a global `credential.helper` would hand `$GH_TOKEN` to git for any HTTPS host it authenticates against, so an agent tricked into fetching `https://attacker.example/repo` would leak the token. No global helper is set, so non-GitHub hosts get no credential at all.
 
 The token stays in process memory; it is **not** written to `~/.git-credentials` or any file in the container's writable layer.
 

