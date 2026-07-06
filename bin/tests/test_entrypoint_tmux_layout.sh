@@ -61,13 +61,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# no-op privileged/identity commands + non-blocking tail (so PID-1 `wait` returns).
-for cmd in sudo git; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/${cmd}"
-    chmod +x "${STUB}/${cmd}"
-done
+# no-op identity command + non-blocking tail (so PID-1 `wait` returns). The
+# rootless entrypoint uses no sudo; sshd is substituted via AGENT_CONTAINER_SSHD
+# (below), and ssh-keygen runs for real to seed the host key.
+printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/git"
+chmod +x "${STUB}/git"
 printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/tail"
 chmod +x "${STUB}/tail"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${STUB}/sshd"
+chmod +x "${STUB}/sshd"
 
 # tmux wrapper: forward every call to the REAL tmux on a private socket. The
 # entrypoint calls `tmux <sub> ...` unqualified; injecting '-L ${SOCK}' ahead of
@@ -86,6 +88,7 @@ run_entrypoint() {
         export GH_TOKEN=x GIT_USER_NAME='Test User' GIT_USER_EMAIL='t@example.com'
         export HOME="${HOMEDIR}" AGENT_CONTAINER_HOME="${HOMEDIR}"
         export AGENT_CONTAINER_REAL_TMUX="${REAL_TMUX}" AGENT_CONTAINER_TMUX_SOCKET="${SOCK}"
+        export AGENT_CONTAINER_SSHD="${STUB}/sshd" AGENT_CONTAINER_INJECT_DIR="${SB}/inject"
         export PATH="${STUB}:${PATH}"
         unset AGENT_CONTAINER_TMUX_WINDOWS
         case "${mode}" in

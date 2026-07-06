@@ -58,12 +58,13 @@ def test_container_and_volume_naming(wiz):
     assert wiz.volume_name("my-box") == "agent-container-my-box-workspace"
     # Each per-container naming helper has its own explicit contract assertion
     # rather than relying on doctest/argv side-coverage (the canonical order is
-    # workspace, claude, codex, pi, shellenv, tmux).
+    # workspace, claude, codex, pi, shellenv, tmux, ssh).
     assert wiz.claude_volume_name("acme") == "agent-container-acme-claude"
     assert wiz.codex_volume_name("acme") == "agent-container-acme-codex"
     assert wiz.pi_volume_name("acme") == "agent-container-acme-pi"
     assert wiz.shellenv_volume_name("acme") == "agent-container-acme-shellenv"
     assert wiz.tmux_volume_name("acme") == "agent-container-acme-tmux"
+    assert wiz.ssh_volume_name("acme") == "agent-container-acme-ssh"
 
 
 # --- name validation: ^[a-z0-9][a-z0-9_-]*$ ------------------------------------

@@ -14,6 +14,17 @@
 # Parallel-container safety: every per-container value (ContainerName,
 # PublishPort, Volume, EnvironmentFile) is unique per substitution. Two
 # instantiations with different ${NAME} produce two non-colliding units.
+#
+# Volume parity with the CLI: this template mounts the SAME seven per-container
+# named volumes that `agent-container up` mounts (workspace + the five agent /
+# shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
+# `codex login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH
+# identity (host key + authorized_keys) persist across restarts and recreation
+# on the Quadlet path too. Keep this list in sync with `all_volume_mounts()` in
+# bin/agent-container.
+#
+# The container is rootless (sshd runs as dev on port 2222); PublishPort maps
+# the operator's host port to 2222.
 
 [Unit]
 Description=agent-container — remote persistent dev environment (${NAME})
@@ -23,14 +34,23 @@ Wants=network-online.target
 [Container]
 Image=localhost/agent-container:latest
 ContainerName=agent-container-${NAME}
-PublishPort=${PORT}:22
+PublishPort=${PORT}:2222
 Volume=agent-container-${NAME}-workspace:/workspace
+Volume=agent-container-${NAME}-claude:/home/dev/.claude
+Volume=agent-container-${NAME}-codex:/home/dev/.codex
+Volume=agent-container-${NAME}-pi:/home/dev/.pi
+Volume=agent-container-${NAME}-shellenv:/home/dev/.agent-container
+Volume=agent-container-${NAME}-tmux:/home/dev/.config/tmux
+Volume=agent-container-${NAME}-ssh:/home/dev/.ssh
 EnvironmentFile=${ENV_FILE}
 # UTC unless the .env overrides TZ.
 Timezone=UTC
 
 [Service]
-Restart=on-failure
+# always (not on-failure): an always-on dev box must come back after a host
+# reboot or a clean exit. systemd still leaves it down after an explicit
+# `systemctl --user stop`, matching Compose's `unless-stopped` semantics.
+Restart=always
 TimeoutStartSec=900
 
 [Install]

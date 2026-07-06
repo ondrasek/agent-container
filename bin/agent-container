@@ -205,14 +205,26 @@ def tmux_volume_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}-tmux"
 
 
+def ssh_volume_name(name: str) -> str:
+    """Persists ~/.ssh across down/up: authorized_keys, known_hosts, and the
+    dev-owned SSH host key under hostkeys/. Because the container is rootless
+    (sshd runs as dev), the host key lives here rather than in root-owned
+    /etc/ssh, so a container keeps a STABLE SSH identity across recreation.
+
+    >>> ssh_volume_name("acme")
+    'agent-container-acme-ssh'
+    """
+    return f"{CONTAINER_PREFIX}{name}-ssh"
+
+
 def all_volume_mounts(name: str) -> list[str]:
-    """The six per-container '-v' volume args, in the canonical fixed order
-    (workspace, claude, codex, pi, shellenv, tmux). pi-coding-agent's
+    """The seven per-container '-v' volume args, in the canonical fixed order
+    (workspace, claude, codex, pi, shellenv, tmux, ssh). pi-coding-agent's
     config/auth dir is ~/.pi (verified from
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
     """
     return [
         f"{volume_name(name)}:/workspace",
@@ -221,6 +233,7 @@ def all_volume_mounts(name: str) -> list[str]:
         f"{pi_volume_name(name)}:/home/dev/.pi",
         f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
+        f"{ssh_volume_name(name)}:/home/dev/.ssh",
     ]
 
 
@@ -228,7 +241,7 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux']
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
     """
     return [
         volume_name(name),
@@ -237,6 +250,7 @@ def per_container_volumes(name: str) -> list[str]:
         pi_volume_name(name),
         shellenv_volume_name(name),
         tmux_volume_name(name),
+        ssh_volume_name(name),
     ]
 
 
@@ -267,6 +281,60 @@ def resolve_bind_mount(spec: str) -> str:
     else:
         container = f"/workspace/{Path(abs_host).name}"
     return f"{abs_host}:{container}"
+
+
+# Container-side paths the entrypoint reads injected SSH material from (bind
+# mounts). Kept in sync with INJECT_DIR in entrypoint.sh.
+INJECT_HOST_KEY_PATH = "/run/agent-container/ssh_host_ed25519_key"
+INJECT_AUTHORIZED_KEYS_PATH = "/run/agent-container/authorized_keys"
+
+
+def validate_private_key(path: Path) -> None:
+    """Fail fast if `path` is not a readable, unencrypted OpenSSH private key.
+    stdin is closed so an encrypted key fails cleanly instead of prompting."""
+    r = subprocess.run(
+        ["ssh-keygen", "-y", "-f", str(path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    if r.returncode != 0:
+        die(
+            f"--host-key: {path} is not a valid, unencrypted OpenSSH private key "
+            f"({r.stderr.strip() or 'ssh-keygen validation failed'})"
+        )
+
+
+def resolve_ssh_injection(
+    name: str, host_key: "Path | None", authorized_keys: list[Path]
+) -> list[str]:
+    """Resolve `up --host-key/--authorized-key` into read-only '-v' bind specs.
+
+    The entrypoint installs whatever appears at the container-side inject paths
+    onto the persisted ~/.ssh volume at boot. The host key file is mounted
+    directly; authorized_keys are concatenated into a stable per-container
+    state file (`<name>.authorized_keys`) so the bind survives a container
+    restart (a temp file would vanish and leave an empty mount).
+    """
+    specs: list[str] = []
+    if host_key is not None:
+        hk = host_key.expanduser()
+        if not hk.is_file():
+            die(f"--host-key: {host_key} does not exist or is not a file")
+        validate_private_key(hk)
+        specs.append(f"{hk.resolve()}:{INJECT_HOST_KEY_PATH}:ro")
+    if authorized_keys:
+        blob = ""
+        for p in authorized_keys:
+            pk = p.expanduser()
+            if not pk.is_file():
+                die(f"--authorized-key: {p} does not exist or is not a file")
+            text = pk.read_text()
+            blob += text if text.endswith("\n") else text + "\n"
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ak_file = STATE_DIR / f"{name}.authorized_keys"
+        ak_file.write_text(blob)
+        ak_file.chmod(0o600)
+        specs.append(f"{ak_file}:{INJECT_AUTHORIZED_KEYS_PATH}:ro")
+    return specs
 
 
 def port_for_name(name: str) -> int:
@@ -455,7 +523,7 @@ def image_exists(rt: str, tag: str) -> bool:
 
 
 def port_free(port: int) -> bool:
-    # Wildcard bind: `-p {port}:22` publishes on ALL interfaces (parity with
+    # Wildcard bind: `-p {port}:2222` publishes on ALL interfaces (parity with
     # agent-container), so probe what will actually be bound, not just loopback.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -586,8 +654,10 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
         "--name", cname,
         "--env-file", str(env_file),
         # Publishes sshd on ALL host interfaces (remote hosts.conf attach needs
-        # it). Firewall the VPS.
-        "-p", f"{port}:22",
+        # it). Firewall the VPS. Container-side port is 2222: sshd runs rootless
+        # as the dev user, which cannot bind the privileged port 22. The host
+        # port (the hashed 2200+ value) is unchanged, so `attach` is unaffected.
+        "-p", f"{port}:2222",
     ]
     # Standard per-container volumes (canonical order), then optional binds.
     for vol in all_volume_mounts(name):
@@ -603,10 +673,18 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
     log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
 
 
-def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | None = None) -> None:
+def do_up(
+    name: str,
+    env_file_override: Path | None = None,
+    mounts: list[str] | None = None,
+    host_key: Path | None = None,
+    authorized_keys: list[Path] | None = None,
+) -> None:
     validate_name(name)
-    # Resolve binds up front so a bad --mount aborts before any runtime call.
+    # Resolve binds up front so a bad --mount / --host-key aborts before any
+    # runtime call. SSH-injection binds are appended after the user --mounts.
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
+    resolved_mounts += resolve_ssh_injection(name, host_key, authorized_keys or [])
     rt = detect_runtime()
     cname = container_name(name)
 
@@ -652,6 +730,67 @@ def down_container(rt: str, name: str, purge: bool) -> None:
         log(f"volumes preserved (use --purge to remove): {', '.join(vols)}")
 
     clear_state(name)
+
+
+# Host-side paths of the persisted SSH material inside the container (rootless,
+# dev-owned). Kept in sync with entrypoint.sh / the Dockerfile HostKey directive.
+CONTAINER_HOSTKEY = "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key"
+CONTAINER_AUTHKEYS = "/home/dev/.ssh/authorized_keys"
+
+
+def inject_keys(rt: str, name: str, host_key: Path | None, authorized_keys: list[Path]) -> None:
+    """Inject an SSH host key and/or authorized_keys into a RUNNING container,
+    onto the persisted ~/.ssh volume, without recreating it. The host key is
+    copied in and installed (then sshd is HUP-reloaded); public keys are
+    streamed over stdin (never on argv) and merged with dedup. Rootless: every
+    in-container step runs as the dev user, no sudo."""
+    cname = container_name(name)
+    if host_key is not None:
+        hk = host_key.expanduser()
+        if not hk.is_file():
+            die(f"--host-key: {host_key} does not exist or is not a file")
+        validate_private_key(hk)
+        # Stream the key over stdin (not `cp`): `cp` lands it owned by the host
+        # uid, unreadable by the rootless `dev` user. Writing via `cat` inside
+        # the container gives dev ownership, and the key never touches argv.
+        install_sh = (
+            f"umask 077; mkdir -p /home/dev/.ssh/hostkeys; "
+            f"cat > {CONTAINER_HOSTKEY}; chmod 600 {CONTAINER_HOSTKEY}; "
+            f"ssh-keygen -y -f {CONTAINER_HOSTKEY} > {CONTAINER_HOSTKEY}.pub && "
+            f"pkill -HUP -x sshd"
+        )
+        r = subprocess.run(
+            [rt, "exec", "-i", cname, "bash", "-lc", install_sh], input=hk.read_bytes()
+        )
+        if r.returncode != 0:
+            die(f"failed to install host key in {cname}")
+        log(f"installed host key into {cname} and reloaded sshd")
+    for p in authorized_keys:
+        pk = p.expanduser()
+        if not pk.is_file():
+            die(f"--authorized-key: {p} does not exist or is not a file")
+        append_sh = (
+            f"umask 077; mkdir -p /home/dev/.ssh; cat >> {CONTAINER_AUTHKEYS}; "
+            f"awk 'NF && !seen[$0]++' {CONTAINER_AUTHKEYS} > {CONTAINER_AUTHKEYS}.tmp && "
+            f"mv {CONTAINER_AUTHKEYS}.tmp {CONTAINER_AUTHKEYS}; chmod 600 {CONTAINER_AUTHKEYS}"
+        )
+        r = subprocess.run(
+            [rt, "exec", "-i", cname, "bash", "-lc", append_sh], input=pk.read_bytes()
+        )
+        if r.returncode != 0:
+            die(f"failed to inject authorized key {p}")
+        log(f"injected authorized key {pk.name} into {cname}")
+
+
+def cli_keys(name: str, host_key: Path | None, authorized_keys: list[Path]) -> None:
+    validate_name(name)
+    if host_key is None and not authorized_keys:
+        die("keys: nothing to inject — pass --host-key and/or --authorized-key")
+    rt = detect_runtime()
+    cname = container_name(name)
+    if not container_running(rt, cname):
+        die(f"container {cname} is not running. Start it first: agent-container up {name}")
+    inject_keys(rt, name, host_key, authorized_keys)
 
 
 def cli_down(name: str, purge: bool, yes: bool) -> None:
@@ -1090,10 +1229,34 @@ def wiz_purge_volume(rt: str) -> None:
     hint(f"{rt} volume rm {sel}")
 
 
+def wiz_keys(rt: str) -> None:
+    rows = ps_agent_container(rt, include_stopped=False)  # running only
+    if not rows:
+        log("no running agent-container containers")
+        return
+    sel = questionary.select("inject SSH keys into", choices=[_short(r[0]) for r in rows]).ask()
+    if sel is None:
+        return
+    hk = questionary.text("host key path (unencrypted ed25519 private key; blank to skip)").ask()
+    ak = questionary.text("authorized public key path (blank to skip)").ask()
+    host_key = Path(hk).expanduser() if hk else None
+    authorized = [Path(ak).expanduser()] if ak else []
+    if host_key is None and not authorized:
+        log("nothing to inject")
+        return
+    inject_keys(rt, sel, host_key, authorized)
+    hint(
+        f"agent-container keys {sel}"
+        + (f" --host-key {hk}" if hk else "")
+        + (f" --authorized-key {ak}" if ak else "")
+    )
+
+
 _MENU: list[tuple[str, "object"]] = [
     ("Provision (build image)", wiz_build),
     ("Start a container", wiz_up),
     ("Attach", wiz_attach),
+    ("Inject SSH keys", wiz_keys),
     ("Logs", wiz_logs),
     ("Stop / remove", wiz_down),
     ("Purge orphaned volume", wiz_purge_volume),
@@ -1197,17 +1360,48 @@ def up(
         "Default CONTAINERPATH is /workspace/<basename>. Lima: host dir must be "
         "under a writable Lima mount.",
     ),
+    host_key: Path | None = typer.Option(
+        None,
+        "--host-key",
+        help="Inject an OpenSSH ed25519 PRIVATE host key so the container adopts "
+        "a known SSH identity (persisted on the ~/.ssh volume). Must be "
+        "unencrypted.",
+    ),
+    authorized_key: List[Path] = typer.Option(
+        None,
+        "--authorized-key",
+        help="Inject an SSH public key into authorized_keys (repeatable), so you "
+        "can attach without a manual exec. Persisted on the ~/.ssh volume.",
+    ),
 ) -> None:
     """Start container agent-container-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_up(name, env_file, mount or [])
+    do_up(name, env_file, mount or [], host_key, authorized_key or [])
+
+
+@app.command()
+def keys(
+    name: str = typer.Argument(..., help="Container short name."),
+    host_key: Path | None = typer.Option(
+        None, "--host-key",
+        help="Install an unencrypted ed25519 PRIVATE host key into the running "
+        "container and reload sshd (persists on the ~/.ssh volume).",
+    ),
+    authorized_key: List[Path] = typer.Option(
+        None, "--authorized-key",
+        help="Append an SSH public key to authorized_keys in the running "
+        "container (repeatable; deduped; persists on the ~/.ssh volume).",
+    ),
+) -> None:
+    """Inject SSH host key / authorized keys into a RUNNING container (no recreate)."""
+    cli_keys(name, host_key, authorized_key or [])
 
 
 @app.command()
 def down(
     name: str = typer.Argument(..., help="Container short name."),
-    purge: bool = typer.Option(False, "--purge", help="Also delete the workspace volume."),
+    purge: bool = typer.Option(False, "--purge", help="Also delete all seven per-container volumes (workspace + agent logins, shell env, tmux config, ssh)."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
     """Stop and remove container agent-container-NAME."""

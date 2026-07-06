@@ -30,7 +30,6 @@ RUN apt-get update \
         openssh-server \
         tmux \
         zsh \
-        sudo \
         locales \
         less \
         jq \
@@ -83,33 +82,58 @@ RUN set -eux; \
     rm -f "${TARBALL}"; \
     nvim --version | head -n1
 
-# --- Layer 5: user + sudo + sshd config -------------------------------------
+# --- Layer 4b: yq (mikefarah) for YAML processing ---------------------------
+# Standalone Go binary; not reliably packaged for Debian 12. Pull the release
+# asset matching the build architecture (dpkg arch names match yq's suffixes).
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "${ARCH}" in \
+        amd64|arm64) : ;; \
+        *) echo "unsupported architecture for yq: ${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/yq \
+        "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"; \
+    chmod 0755 /usr/local/bin/yq; \
+    yq --version
+
+# --- Layer 5: user + ROOTLESS sshd config -----------------------------------
+# The container is fully rootless: no sudo, no root at runtime. All system deps
+# are baked at build (agents never apt-install at runtime), so root buys nothing
+# and is dropped. sshd runs as the 'dev' user on an unprivileged port.
 RUN useradd --create-home --home-dir /home/dev --shell /bin/bash --uid 1000 dev \
-    && echo 'dev ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/90-dev \
-    && chmod 0440 /etc/sudoers.d/90-dev \
     && mkdir -p /workspace \
     && chown dev:dev /workspace \
     && chmod 0755 /workspace
 
-# sshd: dev-only, key-based, no root, no passwords.
-# Host keys are deliberately NOT generated here — entrypoint does it at first
-# launch so every container instance gets a distinct identity.
-RUN mkdir -p /etc/ssh \
+# sshd: dev-only, key-based, no root, no passwords — and started BY dev (rootless).
+#   - Port 2222: unprivileged (<1024 needs root to bind); the host-side published
+#     port is unchanged (the CLI maps <hostport>:2222).
+#   - UsePAM no: PAM session setup needs root; pubkey-only single-user needs no PAM.
+#   - HostKey in the dev-owned ~/.ssh/hostkeys volume so identity persists across
+#     down/up and is generated/installed by the entrypoint (as dev, no root).
+#   - PidFile under ~/.ssh (dev-writable; /run/sshd.pid would need root).
+# /run/sshd is the privilege-separation dir; it must exist and be root-owned 0755
+# (created here at build time, when we still are root). sshd running as dev reads
+# it fine and does not need to write to it.
+RUN mkdir -p /etc/ssh /run/sshd \
+    && chmod 0755 /run/sshd \
     && rm -f /etc/ssh/ssh_host_* \
     && { \
         echo 'AllowUsers dev'; \
         echo 'PasswordAuthentication no'; \
         echo 'PermitRootLogin no'; \
         echo 'PubkeyAuthentication yes'; \
-        echo 'Port 22'; \
-        echo 'UsePAM yes'; \
-        echo 'ChallengeResponseAuthentication no'; \
+        echo 'Port 2222'; \
+        echo 'UsePAM no'; \
+        echo 'KbdInteractiveAuthentication no'; \
         echo 'PrintMotd no'; \
         echo 'AcceptEnv LANG LC_*'; \
+        echo 'HostKey /home/dev/.ssh/hostkeys/ssh_host_ed25519_key'; \
+        echo 'PidFile /home/dev/.ssh/sshd.pid'; \
     } > /etc/ssh/sshd_config.d/10-agent-container.conf \
-    && mkdir -p /home/dev/.ssh \
-    && chown dev:dev /home/dev/.ssh \
-    && chmod 0700 /home/dev/.ssh
+    && mkdir -p /home/dev/.ssh/hostkeys \
+    && chown -R dev:dev /home/dev/.ssh \
+    && chmod 0700 /home/dev/.ssh /home/dev/.ssh/hostkeys
 
 # --- Layer 5b: per-container volume mount points + persistent shell env -----
 # Each of these dirs is the mount point of a per-container named volume
@@ -158,7 +182,7 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
-EXPOSE 22
+EXPOSE 2222
 
 USER dev
 WORKDIR /workspace

@@ -48,7 +48,7 @@ agent-container down alpha --purge
 |--------------------|--------------------------------------|-------------------------------|
 | Container          | `agent-container-<name>`                      | `agent-container-alpha`                |
 | Workspace volume   | `agent-container-<name>-workspace`            | `agent-container-alpha-workspace`      |
-| Per-container volumes | `agent-container-<name>-{workspace,claude,codex,pi,shellenv,tmux}` | `agent-container-alpha-tmux` |
+| Per-container volumes | `agent-container-<name>-{workspace,claude,codex,pi,shellenv,tmux,ssh}` | `agent-container-alpha-ssh` |
 | Image              | `localhost/agent-container:latest` | (shared across containers) |
 | Quadlet unit       | `agent-container-<name>.container`            | `agent-container-alpha.container`      |
 
@@ -72,8 +72,8 @@ If you need to override (e.g. you already have something on 2218), edit the stat
 
 ## Volume layout
 
-- **Six named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume `-shellenv` (`~/.agent-container`), and the tmux-config volume `-tmux` (`~/.config/tmux`).
-- The volumes **survive `agent-container down`** — only `down --purge` removes them (all six).
+- **Seven named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume `-shellenv` (`~/.agent-container`), the tmux-config volume `-tmux` (`~/.config/tmux`), and the SSH volume `-ssh` (`~/.ssh` — `authorized_keys` and the host key under `hostkeys/`, so SSH identity is stable across recreation).
+- The volumes **survive `agent-container down`** — only `down --purge` removes them (all seven).
 - Hard constraint: **the container is ephemeral**. The volume is for **scratch + uncommitted work in flight**, not durable state. Every agent commits and pushes; if you lose the volume, you lose only un-pushed work.
 
 ## `.env` file lookup
@@ -129,14 +129,18 @@ AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_PORT=2218 docker compose up -d
 AGENT_CONTAINER_NAME=alpha docker compose down
 ```
 
-The same env vars drive container name, port, and volume name, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks.
+The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of six per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
 
 `agent-container` does not use compose — it calls the runtime directly. Compose is offered for operators who prefer that interface.
 
+## SSH identity is persisted per container
+
+SSH **host key** and the operator's **`~/.ssh/authorized_keys`** live on the `-ssh` named volume (mounted at `~/.ssh`), so they **survive recreation** (`down`/`up`, Quadlet/compose recreate). A container keeps a **stable SSH identity** across its own recreations (no `known_hosts` churn), while different containers get distinct keys. Because the container is rootless, the host key is dev-owned under `~/.ssh/hostkeys/` rather than root-owned `/etc/ssh`. See the credentials guide for the three injection paths (`.env` vars, `up --host-key/--authorized-key`, and the `keys` subcommand). Only `down --purge` drops the identity along with the other volumes.
+
 ## Constraints satisfied
 
-- **Ephemeral containers** — only the workspace volume is persistent, and `--purge` removes even that.
+- **Ephemeral containers** — all seven per-container volumes persist across `down`/`up`; `--purge` removes them. The container itself is disposable — durable state lives in git (commit + push), not the volumes.
 - **No VSCode coupling** — no `.devcontainer/`, no editor assumptions. SSH + tmux is the contract.
 - **Parallel-safe** — `agent-container up alpha` and `agent-container up bravo` run side by side with distinct names, ports, and volumes.
 - **No baked secrets** — `.env` is read at run time, not at build time.
-- **Rootless** — no `sudo` in `agent-container`. Podman runs rootless under the operator's user.
+- **Rootless** — no `sudo` or root inside the container; sshd runs as the `dev` user on port 2222. Podman also runs rootless under the operator's user on the host.

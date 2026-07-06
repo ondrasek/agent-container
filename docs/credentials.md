@@ -46,16 +46,57 @@ The host-side file path is operator-managed; the container only sees env vars.
 
 ## Git push contract
 
-HTTPS, not SSH. The entrypoint (item C) configures a git credential helper that returns `$GH_TOKEN` from process env on demand:
+HTTPS, not SSH. The entrypoint configures a git credential helper that returns `$GH_TOKEN` from process env on demand, **scoped to `https://github.com`** so the token is never offered to any other host:
 
 ```sh
-git config --global credential.helper \
+git config --global credential.https://github.com.helper \
   '!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
 ```
+
+The URL scope is a deliberate safeguard: a global `credential.helper` would hand `$GH_TOKEN` to git for any HTTPS host it authenticates against, so an agent tricked into fetching `https://attacker.example/repo` would leak the token. No global helper is set, so non-GitHub hosts get no credential at all.
 
 The token stays in process memory; it is **not** written to `~/.git-credentials` or any file in the container's writable layer.
 
 GitHub's HTTPS endpoint accepts `x-access-token` as the username for any PAT.
+
+## SSH access (host key + authorized keys)
+
+The container is **rootless**: sshd runs as the `dev` user on the unprivileged
+port **2222** (the operator-facing host port — the hashed `2200 +` value — is
+unchanged; the CLI publishes `<hostport>:2222`). The whole SSH identity —
+`authorized_keys` plus the host key under `hostkeys/` — lives on a dedicated
+per-container `-ssh` volume mounted at `~/.ssh` and **persists across
+`down`/`up`**. Inject your key **once**; a recreate keeps the same host key, so
+clients never see `REMOTE HOST IDENTIFICATION HAS CHANGED`.
+
+Nothing SSH-related is baked into the image. Three injection channels feed the
+`~/.ssh` volume, and all are installed by the entrypoint before sshd starts:
+
+| Channel | What it takes | When it applies |
+|---------|---------------|-----------------|
+| **Env-file** | `SSH_AUTHORIZED_KEYS` (newline-separated public keys), `SSH_HOST_ED25519_KEY_B64` (base64 of an unencrypted ed25519 **private** host key) | At boot, from the same `.env` / `EnvironmentFile=` channel as the other credentials — the natural fit for the Quadlet path. |
+| **`up --host-key FILE --authorized-key FILE`** | file paths (repeatable `--authorized-key`) | Bind-mounted read-only; installed at boot before sshd starts. |
+| **`agent-container keys <name> --host-key FILE --authorized-key FILE`** | file paths | Injected into an **already-running** container (no recreate); sshd is reloaded in place. Secrets are streamed over stdin, never on argv. |
+
+**Host-key precedence** (highest first): `up --host-key` bind-mount >
+`SSH_HOST_ED25519_KEY_B64` env > the already-persisted key on the volume > a
+freshly generated ed25519 key. Only the last two are auto-created; an
+injected or persisted key is left untouched. **`authorized_keys`** is a
+deduped union of the persisted file plus every injected source.
+
+### Security notes
+
+- **The private host key at rest** lives only in operator-controlled places: the
+  operator-managed env-file (base64) or the operator's own key file passed to
+  `up`/`keys`. It is **never** baked into the image and **never** placed on
+  argv (`keys` streams it over stdin; the entrypoint reads it from a bind-mount
+  or env var). Inside the container it lands 0600 on the dev-owned `~/.ssh`
+  volume — same storage-access trust boundary as the OAuth credential volumes
+  below.
+- **`authorized_keys` are public** — no secrecy requirement; they are only
+  deduped so repeated boots and overlapping sources don't accumulate duplicates.
+- **ed25519-only.** The host key is validated at boot (`ssh-keygen -y`); an
+  invalid or encrypted key fails fast rather than as an opaque sshd error.
 
 ## Required prerequisites
 

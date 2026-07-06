@@ -66,6 +66,7 @@ _agent-container() {
     cmds=(
         'build:Build the image at the repo root'
         'up:Start a container (detached)'
+        'keys:Inject SSH host key / authorized keys into a running container'
         'down:Stop and remove a container'
         'purge:Stop, remove, and delete all per-container volumes'
         'list:List containers (plus stale state files)'
@@ -87,11 +88,24 @@ _agent-container() {
             ;;
         args)
             case $line[1] in
+                build)
+                    _arguments \
+                        '--context[Docker build context (repo checkout)]:directory:_files -/' \
+                        '1:tag:'
+                    ;;
                 up)
                     _arguments \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
+                        '--host-key[Inject an ed25519 private host key]:file:_files' \
+                        '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
                         '*:container:__agent_container_names'
+                    ;;
+                keys)
+                    _arguments \
+                        '--host-key[Inject an ed25519 private host key]:file:_files' \
+                        '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
+                        '*:container:__agent_container_names_local'
                     ;;
                 down)
                     _arguments \

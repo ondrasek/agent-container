@@ -90,7 +90,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build up down purge list attach logs menu completions --self-test --help"
+    local subcommands="build up keys down purge list attach logs menu completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -113,15 +113,26 @@ _agent_container() {
                 _agent_container_filedir d       # --mount takes a directory
                 return 0
             fi
-            if [[ "${prev}" == "--env-file" ]]; then
-                _agent_container_filedir          # --env-file takes a file path
+            if [[ "${prev}" == "--env-file" || "${prev}" == "--host-key" || "${prev}" == "--authorized-key" ]]; then
+                _agent_container_filedir          # these take a file path
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--mount --env-file" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--mount --env-file --host-key --authorized-key" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names       # arbitrary name; union is fine
+            ;;
+        keys)
+            if [[ "${prev}" == "--host-key" || "${prev}" == "--authorized-key" ]]; then
+                _agent_container_filedir          # both take a file path
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--host-key --authorized-key" -- "${cur}") )
+                return 0
+            fi
+            __agent_container_add_names __agent_container_names_local # running container; local only
             ;;
         down)
             if [[ "${cur}" == -* ]]; then
@@ -163,8 +174,20 @@ _agent_container() {
         completions)
             COMPREPLY=( $(compgen -W "bash zsh" -- "${cur}") )
             ;;
-        build|menu)
-            : # build takes a free-form tag; menu takes nothing.
+        build)
+            # build [TAG] [--context DIR]. --context takes a directory (repo checkout).
+            if [[ "${prev}" == "--context" ]]; then
+                COMPREPLY=( $(compgen -d -- "${cur}") )
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--context" -- "${cur}") )
+                return 0
+            fi
+            : # free-form tag otherwise
+            ;;
+        menu)
+            : # menu takes nothing.
             ;;
     esac
 }

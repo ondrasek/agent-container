@@ -38,19 +38,21 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
 
     wiz.launch_container("podman", "acme", env_file)
 
-    # Six per-container named volumes in the canonical order, then --restart.
+    # Seven per-container named volumes in the canonical order, then --restart.
     # This argv is the load-bearing container start command; pin it exactly.
+    # Container-side port is 2222 (rootless sshd runs as dev, cannot bind 22).
     assert capture_query == [[
         "podman", "run", "-d",
         "--name", "agent-container-acme",
         "--env-file", str(env_file),
-        "-p", "2206:22",
+        "-p", "2206:2222",
         "-v", "agent-container-acme-workspace:/workspace",
         "-v", "agent-container-acme-claude:/home/dev/.claude",
         "-v", "agent-container-acme-codex:/home/dev/.codex",
         "-v", "agent-container-acme-pi:/home/dev/.pi",
         "-v", "agent-container-acme-shellenv:/home/dev/.agent-container",
         "-v", "agent-container-acme-tmux:/home/dev/.config/tmux",
+        "-v", "agent-container-acme-ssh:/home/dev/.ssh",
         "--restart", "unless-stopped",
         "localhost/agent-container:latest",
     ]]
@@ -150,7 +152,7 @@ def test_launch_container_port_is_name_hash(wiz, capture_query, monkeypatch, tmp
     env_file, _ = make_env_file(tmp_path)
     wiz.launch_container("podman", "my-box", env_file)
     (argv,) = capture_query
-    assert argv[argv.index("-p") + 1] == "2204:22"
+    assert argv[argv.index("-p") + 1] == "2204:2222"
     assert argv[argv.index("-v") + 1] == "agent-container-my-box-workspace:/workspace"
 
 
@@ -268,7 +270,7 @@ def test_do_up_rejects_invalid_name_before_any_runtime_call(up_env, capture_quer
 # --- down / purge volume removal ----------------------------------------------------
 
 
-def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
+def test_down_purge_removes_all_seven_volumes(wiz, capture_query, monkeypatch):
     monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
     wiz.write_state("acme", 2206)
     wiz.down_container("podman", "acme", purge=True)
@@ -280,6 +282,7 @@ def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
         "agent-container-acme-pi",
         "agent-container-acme-shellenv",
         "agent-container-acme-tmux",
+        "agent-container-acme-ssh",
     ]
     assert wiz.read_state_port("acme") is None  # state cleared
 
@@ -442,3 +445,61 @@ def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
     assert by_name["agent-container-ghost"]["port"] == "2299"
     assert by_name["agent-container-ghost"]["stale"] is True
     assert by_name["agent-container-ghost"]["status"] == "stale"
+
+
+# --- SSH injection: up flags + keys subcommand ---------------------------------
+
+
+def test_resolve_ssh_injection_builds_ro_binds(wiz, monkeypatch, tmp_path):
+    # ssh-keygen validation is exercised for real elsewhere; stub it here so the
+    # test stays hermetic (no ssh binary required).
+    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    hk = tmp_path / "hostkey"
+    hk.write_text("PRIVATE")
+    p1 = tmp_path / "a.pub"
+    p1.write_text("ssh-ed25519 AAAAA a\n")
+    p2 = tmp_path / "b.pub"
+    p2.write_text("ssh-ed25519 BBBBB b")  # no trailing newline -> normalized
+    specs = wiz.resolve_ssh_injection("acme", hk, [p1, p2])
+    assert specs == [
+        f"{hk.resolve()}:/run/agent-container/ssh_host_ed25519_key:ro",
+        f"{wiz.STATE_DIR}/acme.authorized_keys:/run/agent-container/authorized_keys:ro",
+    ]
+    ak = wiz.STATE_DIR / "acme.authorized_keys"
+    assert ak.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
+    assert (ak.stat().st_mode & 0o777) == 0o600
+
+
+def test_resolve_ssh_injection_rejects_missing_files(wiz, monkeypatch, tmp_path):
+    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    with pytest.raises(wiz.Fatal, match="--host-key"):
+        wiz.resolve_ssh_injection("acme", tmp_path / "nope", [])
+    with pytest.raises(wiz.Fatal, match="--authorized-key"):
+        wiz.resolve_ssh_injection("acme", None, [tmp_path / "nope.pub"])
+
+
+def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
+    """The private host key and pubkeys go via stdin, never argv (so they can't
+    leak through the process table), and land in the running container by exec."""
+    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    calls: list[tuple[list[str], object]] = []
+
+    def fake_run(argv, **kw):
+        calls.append((list(argv), kw.get("input")))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(wiz.subprocess, "run", fake_run)
+    hk = tmp_path / "hk"
+    hk.write_bytes(b"SECRETKEYBYTES")
+    pub = tmp_path / "p.pub"
+    pub.write_bytes(b"ssh-ed25519 PUBPUB u")
+
+    wiz.inject_keys("podman", "acme", hk, [pub])
+
+    hk_argv, hk_input = calls[0]
+    assert hk_input == b"SECRETKEYBYTES"
+    assert hk_argv[:4] == ["podman", "exec", "-i", "agent-container-acme"]
+    assert all(b"SECRETKEYBYTES" not in a.encode() for a in hk_argv)
+    ak_argv, ak_input = calls[1]
+    assert ak_input == b"ssh-ed25519 PUBPUB u"
+    assert ak_argv[:4] == ["podman", "exec", "-i", "agent-container-acme"]
