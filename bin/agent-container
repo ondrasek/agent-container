@@ -283,6 +283,60 @@ def resolve_bind_mount(spec: str) -> str:
     return f"{abs_host}:{container}"
 
 
+# Container-side paths the entrypoint reads injected SSH material from (bind
+# mounts). Kept in sync with INJECT_DIR in entrypoint.sh.
+INJECT_HOST_KEY_PATH = "/run/agent-container/ssh_host_ed25519_key"
+INJECT_AUTHORIZED_KEYS_PATH = "/run/agent-container/authorized_keys"
+
+
+def validate_private_key(path: Path) -> None:
+    """Fail fast if `path` is not a readable, unencrypted OpenSSH private key.
+    stdin is closed so an encrypted key fails cleanly instead of prompting."""
+    r = subprocess.run(
+        ["ssh-keygen", "-y", "-f", str(path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    if r.returncode != 0:
+        die(
+            f"--host-key: {path} is not a valid, unencrypted OpenSSH private key "
+            f"({r.stderr.strip() or 'ssh-keygen validation failed'})"
+        )
+
+
+def resolve_ssh_injection(
+    name: str, host_key: "Path | None", authorized_keys: list[Path]
+) -> list[str]:
+    """Resolve `up --host-key/--authorized-key` into read-only '-v' bind specs.
+
+    The entrypoint installs whatever appears at the container-side inject paths
+    onto the persisted ~/.ssh volume at boot. The host key file is mounted
+    directly; authorized_keys are concatenated into a stable per-container
+    state file (`<name>.authorized_keys`) so the bind survives a container
+    restart (a temp file would vanish and leave an empty mount).
+    """
+    specs: list[str] = []
+    if host_key is not None:
+        hk = host_key.expanduser()
+        if not hk.is_file():
+            die(f"--host-key: {host_key} does not exist or is not a file")
+        validate_private_key(hk)
+        specs.append(f"{hk.resolve()}:{INJECT_HOST_KEY_PATH}:ro")
+    if authorized_keys:
+        blob = ""
+        for p in authorized_keys:
+            pk = p.expanduser()
+            if not pk.is_file():
+                die(f"--authorized-key: {p} does not exist or is not a file")
+            text = pk.read_text()
+            blob += text if text.endswith("\n") else text + "\n"
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ak_file = STATE_DIR / f"{name}.authorized_keys"
+        ak_file.write_text(blob)
+        ak_file.chmod(0o600)
+        specs.append(f"{ak_file}:{INJECT_AUTHORIZED_KEYS_PATH}:ro")
+    return specs
+
+
 def port_for_name(name: str) -> int:
     """Deterministic port: PORT_BASE + (sum of char codes mod PORT_RANGE).
 
@@ -619,10 +673,18 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
     log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
 
 
-def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | None = None) -> None:
+def do_up(
+    name: str,
+    env_file_override: Path | None = None,
+    mounts: list[str] | None = None,
+    host_key: Path | None = None,
+    authorized_keys: list[Path] | None = None,
+) -> None:
     validate_name(name)
-    # Resolve binds up front so a bad --mount aborts before any runtime call.
+    # Resolve binds up front so a bad --mount / --host-key aborts before any
+    # runtime call. SSH-injection binds are appended after the user --mounts.
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
+    resolved_mounts += resolve_ssh_injection(name, host_key, authorized_keys or [])
     rt = detect_runtime()
     cname = container_name(name)
 
@@ -1213,11 +1275,24 @@ def up(
         "Default CONTAINERPATH is /workspace/<basename>. Lima: host dir must be "
         "under a writable Lima mount.",
     ),
+    host_key: Path | None = typer.Option(
+        None,
+        "--host-key",
+        help="Inject an OpenSSH ed25519 PRIVATE host key so the container adopts "
+        "a known SSH identity (persisted on the ~/.ssh volume). Must be "
+        "unencrypted.",
+    ),
+    authorized_key: List[Path] = typer.Option(
+        None,
+        "--authorized-key",
+        help="Inject an SSH public key into authorized_keys (repeatable), so you "
+        "can attach without a manual exec. Persisted on the ~/.ssh volume.",
+    ),
 ) -> None:
     """Start container agent-container-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_up(name, env_file, mount or [])
+    do_up(name, env_file, mount or [], host_key, authorized_key or [])
 
 
 @app.command()
