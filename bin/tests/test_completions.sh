@@ -142,6 +142,17 @@ test_tool() {
     assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "build" "--"
     assert_has "${tool}:build-flag" "--context" "${COMPREPLY[@]}"
+    # SSH-injection flags on up + the keys subcommand.
+    run_comp "${func}" "${tool}" "up" "--"
+    assert_has "${tool}:up-hostkey"  "--host-key"       "${COMPREPLY[@]}"
+    assert_has "${tool}:up-authkey"  "--authorized-key" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" ""
+    assert_has "${tool}:subcmd-keys" "keys" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "keys" "--"
+    assert_has "${tool}:keys-flag"   "--host-key"       "${COMPREPLY[@]}"
+    assert_has "${tool}:keys-flag"   "--authorized-key" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "keys" ""
+    assert_has "${tool}:keys-name"   "acme" "${COMPREPLY[@]}"     # local running names
 }
 
 # COMPL-1 regression: a hostile hosts.conf key or state-file name carrying a

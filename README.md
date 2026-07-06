@@ -16,7 +16,7 @@ laptop                                        VPS (Hetzner / Debian 12)
   ACME_PORT=2218                                +-- Quadlet: agent-container-acme.container
                                                     |
 $ agent-container attach acme                                +-- container: agent-container-acme
-   |                                                       +-- sshd  (port 22 -> host 2218)
+   |                                                       +-- sshd  (port 2222 -> host 2218)
    |  ssh -p 2218 dev@vps1.example -t tmux              +-- tmux session "main"
    |     attach -t main                                       +-- nvim
    v                                                          +-- claude
@@ -123,21 +123,57 @@ journalctl --user -u agent-container-acme.service -f
 
 ### Step 6 — grant SSH access from your laptop
 
-The container starts with **no** keys in `dev`'s `authorized_keys` (per the hard constraint that nothing operator-specific lives in the image). One-time setup, on the VPS, after first launch:
+Nothing operator-specific is baked into the image, so a fresh container has no
+authorized keys of its own. But the SSH identity — `authorized_keys` and the
+host key — now lives on the per-container `-ssh` volume (mounted at
+`~/.ssh`) and **persists across `down`/`up`**: inject your public key **once** and
+it survives every recreate (no more `REMOTE HOST IDENTIFICATION HAS CHANGED`
+churn, since the host key is stable too). Pick whichever injection path fits:
+
+**At launch — `up --authorized-key` (and optionally `--host-key`):**
 
 ```bash
-# inside the container, set up .ssh
-podman exec -u dev agent-container-acme install -d -m 0700 /home/dev/.ssh
-
-# copy your laptop's pubkey into the container
-podman exec -u dev -i agent-container-acme \
-    tee -a /home/dev/.ssh/authorized_keys < ~/.ssh/authorized_keys >/dev/null
-
-# tighten perms
-podman exec -u dev agent-container-acme chmod 0600 /home/dev/.ssh/authorized_keys
+agent-container up acme --authorized-key ~/.ssh/id_ed25519.pub
+# fixed host identity too (repeatable --authorized-key):
+agent-container up acme --host-key ~/.config/agent-container/acme_host_ed25519_key \
+                        --authorized-key ~/.ssh/id_ed25519.pub
 ```
 
-(This step is a known wart of the MVP — a future iteration will accept an `AUTHORIZED_KEYS` env var or a mounted file so it happens automatically at container start. Tracked separately.)
+The files are bind-mounted read-only and installed onto the `~/.ssh` volume by
+the entrypoint before sshd starts.
+
+**Into an already-running container — `agent-container keys`:**
+
+```bash
+agent-container keys acme --authorized-key ~/.ssh/id_ed25519.pub
+agent-container keys acme --host-key ~/.config/agent-container/acme_host_ed25519_key
+```
+
+No recreate: the key is streamed over stdin (never on argv), merged with dedup,
+and sshd is reloaded in place.
+
+**Via the `.env` file:** set `SSH_AUTHORIZED_KEYS` (newline-separated public
+keys) and/or `SSH_HOST_ED25519_KEY_B64` (base64 of an unencrypted ed25519
+**private** host key); the entrypoint installs them at boot. This is the natural
+fit for the Quadlet path, whose credentials already flow through the env-file.
+
+The host key is ed25519-only, and its boot precedence is
+`up --host-key` bind-mount > env `SSH_HOST_ED25519_KEY_B64` > already-persisted
+key > freshly generated. `authorized_keys` are a deduped union of the persisted
+file plus every injected source.
+
+<details>
+<summary>Fallback: copy a key in by hand</summary>
+
+If you'd rather not use the first-class paths, you can still write into the
+`~/.ssh` volume directly (it persists just the same):
+
+```bash
+podman exec -u dev -i agent-container-acme \
+    tee -a /home/dev/.ssh/authorized_keys < ~/.ssh/id_ed25519.pub >/dev/null
+podman exec -u dev agent-container-acme chmod 0600 /home/dev/.ssh/authorized_keys
+```
+</details>
 
 ### Step 7 — set up `agent-container` on the laptop
 
@@ -426,8 +462,8 @@ agent-container attach blog                                       # totally sepa
 
 The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
 
-- `agent-container down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-container`), and the tmux-config volume (`~/.config/tmux`). `agent-container up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf`.
-- `agent-container down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux). Use for a true clean slate; you will re-`login` to the agents afterward.
+- `agent-container down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-container`), the tmux-config volume (`~/.config/tmux`), and the SSH-identity volume (`~/.ssh`). `agent-container up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf` *and* your SSH host key + authorized_keys.
+- `agent-container down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux + ssh). Use for a true clean slate; you will re-`login` to the agents afterward and re-inject your SSH key.
 - VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `agent-container up acme` again. Pushed commits are unaffected either way.
 - Quadlet service crashed — `systemctl --user restart agent-container-acme.service`. Look at `journalctl --user -u agent-container-acme.service` first.
 
@@ -572,18 +608,19 @@ For a full end-to-end check (build → launch with credentials → in-container 
 
 Layers are ordered cheapest-to-rebuild last, so an edit to the entrypoint (which changes most often) doesn't bust the expensive apt + NodeSource layers:
 
-1. **apt base packages** — `ca-certificates`, `curl`, `gnupg`, `git`, `openssh-server`, `tmux`, `sudo`, `locales`, `less`, `jq`, `build-essential`, `python3`, `python3-pip`, `python3-venv`. Single `RUN`; cache cleaned in the same layer.
+1. **apt base packages** — `ca-certificates`, `curl`, `gnupg`, `git`, `openssh-server`, `tmux`, `zsh`, `locales`, `less`, `jq`, `build-essential`, `python3`, `python3-pip`, `python3-venv`. No `sudo` — the runtime is rootless. Single `RUN`; cache cleaned in the same layer.
 2. **Node 22 LTS via NodeSource** — `setup_22.x` then `apt-get install nodejs`. Cache cleaned in the same layer.
 3. **Agent CLIs (global npm installs)** — `@anthropic-ai/claude-code`, `@openai/codex`, `--ignore-scripts @earendil-works/pi-coding-agent`. Changes when an agent releases.
 4. **Neovim upstream tarball** — fetched from `https://github.com/neovim/neovim/releases/latest`, extracted to `/usr/local`. Picks the asset matching `dpkg --print-architecture`: `nvim-linux-x86_64.tar.gz` (with fallback to `nvim-linux64.tar.gz` for older releases) on amd64, `nvim-linux-arm64.tar.gz` on arm64. Debian's repo `nvim` is too old.
-5. **User + sshd config** — non-root `dev` (uid 1000, home `/home/dev`), passwordless sudo via `/etc/sudoers.d/90-dev`, `/workspace` owned by `dev:dev`. sshd configured for key-based dev-only login. **Host keys are deliberately empty in the image** — the entrypoint regenerates them on first run, so each container instance has a distinct SSH identity (a hard requirement for parallel-container safety).
+5. **User + rootless sshd config** — non-root `dev` (uid 1000, home `/home/dev`), no `sudo`/root at runtime, `/workspace` owned by `dev:dev`. sshd is configured for key-based dev-only login on the unprivileged **port 2222** (`UsePAM no`, `HostKey`/`PidFile` under the dev-owned `~/.ssh` volume), and is started **by** `dev`. **No host key is baked into the image** — the entrypoint installs an injected key or generates an ed25519 one onto the persisted `-ssh` volume, so each container has a distinct but **stable** SSH identity across `down`/`up` (a hard requirement for parallel-container safety).
 6. **entrypoint.sh** — last `COPY`, since this is the most-frequently-edited file during development.
 
 ### What is NOT in the image (by design)
 
 - No `.env` content, `GH_TOKEN`, API keys, or any other secret. Credentials are injected at `run` time only.
-- No SSH host keys. Generated by the entrypoint on first launch.
-- No `~/.ssh/authorized_keys` content for `dev`. Operator provides this at run time via volume mount or entrypoint-side fetch (item C / item E).
+- No SSH host key baked into the image. The entrypoint generates an ed25519 key (or installs an injected one) onto the per-container `-ssh` volume, so the identity **persists** across `down`/`up` instead of being regenerated each launch.
+- No `~/.ssh/authorized_keys` content for `dev` in the image. The operator injects it at run time — `up --authorized-key`, `agent-container keys <name>`, or `SSH_AUTHORIZED_KEYS` in the env-file — and it too persists on the `-ssh` volume (inject once, not on every recreate).
+- No `sudo` / root at runtime. The image is **rootless**: sshd runs as `dev` on port 2222 and all dependencies are baked at build time (agents never `apt install`), so root is never needed.
 - No `.devcontainer/` configs. SSH + tmux is the only supported attach path.
 
 ### Image size
@@ -601,23 +638,23 @@ The container expects to be launched with:
 
 - `--env-file .env` (local docker) or `EnvironmentFile=` (VPS Quadlet) supplying at least `GH_TOKEN`, `GIT_USER_NAME`, `GIT_USER_EMAIL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`. See [`.env.example`](.env.example).
 - A mounted workspace at `/workspace` (so committed work survives container recreation).
-- Port 22 mapped to a host port chosen by the orchestration layer (item E).
+- Container-internal port 2222 (rootless sshd) mapped to a host port chosen by the orchestration layer (item E).
 
 The image itself enforces none of this — that's item C's entrypoint and item E's orchestration. The image is the substrate.
 
 ## Entrypoint behavior
 
-`entrypoint.sh` runs as PID 1 inside the container, as the non-root `dev` user. It is idempotent — restarting the container reruns it safely.
+`entrypoint.sh` runs as PID 1 inside the container, as the non-root `dev` user. The container is **fully rootless**: no `sudo` package, no root at runtime — all system dependencies are baked at build time (agents never `apt install` at runtime), so root buys nothing and is dropped. It is idempotent — restarting the container reruns it safely.
 
 **Execution order:**
 
 1. **Debug override.** If the operator passes arguments (`docker run image bash`), the entrypoint `exec`s them and the rest of the flow is skipped.
 2. **Env-var validation.** Required vars must be set and non-empty; missing ones cause an immediate non-zero exit with a message naming the offender. Values are **never logged**.
-3. **SSH host keys.** Generated via `ssh-keygen -A` only if `/etc/ssh/ssh_host_ed25519_key` is absent. This guarantees each container instance gets a distinct SSH identity — a hard requirement for running multiple containers in parallel.
+3. **SSH host key + authorized_keys (rootless).** The host key is an ed25519 key under `~/.ssh/hostkeys` — dev-owned, on the persisted `-ssh` volume — so a container keeps a **stable** identity across `down`/`up` while different containers differ. Boot precedence: a bind-mounted key (`up --host-key`) > `SSH_HOST_ED25519_KEY_B64` (env) > the already-persisted key > a freshly generated one; only the last two are auto-created, an injected/persisted key is left untouched. `authorized_keys` is assembled as a deduped union of the persisted file plus any injected source (`up --authorized-key`, `SSH_AUTHORIZED_KEYS`). No root or `sudo` is involved.
 4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig` and **scoped to `https://github.com`** (`credential.https://github.com.helper`) so the token is never handed to any other host; the token itself is never written to disk in the container.
-5. **sshd.** Started in the background via `sudo /usr/sbin/sshd` (daemonized; not `-D`). Listens on port 22 inside the container; map this to a host port via the orchestration layer.
+5. **sshd.** Started in the background as the `dev` user (rootless — no `sudo`), daemonized (not `-D`). Listens on the unprivileged port **2222** inside the container, using the host key + pidfile under the dev-owned `~/.ssh` volume; the orchestration layer maps this to the operator-facing host port (the hashed `2200 +` value, unchanged).
 6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `AGENT_CONTAINER_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `AGENT_CONTAINER_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `agent-container attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.
-7. **PID 1 lifecycle.** The script `wait`s on a background `tail -f /dev/null`, keeping PID 1 alive. `SIGTERM` / `SIGINT` trigger a clean shutdown: `tmux kill-server`, then `sudo pkill sshd`, then `exit 0`.
+7. **PID 1 lifecycle.** The script `wait`s on a background `tail -f /dev/null`, keeping PID 1 alive. `SIGTERM` / `SIGINT` trigger a clean shutdown: `tmux kill-server`, then `pkill -TERM -x sshd` (dev signals its own rootless sshd — no `sudo`), then `exit 0`.
 
 **Required env vars (entrypoint exits non-zero if missing):**
 

@@ -20,6 +20,8 @@ These are load-bearing design decisions, not preferences:
 ## Decisions
 
 - **Runtime + base image:** Podman + `debian:12-slim`. See [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
+- **Rootless container, no runtime apt:** the image has NO `sudo`/root at runtime — `sshd` runs as the `dev` user on unprivileged port **2222** (host port maps `<hostport>:2222`), host key + `authorized_keys` on the dev-owned `~/.ssh` volume. Consequently **all system deps are baked at build time; agents never `apt install` at runtime** — add packages to the `Dockerfile` apt layer, never via runtime install.
+- **SSH identity persists + is injectable:** the `-ssh` per-container volume (`~/.ssh`) keeps a stable host key + `authorized_keys` across recreation. Inject three ways (all land there): env-file (`SSH_AUTHORIZED_KEYS`, `SSH_HOST_ED25519_KEY_B64`), `up --host-key/--authorized-key`, or `keys <name>` (live, no recreate). Seven per-container volumes total: `workspace, claude, codex, pi, shellenv, tmux, ssh`.
 - **CLI:** a single tool, `agent-container` (`bin/agent-container`) — a PEP 723 uv script (Typer + questionary + rich) covering the whole lifecycle (build/up/attach/logs/down/purge) plus an interactive wizard. Its on-disk contract (container names `agent-container-<name>`, the `2200 + name-hash` port, `$XDG_STATE_HOME/agent-container/<name>.port` state files, `~/.config/agent-container/hosts.conf`) is the single source of truth; the shell completions read the same state files. Runtime default is platform-aware (docker-first on macOS, podman-first on Linux); override with `AGENT_CONTAINER_RUNTIME`.
 - **Packaging + release:** ships to PyPI as the `agent_container` module via a hatchling `force-include` wheel (`bin/agent-container` → `agent_container/__init__.py`; completions → `agent_container/completions/*` package data). `REPO_ROOT` resolves location-independently (`AGENT_CONTAINER_REPO` → `Dockerfile`+`completions/` marker → `None`) so a **non-editable** PyPI install works standalone (`up/down/list/attach/logs/purge/completions`); only `build` needs a checkout (via `AGENT_CONTAINER_REPO`/`--context`). `uv tool install --editable .` remains the dev path. Push a `v*` tag → `.github/workflows/publish.yml` uploads via PyPI **Trusted Publishing** (OIDC, no stored secrets); `ci.yml` gates on the pytest suite + `uv build`. Licensed **MIT** ([`LICENSE`](LICENSE)).
 
@@ -36,7 +38,7 @@ When adding a component, keep these layers separate. Don't bake host-specific or
 
 ## Conventions for future work
 
-- Prefer **rootless / Podman-compatible** patterns where reasonable; avoid features that only work on Docker Desktop.
+- The container is **rootless by decision** (see Decisions): no `sudo`/root at runtime, sshd as `dev` on port 2222. Keep it that way — don't reintroduce root-only steps; bake deps at build. Also avoid features that only work on Docker Desktop (stay Podman-compatible).
 - Treat the **commit-and-push discipline** as a property of the agent configuration, not something to enforce via git hooks alone (hooks can be bypassed; the agents themselves should be configured to push).
 - When proposing a tool or dependency, justify it against the constraints above — especially the "not VSCode-locked" one.
 
