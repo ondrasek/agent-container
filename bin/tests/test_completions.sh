@@ -140,6 +140,8 @@ test_tool() {
     assert_has "${tool}:logs-flag" "--no-follow" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "attach" "--"
     assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "build" "--"
+    assert_has "${tool}:build-flag" "--context" "${COMPREPLY[@]}"
 }
 
 # COMPL-1 regression: a hostile hosts.conf key or state-file name carrying a

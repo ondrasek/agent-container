@@ -87,6 +87,11 @@ _agent-container() {
             ;;
         args)
             case $line[1] in
+                build)
+                    _arguments \
+                        '--context[Docker build context (repo checkout)]:directory:_files -/' \
+                        '1:tag:'
+                    ;;
                 up)
                     _arguments \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \

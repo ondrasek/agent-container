@@ -1207,7 +1207,7 @@ def up(
 @app.command()
 def down(
     name: str = typer.Argument(..., help="Container short name."),
-    purge: bool = typer.Option(False, "--purge", help="Also delete the workspace volume."),
+    purge: bool = typer.Option(False, "--purge", help="Also delete all six per-container volumes (workspace + agent logins, shell env, tmux config)."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
     """Stop and remove container agent-container-NAME."""

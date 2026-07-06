@@ -163,8 +163,20 @@ _agent_container() {
         completions)
             COMPREPLY=( $(compgen -W "bash zsh" -- "${cur}") )
             ;;
-        build|menu)
-            : # build takes a free-form tag; menu takes nothing.
+        build)
+            # build [TAG] [--context DIR]. --context takes a directory (repo checkout).
+            if [[ "${prev}" == "--context" ]]; then
+                COMPREPLY=( $(compgen -d -- "${cur}") )
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--context" -- "${cur}") )
+                return 0
+            fi
+            : # free-form tag otherwise
+            ;;
+        menu)
+            : # menu takes nothing.
             ;;
     esac
 }

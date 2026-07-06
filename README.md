@@ -90,7 +90,7 @@ Two paths. Pick one per container.
 ```bash
 agent-container up acme
 # prints something like:
-# [agent-container] name=acme port=2218 env-file=/home/ondra/agent-container/.env
+# [agent-container] name=acme port=2206 env-file=/home/ondra/agent-container/.env
 ```
 
 Note the port. You'll need it on the laptop side.
@@ -556,18 +556,17 @@ podman build -t agent-container:latest .
 
 No build args. No secrets. Credentials are injected **only at `run` time** via `--env-file .env` (see [`docs/credentials.md`](docs/credentials.md)).
 
-### Smoke test (item B scope)
+### Build sanity check
 
-The entrypoint shipped with item B is a **stub** — it just generates SSH host keys and execs `sshd` in the foreground. Real entrypoint logic (git identity, credential helper, tmux session) lands in item C. Until then, a successful build + a container that stays running is the bar:
+The entrypoint requires credentials (`GH_TOKEN`, `GIT_USER_NAME`, `GIT_USER_EMAIL`) and exits immediately without them, so a bare `docker run` won't stay up. To verify the image built and the tooling is present **without** wiring up an `.env`, use the entrypoint's **debug override** — any arguments passed after the image are `exec`'d instead of the sshd + tmux flow:
 
 ```bash
 docker build -t agent-container:latest .
-docker run --rm -d --name agent-container-smoke agent-container:latest
-docker exec agent-container-smoke nvim --version | head -n1
-docker exec agent-container-smoke node --version
-docker exec agent-container-smoke claude --version || true
-docker stop agent-container-smoke
+docker run --rm agent-container:latest \
+  bash -lc 'nvim --version | head -n1; node --version; claude --version || true'
 ```
+
+For a full end-to-end check (build → launch with credentials → in-container HTTPS git push → host-side verify → teardown), run `scripts/smoke-test.sh` — see [Smoke test](#smoke-test) and [`docs/smoke-test.md`](docs/smoke-test.md).
 
 ### Layering rationale
 
