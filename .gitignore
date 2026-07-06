@@ -25,4 +25,5 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-uv.lock
+# NOTE: uv.lock IS committed. agent-env is an application/CLI (not a library), so
+# the lockfile is checked in for reproducible dev envs (`uv sync`). Do not ignore it.
