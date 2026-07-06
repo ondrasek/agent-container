@@ -8,6 +8,7 @@ tests exercise the real `#!/usr/bin/env -S uv run --script` entry path
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -18,6 +19,9 @@ from conftest import SCRIPT_PATH
 
 runner = CliRunner()
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_BOX_CHARS = "│╭╮╰╯─"
+
 
 def combined_output(result) -> str:
     """stdout + stderr regardless of the installed click version."""
@@ -27,6 +31,17 @@ def combined_output(result) -> str:
     except (ValueError, AttributeError):
         pass  # click<8.2 mixes stderr into .output already
     return "".join(parts)
+
+
+def flat_output(result) -> str:
+    """combined_output with ANSI colors, Rich box borders, and line wrapping
+    normalized to single spaces. Rich (typer>=0.12) renders BadParameter errors
+    in a fixed-width box and *wraps* long values, which splits phrases like
+    'does not exist' across `│`-bordered lines — brittle for substring asserts.
+    Flattening rejoins space-separated words regardless of where the box wraps."""
+    text = _ANSI_RE.sub("", combined_output(result))
+    text = text.translate({ord(c): " " for c in _BOX_CHARS})
+    return re.sub(r"\s+", " ", text)
 
 
 # --- help / unknown subcommand -----------------------------------------------
@@ -61,7 +76,9 @@ def test_attach_local_and_remote_are_mutually_exclusive(wiz):
 def test_up_rejects_missing_env_file_option(wiz, tmp_path):
     result = runner.invoke(wiz.app, ["up", "acme", "--env-file", str(tmp_path / "nope.env")])
     assert result.exit_code != 0
-    assert "does not exist" in combined_output(result)
+    # flat_output: the boxed BadParameter error wraps the (long) tmp path, so the
+    # substring must be matched against wrap-normalized text (see flat_output).
+    assert "does not exist" in flat_output(result)
 
 
 def test_fatal_errors_surface_as_fatal_not_traceback(wiz):
