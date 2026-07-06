@@ -3,14 +3,16 @@
 #
 # Responsibilities (in order):
 #   1. Validate required env vars (fail fast, never log their values).
-#   2. Generate SSH host keys on first run (so each container has a distinct identity).
+#   2. Install/persist/generate the SSH host key + assemble authorized_keys
+#      (from bind-mount, env, or the persisted ~/.ssh volume) as the dev user.
 #   3. Configure git identity + HTTPS credential helper for the dev user.
 #   4. Start sshd in the background.
 #   5. Start a detached tmux session named 'main' for the dev user.
 #   6. Stay alive as PID 1, forwarding SIGTERM/SIGINT to a clean shutdown.
 #
-# Runs as the non-root 'dev' user. Privileged actions go through passwordless sudo
-# (configured in the Dockerfile). NEVER echoes env-var contents to logs.
+# Runs as the non-root 'dev' user with NO root/sudo (fully rootless container):
+# sshd runs as dev on an unprivileged port and the SSH host key lives in the
+# dev-owned ~/.ssh volume. NEVER echoes env-var contents to logs.
 #
 # Override: if invoked with arguments, exec them instead of the default flow
 # (e.g. `docker run image bash` for debugging).
@@ -88,19 +90,67 @@ else
     log "persistent shell-env file already present, leaving it alone"
 fi
 
-# --- 2. SSH host keys -------------------------------------------------------
-# Idempotent: only regenerate if the ed25519 key is absent. ssh-keygen -A
-# creates whichever key types are missing under /etc/ssh/.
-if [[ ! -f /etc/ssh/ssh_host_ed25519_key ]]; then
-    log "Generating SSH host keys..."
-    sudo ssh-keygen -A
-else
-    log "SSH host keys already present, skipping generation"
-fi
+# --- 2. SSH host key (rootless: dev-owned, on the persisted ~/.ssh volume) ---
+# The host key lives in ~/.ssh/hostkeys (a per-container named volume), so a
+# container keeps a STABLE identity across down/up while different containers
+# differ. Generated as the dev user — no root. ssh-keygen -A cannot target a
+# custom dir, so we generate the single ed25519 key explicitly. Idempotent:
+# only generate if absent (a persisted or injected key is left untouched).
+SSH_DIR="${AGENT_CONTAINER_HOME}/.ssh"
+HOSTKEY_DIR="${SSH_DIR}/hostkeys"
+HOSTKEY="${HOSTKEY_DIR}/ssh_host_ed25519_key"
+mkdir -p "${HOSTKEY_DIR}"
+chmod 0700 "${SSH_DIR}" "${HOSTKEY_DIR}"
 
-# sshd's privilege-separation directory. Idempotent.
-sudo mkdir -p /run/sshd
-sudo chmod 0755 /run/sshd
+# Host-key source precedence (highest first). A container adopts an operator-
+# supplied identity if given, else keeps its persisted one, else generates:
+#   1. bind-mounted file at /run/agent-container/ssh_host_ed25519_key (`up --host-key`)
+#   2. SSH_HOST_ED25519_KEY_B64 env var (base64 of the private key; env-file channel)
+#   3. already-persisted key on the ~/.ssh volume
+#   4. freshly generated ed25519 key
+# INJECT_DIR is where `up --host-key/--authorized-key` bind-mounts the key
+# files. AGENT_CONTAINER_INJECT_DIR lets the off-container test harness redirect
+# it; production leaves it unset so the default is the real bind-mount path.
+INJECT_DIR="${AGENT_CONTAINER_INJECT_DIR:-/run/agent-container}"
+if [[ -f "${INJECT_DIR}/ssh_host_ed25519_key" ]]; then
+    log "installing bind-mounted SSH host key"
+    install -m 0600 "${INJECT_DIR}/ssh_host_ed25519_key" "${HOSTKEY}"
+elif [[ -n "${SSH_HOST_ED25519_KEY_B64:-}" ]]; then
+    log "installing SSH host key from SSH_HOST_ED25519_KEY_B64"
+    printf '%s' "${SSH_HOST_ED25519_KEY_B64}" | base64 -d > "${HOSTKEY}"
+    chmod 0600 "${HOSTKEY}"
+elif [[ ! -f "${HOSTKEY}" ]]; then
+    log "generating SSH host key (ed25519) at ${HOSTKEY}"
+    ssh-keygen -q -t ed25519 -f "${HOSTKEY}" -N ''
+else
+    log "SSH host key already present, skipping generation"
+fi
+# Validate the key and (re)derive its public half. A bad injected key fails fast
+# here rather than as an opaque sshd startup error.
+if ! ssh-keygen -y -f "${HOSTKEY}" > "${HOSTKEY}.pub" 2>/dev/null; then
+    die "SSH host key at ${HOSTKEY} is missing or invalid"
+fi
+chmod 0600 "${HOSTKEY}"
+chmod 0644 "${HOSTKEY}.pub"
+
+# --- 2b. authorized_keys: union of persisted + injected sources, deduped -----
+# Non-secret (public keys). Sources: the persisted file, a bind-mounted file
+# (`up --authorized-key`), and the SSH_AUTHORIZED_KEYS env var. Deduped so
+# repeated boots and overlapping sources don't accumulate duplicates.
+AUTHKEYS="${SSH_DIR}/authorized_keys"
+_akt="$(mktemp)"
+[[ -f "${AUTHKEYS}" ]] && cat "${AUTHKEYS}" >> "${_akt}"
+[[ -f "${INJECT_DIR}/authorized_keys" ]] && cat "${INJECT_DIR}/authorized_keys" >> "${_akt}"
+[[ -n "${SSH_AUTHORIZED_KEYS:-}" ]] && printf '%s\n' "${SSH_AUTHORIZED_KEYS}" >> "${_akt}"
+if [[ -s "${_akt}" ]]; then
+    awk 'NF && !seen[$0]++' "${_akt}" > "${AUTHKEYS}"
+    chmod 0600 "${AUTHKEYS}"
+    log "authorized_keys assembled ($(grep -c . "${AUTHKEYS}") key(s))"
+fi
+rm -f "${_akt}"
+
+# sshd's privilege-separation directory (/run/sshd) is created root-owned at
+# build time; a rootless sshd only needs it to exist, not to write to it.
 
 # --- 3. Git identity + credential helper ------------------------------------
 # Identity is non-secret; logging the name is fine. Email is also non-secret
@@ -127,8 +177,12 @@ log "Configured git identity for ${GIT_USER_NAME}"
 
 # --- 4. sshd ----------------------------------------------------------------
 # Daemonize (no -D) so the entrypoint can continue to start tmux and tail.
+# Started as the dev user (rootless) — sshd listens on the unprivileged port
+# 2222 with its host key + pidfile under the dev-owned ~/.ssh volume.
 # sshd's own logs go to stderr / syslog per the image's sshd_config.
-sudo /usr/sbin/sshd
+# AGENT_CONTAINER_SSHD lets the test harness substitute a stub; production
+# leaves it unset so the default is the real sshd binary.
+"${AGENT_CONTAINER_SSHD:-/usr/sbin/sshd}"
 log "sshd listening"
 
 # --- 5. tmux session --------------------------------------------------------
@@ -183,8 +237,8 @@ fi
 shutdown() {
     log "shutdown signal received, stopping tmux and sshd"
     tmux kill-server 2>/dev/null || true
-    # sshd was started via sudo and runs as root; kill it the same way.
-    sudo pkill -TERM -x sshd 2>/dev/null || true
+    # sshd runs as dev (rootless); dev can signal its own process — no sudo.
+    pkill -TERM -x sshd 2>/dev/null || true
     exit 0
 }
 

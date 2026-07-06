@@ -38,19 +38,21 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
 
     wiz.launch_container("podman", "acme", env_file)
 
-    # Six per-container named volumes in the canonical order, then --restart.
+    # Seven per-container named volumes in the canonical order, then --restart.
     # This argv is the load-bearing container start command; pin it exactly.
+    # Container-side port is 2222 (rootless sshd runs as dev, cannot bind 22).
     assert capture_query == [[
         "podman", "run", "-d",
         "--name", "agent-container-acme",
         "--env-file", str(env_file),
-        "-p", "2206:22",
+        "-p", "2206:2222",
         "-v", "agent-container-acme-workspace:/workspace",
         "-v", "agent-container-acme-claude:/home/dev/.claude",
         "-v", "agent-container-acme-codex:/home/dev/.codex",
         "-v", "agent-container-acme-pi:/home/dev/.pi",
         "-v", "agent-container-acme-shellenv:/home/dev/.agent-container",
         "-v", "agent-container-acme-tmux:/home/dev/.config/tmux",
+        "-v", "agent-container-acme-ssh:/home/dev/.ssh",
         "--restart", "unless-stopped",
         "localhost/agent-container:latest",
     ]]
@@ -150,7 +152,7 @@ def test_launch_container_port_is_name_hash(wiz, capture_query, monkeypatch, tmp
     env_file, _ = make_env_file(tmp_path)
     wiz.launch_container("podman", "my-box", env_file)
     (argv,) = capture_query
-    assert argv[argv.index("-p") + 1] == "2204:22"
+    assert argv[argv.index("-p") + 1] == "2204:2222"
     assert argv[argv.index("-v") + 1] == "agent-container-my-box-workspace:/workspace"
 
 
@@ -268,7 +270,7 @@ def test_do_up_rejects_invalid_name_before_any_runtime_call(up_env, capture_quer
 # --- down / purge volume removal ----------------------------------------------------
 
 
-def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
+def test_down_purge_removes_all_seven_volumes(wiz, capture_query, monkeypatch):
     monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
     wiz.write_state("acme", 2206)
     wiz.down_container("podman", "acme", purge=True)
@@ -280,6 +282,7 @@ def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
         "agent-container-acme-pi",
         "agent-container-acme-shellenv",
         "agent-container-acme-tmux",
+        "agent-container-acme-ssh",
     ]
     assert wiz.read_state_port("acme") is None  # state cleared
 

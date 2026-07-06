@@ -205,14 +205,26 @@ def tmux_volume_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}-tmux"
 
 
+def ssh_volume_name(name: str) -> str:
+    """Persists ~/.ssh across down/up: authorized_keys, known_hosts, and the
+    dev-owned SSH host key under hostkeys/. Because the container is rootless
+    (sshd runs as dev), the host key lives here rather than in root-owned
+    /etc/ssh, so a container keeps a STABLE SSH identity across recreation.
+
+    >>> ssh_volume_name("acme")
+    'agent-container-acme-ssh'
+    """
+    return f"{CONTAINER_PREFIX}{name}-ssh"
+
+
 def all_volume_mounts(name: str) -> list[str]:
-    """The six per-container '-v' volume args, in the canonical fixed order
-    (workspace, claude, codex, pi, shellenv, tmux). pi-coding-agent's
+    """The seven per-container '-v' volume args, in the canonical fixed order
+    (workspace, claude, codex, pi, shellenv, tmux, ssh). pi-coding-agent's
     config/auth dir is ~/.pi (verified from
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
     """
     return [
         f"{volume_name(name)}:/workspace",
@@ -221,6 +233,7 @@ def all_volume_mounts(name: str) -> list[str]:
         f"{pi_volume_name(name)}:/home/dev/.pi",
         f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
+        f"{ssh_volume_name(name)}:/home/dev/.ssh",
     ]
 
 
@@ -228,7 +241,7 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux']
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
     """
     return [
         volume_name(name),
@@ -237,6 +250,7 @@ def per_container_volumes(name: str) -> list[str]:
         pi_volume_name(name),
         shellenv_volume_name(name),
         tmux_volume_name(name),
+        ssh_volume_name(name),
     ]
 
 
@@ -455,7 +469,7 @@ def image_exists(rt: str, tag: str) -> bool:
 
 
 def port_free(port: int) -> bool:
-    # Wildcard bind: `-p {port}:22` publishes on ALL interfaces (parity with
+    # Wildcard bind: `-p {port}:2222` publishes on ALL interfaces (parity with
     # agent-container), so probe what will actually be bound, not just loopback.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -586,8 +600,10 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
         "--name", cname,
         "--env-file", str(env_file),
         # Publishes sshd on ALL host interfaces (remote hosts.conf attach needs
-        # it). Firewall the VPS.
-        "-p", f"{port}:22",
+        # it). Firewall the VPS. Container-side port is 2222: sshd runs rootless
+        # as the dev user, which cannot bind the privileged port 22. The host
+        # port (the hashed 2200+ value) is unchanged, so `attach` is unaffected.
+        "-p", f"{port}:2222",
     ]
     # Standard per-container volumes (canonical order), then optional binds.
     for vol in all_volume_mounts(name):

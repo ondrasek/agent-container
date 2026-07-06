@@ -16,13 +16,15 @@
 # env file) is parameterized, so running compose twice with different env values
 # yields two fully non-colliding stacks.
 #
-# Volume parity with the CLI: this template mounts the SAME six per-container
+# Volume parity with the CLI: this template mounts the SAME seven per-container
 # named volumes that `agent-container up` mounts (workspace + the five agent /
-# shell-env / tmux config dirs), so interactive `claude login` / `codex login`,
-# `~/.agent-container/env`, and `~/.config/tmux` persist across `down`/`up` on
-# this path too. Keep this list in sync with `all_volume_mounts()` in
-# bin/agent-container. (NOTE: SSH host keys and ~/.ssh/authorized_keys are NOT
-# yet persisted here or on the CLI path — see docs/orchestration.md.)
+# shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
+# `codex login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH
+# identity (host key + authorized_keys) persist across `down`/`up` on this path
+# too. Keep this list in sync with `all_volume_mounts()` in bin/agent-container.
+#
+# The container is rootless (sshd runs as dev on port 2222); the host port is
+# operator-chosen, mapped to 2222.
 
 services:
   agent-container:
@@ -34,7 +36,7 @@ services:
     env_file:
       - "${AGENT_CONTAINER_ENV_FILE:-../.env}"
     ports:
-      - "${AGENT_CONTAINER_PORT:-2200}:22"
+      - "${AGENT_CONTAINER_PORT:-2200}:2222"
     volumes:
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-workspace:/workspace"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-claude:/home/dev/.claude"
@@ -42,6 +44,7 @@ services:
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-pi:/home/dev/.pi"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:/home/dev/.agent-container"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:/home/dev/.config/tmux"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-ssh:/home/dev/.ssh"
     # unless-stopped: an always-on dev box should come back after a host reboot
     # or daemon restart, but stay down when the operator explicitly stops it.
     restart: unless-stopped
@@ -62,3 +65,5 @@ volumes:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv"
   agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-ssh:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-ssh"
