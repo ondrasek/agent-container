@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v7
       - name: Run the pytest suite
         # Gate the release on green: mirrors ci.yml (ci.yml does NOT run on tag
         # pushes, so the suite is re-run here). A failure here fails the build
