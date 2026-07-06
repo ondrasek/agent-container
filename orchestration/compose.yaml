@@ -8,9 +8,21 @@
 #   AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_PORT=2218 docker compose up -d
 #   AGENT_CONTAINER_NAME=alpha docker compose down
 #
-# Parallel-container safety: every per-container value (name, port, volume)
-# is parameterized via AGENT_CONTAINER_NAME / AGENT_CONTAINER_PORT, so running compose twice
-# with different env values yields two non-colliding stacks.
+# Per-container env file (optional): point AGENT_CONTAINER_ENV_FILE at a distinct
+# .env so two parallel stacks can carry different GH_TOKEN / git identities:
+#   AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_ENV_FILE=../alpha.env docker compose up -d
+#
+# Parallel-container safety: every per-container value (name, port, volumes,
+# env file) is parameterized, so running compose twice with different env values
+# yields two fully non-colliding stacks.
+#
+# Volume parity with the CLI: this template mounts the SAME six per-container
+# named volumes that `agent-container up` mounts (workspace + the five agent /
+# shell-env / tmux config dirs), so interactive `claude login` / `codex login`,
+# `~/.agent-container/env`, and `~/.config/tmux` persist across `down`/`up` on
+# this path too. Keep this list in sync with `all_volume_mounts()` in
+# bin/agent-container. (NOTE: SSH host keys and ~/.ssh/authorized_keys are NOT
+# yet persisted here or on the CLI path — see docs/orchestration.md.)
 
 services:
   agent-container:
@@ -20,15 +32,33 @@ services:
     image: localhost/agent-container:latest
     container_name: "agent-container-${AGENT_CONTAINER_NAME:-default}"
     env_file:
-      - ../.env
+      - "${AGENT_CONTAINER_ENV_FILE:-../.env}"
     ports:
       - "${AGENT_CONTAINER_PORT:-2200}:22"
     volumes:
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-workspace:/workspace"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-claude:/home/dev/.claude"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-codex:/home/dev/.codex"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-pi:/home/dev/.pi"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:/home/dev/.agent-container"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:/home/dev/.config/tmux"
+    # unless-stopped: an always-on dev box should come back after a host reboot
+    # or daemon restart, but stay down when the operator explicitly stops it.
     restart: unless-stopped
 
+# Compose expands ${AGENT_CONTAINER_NAME} at parse time, so each invocation
+# creates a distinct set of named volumes. They survive `compose down` and are
+# removed only by `compose down -v` (the CLI's `down --purge` equivalent).
 volumes:
-  # Compose expands ${AGENT_CONTAINER_NAME} at parse time, so each invocation
-  # creates a distinct named volume. The volume survives `compose down`.
   agent-container-${AGENT_CONTAINER_NAME:-default}-workspace:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-workspace"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-claude:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-claude"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-codex:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-codex"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-pi:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-pi"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux"

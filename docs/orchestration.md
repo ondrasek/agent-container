@@ -129,13 +129,22 @@ AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_PORT=2218 docker compose up -d
 AGENT_CONTAINER_NAME=alpha docker compose down
 ```
 
-The same env vars drive container name, port, and volume name, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks.
+The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of six per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
 
 `agent-container` does not use compose — it calls the runtime directly. Compose is offered for operators who prefer that interface.
 
+## Known limitation: SSH identity is not persisted
+
+SSH **host keys** (`/etc/ssh/ssh_host_*`) and the operator's **`~/.ssh/authorized_keys`** live outside the six named volumes, so they are regenerated / wiped whenever the container is recreated (`down`/`up`, or a Quadlet/compose recreate). Consequences:
+
+- Your SSH client will report `REMOTE HOST IDENTIFICATION HAS CHANGED` after a recreate (clear the stale `known_hosts` entry, or pin the container's key).
+- The `authorized_keys` you inject must be **re-injected after each recreate**, not just once.
+
+This affects **all** paths equally (the `agent-container up` CLI, Quadlet, and compose all mount the same six volumes). Persisting SSH identity across recreation is tracked as a follow-up; it is a cross-cutting change to the entrypoint + volume set, not a template-only tweak.
+
 ## Constraints satisfied
 
-- **Ephemeral containers** — only the workspace volume is persistent, and `--purge` removes even that.
+- **Ephemeral containers** — all six per-container volumes persist across `down`/`up`; `--purge` removes them. The container itself is disposable — durable state lives in git (commit + push), not the volumes.
 - **No VSCode coupling** — no `.devcontainer/`, no editor assumptions. SSH + tmux is the contract.
 - **Parallel-safe** — `agent-container up alpha` and `agent-container up bravo` run side by side with distinct names, ports, and volumes.
 - **No baked secrets** — `.env` is read at run time, not at build time.
