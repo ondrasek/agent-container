@@ -1,6 +1,6 @@
-"""Pytest fixtures for the bin/agent-env suite.
+"""Pytest fixtures for the bin/agent-container suite.
 
-agent-env is a PEP 723 single-file script without a .py extension, so the
+agent-container is a PEP 723 single-file script without a .py extension, so the
 suite loads it via SourceFileLoader. Run it with uv; --no-project keeps the run
 hermetic (the root pyproject.toml otherwise puts uv in project mode) and the
 --with pins mirror the script's own inline metadata:
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "agent-env"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "agent-container"
 
 _counter = itertools.count()
 
@@ -53,10 +53,10 @@ def load_wiz(monkeypatch, tmp_path):
                 Path(val).mkdir(parents=True, exist_ok=True)
                 monkeypatch.setenv(var, str(val))
         # A leaked operator env var must never steer a test.
-        for var in ("AGENT_ENV_RUNTIME", "AGENT_ENV_HOST", "AGENT_ENV_USER", "TMUX"):
+        for var in ("AGENT_CONTAINER_RUNTIME", "AGENT_CONTAINER_HOST", "AGENT_CONTAINER_USER", "TMUX"):
             monkeypatch.delenv(var, raising=False)
 
-        mod_name = f"_agent_env_under_test_{next(_counter)}"
+        mod_name = f"_agent_container_under_test_{next(_counter)}"
         loader = SourceFileLoader(mod_name, str(SCRIPT_PATH))
         spec = importlib.util.spec_from_loader(mod_name, loader)
         module = importlib.util.module_from_spec(spec)

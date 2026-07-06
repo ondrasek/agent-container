@@ -1,4 +1,4 @@
-# agent-env
+# agent-container
 
 Always-on, containerized development environment for a single operator. Hosts AI coding agents (Claude Code, Codex, pi-coding-agent), `nvim`, `tmux`, and `git` behind OpenSSH. Designed to run on a personal Linux VPS and be attached to over `ssh`.
 
@@ -11,11 +11,11 @@ Credential contract: [`docs/credentials.md`](docs/credentials.md).
 ```
 laptop                                        VPS (Hetzner / Debian 12)
 ------                                        ------------------------
-~/.config/agent-env/hosts.conf                   user systemd (linger enabled)
+~/.config/agent-container/hosts.conf                   user systemd (linger enabled)
   ACME_HOST=vps1.example                        |
-  ACME_PORT=2218                                +-- Quadlet: agent-env-acme.container
+  ACME_PORT=2218                                +-- Quadlet: agent-container-acme.container
                                                     |
-$ agent-env attach acme                                +-- container: agent-env-acme
+$ agent-container attach acme                                +-- container: agent-container-acme
    |                                                       +-- sshd  (port 22 -> host 2218)
    |  ssh -p 2218 dev@vps1.example -t tmux              +-- tmux session "main"
    |     attach -t main                                       +-- nvim
@@ -58,8 +58,8 @@ sudo apt-get update
 sudo apt-get install -y podman git netcat-openbsd
 loginctl enable-linger "$USER"
 
-# uv — needed only for the `agent-env` CLI (Quick path below). The Quadlet path
-# drives podman via systemd and needs neither uv nor agent-env.
+# uv — needed only for the `agent-container` CLI (Quick path below). The Quadlet path
+# drives podman via systemd and needs neither uv nor agent-container.
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
@@ -68,16 +68,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ### Step 4 — clone, configure, build
 
 ```bash
-git clone https://github.com/ondrasek/agent-env.git
-cd agent-env
+git clone https://github.com/ondrasek/agent-container.git
+cd agent-container
 cp .env.example .env
 chmod 0600 .env
 $EDITOR .env       # fill in GH_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL, agent API keys
-uv tool install --editable .   # puts `agent-env` on PATH (editable; needs uv)
-agent-env build
+uv tool install --editable .   # puts `agent-container` on PATH (editable; needs uv)
+agent-container build
 ```
 
-(If you prefer not to install the tool, `uv run --script bin/agent-env build`
+(If you prefer not to install the tool, `uv run --script bin/agent-container build`
 runs it in place.) First build takes ~5-10 minutes (NodeSource, npm globals,
 neovim tarball). Subsequent builds reuse cached layers.
 
@@ -85,12 +85,12 @@ neovim tarball). Subsequent builds reuse cached layers.
 
 Two paths. Pick one per container.
 
-**Quick path** — `agent-env up` (needs `uv` + `agent-env`, installed in Step 4). Runs `podman run -d`. Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
+**Quick path** — `agent-container up` (needs `uv` + `agent-container`, installed in Step 4). Runs `podman run -d`. Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
 
 ```bash
-agent-env up acme
+agent-container up acme
 # prints something like:
-# [agent-env] name=acme port=2218 env-file=/home/ondra/agent-env/.env
+# [agent-container] name=acme port=2218 env-file=/home/ondra/agent-container/.env
 ```
 
 Note the port. You'll need it on the laptop side.
@@ -98,27 +98,27 @@ Note the port. You'll need it on the laptop side.
 **Quadlet path** — recommended for "always-on" production use. systemd supervises the container, restarts it on failure, brings it back on reboot, captures its logs in `journald`:
 
 ```bash
-mkdir -p ~/.config/containers/systemd ~/.config/agent-env
-cp .env ~/.config/agent-env/agent-env-acme.env
-chmod 0600 ~/.config/agent-env/agent-env-acme.env
+mkdir -p ~/.config/containers/systemd ~/.config/agent-container
+cp .env ~/.config/agent-container/agent-container-acme.env
+chmod 0600 ~/.config/agent-container/agent-container-acme.env
 
 sed -e 's/${NAME}/acme/g' \
-    -e "s|\${ENV_FILE}|$HOME/.config/agent-env/agent-env-acme.env|g" \
+    -e "s|\${ENV_FILE}|$HOME/.config/agent-container/agent-container-acme.env|g" \
     -e 's/${PORT}/2218/g' \
-    orchestration/agent-env.container \
-    > ~/.config/containers/systemd/agent-env-acme.container
+    orchestration/agent-container.container \
+    > ~/.config/containers/systemd/agent-container-acme.container
 
 systemctl --user daemon-reload
-systemctl --user start agent-env-acme.service        # Quadlet generates the .service from .container
-systemctl --user status agent-env-acme.service
+systemctl --user start agent-container-acme.service        # Quadlet generates the .service from .container
+systemctl --user status agent-container-acme.service
 ```
 
 To stop / restart / log:
 
 ```bash
-systemctl --user stop    agent-env-acme.service
-systemctl --user restart agent-env-acme.service
-journalctl --user -u agent-env-acme.service -f
+systemctl --user stop    agent-container-acme.service
+systemctl --user restart agent-container-acme.service
+journalctl --user -u agent-container-acme.service -f
 ```
 
 ### Step 6 — grant SSH access from your laptop
@@ -127,40 +127,40 @@ The container starts with **no** keys in `dev`'s `authorized_keys` (per the hard
 
 ```bash
 # inside the container, set up .ssh
-podman exec -u dev agent-env-acme install -d -m 0700 /home/dev/.ssh
+podman exec -u dev agent-container-acme install -d -m 0700 /home/dev/.ssh
 
 # copy your laptop's pubkey into the container
-podman exec -u dev -i agent-env-acme \
+podman exec -u dev -i agent-container-acme \
     tee -a /home/dev/.ssh/authorized_keys < ~/.ssh/authorized_keys >/dev/null
 
 # tighten perms
-podman exec -u dev agent-env-acme chmod 0600 /home/dev/.ssh/authorized_keys
+podman exec -u dev agent-container-acme chmod 0600 /home/dev/.ssh/authorized_keys
 ```
 
 (This step is a known wart of the MVP — a future iteration will accept an `AUTHORIZED_KEYS` env var or a mounted file so it happens automatically at container start. Tracked separately.)
 
-### Step 7 — set up `agent-env` on the laptop
+### Step 7 — set up `agent-container` on the laptop
 
 On your **laptop**, not the VPS. Install the same CLI (it runs client-side for
 attach) and point it at the VPS via `hosts.conf`:
 
 ```bash
-git clone https://github.com/ondrasek/agent-env.git
-uv tool install --editable ./agent-env   # puts `agent-env` on PATH
+git clone https://github.com/ondrasek/agent-container.git
+uv tool install --editable ./agent-container   # puts `agent-container` on PATH
 
-mkdir -p ~/.config/agent-env
-chmod 0700 ~/.config/agent-env
-cat >> ~/.config/agent-env/hosts.conf <<EOF
+mkdir -p ~/.config/agent-container
+chmod 0700 ~/.config/agent-container
+cat >> ~/.config/agent-container/hosts.conf <<EOF
 ACME_HOST=<vps-ip-or-dns>
 ACME_PORT=2218
 EOF
-chmod 0600 ~/.config/agent-env/hosts.conf
+chmod 0600 ~/.config/agent-container/hosts.conf
 ```
 
 ### Step 8 — verify
 
 ```bash
-agent-env attach acme
+agent-container attach acme
 ```
 
 You should land inside a tmux session named `main`, prompt is `dev@<container-id>:/workspace$`. `tmux ls` shows one session. Detach with `Ctrl-B d`. Re-attach to confirm everything's still there.
@@ -170,25 +170,25 @@ You should land inside a tmux session named `main`, prompt is `dev@<container-id
 ### Attach to a container
 
 ```bash
-agent-env attach acme            # auto: hosts.conf -> remote, else local state file
-agent-env attach --local acme    # local (Lima on macOS); reads port from local state file
+agent-container attach acme            # auto: hosts.conf -> remote, else local state file
+agent-container attach --local acme    # local (Lima on macOS); reads port from local state file
 ```
 
 Behind the scenes: `ssh dev@<host> -p <port> -t tmux attach -t main`. The `-t` allocates a TTY (required for tmux); `tmux attach -t main` joins the existing session rather than creating a new one (which would mask bugs).
 
-### The `agent-env` CLI
+### The `agent-container` CLI
 
-`agent-env` is the single command for the whole lifecycle — build, start, attach,
+`agent-container` is the single command for the whole lifecycle — build, start, attach,
 logs, stop, purge — plus an interactive wizard when run with no arguments. It is a
-PEP 723 single-file script (`bin/agent-env`) and needs nothing but
+PEP 723 single-file script (`bin/agent-container`) and needs nothing but
 [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
-agent-env                # interactive menu: build, start, attach, logs, stop, purge
-agent-env up acme        # every menu action has a scriptable subcommand
-agent-env list --json    # machine-readable state (merges runtime ps + state files)
-agent-env attach acme    # hosts.conf -> remote, else local state file; execs ssh
-agent-env --self-test    # doctests + port-hash corpus (port hash, key derivation)
+agent-container                # interactive menu: build, start, attach, logs, stop, purge
+agent-container up acme        # every menu action has a scriptable subcommand
+agent-container list --json    # machine-readable state (merges runtime ps + state files)
+agent-container attach acme    # hosts.conf -> remote, else local state file; execs ssh
+agent-container --self-test    # doctests + port-hash corpus (port hash, key derivation)
 ```
 
 It keeps all state on disk (container names, the port hash, `<name>.port` state
@@ -209,18 +209,18 @@ uv run --no-project --with pytest \
 ```
 
 The `--with` pins mirror the script's PEP 723 inline metadata — keep them in sync
-when bumping dependencies in `bin/agent-env` (and in `pyproject.toml`).
+when bumping dependencies in `bin/agent-container` (and in `pyproject.toml`).
 `--no-project` keeps the run hermetic: the root `pyproject.toml` otherwise puts
 `uv run` in project mode and would sync a `.venv/` at the repo root.
 
 ### Install from PyPI
 
-Once published, install `agent-env` onto your `PATH` from PyPI — no checkout
+Once published, install `agent-container` onto your `PATH` from PyPI — no checkout
 required:
 
 ```bash
-uv tool install agent-env      # or: pipx install agent-env
-agent-env --help
+uv tool install agent-container      # or: pipx install agent-container
+agent-container --help
 ```
 
 A PyPI install is primarily a **client / attach tool**: `attach`, `list`,
@@ -229,7 +229,7 @@ scripts are bundled as package data). Two commands still need a repo checkout on
 the host they run on:
 
 - **`build`** needs a checkout as the docker build context.
-- **`up`** needs the image `localhost/agent-env:latest` to already exist locally
+- **`up`** needs the image `localhost/agent-container:latest` to already exist locally
   (it dies otherwise). No prebuilt image is published to any registry, so
   producing it requires `build` — hence a checkout. On a fresh host the server
   side still needs a checkout; a pure-PyPI install alone cannot `up` a container.
@@ -237,39 +237,39 @@ the host they run on:
 Point `build` at a checkout explicitly:
 
 ```bash
-agent-env build --context /path/to/agent-env
+agent-container build --context /path/to/agent-container
 # or, once, for the session:
-export AGENT_ENV_REPO=/path/to/agent-env
-agent-env build
+export AGENT_CONTAINER_REPO=/path/to/agent-container
+agent-container build
 ```
 
-`AGENT_ENV_REPO` (or an auto-detected checkout you happen to run from) also lets
+`AGENT_CONTAINER_REPO` (or an auto-detected checkout you happen to run from) also lets
 the standalone install read the on-disk `completions/` instead of the bundled
 copy — handy when hacking on the completions.
 
 ### Install as a uv tool (editable, for development)
 
-For working **on** `agent-env`, install it editable so `git pull` keeps the
+For working **on** `agent-container`, install it editable so `git pull` keeps the
 `PATH` command current and `build` / `completions` resolve the live repo files:
 
 ```bash
-uv tool install --editable /path/to/agent-env
-#   installs ~/.local/bin/agent-env; `git pull` keeps it current (editable)
-uv tool upgrade agent-env     # after dependency bumps
-uv tool uninstall agent-env
+uv tool install --editable /path/to/agent-container
+#   installs ~/.local/bin/agent-container; `git pull` keeps it current (editable)
+uv tool upgrade agent-container     # after dependency bumps
+uv tool uninstall agent-container
 ```
 
-The `uv run --script bin/agent-env` path and the oh-my-zsh plugin are unaffected
+The `uv run --script bin/agent-container` path and the oh-my-zsh plugin are unaffected
 by installing the tool; if the repo's `bin/` is also on `PATH` (e.g. via the
 plugin), both resolve to the same code — harmless.
 
 ### Shell completions
 
-`agent-env` ships bash and zsh completions under [`completions/`](completions/):
+`agent-container` ships bash and zsh completions under [`completions/`](completions/):
 subcommands, per-subcommand flags (including the repeatable `--mount`), and
 **container-name completion** for `up` / `down` / `attach` / `logs` / `purge`.
 Names are gathered directly in the shell from your state files
-(`$XDG_STATE_HOME/agent-env/*.port`) and `hosts.conf` — no `docker`, `podman`, or
+(`$XDG_STATE_HOME/agent-container/*.port`) and `hosts.conf` — no `docker`, `podman`, or
 `uv` is spawned on Tab, so completion stays instant and works offline.
 
 Completion triggers on the command **name**, so put the tool on your `PATH`
@@ -277,7 +277,7 @@ Completion triggers on the command **name**, so put the tool on your `PATH`
 
 ```bash
 # add the repo's bin/ to PATH (in ~/.bashrc or ~/.zshrc)
-export PATH="$HOME/agent-env/bin:$PATH"
+export PATH="$HOME/agent-container/bin:$PATH"
 ```
 
 **bash** — source the script (works with or without the `bash-completion`
@@ -285,42 +285,42 @@ package):
 
 ```bash
 # ~/.bashrc
-source "$HOME/agent-env/completions/agent-env.bash"
-# or generate it: agent-env completions bash > ~/.local/share/bash-completion/completions/agent-env
+source "$HOME/agent-container/completions/agent-container.bash"
+# or generate it: agent-container completions bash > ~/.local/share/bash-completion/completions/agent-container
 ```
 
-**zsh** — drop the script onto `$fpath` as `_agent-env`, then `compinit`:
+**zsh** — drop the script onto `$fpath` as `_agent-container`, then `compinit`:
 
 ```zsh
 mkdir -p ~/.zfunc
-agent-env completions zsh > ~/.zfunc/_agent-env
+agent-container completions zsh > ~/.zfunc/_agent-container
 # ~/.zshrc, before compinit:
 fpath=(~/.zfunc $fpath)
 autoload -Uz compinit && compinit
 ```
 
-**oh-my-zsh** — a plugin under [`completions/oh-my-zsh/agent-env/`](completions/oh-my-zsh/agent-env/)
+**oh-my-zsh** — a plugin under [`completions/oh-my-zsh/agent-container/`](completions/oh-my-zsh/agent-container/)
 bundles PATH wiring, the completion, and aliases (`ae`, `aeu`, `aea`, `ael`).
 Symlink it into your custom plugins dir and enable it:
 
 ```zsh
-ln -s "$HOME/Git/ondrasek/agent-env/completions/oh-my-zsh/agent-env" \
-      "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/agent-env"
-# then add `agent-env` to plugins=(...) in ~/.zshrc:
-#   plugins=(git agent-env)
+ln -s "$HOME/Git/ondrasek/agent-container/completions/oh-my-zsh/agent-container" \
+      "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/agent-container"
+# then add `agent-container` to plugins=(...) in ~/.zshrc:
+#   plugins=(git agent-container)
 ```
 
-`AGENT_ENV_REPO` is the path to this repo checkout; the plugin auto-detects it from
+`AGENT_CONTAINER_REPO` is the path to this repo checkout; the plugin auto-detects it from
 its own symlink-resolved location, so a symlink install needs no configuration.
-(If you *copy* the plugin dir instead of symlinking, set `AGENT_ENV_REPO=<repo>` in
+(If you *copy* the plugin dir instead of symlinking, set `AGENT_CONTAINER_REPO=<repo>` in
 `~/.zshrc` before oh-my-zsh loads.)
 
 For `PATH`, the plugin prefers the canonical user bin dir — `$XDG_BIN_HOME`, or
-`~/.local/bin` when that's unset. If `agent-env` is symlinked there
-(e.g. `ln -s "$AGENT_ENV_REPO/bin/agent-env" "${XDG_BIN_HOME:-$HOME/.local/bin}/"`)
+`~/.local/bin` when that's unset. If `agent-container` is symlinked there
+(e.g. `ln -s "$AGENT_CONTAINER_REPO/bin/agent-container" "${XDG_BIN_HOME:-$HOME/.local/bin}/"`)
 it puts that dir on `PATH`; otherwise it falls back to the repo's own `bin/`, so
 the plugin works with or without a separate install step. This alone makes
-`agent-env` callable with completions — no manual `PATH` or `~/.zfunc` edits.
+`agent-container` callable with completions — no manual `PATH` or `~/.zfunc` edits.
 
 The completion script and the oh-my-zsh plugin are covered by
 `bin/tests/test_completions.sh` (needs only bash; the zsh/omz cases are skipped
@@ -375,11 +375,11 @@ Press **`Ctrl-B d`**. SSH closes, your laptop shell returns. Everything you star
 - Agents keep processing whatever you had them on.
 - Background commands (`make`, `pytest --watch`, anything) keep going.
 
-You can close the laptop lid, switch networks, reboot the laptop, or fly to another continent. Reconnect later with `agent-env attach acme` and everything is exactly where you left it.
+You can close the laptop lid, switch networks, reboot the laptop, or fly to another continent. Reconnect later with `agent-container attach acme` and everything is exactly where you left it.
 
 The chain that makes this work:
 
-1. `ssh` is `exec`ed by `agent-env attach`, not backgrounded — closing it cleanly drops the TTY without killing remote processes.
+1. `ssh` is `exec`ed by `agent-container attach`, not backgrounded — closing it cleanly drops the TTY without killing remote processes.
 2. tmux session `main` was started detached by the container's entrypoint; it has no parent process tied to your SSH session.
 3. The container was started detached (`podman run -d`) and stays running independent of any login.
 4. `loginctl enable-linger` keeps user-level systemd (and therefore the Quadlet-supervised container) alive across all logins / logouts of your VPS user.
@@ -390,8 +390,8 @@ The chain that makes this work:
 On the VPS:
 
 ```bash
-agent-env list                                       # agent-env-managed containers + their ports
-systemctl --user list-units 'agent-env-*.service'           # Quadlet-supervised services
+agent-container list                                       # agent-container-managed containers + their ports
+systemctl --user list-units 'agent-container-*.service'           # Quadlet-supervised services
 ```
 
 Inside the container (after attach):
@@ -408,28 +408,28 @@ Each project gets its own container with its own workspace, SSH port, tmux sessi
 
 ```bash
 # on the VPS
-agent-env up blog
+agent-container up blog
 # or via Quadlet (repeat Step 5 Quadlet recipe with NAME=blog, a different PORT)
 
 # on the laptop
-cat >> ~/.config/agent-env/hosts.conf <<EOF
+cat >> ~/.config/agent-container/hosts.conf <<EOF
 BLOG_HOST=<vps-ip-or-dns>
 BLOG_PORT=2247
 EOF
 
-agent-env attach blog                                       # totally separate session
+agent-container attach blog                                       # totally separate session
 ```
 
-`agent-env up` allocates ports deterministically from the container name (hash → 2200-2299 range) so the same name always gets the same port across rebuilds.
+`agent-container up` allocates ports deterministically from the container name (hash → 2200-2299 range) so the same name always gets the same port across rebuilds.
 
 ### Lose a container, keep your work
 
 The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
 
-- `agent-env down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-env`), and the tmux-config volume (`~/.config/tmux`). `agent-env up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf`.
-- `agent-env down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux). Use for a true clean slate; you will re-`login` to the agents afterward.
-- VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `agent-env up acme` again. Pushed commits are unaffected either way.
-- Quadlet service crashed — `systemctl --user restart agent-env-acme.service`. Look at `journalctl --user -u agent-env-acme.service` first.
+- `agent-container down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-container`), and the tmux-config volume (`~/.config/tmux`). `agent-container up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf`.
+- `agent-container down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux). Use for a true clean slate; you will re-`login` to the agents afterward.
+- VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `agent-container up acme` again. Pushed commits are unaffected either way.
+- Quadlet service crashed — `systemctl --user restart agent-container-acme.service`. Look at `journalctl --user -u agent-container-acme.service` first.
 
 ### Log in to agents (persists across restarts)
 
@@ -438,7 +438,7 @@ persistent volume for each agent's credentials, so you can **log in once,
 interactively, inside the container** and it survives `down`/`up` and crashes:
 
 ```bash
-agent-env attach acme        # or: agent-env attach --local acme
+agent-container attach acme        # or: agent-container attach --local acme
 # then, inside the tmux session:
 claude          # run /login and follow the prompt
 codex login
@@ -451,7 +451,7 @@ auto-refreshes it, so "log in once" effectively means "indefinitely" — strictl
 better than a static key in `.env`, which never refreshes.
 
 **Per-container = per-account.** Because each container name has its own
-credential volumes, `agent-env up work` and `agent-env up personal` can be logged into
+credential volumes, `agent-container up work` and `agent-container up personal` can be logged into
 different Claude/Codex accounts at the same time with no cross-talk. (You can
 still set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in `.env` instead — they're now
 optional. `GH_TOKEN` and git identity remain required.)
@@ -462,15 +462,15 @@ optional. `GH_TOKEN` and git identity remain required.)
 
 ### Persistent shell environment
 
-Each container mounts a `~/.agent-env` volume holding an `env` file that is sourced
+Each container mounts a `~/.agent-container` volume holding an `env` file that is sourced
 into **every** bash and zsh session (login, SSH, and tmux panes). Use it for
 per-container exports, aliases, or extra secrets that should outlive the
 container:
 
 ```bash
 # inside the container — the file is seeded with a commented template on first boot
-nvim ~/.agent-env/env       # add lines like:  export FOO=bar
-# new shells (or: source ~/.agent-env/env) pick it up; it survives down/up.
+nvim ~/.agent-container/env       # add lines like:  export FOO=bar
+# new shells (or: source ~/.agent-container/env) pick it up; it survives down/up.
 ```
 
 It's read with `set -a` semantics, so plain `KEY=VALUE` lines are exported. A
@@ -490,7 +490,7 @@ tmux source ~/.config/tmux/tmux.conf   # or start a fresh session to pick it up
 ```
 
 The default window layout (`shell edit agents`) is set by the entrypoint via
-`AGENT_ENV_TMUX_WINDOWS`; see [Entrypoint behavior](#entrypoint-behavior).
+`AGENT_CONTAINER_TMUX_WINDOWS`; see [Entrypoint behavior](#entrypoint-behavior).
 
 ### Mount a host directory (optional)
 
@@ -498,11 +498,11 @@ To give a container read/write access to a directory on your machine, pass
 `--mount` at `up` (repeatable). With no `--mount`, nothing extra is mounted:
 
 ```bash
-agent-env up acme --mount ~/code/myproject
+agent-container up acme --mount ~/code/myproject
 #   -> appears inside the container at /workspace/myproject (read/write)
 
 # explicit target, and more than one:
-agent-env up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
+agent-container up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
 ```
 
 > **macOS / Lima prerequisite:** the host directory must sit inside a **writable**
@@ -515,14 +515,14 @@ agent-env up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
 
 ```bash
 # on the VPS
-cd ~/agent-env
+cd ~/agent-container
 git pull
-agent-env build
+agent-container build
 
 # then restart whichever path you used
-systemctl --user restart agent-env-acme.service              # Quadlet path
+systemctl --user restart agent-container-acme.service              # Quadlet path
 # OR
-agent-env down acme && agent-env up acme            # quick path
+agent-container down acme && agent-container up acme            # quick path
 ```
 
 The workspace volume is independent of the image, so a rebuild does **not** disturb the contents of `/workspace`.
@@ -532,12 +532,12 @@ The workspace volume is independent of the image, so a rebuild does **not** dist
 When your `GH_TOKEN` expires:
 
 1. Generate a new PAT on GitHub (same `repo` scope, new expiration).
-2. Update the `.env` file (the one you launched the container from — `~/.config/agent-env/agent-env-acme.env` for Quadlet, or `./.env` for the quick path).
+2. Update the `.env` file (the one you launched the container from — `~/.config/agent-container/agent-container-acme.env` for Quadlet, or `./.env` for the quick path).
 3. Restart the container so the new value is loaded into env:
    ```bash
-   systemctl --user restart agent-env-acme.service
+   systemctl --user restart agent-container-acme.service
    # OR
-   agent-env down acme && agent-env up acme
+   agent-container down acme && agent-container up acme
    ```
 
 The credential helper reads `$GH_TOKEN` fresh on every push, so the next `git push` after the restart uses the new token.
@@ -549,9 +549,9 @@ The image is built from a single `Dockerfile` at the repo root. The same file wo
 ### Build
 
 ```bash
-docker build -t agent-env:latest .
+docker build -t agent-container:latest .
 # or, on the VPS:
-podman build -t agent-env:latest .
+podman build -t agent-container:latest .
 ```
 
 No build args. No secrets. Credentials are injected **only at `run` time** via `--env-file .env` (see [`docs/credentials.md`](docs/credentials.md)).
@@ -561,12 +561,12 @@ No build args. No secrets. Credentials are injected **only at `run` time** via `
 The entrypoint shipped with item B is a **stub** — it just generates SSH host keys and execs `sshd` in the foreground. Real entrypoint logic (git identity, credential helper, tmux session) lands in item C. Until then, a successful build + a container that stays running is the bar:
 
 ```bash
-docker build -t agent-env:latest .
-docker run --rm -d --name agent-env-smoke agent-env:latest
-docker exec agent-env-smoke nvim --version | head -n1
-docker exec agent-env-smoke node --version
-docker exec agent-env-smoke claude --version || true
-docker stop agent-env-smoke
+docker build -t agent-container:latest .
+docker run --rm -d --name agent-container-smoke agent-container:latest
+docker exec agent-container-smoke nvim --version | head -n1
+docker exec agent-container-smoke node --version
+docker exec agent-container-smoke claude --version || true
+docker stop agent-container-smoke
 ```
 
 ### Layering rationale
@@ -589,7 +589,7 @@ Layers are ordered cheapest-to-rebuild last, so an edit to the entrypoint (which
 
 ### Image size
 
-Measured on first build (`docker images localhost/agent-env:latest`):
+Measured on first build (`docker images localhost/agent-container:latest`):
 
 - **Uncompressed (`DISK USAGE`):** ~1.84 GB
 - **Compressed (`CONTENT SIZE`):** ~432 MB
@@ -617,7 +617,7 @@ The image itself enforces none of this — that's item C's entrypoint and item E
 3. **SSH host keys.** Generated via `ssh-keygen -A` only if `/etc/ssh/ssh_host_ed25519_key` is absent. This guarantees each container instance gets a distinct SSH identity — a hard requirement for running multiple containers in parallel.
 4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig`; the token itself is never written to disk in the container.
 5. **sshd.** Started in the background via `sudo /usr/sbin/sshd` (daemonized; not `-D`). Listens on port 22 inside the container; map this to a host port via the orchestration layer.
-6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `AGENT_ENV_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `AGENT_ENV_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `agent-env attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.
+6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `AGENT_CONTAINER_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `AGENT_CONTAINER_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `agent-container attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.
 7. **PID 1 lifecycle.** The script `wait`s on a background `tail -f /dev/null`, keeping PID 1 alive. `SIGTERM` / `SIGINT` trigger a clean shutdown: `tmux kill-server`, then `sudo pkill sshd`, then `exit 0`.
 
 **Required env vars (entrypoint exits non-zero if missing):**
@@ -639,43 +639,43 @@ The agents themselves enforce their own keys at run time; the entrypoint just su
 
 ## Orchestration
 
-Host-side orchestration is the single `agent-env` CLI, plus two deployment templates. Full doc: [`docs/orchestration.md`](docs/orchestration.md).
+Host-side orchestration is the single `agent-container` CLI, plus two deployment templates. Full doc: [`docs/orchestration.md`](docs/orchestration.md).
 
 ```bash
-agent-env build                  # build the image
-agent-env up alpha               # start container agent-env-alpha (detached)
-agent-env up bravo               # start another, in parallel, on a different port
-agent-env list                   # see what's running
-agent-env attach alpha           # ssh + tmux attach
-agent-env attach alpha --window edit  # attach and select the 'edit' window
-agent-env logs alpha             # tail container logs
-agent-env down alpha             # stop + remove (all volumes preserved)
-agent-env down alpha --purge     # stop + remove + delete ALL per-container volumes
+agent-container build                  # build the image
+agent-container up alpha               # start container agent-container-alpha (detached)
+agent-container up bravo               # start another, in parallel, on a different port
+agent-container list                   # see what's running
+agent-container attach alpha           # ssh + tmux attach
+agent-container attach alpha --window edit  # attach and select the 'edit' window
+agent-container logs alpha             # tail container logs
+agent-container down alpha             # stop + remove (all volumes preserved)
+agent-container down alpha --purge     # stop + remove + delete ALL per-container volumes
 ```
 
-**Runtime auto-detection:** the default is platform-aware — on macOS (Lima + docker-cli) `agent-env` prefers `docker`, on Linux (the VPS) it prefers `podman`, falling back to the other. Override with `AGENT_ENV_RUNTIME=docker|podman`.
+**Runtime auto-detection:** the default is platform-aware — on macOS (Lima + docker-cli) `agent-container` prefers `docker`, on Linux (the VPS) it prefers `podman`, falling back to the other. Override with `AGENT_CONTAINER_RUNTIME=docker|podman`.
 
 **Templates:**
 - `orchestration/compose.yaml` — Docker Compose, for the local Lima + docker-cli path.
-- `orchestration/agent-env.container` — Podman Quadlet template, instantiated per container on the VPS.
+- `orchestration/agent-container.container` — Podman Quadlet template, instantiated per container on the VPS.
 
 ## Client-side attach
 
-`agent-env attach` resolves a symbolic container name to the right `ssh + tmux` invocation. It runs **on your laptop** (reading `hosts.conf` and local state files) and hands over to `ssh`:
+`agent-container attach` resolves a symbolic container name to the right `ssh + tmux` invocation. It runs **on your laptop** (reading `hosts.conf` and local state files) and hands over to `ssh`:
 
 ```bash
-agent-env attach acme                 # remote: read ACME_HOST + ACME_PORT from hosts.conf
-agent-env attach --local alpha        # local:  read port from XDG_STATE_HOME/agent-env/alpha.port
-agent-env attach --window edit acme   # select the 'edit' tmux window on attach
+agent-container attach acme                 # remote: read ACME_HOST + ACME_PORT from hosts.conf
+agent-container attach --local alpha        # local:  read port from XDG_STATE_HOME/agent-container/alpha.port
+agent-container attach --window edit acme   # select the 'edit' tmux window on attach
 ```
 
 `--window`/`-w NAME` selects a tmux window in session `main` before attaching, so you land where you want. The name is validated against `[A-Za-z0-9._-]+`. If the window does not exist, tmux stays on the current one and still attaches.
 
 Detach is `Ctrl-B d` (tmux default) and returns you to your local shell — `ssh` is `exec`ed with `-t`, so signals and exit codes propagate through.
 
-**Remote config** — `~/.config/agent-env/hosts.conf` (or `$XDG_CONFIG_HOME/agent-env/hosts.conf`).
+**Remote config** — `~/.config/agent-container/hosts.conf` (or `$XDG_CONFIG_HOME/agent-container/hosts.conf`).
 
-Flat `KEY=VALUE` file. For each container name `foo`, set `FOO_HOST` and `FOO_PORT`. The name argument is uppercased (and hyphens become underscores) before lookup, so `agent-env attach my-box` reads `MY_BOX_HOST` / `MY_BOX_PORT`. Template: [`docs/agent-env-hosts.example`](docs/agent-env-hosts.example).
+Flat `KEY=VALUE` file. For each container name `foo`, set `FOO_HOST` and `FOO_PORT`. The name argument is uppercased (and hyphens become underscores) before lookup, so `agent-container attach my-box` reads `MY_BOX_HOST` / `MY_BOX_PORT`. Template: [`docs/agent-container-hosts.example`](docs/agent-container-hosts.example).
 
 ```ini
 ACME_HOST=vps1.example.com
@@ -684,11 +684,11 @@ BLOG_HOST=vps1.example.com
 BLOG_PORT=2247
 ```
 
-Why this format: trivial to hand-edit and the same primitives a shell user already knows. `agent-env` parses it line-by-line and **never** sources or executes it (values with `$` or backticks are taken literally, with a one-time warning).
+Why this format: trivial to hand-edit and the same primitives a shell user already knows. `agent-container` parses it line-by-line and **never** sources or executes it (values with `$` or backticks are taken literally, with a one-time warning).
 
-**Local mode** — `agent-env attach --local <name>` connects to `localhost` using the port written by `agent-env up` at `$XDG_STATE_HOME/agent-env/<name>.port`. This is the path for running the container under Lima on macOS while attaching from the same laptop.
+**Local mode** — `agent-container attach --local <name>` connects to `localhost` using the port written by `agent-container up` at `$XDG_STATE_HOME/agent-container/<name>.port`. This is the path for running the container under Lima on macOS while attaching from the same laptop.
 
-**Env overrides:** `AGENT_ENV_USER=<user>` (default `dev`), `AGENT_ENV_HOST=<host>` (default `localhost` for local targets).
+**Env overrides:** `AGENT_CONTAINER_USER=<user>` (default `dev`), `AGENT_CONTAINER_HOST=<host>` (default `localhost` for local targets).
 
 **Errors are actionable** — missing config, missing keys, and missing local state each print the exact file path you need to create or fix. SSH's own exit code is propagated on connection failure.
 
@@ -697,14 +697,14 @@ Why this format: trivial to hand-edit and the same primitives a shell user alrea
 `scripts/smoke-test.sh` exercises the full happy path end-to-end: build, up, in-container HTTPS git push via the credential helper, host-side push verification, and torn-down cleanup. It retroactively verifies the deferred acceptance criteria of the credential contract (item D).
 
 ```bash
-AGENT_ENV_SMOKE_REPO=your-handle/agent-env-smoke-target ./scripts/smoke-test.sh
+AGENT_CONTAINER_SMOKE_REPO=your-handle/agent-container-smoke-target ./scripts/smoke-test.sh
 ```
 
-Pre-flight refuses to run without `docker`/`podman`, `uv` plus `bin/agent-env`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).
+Pre-flight refuses to run without `docker`/`podman`, `uv` plus `bin/agent-container`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).
 
 ## Releasing
 
-`agent-env` publishes to PyPI via **Trusted Publishing** (OIDC — no API tokens
+`agent-container` publishes to PyPI via **Trusted Publishing** (OIDC — no API tokens
 stored in the repo). To cut a release:
 
 1. Bump `version` in `pyproject.toml`, commit, and push.
@@ -719,7 +719,7 @@ through `pypa/gh-action-pypi-publish` using a short-lived OIDC token. Because th
 suite runs first in the `build` job and `publish` `needs: build`, a red tagged
 commit fails the build and never reaches PyPI. **One-time setup:**
 the operator configures the [PyPI trusted publisher](https://docs.pypi.org/trusted-publishers/)
-for the `agent-env` project (owner `ondrasek`, repo `agent-env`, workflow
+for the `agent-container` project (owner `ondrasek`, repo `agent-container`, workflow
 `publish.yml`, environment `release`) — after that, releases need no secrets.
 
 ## License

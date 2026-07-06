@@ -14,12 +14,12 @@
 # (new-session -d), so it outlives the entrypoint's normal exit and we query it.
 #
 # Contract asserted against real tmux:
-#   1. unset AGENT_ENV_TMUX_WINDOWS -> windows 'shell edit agents' exist, in order,
+#   1. unset AGENT_CONTAINER_TMUX_WINDOWS -> windows 'shell edit agents' exist, in order,
 #      and the ACTIVE window is 'shell' (the select-window-by-id fix, verified
 #      against a real server rather than a stub echo).
 #   2. idempotency: a second entrypoint run (session already exists) leaves the
 #      window set byte-identical — no rebuild, no duplicates.
-#   3. explicit-empty AGENT_ENV_TMUX_WINDOWS='' -> exactly ONE window (opt-out).
+#   3. explicit-empty AGENT_CONTAINER_TMUX_WINDOWS='' -> exactly ONE window (opt-out).
 
 set -uo pipefail
 
@@ -53,7 +53,7 @@ STUB="${SB}/stub"; mkdir -p "${STUB}"
 HOMEDIR="${SB}/home"; mkdir -p "${HOMEDIR}"
 WORK="${SB}/work"; mkdir -p "${WORK}"
 # Private tmux socket for this run; unique per pid so parallel runs never collide.
-SOCK="agent-env-layout-test-$$"
+SOCK="agent-container-layout-test-$$"
 
 cleanup() {
     "${REAL_TMUX}" -L "${SOCK}" kill-server >/dev/null 2>&1 || true
@@ -74,7 +74,7 @@ chmod +x "${STUB}/tail"
 # the subcommand confines all of it to one disposable server.
 cat > "${STUB}/tmux" <<'EOF'
 #!/usr/bin/env bash
-exec "${AGENT_ENV_REAL_TMUX}" -L "${AGENT_ENV_TMUX_SOCKET}" "$@"
+exec "${AGENT_CONTAINER_REAL_TMUX}" -L "${AGENT_CONTAINER_TMUX_SOCKET}" "$@"
 EOF
 chmod +x "${STUB}/tmux"
 
@@ -84,14 +84,14 @@ run_entrypoint() {
     (
         cd "${WORK}" || exit 99
         export GH_TOKEN=x GIT_USER_NAME='Test User' GIT_USER_EMAIL='t@example.com'
-        export HOME="${HOMEDIR}" AGENT_ENV_HOME="${HOMEDIR}"
-        export AGENT_ENV_REAL_TMUX="${REAL_TMUX}" AGENT_ENV_TMUX_SOCKET="${SOCK}"
+        export HOME="${HOMEDIR}" AGENT_CONTAINER_HOME="${HOMEDIR}"
+        export AGENT_CONTAINER_REAL_TMUX="${REAL_TMUX}" AGENT_CONTAINER_TMUX_SOCKET="${SOCK}"
         export PATH="${STUB}:${PATH}"
-        unset AGENT_ENV_TMUX_WINDOWS
+        unset AGENT_CONTAINER_TMUX_WINDOWS
         case "${mode}" in
             __unset__) : ;;
-            __empty__) export AGENT_ENV_TMUX_WINDOWS="" ;;
-            *)         export AGENT_ENV_TMUX_WINDOWS="${mode}" ;;
+            __empty__) export AGENT_CONTAINER_TMUX_WINDOWS="" ;;
+            *)         export AGENT_CONTAINER_TMUX_WINDOWS="${mode}" ;;
         esac
         bash "${ENTRY}" >/dev/null 2>&1
     )

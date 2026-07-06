@@ -8,14 +8,14 @@
 # ]
 # ///
 #
-# agent-env — interactive wizard + CLI for agent-env containers.
+# agent-container — interactive wizard + CLI for agent-container containers.
 #
 # ============================================================================
-# This script is the SINGLE SOURCE OF TRUTH for the agent-env on-disk contract.
-# Everything below — container naming (agent-env-<name>), the port hash
+# This script is the SINGLE SOURCE OF TRUTH for the agent-container on-disk contract.
+# Everything below — container naming (agent-container-<name>), the port hash
 # (2200 + sum-of-char-codes mod 100), the per-name state files
-# ($XDG_STATE_HOME/agent-env/<name>.port), the env-file resolution order
-# (./.env -> ~/.config/agent-env/<name>.env -> ~/.config/agent-env/.env), and
+# ($XDG_STATE_HOME/agent-container/<name>.port), the env-file resolution order
+# (./.env -> ~/.config/agent-container/<name>.env -> ~/.config/agent-container/.env), and
 # the hosts.conf KEY=VALUE format (FOO_HOST / FOO_PORT) — is defined here and
 # only here. The shell completions read the same state files directly; keep
 # them in step with the constants in this file.
@@ -47,27 +47,27 @@ from rich.table import Table
 
 # --- constants ---------------------------------------------------------------
 
-IMAGE_NAME = "localhost/agent-env:latest"
-CONTAINER_PREFIX = "agent-env-"
+IMAGE_NAME = "localhost/agent-container:latest"
+CONTAINER_PREFIX = "agent-container-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
 
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-env"
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-env"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 
 def _is_repo_checkout(base: "Path") -> bool:
-    """Best-effort test that `base` is an agent-env checkout.
+    """Best-effort test that `base` is an agent-container checkout.
 
-    Keyed on `completions/agent-env.bash` (plus a Dockerfile for the build
+    Keyed on `completions/agent-container.bash` (plus a Dockerfile for the build
     context): a repo-specific sentinel rather than the generic `Dockerfile` +
     `completions/` dir pair, which is common to unrelated trees. Requiring the
-    exact file _completion_script reads (bin/agent-env: REPO_ROOT/completions/
-    agent-env.<shell>) also makes the marker and that consumed path the same
+    exact file _completion_script reads (bin/agent-container: REPO_ROOT/completions/
+    agent-container.<shell>) also makes the marker and that consumed path the same
     invariant — a recognized checkout can never then serve stale package data.
     This is a heuristic, not a guaranteed false-positive-free identifier.
     """
-    return (base / "Dockerfile").is_file() and (base / "completions" / "agent-env.bash").is_file()
+    return (base / "Dockerfile").is_file() and (base / "completions" / "agent-container.bash").is_file()
 
 
 def _find_repo_root() -> "Path | None":
@@ -75,7 +75,7 @@ def _find_repo_root() -> "Path | None":
 
     A wheel copies this module into site-packages, so Path(__file__) no longer
     points inside the repo. Resolution order:
-      1. AGENT_ENV_REPO (explicit operator override): trusted only when it
+      1. AGENT_CONTAINER_REPO (explicit operator override): trusted only when it
          satisfies the checkout marker (see _is_repo_checkout); a wrong/typo'd
          path yields None rather than a bogus root (build then dies actionably).
       2. Walk up from this file, then from cwd, looking for a dir that matches
@@ -84,7 +84,7 @@ def _find_repo_root() -> "Path | None":
     (completions falls back to bundled package data; build fails actionably).
     Note: this cannot die here — it runs at import, before Fatal/die exist.
     """
-    env = os.environ.get("AGENT_ENV_REPO")
+    env = os.environ.get("AGENT_CONTAINER_REPO")
     if env:
         base = Path(env).expanduser().resolve()
         return base if _is_repo_checkout(base) else None
@@ -107,14 +107,14 @@ NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 SSH_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 SSH_HOST_RE = re.compile(r"[A-Za-z0-9_\[][A-Za-z0-9.:_\]-]*")
 # tmux window name: embedded in the ssh remote command (attach --window), so it
-# is charset-validated. Matches the entrypoint / agent-env window charset.
+# is charset-validated. Matches the entrypoint / agent-container window charset.
 WINDOW_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 console = Console()
 
 
 def eprint(msg: str) -> None:
-    # Plain stderr writer; rich would mangle "[agent-env]" as markup and wrap lines.
+    # Plain stderr writer; rich would mangle "[agent-container]" as markup and wrap lines.
     print(msg, file=sys.stderr)
 
 
@@ -151,7 +151,7 @@ def validate_name(name: str) -> str:
 def container_name(name: str) -> str:
     """
     >>> container_name("acme")
-    'agent-env-acme'
+    'agent-container-acme'
     """
     return f"{CONTAINER_PREFIX}{name}"
 
@@ -159,7 +159,7 @@ def container_name(name: str) -> str:
 def volume_name(name: str) -> str:
     """
     >>> volume_name("acme")
-    'agent-env-acme-workspace'
+    'agent-container-acme-workspace'
     """
     return f"{CONTAINER_PREFIX}{name}-workspace"
 
@@ -167,7 +167,7 @@ def volume_name(name: str) -> str:
 def claude_volume_name(name: str) -> str:
     """
     >>> claude_volume_name("acme")
-    'agent-env-acme-claude'
+    'agent-container-acme-claude'
     """
     return f"{CONTAINER_PREFIX}{name}-claude"
 
@@ -175,7 +175,7 @@ def claude_volume_name(name: str) -> str:
 def codex_volume_name(name: str) -> str:
     """
     >>> codex_volume_name("acme")
-    'agent-env-acme-codex'
+    'agent-container-acme-codex'
     """
     return f"{CONTAINER_PREFIX}{name}-codex"
 
@@ -183,7 +183,7 @@ def codex_volume_name(name: str) -> str:
 def pi_volume_name(name: str) -> str:
     """
     >>> pi_volume_name("acme")
-    'agent-env-acme-pi'
+    'agent-container-acme-pi'
     """
     return f"{CONTAINER_PREFIX}{name}-pi"
 
@@ -191,7 +191,7 @@ def pi_volume_name(name: str) -> str:
 def shellenv_volume_name(name: str) -> str:
     """
     >>> shellenv_volume_name("acme")
-    'agent-env-acme-shellenv'
+    'agent-container-acme-shellenv'
     """
     return f"{CONTAINER_PREFIX}{name}-shellenv"
 
@@ -200,7 +200,7 @@ def tmux_volume_name(name: str) -> str:
     """Persists ~/.config/tmux (tmux.conf + tpm plugins) across down/up.
 
     >>> tmux_volume_name("acme")
-    'agent-env-acme-tmux'
+    'agent-container-acme-tmux'
     """
     return f"{CONTAINER_PREFIX}{name}-tmux"
 
@@ -212,14 +212,14 @@ def all_volume_mounts(name: str) -> list[str]:
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-env-acme-workspace:/workspace', 'agent-env-acme-claude:/home/dev/.claude', 'agent-env-acme-codex:/home/dev/.codex', 'agent-env-acme-pi:/home/dev/.pi', 'agent-env-acme-shellenv:/home/dev/.agent-env', 'agent-env-acme-tmux:/home/dev/.config/tmux']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux']
     """
     return [
         f"{volume_name(name)}:/workspace",
         f"{claude_volume_name(name)}:/home/dev/.claude",
         f"{codex_volume_name(name)}:/home/dev/.codex",
         f"{pi_volume_name(name)}:/home/dev/.pi",
-        f"{shellenv_volume_name(name)}:/home/dev/.agent-env",
+        f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
     ]
 
@@ -228,7 +228,7 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['agent-env-acme-workspace', 'agent-env-acme-claude', 'agent-env-acme-codex', 'agent-env-acme-pi', 'agent-env-acme-shellenv', 'agent-env-acme-tmux']
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux']
     """
     return [
         volume_name(name),
@@ -295,7 +295,7 @@ def name_to_key(name: str) -> str:
 
 
 def resolve_ssh_user(override: str | None = None) -> str:
-    """SSH user from --user / AGENT_ENV_USER / 'dev', charset-checked so it can
+    """SSH user from --user / AGENT_CONTAINER_USER / 'dev', charset-checked so it can
     never be parsed by ssh as an option.
 
     >>> resolve_ssh_user("dev")
@@ -305,7 +305,7 @@ def resolve_ssh_user(override: str | None = None) -> str:
     ...
     Fatal: invalid ssh user '-oProxyCommand=x'
     """
-    user = override or os.environ.get("AGENT_ENV_USER") or "dev"
+    user = override or os.environ.get("AGENT_CONTAINER_USER") or "dev"
     if not SSH_USER_RE.fullmatch(user):
         die(f"invalid ssh user '{user}'")
     return user
@@ -400,23 +400,23 @@ except Exception:
 def detect_runtime() -> str:
     """Resolve the container runtime.
 
-    AGENT_ENV_RUNTIME (validated docker|podman, must be on PATH) always wins.
+    AGENT_CONTAINER_RUNTIME (validated docker|podman, must be on PATH) always wins.
     Otherwise the default is platform-aware: on macOS the operator runs Lima +
     docker-cli, so prefer docker then podman; on Linux (the VPS) prefer podman
     then docker. Dies if neither is installed.
     """
-    forced = os.environ.get("AGENT_ENV_RUNTIME")
+    forced = os.environ.get("AGENT_CONTAINER_RUNTIME")
     if forced:
         if forced not in ("podman", "docker"):
-            die(f"AGENT_ENV_RUNTIME must be 'docker' or 'podman', got: {forced}")
+            die(f"AGENT_CONTAINER_RUNTIME must be 'docker' or 'podman', got: {forced}")
         if not shutil.which(forced):
-            die(f"AGENT_ENV_RUNTIME={forced} but '{forced}' is not on PATH")
+            die(f"AGENT_CONTAINER_RUNTIME={forced} but '{forced}' is not on PATH")
         return forced
     order = ("docker", "podman") if sys.platform.startswith("darwin") else ("podman", "docker")
     for rt in order:
         if shutil.which(rt):
             return rt
-    die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_ENV_RUNTIME)")
+    die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_CONTAINER_RUNTIME)")
 
 
 def query(argv: list[str]) -> subprocess.CompletedProcess:
@@ -433,8 +433,8 @@ def container_exists(rt: str, cname: str) -> bool:
     return cname in r.stdout.splitlines()
 
 
-def ps_agent_env(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
-    """(cname, image, status, uptime) rows for agent-env-* containers.
+def ps_agent_container(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
+    """(cname, image, status, uptime) rows for agent-container-* containers.
 
     Go-template + tab split, not --format json: podman and docker JSON
     shapes are incompatible, the template output is not.
@@ -456,7 +456,7 @@ def image_exists(rt: str, tag: str) -> bool:
 
 def port_free(port: int) -> bool:
     # Wildcard bind: `-p {port}:22` publishes on ALL interfaces (parity with
-    # agent-env), so probe what will actually be bound, not just loopback.
+    # agent-container), so probe what will actually be bound, not just loopback.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", port))
@@ -488,8 +488,8 @@ def load_hosts_conf() -> dict[str, str]:
     conf = parse_kv_config(HOSTS_CONF.read_text())
     if not _hosts_warned and any("$" in v or "`" in v for v in conf.values()):
         eprint(
-            "[agent-env] WARNING: hosts.conf contains '$' or '`' values; "
-            "agent-env does not perform shell expansion (agent-env does)."
+            "[agent-container] WARNING: hosts.conf contains '$' or '`' values; "
+            "agent-container does not perform shell expansion (agent-container does)."
         )
         _hosts_warned = True
     return conf
@@ -524,11 +524,11 @@ def is_tty() -> bool:
 
 
 def log(msg: str) -> None:
-    eprint(f"[agent-env] {msg}")
+    eprint(f"[agent-container] {msg}")
 
 
 def warn(msg: str) -> None:
-    eprint(f"[agent-env] WARNING: {msg}")
+    eprint(f"[agent-container] WARNING: {msg}")
 
 
 def hint(cmd: str) -> None:
@@ -541,13 +541,13 @@ def do_build(tag: str, context: "Path | None" = None) -> None:
     # is None) and fail actionably rather than with a traceback.
     ctx = context
     if ctx is None:
-        env = os.environ.get("AGENT_ENV_REPO")
+        env = os.environ.get("AGENT_CONTAINER_REPO")
         if env:
             base = Path(env).expanduser().resolve()
             if not _is_repo_checkout(base):
                 die(
-                    f"AGENT_ENV_REPO={env} is not an agent-env checkout "
-                    "(missing Dockerfile/completions/agent-env.bash)"
+                    f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout "
+                    "(missing Dockerfile/completions/agent-container.bash)"
                 )
             ctx = base
         else:
@@ -555,7 +555,7 @@ def do_build(tag: str, context: "Path | None" = None) -> None:
     if ctx is None:
         die(
             "no repo checkout for the docker build context; run from a checkout, "
-            "set AGENT_ENV_REPO=<checkout>, or pass --context <dir>"
+            "set AGENT_CONTAINER_REPO=<checkout>, or pass --context <dir>"
         )
     rt = detect_runtime()
     log(f"building image '{tag}' with {rt} from {ctx}")
@@ -576,7 +576,7 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
     if not port_free(port):
         die(
             f"port {port} is already in use (port = 2200 + name hash; "
-            f"collisions are possible). Stop whatever holds it (agent-env list) "
+            f"collisions are possible). Stop whatever holds it (agent-container list) "
             f"or pick a different name."
         )
     log(f"name={name} port={port} env-file={env_file}")
@@ -599,7 +599,7 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
     if r.returncode != 0:
         die(f"{rt} run failed: {r.stderr.strip()}")
     write_state(name, port)
-    log(f"started {cname}; attach with: agent-env attach {name}")
+    log(f"started {cname}; attach with: agent-container attach {name}")
     log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
 
 
@@ -613,11 +613,11 @@ def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | 
     if container_running(rt, cname):
         port = read_state_port(name)
         log(f"container {cname} already running" + (f" on port {port}" if port else ""))
-        log(f"attach with: agent-env attach {name}")
+        log(f"attach with: agent-container attach {name}")
         return
 
     if container_exists(rt, cname):
-        die(f"container {cname} exists but is not running. Run: agent-env down {name}")
+        die(f"container {cname} exists but is not running. Run: agent-container down {name}")
 
     env_file = env_file_override or resolve_env_file(name)
     if env_file is None:
@@ -625,7 +625,7 @@ def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | 
         die(f"no .env found. Looked in: {cands}")
 
     if not image_exists(rt, IMAGE_NAME):
-        die(f"image {IMAGE_NAME} not found; run: agent-env build")
+        die(f"image {IMAGE_NAME} not found; run: agent-container build")
 
     launch_container(rt, name, env_file, resolved_mounts)
 
@@ -664,12 +664,12 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
             f"systemd will restart the container after removal. Manage it via Quadlet instead."
         )
         if not yes:
-            eprint("[agent-env] re-run with -y/--yes to proceed despite the active unit")
+            eprint("[agent-container] re-run with -y/--yes to proceed despite the active unit")
             raise typer.Exit(2)
 
     if not yes:
         if not is_tty():
-            eprint("[agent-env] refusing destructive 'down' without -y/--yes on a non-TTY")
+            eprint("[agent-container] refusing destructive 'down' without -y/--yes on a non-TTY")
             raise typer.Exit(2)
         what = f"stop and remove {container_name(name)}"
         if purge:
@@ -684,7 +684,7 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
 def gather_rows(rt: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     running_short: set[str] = set()
-    for cname, image, status, uptime in ps_agent_env(rt):
+    for cname, image, status, uptime in ps_agent_container(rt):
         short = cname[len(CONTAINER_PREFIX):]
         running_short.add(short)
         rows.append({
@@ -732,7 +732,7 @@ def do_list(as_json: bool) -> None:
 
 def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
     # The one true attach command; argv list, never a shell string. Without a
-    # window the argv is unchanged (agent-env parity). With one, the remote
+    # window the argv is unchanged (agent-container parity). With one, the remote
     # command is a SINGLE compound string that selects the window (tolerating
     # its absence) THEN attaches — select-window works on a detached session.
     base = ["ssh", f"{user}@{host}", "-p", str(port), "-t"]
@@ -756,8 +756,8 @@ def resolve_attach_target(
     host_override: str | None = None,
 ) -> tuple[str, str, str, str]:
     """Returns (user, host, port, kind). kind is 'local' or 'remote'."""
-    # Case-insensitive like agent-env: 'My-Box' resolves the same
-    # MY_BOX_* keys (and the same lowercase state file agent-env writes).
+    # Case-insensitive like agent-container: 'My-Box' resolves the same
+    # MY_BOX_* keys (and the same lowercase state file agent-container writes).
     name = validate_name(name.lower())
     user = resolve_ssh_user(user_override)
     if host_override is not None and not SSH_HOST_RE.fullmatch(host_override):
@@ -765,7 +765,7 @@ def resolve_attach_target(
     key = name_to_key(name)
 
     if mode == "remote" and not HOSTS_CONF.is_file():
-        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/agent-env-hosts.example)")
+        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/agent-container-hosts.example)")
 
     entry = hosts_entry(name)
     if mode == "remote" or (mode == "auto" and entry is not None):
@@ -779,13 +779,13 @@ def resolve_attach_target(
         if mode == "local":
             die(
                 f"no local state for {name} at {state_file(name)} — is the container "
-                f"running? (try: agent-env up {name})"
+                f"running? (try: agent-container up {name})"
             )
         die(
             f"no attach target for {name}; checked {HOSTS_CONF} "
             f"(no {key}_HOST/{key}_PORT) and {state_file(name)}"
         )
-    host = host_override or os.environ.get("AGENT_ENV_HOST") or "localhost"
+    host = host_override or os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
     return user, host, port, "local"
 
 
@@ -804,7 +804,7 @@ def cli_attach(
     if w := tmux_nest_warning():
         warn(w)  # CLI mode: warn and proceed
     session = f'"main"' + (f', window "{window}"' if window else "")
-    eprint(f"agent-env: {user}@{host}:{port} (tmux session {session})")
+    eprint(f"agent-container: {user}@{host}:{port} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
     # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
@@ -822,13 +822,13 @@ def wizard_handover(
     user: str,
     host: str,
     port: str,
-    logs_hint: str = "agent-env logs <name>",
+    logs_hint: str = "agent-container logs <name>",
     window: str | None = None,
 ) -> None:
     """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
     target = f"{user}@{host}:{port}"
     session = f'"main"' + (f', window "{window}"' if window else "")
-    eprint(f"agent-env: {target} (tmux session {session})")
+    eprint(f"agent-container: {target} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
     old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C goes to ssh only
@@ -884,7 +884,7 @@ def wiz_build(rt: str) -> None:
     if not tag:
         return
     do_build(tag)
-    hint("agent-env build" + (f" {tag}" if tag != IMAGE_NAME else ""))
+    hint("agent-container build" + (f" {tag}" if tag != IMAGE_NAME else ""))
 
 
 def wiz_up(rt: str) -> None:
@@ -903,13 +903,13 @@ def wiz_up(rt: str) -> None:
 
     env_file = resolve_env_file(name)
     if env_file is None:
-        eprint("[agent-env] no env file found; looked in:")
+        eprint("[agent-container] no env file found; looked in:")
         for c in env_file_candidates(name, Path.cwd()):
             eprint(f"  {c}")
         target = CONFIG_DIR / f"{name}.env"
         if questionary.confirm(f"create/edit {target} in $EDITOR now?", default=True).ask():
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            # $EDITOR gets the path only; agent-env never reads env contents.
+            # $EDITOR gets the path only; agent-container never reads env contents.
             subprocess.run([os.environ.get("EDITOR") or "vi", str(target)])
             env_file = resolve_env_file(name)
         if env_file is None:
@@ -947,12 +947,12 @@ def wiz_up(rt: str) -> None:
     if not questionary.confirm(f"start {cname}?", default=True).ask():
         return
     launch_container(rt, name, env_file, mounts)  # port pre-check + actionable abort inside
-    hint(f"agent-env up {name}" + (f" --mount {mount_dir}" if mounts else ""))
+    hint(f"agent-container up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
 def wiz_attach(rt: str) -> None:
     choices: list[questionary.Choice] = []
-    for cname, _image, _status, _uptime in ps_agent_env(rt):
+    for cname, _image, _status, _uptime in ps_agent_container(rt):
         short = _short(cname)
         port = read_state_port(short) or "?"
         choices.append(questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", "")))
@@ -993,15 +993,15 @@ def wiz_attach(rt: str) -> None:
         if port is None:  # TOCTOU: state file vanished since the picker rendered
             warn(f"state file for {name} disappeared; is the container still up?")
             return
-        host = os.environ.get("AGENT_ENV_HOST") or "localhost"
-    wizard_handover(user, host, port, logs_hint=f"agent-env logs {name}", window=window)
-    hint(f"agent-env attach {name} --{kind}" + (f" --window {window}" if window else ""))
+        host = os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
+    wizard_handover(user, host, port, logs_hint=f"agent-container logs {name}", window=window)
+    hint(f"agent-container attach {name} --{kind}" + (f" --window {window}" if window else ""))
 
 
 def wiz_logs(rt: str) -> None:
-    rows = ps_agent_env(rt)
+    rows = ps_agent_container(rt)
     if not rows:
-        log("no running agent-env containers")
+        log("no running agent-container containers")
         return
     sel = questionary.select("logs for", choices=[_short(r[0]) for r in rows]).ask()
     if sel is None:
@@ -1012,13 +1012,13 @@ def wiz_logs(rt: str) -> None:
         subprocess.run([rt, "logs", "-f", container_name(sel)], preexec_fn=_child_default_sigint)
     finally:
         signal.signal(signal.SIGINT, old_int)
-    hint(f"agent-env logs {sel}")
+    hint(f"agent-container logs {sel}")
 
 
 def wiz_down(rt: str) -> None:
-    rows = ps_agent_env(rt, include_stopped=True)
+    rows = ps_agent_container(rt, include_stopped=True)
     if not rows:
-        log("no agent-env containers (running or stopped)")
+        log("no agent-container containers (running or stopped)")
         return
     choices = []
     for cname, _image, status, _uptime in rows:
@@ -1055,7 +1055,7 @@ def wiz_down(rt: str) -> None:
         else:
             log("name mismatch — volumes will be preserved")
     down_container(rt, sel, purge)  # reports preserved vs purged, clears state
-    hint(f"agent-env down {sel}" + (" --purge" if purge else ""))
+    hint(f"agent-container down {sel}" + (" --purge" if purge else ""))
 
 
 def _volume_names(rt: str) -> list[str]:
@@ -1064,14 +1064,14 @@ def _volume_names(rt: str) -> list[str]:
 
 
 def wiz_purge_volume(rt: str) -> None:
-    containers = {row[0] for row in ps_agent_env(rt, include_stopped=True)}
+    containers = {row[0] for row in ps_agent_container(rt, include_stopped=True)}
     orphans = []
     for vol in _volume_names(rt):
         short = vol[len(CONTAINER_PREFIX): -len("-workspace")]
         if container_name(short) not in containers:
             orphans.append(vol)
     if not orphans:
-        log("no orphaned agent-env volumes")
+        log("no orphaned agent-container volumes")
         return
     sel = questionary.select("purge orphaned volume", choices=orphans).ask()
     if sel is None:
@@ -1103,29 +1103,29 @@ _MENU: list[tuple[str, "object"]] = [
 
 def wizard_loop() -> int:
     if not is_tty():
-        eprint("[agent-env] no TTY; interactive wizard unavailable. Use subcommands (agent-env --help).")
+        eprint("[agent-container] no TTY; interactive wizard unavailable. Use subcommands (agent-container --help).")
         return 2
     try:
         rt = detect_runtime()
     except Fatal as e:
-        eprint(f"[agent-env] FATAL: {e}")
+        eprint(f"[agent-container] FATAL: {e}")
         return 1
     actions = dict(_MENU)
     while True:
         try:
-            running = len(ps_agent_env(rt))
+            running = len(ps_agent_container(rt))
             hosts = "present" if HOSTS_CONF.is_file() else "absent"
             console.print(
                 f"runtime: {rt} | running local containers: {running} | hosts.conf: {hosts}",
                 style="dim",
             )
-            choice = questionary.select("agent-env — what now?", choices=[t for t, _ in _MENU]).ask()
+            choice = questionary.select("agent-container — what now?", choices=[t for t, _ in _MENU]).ask()
             if choice is None or choice == "Quit":
                 return 0
             try:
                 actions[choice](rt)
             except Fatal as e:
-                eprint(f"[agent-env] ERROR: {e}")  # back to the menu, not exit
+                eprint(f"[agent-container] ERROR: {e}")  # back to the menu, not exit
         except (KeyboardInterrupt, EOFError):
             return 0
 
@@ -1136,12 +1136,12 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
     pretty_exceptions_enable=False,
-    help="Interactive wizard + CLI for agent-env containers.",
+    help="Interactive wizard + CLI for agent-container containers.",
 )
 
 
 def fatal_exit(e: Fatal) -> "typer.NoReturn":
-    eprint(f"[agent-env] FATAL: {e}")
+    eprint(f"[agent-container] FATAL: {e}")
     raise typer.Exit(1)
 
 
@@ -1176,7 +1176,7 @@ def build(
     context: Path | None = typer.Option(
         None,
         "--context",
-        help="Docker build context (repo checkout). Defaults to AGENT_ENV_REPO "
+        help="Docker build context (repo checkout). Defaults to AGENT_CONTAINER_REPO "
         "or the auto-detected checkout; required when installed from PyPI.",
     ),
 ) -> None:
@@ -1186,7 +1186,7 @@ def build(
 
 @app.command()
 def up(
-    name: str = typer.Argument(..., help="Container short name (agent-env-<name>)."),
+    name: str = typer.Argument(..., help="Container short name (agent-container-<name>)."),
     env_file: Path | None = typer.Option(
         None, "--env-file", help="Bypass env-file resolution; path must exist."
     ),
@@ -1198,7 +1198,7 @@ def up(
         "under a writable Lima mount.",
     ),
 ) -> None:
-    """Start container agent-env-NAME (detached)."""
+    """Start container agent-container-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
     do_up(name, env_file, mount or [])
@@ -1210,7 +1210,7 @@ def down(
     purge: bool = typer.Option(False, "--purge", help="Also delete the workspace volume."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
-    """Stop and remove container agent-env-NAME."""
+    """Stop and remove container agent-container-NAME."""
     cli_down(name, purge, yes)
 
 
@@ -1227,7 +1227,7 @@ def purge(
 def list_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
-    """List running agent-env containers (plus stale state files)."""
+    """List running agent-container containers (plus stale state files)."""
     do_list(as_json)
 
 
@@ -1236,7 +1236,7 @@ def attach(
     name: str = typer.Argument(..., help="Container short name."),
     local: bool = typer.Option(False, "--local", help="Force local target (state file)."),
     remote: bool = typer.Option(False, "--remote", help="Force remote target (hosts.conf)."),
-    user: str | None = typer.Option(None, "--user", help="SSH user (default: AGENT_ENV_USER or dev)."),
+    user: str | None = typer.Option(None, "--user", help="SSH user (default: AGENT_CONTAINER_USER or dev)."),
     host: str | None = typer.Option(None, "--host", help="Override the resolved host."),
     window: str | None = typer.Option(
         None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
@@ -1260,7 +1260,7 @@ def logs(
 
 @app.command()
 def menu() -> None:
-    """Interactive wizard (same as bare agent-env)."""
+    """Interactive wizard (same as bare agent-container)."""
     raise typer.Exit(wizard_loop())
 
 
@@ -1272,13 +1272,13 @@ def _completion_script(shell: str) -> str:
     package data in a non-editable PyPI install (where REPO_ROOT is None).
     """
     if REPO_ROOT is not None:
-        p = REPO_ROOT / "completions" / f"agent-env.{shell}"
+        p = REPO_ROOT / "completions" / f"agent-container.{shell}"
         if p.is_file():
             return p.read_text()
     try:
         import importlib.resources as ir
 
-        res = ir.files("agent_env").joinpath(f"completions/agent-env.{shell}")
+        res = ir.files("agent_container").joinpath(f"completions/agent-container.{shell}")
         if res.is_file():
             return res.read_text()
     except (ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError):
@@ -1289,12 +1289,12 @@ def _completion_script(shell: str) -> str:
 @app.command()
 def completions(
     # Optional + manual validation so a bad/missing shell routes through die()
-    # (exit 1, '[agent-env] FATAL:' style), not Typer's exit-2 required-arg error.
+    # (exit 1, '[agent-container] FATAL:' style), not Typer's exit-2 required-arg error.
     shell: str = typer.Argument("", help="Shell to emit completion for: bash or zsh."),
 ) -> None:
     """Print the completion script for bash or zsh (from a checkout or package data)."""
     if shell not in ("bash", "zsh"):
-        die("usage: agent-env completions <bash|zsh>")
+        die("usage: agent-container completions <bash|zsh>")
     sys.stdout.write(_completion_script(shell))
 
 
@@ -1312,14 +1312,14 @@ def main(
 def cli() -> None:
     """Console-script entry point for `uv tool install` (see pyproject.toml).
 
-    uv's generated launcher does `from agent_env import cli; sys.exit(cli())`,
+    uv's generated launcher does `from agent_container import cli; sys.exit(cli())`,
     so the Fatal -> exit-1 handling that used to live only in the __main__ guard
     is hoisted here. NOT named `main` — that is already the Typer @app.callback.
     """
     try:
         app()
     except Fatal as e:
-        eprint(f"[agent-env] FATAL: {e}")
+        eprint(f"[agent-container] FATAL: {e}")
         sys.exit(1)
 
 

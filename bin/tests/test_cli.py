@@ -108,7 +108,7 @@ def test_down_without_yes_refuses_on_non_tty(wiz, monkeypatch):
 def test_completions_prints_checked_in_script(wiz, shell):
     result = runner.invoke(wiz.app, ["completions", shell])
     assert result.exit_code == 0
-    expected = (wiz.REPO_ROOT / "completions" / f"agent-env.{shell}").read_text()
+    expected = (wiz.REPO_ROOT / "completions" / f"agent-container.{shell}").read_text()
     assert result.output == expected
 
 
@@ -116,7 +116,7 @@ def test_completions_invalid_shell_is_fatal_not_traceback(wiz):
     result = runner.invoke(wiz.app, ["completions", "fish"])
     assert result.exit_code == 1
     assert isinstance(result.exception, wiz.Fatal)
-    assert "usage: agent-env completions <bash|zsh>" in str(result.exception)
+    assert "usage: agent-container completions <bash|zsh>" in str(result.exception)
     assert "Traceback" not in combined_output(result)
 
 
@@ -170,7 +170,7 @@ def test_script_fatal_exits_one_via_uv(tmp_path):
     env["HOME"] = str(home)
     env["XDG_STATE_HOME"] = str(tmp_path / "state")
     env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
-    for var in ("AGENT_ENV_RUNTIME", "AGENT_ENV_HOST", "AGENT_ENV_USER"):
+    for var in ("AGENT_CONTAINER_RUNTIME", "AGENT_CONTAINER_HOST", "AGENT_CONTAINER_USER"):
         env.pop(var, None)
     proc = subprocess.run(
         ["uv", "run", "--script", str(SCRIPT_PATH), "attach", "acme", "--local"],

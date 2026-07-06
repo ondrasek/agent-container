@@ -1,9 +1,9 @@
-# Publish agent-env to PyPI via Trusted Publishing (OIDC — no stored secrets).
+# Publish agent-container to PyPI via Trusted Publishing (OIDC — no stored secrets).
 #
 # Trigger: pushing a tag matching v* (e.g. v0.1.0). Builds an sdist + wheel with
 # `uv build` and uploads them with pypa/gh-action-pypi-publish, which mints a
 # short-lived OIDC token. The operator configures the PyPI trusted publisher once
-# (project: agent-env, owner: ondrasek, repo: agent-env, workflow: publish.yml,
+# (project: agent-container, owner: ondrasek, repo: agent-container, workflow: publish.yml,
 # environment: release) — no API token is ever stored in the repo.
 name: publish
 
@@ -24,7 +24,7 @@ jobs:
         # Gate the release on green: mirrors ci.yml (ci.yml does NOT run on tag
         # pushes, so the suite is re-run here). A failure here fails the build
         # job, and `publish` needs: build — so a red tagged commit never ships.
-        # --with pins mirror the bin/agent-env PEP 723 inline metadata.
+        # --with pins mirror the bin/agent-container PEP 723 inline metadata.
         run: >
           uv run --no-project --with pytest
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'

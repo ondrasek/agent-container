@@ -22,7 +22,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 
 def _pep723_metadata() -> dict:
-    """Parse the '# /// script ... # ///' PEP 723 block from bin/agent-env."""
+    """Parse the '# /// script ... # ///' PEP 723 block from bin/agent-container."""
     lines = SCRIPT_PATH.read_text().splitlines()
     start = end = None
     for i, line in enumerate(lines):
@@ -51,25 +51,25 @@ def test_pyproject_requires_python_matches_pep723():
 
 
 def test_entry_point_module_and_attr_resolve(wiz):
-    # [project.scripts] agent-env = "<module>:<attr>"; the module name must be
-    # 'agent_env' (the force-included module name) and the attr must exist +
+    # [project.scripts] agent-container = "<module>:<attr>"; the module name must be
+    # 'agent_container' (the force-included module name) and the attr must exist +
     # be callable.
-    module_name, _, attr = _pyproject()["project"]["scripts"]["agent-env"].partition(":")
-    assert module_name == "agent_env"
+    module_name, _, attr = _pyproject()["project"]["scripts"]["agent-container"].partition(":")
+    assert module_name == "agent_container"
     assert hasattr(wiz, attr) and callable(getattr(wiz, attr))
 
 
 def test_wheel_force_include_ships_module_and_completions():
     # The non-editable wheel must copy the single-file script in as
-    # agent_env/__init__.py and bundle both completion scripts as package data
-    # (agent_env/completions/*), so a PyPI install has the module AND the
+    # agent_container/__init__.py and bundle both completion scripts as package data
+    # (agent_container/completions/*), so a PyPI install has the module AND the
     # completions without a repo checkout.
     force_include = (
         _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     )
-    assert force_include["bin/agent-env"] == "agent_env/__init__.py"
-    assert force_include["completions/agent-env.bash"] == "agent_env/completions/agent-env.bash"
-    assert force_include["completions/agent-env.zsh"] == "agent_env/completions/agent-env.zsh"
+    assert force_include["bin/agent-container"] == "agent_container/__init__.py"
+    assert force_include["completions/agent-container.bash"] == "agent_container/completions/agent-container.bash"
+    assert force_include["completions/agent-container.zsh"] == "agent_container/completions/agent-container.zsh"
 
 
 def test_wheel_bypasses_selection():
@@ -79,9 +79,9 @@ def test_wheel_bypasses_selection():
 
 
 def test_no_module_symlink_remains():
-    # The old bin/agent_env.py importable-module symlink is gone; force-include
-    # now supplies the `agent_env` module name.
-    assert not (REPO_ROOT / "bin" / "agent_env.py").exists()
+    # The old bin/agent_container.py importable-module symlink is gone; force-include
+    # now supplies the `agent_container` module name.
+    assert not (REPO_ROOT / "bin" / "agent_container.py").exists()
 
 
 def test_pyproject_declares_mit_license_and_metadata():
@@ -91,13 +91,13 @@ def test_pyproject_declares_mit_license_and_metadata():
     assert (REPO_ROOT / "LICENSE").is_file()
     assert proj["description"]
     assert proj["readme"] == "README.md"
-    assert proj["urls"]["Homepage"] == "https://github.com/ondrasek/agent-env"
+    assert proj["urls"]["Homepage"] == "https://github.com/ondrasek/agent-container"
 
 
 def test_cli_translates_fatal_to_exit_one(wiz, monkeypatch):
     # The entry point must turn a Fatal into exit 1 (not a traceback). With an
     # isolated HOME, 'attach acme --local' has no state file -> Fatal.
-    monkeypatch.setattr(sys, "argv", ["agent-env", "attach", "acme", "--local"])
+    monkeypatch.setattr(sys, "argv", ["agent-container", "attach", "acme", "--local"])
     with pytest.raises(SystemExit) as exc:
         wiz.cli()
     assert exc.value.code == 1
@@ -123,45 +123,45 @@ def test_main_guard_routes_through_cli():
 # --- location-independent REPO_ROOT + gated build ------------------------------
 
 
-def test_find_repo_root_honours_agent_env_repo(wiz, monkeypatch, tmp_path):
-    # AGENT_ENV_REPO wins when it satisfies the checkout marker (Dockerfile +
-    # completions/agent-env.bash — the repo-specific sentinel).
+def test_find_repo_root_honours_agent_container_repo(wiz, monkeypatch, tmp_path):
+    # AGENT_CONTAINER_REPO wins when it satisfies the checkout marker (Dockerfile +
+    # completions/agent-container.bash — the repo-specific sentinel).
     checkout = tmp_path / "fake-checkout"
     (checkout / "completions").mkdir(parents=True)
     (checkout / "Dockerfile").write_text("FROM scratch\n")
-    (checkout / "completions" / "agent-env.bash").write_text("# complete\n")
-    monkeypatch.setenv("AGENT_ENV_REPO", str(checkout))
+    (checkout / "completions" / "agent-container.bash").write_text("# complete\n")
+    monkeypatch.setenv("AGENT_CONTAINER_REPO", str(checkout))
     assert wiz._find_repo_root() == checkout.resolve()
 
 
-def test_find_repo_root_rejects_agent_env_repo_without_marker(wiz, monkeypatch, tmp_path):
+def test_find_repo_root_rejects_agent_container_repo_without_marker(wiz, monkeypatch, tmp_path):
     # A wrong/typo'd override that lacks the sentinel is NOT trusted: it resolves
     # to None (build then dies actionably) rather than a bogus root. A bare
     # Dockerfile + empty completions/ dir is no longer sufficient.
     stray = tmp_path / "not-a-checkout"
     (stray / "completions").mkdir(parents=True)
     (stray / "Dockerfile").write_text("FROM scratch\n")
-    monkeypatch.setenv("AGENT_ENV_REPO", str(stray))
+    monkeypatch.setenv("AGENT_CONTAINER_REPO", str(stray))
     assert wiz._find_repo_root() is None
 
 
-def test_do_build_dies_on_invalid_agent_env_repo(wiz, monkeypatch, tmp_path):
-    # AGENT_ENV_REPO set but not a checkout -> actionable Fatal naming the var,
+def test_do_build_dies_on_invalid_agent_container_repo(wiz, monkeypatch, tmp_path):
+    # AGENT_CONTAINER_REPO set but not a checkout -> actionable Fatal naming the var,
     # before any runtime call.
     stray = tmp_path / "not-a-checkout"
     stray.mkdir()
     monkeypatch.setattr(wiz, "REPO_ROOT", None)
-    monkeypatch.setenv("AGENT_ENV_REPO", str(stray))
+    monkeypatch.setenv("AGENT_CONTAINER_REPO", str(stray))
     with pytest.raises(wiz.Fatal) as exc:
-        wiz.do_build("localhost/agent-env:latest")
-    assert "is not an agent-env checkout" in str(exc.value)
+        wiz.do_build("localhost/agent-container:latest")
+    assert "is not an agent-container checkout" in str(exc.value)
 
 
 def test_find_repo_root_is_none_without_checkout(wiz, monkeypatch, tmp_path):
-    # No AGENT_ENV_REPO, __file__ relocated out of any repo, and cwd moved to a
+    # No AGENT_CONTAINER_REPO, __file__ relocated out of any repo, and cwd moved to a
     # marker-free dir -> the resolver returns None (mirrors a PyPI install).
-    monkeypatch.delenv("AGENT_ENV_REPO", raising=False)
-    stray = tmp_path / "site-packages" / "agent_env" / "__init__.py"
+    monkeypatch.delenv("AGENT_CONTAINER_REPO", raising=False)
+    stray = tmp_path / "site-packages" / "agent_container" / "__init__.py"
     stray.parent.mkdir(parents=True)
     stray.write_text("")
     monkeypatch.setattr(wiz, "__file__", str(stray))
@@ -170,12 +170,12 @@ def test_find_repo_root_is_none_without_checkout(wiz, monkeypatch, tmp_path):
 
 
 def test_do_build_dies_without_context_or_checkout(wiz, monkeypatch):
-    # REPO_ROOT None + no --context + no AGENT_ENV_REPO -> actionable Fatal
+    # REPO_ROOT None + no --context + no AGENT_CONTAINER_REPO -> actionable Fatal
     # (not a traceback), and before any runtime call.
-    monkeypatch.delenv("AGENT_ENV_REPO", raising=False)
+    monkeypatch.delenv("AGENT_CONTAINER_REPO", raising=False)
     monkeypatch.setattr(wiz, "REPO_ROOT", None)
     with pytest.raises(wiz.Fatal) as exc:
-        wiz.do_build("localhost/agent-env:latest")
+        wiz.do_build("localhost/agent-container:latest")
     assert "no repo checkout for the docker build context" in str(exc.value)
 
 
@@ -184,4 +184,4 @@ def test_completion_script_reads_from_checkout(wiz):
     # completion text comes straight off disk.
     assert wiz.REPO_ROOT is not None
     text = wiz._completion_script("bash")
-    assert text == (wiz.REPO_ROOT / "completions" / "agent-env.bash").read_text()
+    assert text == (wiz.REPO_ROOT / "completions" / "agent-container.bash").read_text()

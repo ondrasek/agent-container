@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shell-based tests for the bash completion script (completions/agent-env.bash).
+# Shell-based tests for the bash completion script (completions/agent-container.bash).
 #
 # Run:  bin/tests/test_completions.sh        (needs only bash)
 #
@@ -50,10 +50,10 @@ setup_sandbox() {
     SANDBOX="$(mktemp -d)"
     export XDG_STATE_HOME="${SANDBOX}/state"
     export XDG_CONFIG_HOME="${SANDBOX}/config"
-    mkdir -p "${XDG_STATE_HOME}/agent-env" "${XDG_CONFIG_HOME}/agent-env"
-    printf '2206\n' > "${XDG_STATE_HOME}/agent-env/acme.port"
-    printf '2220\n' > "${XDG_STATE_HOME}/agent-env/blog.port"
-    cat > "${XDG_CONFIG_HOME}/agent-env/hosts.conf" <<'EOF'
+    mkdir -p "${XDG_STATE_HOME}/agent-container" "${XDG_CONFIG_HOME}/agent-container"
+    printf '2206\n' > "${XDG_STATE_HOME}/agent-container/acme.port"
+    printf '2220\n' > "${XDG_STATE_HOME}/agent-container/blog.port"
+    cat > "${XDG_CONFIG_HOME}/agent-container/hosts.conf" <<'EOF'
 # sample hosts
 VPS_HOST=vps.example.com
 VPS_PORT=2222
@@ -78,8 +78,8 @@ run_comp() {
 # (including --env-file / --mount / --json / --no-follow / attach targets), and
 # container-name completion sourced directly from state + hosts.conf.
 test_tool() {
-    local tool="agent-env" func="_agent_env" names_func="__agent_env_names"
-    local script="${REPO_ROOT}/completions/agent-env.bash"
+    local tool="agent-container" func="_agent_container" names_func="__agent_container_names"
+    local script="${REPO_ROOT}/completions/agent-container.bash"
     note "--- ${tool} (${script}) ---"
     # shellcheck disable=SC1090
     source "${script}"
@@ -146,12 +146,12 @@ test_tool() {
 # $(...) payload must NEVER execute when the bash completion runs. Uses a fresh
 # sandbox with relative-path payloads and runs the completer from inside it.
 test_security_no_exec() {
-    local tool="agent-env" func="_agent_env"
-    local script="${REPO_ROOT}/completions/agent-env.bash"
+    local tool="agent-container" func="_agent_container"
+    local script="${REPO_ROOT}/completions/agent-container.bash"
     local sbx; sbx="$(mktemp -d)"
-    mkdir -p "${sbx}/state/agent-env" "${sbx}/config/agent-env"
-    : > "${sbx}/state/agent-env/\$(touch PWNED-state).port"
-    printf '$(touch PWNED-hosts)_HOST=x\n' > "${sbx}/config/agent-env/hosts.conf"
+    mkdir -p "${sbx}/state/agent-container" "${sbx}/config/agent-container"
+    : > "${sbx}/state/agent-container/\$(touch PWNED-state).port"
+    printf '$(touch PWNED-hosts)_HOST=x\n' > "${sbx}/config/agent-container/hosts.conf"
     (
         cd "${sbx}" || exit 0
         export XDG_STATE_HOME="${sbx}/state" XDG_CONFIG_HOME="${sbx}/config"
@@ -171,12 +171,12 @@ test_security_no_exec() {
 # F4: exercise the zsh name gatherers (guarded — skipped if zsh is absent).
 test_zsh_names() {
     command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping zsh name tests"; return; }
-    local n out script="${REPO_ROOT}/completions/agent-env.zsh"
-    out="$(zsh -c "source '${script}'; local -aU names; __agent_env_gather_local; __agent_env_gather_hosts; print -l -- \$names" 2>/dev/null)"
+    local n out script="${REPO_ROOT}/completions/agent-container.zsh"
+    out="$(zsh -c "source '${script}'; local -aU names; __agent_container_gather_local; __agent_container_gather_hosts; print -l -- \$names" 2>/dev/null)"
     for n in acme blog my-box vps; do
         if printf '%s\n' "${out}" | grep -qxF "${n}"; then pass=$((pass + 1)); else fail=$((fail + 1)); note "FAIL: zsh union missing '${n}'"; fi
     done
-    out="$(zsh -c "source '${script}'; local -aU names; __agent_env_gather_local; print -l -- \$names" 2>/dev/null)"
+    out="$(zsh -c "source '${script}'; local -aU names; __agent_container_gather_local; print -l -- \$names" 2>/dev/null)"
     if printf '%s\n' "${out}" | grep -qxF "acme"; then pass=$((pass + 1)); else fail=$((fail + 1)); note "FAIL: zsh local missing 'acme'"; fi
     if printf '%s\n' "${out}" | grep -qxF "vps"; then fail=$((fail + 1)); note "FAIL: zsh local should exclude remote 'vps'"; else pass=$((pass + 1)); fi
 }
@@ -185,23 +185,23 @@ test_zsh_names() {
 # and assert it wires PATH, registers the completion, and defines aliases.
 test_omz_plugin() {
     command -v zsh >/dev/null 2>&1 || { note "zsh not found; skipping omz plugin test"; return; }
-    local plugin="${REPO_ROOT}/completions/oh-my-zsh/agent-env/agent-env.plugin.zsh"
+    local plugin="${REPO_ROOT}/completions/oh-my-zsh/agent-container/agent-container.plugin.zsh"
     if [[ ! -f "${plugin}" ]]; then fail=$((fail + 1)); note "FAIL: omz plugin file missing"; return; fi
     local out label empty_bin filled_bin
     empty_bin="$(mktemp -d)"                        # XDG bin WITHOUT the tool
-    filled_bin="$(mktemp -d)"; : > "${filled_bin}/agent-env"  # XDG bin WITH the tool
+    filled_bin="$(mktemp -d)"; : > "${filled_bin}/agent-container"  # XDG bin WITH the tool
 
     # Case 1: tool absent from XDG bin -> plugin falls back to repo/bin, and
     # wires the completion + aliases.
     out="$(XDG_BIN_HOME="${empty_bin}" zsh -c "
         autoload -Uz compinit && compinit -u
         source '${plugin}'
-        print -r -- \"PATHHIT=\$([[ \":\$PATH:\" == *\":\${AGENT_ENV_REPO}/bin:\"* ]] && echo yes || echo no)\"
-        print -r -- \"COMPFUNC=\${functions[_agent-env]:+defined}\"
-        print -r -- \"COMPDEF=\${_comps[agent-env]:-none}\"
+        print -r -- \"PATHHIT=\$([[ \":\$PATH:\" == *\":\${AGENT_CONTAINER_REPO}/bin:\"* ]] && echo yes || echo no)\"
+        print -r -- \"COMPFUNC=\${functions[_agent-container]:+defined}\"
+        print -r -- \"COMPDEF=\${_comps[agent-container]:-none}\"
         alias ae >/dev/null 2>&1 && print -r -- 'ALIAS=ok'
     " 2>/dev/null)"
-    for label in "PATHHIT=yes" "COMPFUNC=defined" "COMPDEF=_agent-env" "ALIAS=ok"; do
+    for label in "PATHHIT=yes" "COMPFUNC=defined" "COMPDEF=_agent-container" "ALIAS=ok"; do
         if printf '%s\n' "${out}" | grep -qxF "${label}"; then
             pass=$((pass + 1))
         else

@@ -6,8 +6,8 @@
 # Run:  bin/tests/test_entrypoint.sh
 #
 # Covers the four contract behaviors:
-#   1. AGENT_ENV_TMUX_WINDOWS unset      -> windows 'shell edit agents' (${VAR-default}).
-#   2. AGENT_ENV_TMUX_WINDOWS=''         -> single default window (opt-out path).
+#   1. AGENT_CONTAINER_TMUX_WINDOWS unset      -> windows 'shell edit agents' (${VAR-default}).
+#   2. AGENT_CONTAINER_TMUX_WINDOWS=''         -> single default window (opt-out path).
 #   3. an injection name is SKIPPED, never forwarded to tmux, and fires no
 #      command substitution ('a;b' and '$(touch PWNED)').
 #   4. idempotency: the has-session guard means a restart never rebuilds windows.
@@ -16,8 +16,8 @@
 # never run), `tail` exits immediately (so the PID-1 `tail -f /dev/null; wait`
 # returns instead of blocking), and `tmux` is a dispatcher that records
 # new-session/new-window/select-window argv and models has-session via a
-# per-run sentinel file. AGENT_ENV_HOME redirects the shell-env seeding path into a
-# writable tmpdir. bash word-splits ${AGENT_ENV_TMUX_WINDOWS}, so a valid injection
+# per-run sentinel file. AGENT_CONTAINER_HOME redirects the shell-env seeding path into a
+# writable tmpdir. bash word-splits ${AGENT_CONTAINER_TMUX_WINDOWS}, so a valid injection
 # payload must be ';'- or '$(...)'-based; 'a b' is NOT injection (bash splits it
 # into two legitimate window names).
 
@@ -73,16 +73,16 @@ cat > "${STUB}/tmux" <<'EOF'
 sub="$1"; shift
 case "${sub}" in
     has-session)
-        [[ -f "${AGENT_ENV_STUB_STATE}/exists" ]] && exit 0 || exit 1 ;;
+        [[ -f "${AGENT_CONTAINER_STUB_STATE}/exists" ]] && exit 0 || exit 1 ;;
     new-session)
-        : > "${AGENT_ENV_STUB_STATE}/exists"
-        printf 'new-session %s\n' "$*" >> "${AGENT_ENV_CAPTURE}"
+        : > "${AGENT_CONTAINER_STUB_STATE}/exists"
+        printf 'new-session %s\n' "$*" >> "${AGENT_CONTAINER_CAPTURE}"
         for a in "$@"; do [[ "${a}" == "-P" ]] && { printf '@0\n'; break; }; done
         exit 0 ;;
     new-window)
-        printf 'new-window %s\n' "$*" >> "${AGENT_ENV_CAPTURE}"; exit 0 ;;
+        printf 'new-window %s\n' "$*" >> "${AGENT_CONTAINER_CAPTURE}"; exit 0 ;;
     select-window)
-        printf 'select-window %s\n' "$*" >> "${AGENT_ENV_CAPTURE}"; exit 0 ;;
+        printf 'select-window %s\n' "$*" >> "${AGENT_CONTAINER_CAPTURE}"; exit 0 ;;
     *) exit 0 ;;
 esac
 EOF
@@ -97,20 +97,20 @@ run_entrypoint() {
     (
         cd "${WORK}" || exit 99
         export GH_TOKEN=x GIT_USER_NAME='Test User' GIT_USER_EMAIL='t@example.com'
-        export HOME="${HOMEDIR}" AGENT_ENV_HOME="${HOMEDIR}"
-        export AGENT_ENV_CAPTURE="${CAP}" AGENT_ENV_STUB_STATE="${STATE}"
+        export HOME="${HOMEDIR}" AGENT_CONTAINER_HOME="${HOMEDIR}"
+        export AGENT_CONTAINER_CAPTURE="${CAP}" AGENT_CONTAINER_STUB_STATE="${STATE}"
         export PATH="${STUB}:${PATH}"
-        unset AGENT_ENV_TMUX_WINDOWS
+        unset AGENT_CONTAINER_TMUX_WINDOWS
         case "${mode}" in
             __unset__) : ;;
-            __empty__) export AGENT_ENV_TMUX_WINDOWS="" ;;
-            *)         export AGENT_ENV_TMUX_WINDOWS="${mode}" ;;
+            __empty__) export AGENT_CONTAINER_TMUX_WINDOWS="" ;;
+            *)         export AGENT_CONTAINER_TMUX_WINDOWS="${mode}" ;;
         esac
         bash "${ENTRY}" >/dev/null 2>"${LOG}"
     )
 }
 
-# --- 1. unset AGENT_ENV_TMUX_WINDOWS -> default 'shell edit agents' --------------
+# --- 1. unset AGENT_CONTAINER_TMUX_WINDOWS -> default 'shell edit agents' --------------
 reset_session
 run_entrypoint __unset__
 check_eq "unset: first window is 'shell' on session main (with -P id capture)" \
@@ -122,7 +122,7 @@ check_eq "unset: exactly two extra windows" "2" "$(cap_count 'new-window')"
 # string — the TMUX-1 fix. (Stub prints '@0' for the -P new-session.)
 if cap_hasx 'select-window -t @0'; then ok; else bad "unset: select-window by id @0"; fi
 
-# --- 2. empty AGENT_ENV_TMUX_WINDOWS -> single default window (opt-out) ----------
+# --- 2. empty AGENT_CONTAINER_TMUX_WINDOWS -> single default window (opt-out) ----------
 reset_session
 run_entrypoint __empty__
 check_eq "empty: exactly one bare 'new-session -d -s main' (no -n, no -P)" \

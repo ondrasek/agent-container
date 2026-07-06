@@ -1,4 +1,4 @@
-# CI gate for agent-env: runs the runtime-free pytest suite and builds the
+# CI gate for agent-container: runs the runtime-free pytest suite and builds the
 # distributions on every push and PR. This does NOT run on tag pushes; the
 # release itself is gated by publish.yml, which re-runs the suite before build.
 name: ci
@@ -24,7 +24,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Run the pytest suite
         # --no-project keeps the run hermetic; the --with pins mirror the
-        # bin/agent-env PEP 723 inline metadata (kept in sync with pyproject).
+        # bin/agent-container PEP 723 inline metadata (kept in sync with pyproject).
         run: >
           uv run --no-project --with pytest
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'

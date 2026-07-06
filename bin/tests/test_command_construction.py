@@ -42,17 +42,17 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
     # This argv is the load-bearing container start command; pin it exactly.
     assert capture_query == [[
         "podman", "run", "-d",
-        "--name", "agent-env-acme",
+        "--name", "agent-container-acme",
         "--env-file", str(env_file),
         "-p", "2206:22",
-        "-v", "agent-env-acme-workspace:/workspace",
-        "-v", "agent-env-acme-claude:/home/dev/.claude",
-        "-v", "agent-env-acme-codex:/home/dev/.codex",
-        "-v", "agent-env-acme-pi:/home/dev/.pi",
-        "-v", "agent-env-acme-shellenv:/home/dev/.agent-env",
-        "-v", "agent-env-acme-tmux:/home/dev/.config/tmux",
+        "-v", "agent-container-acme-workspace:/workspace",
+        "-v", "agent-container-acme-claude:/home/dev/.claude",
+        "-v", "agent-container-acme-codex:/home/dev/.codex",
+        "-v", "agent-container-acme-pi:/home/dev/.pi",
+        "-v", "agent-container-acme-shellenv:/home/dev/.agent-container",
+        "-v", "agent-container-acme-tmux:/home/dev/.config/tmux",
         "--restart", "unless-stopped",
-        "localhost/agent-env:latest",
+        "localhost/agent-container:latest",
     ]]
     # state file written (the completions and `attach` read it)
     assert wiz.read_state_port("acme") == "2206"
@@ -74,9 +74,9 @@ def test_launch_container_appends_binds_after_volumes(wiz, capture_query, monkey
         "-v", "/abs/host:/opt/data",
         "-v", "/another:/workspace/another",
     ]
-    assert argv[ri:] == ["--restart", "unless-stopped", "localhost/agent-env:latest"]
+    assert argv[ri:] == ["--restart", "unless-stopped", "localhost/agent-container:latest"]
     # First -v is still the workspace volume.
-    assert argv[argv.index("-v") + 1] == "agent-env-acme-workspace:/workspace"
+    assert argv[argv.index("-v") + 1] == "agent-container-acme-workspace:/workspace"
 
 
 # --- bind-mount resolution (--mount) -----------------------------------------
@@ -151,7 +151,7 @@ def test_launch_container_port_is_name_hash(wiz, capture_query, monkeypatch, tmp
     wiz.launch_container("podman", "my-box", env_file)
     (argv,) = capture_query
     assert argv[argv.index("-p") + 1] == "2204:22"
-    assert argv[argv.index("-v") + 1] == "agent-env-my-box-workspace:/workspace"
+    assert argv[argv.index("-v") + 1] == "agent-container-my-box-workspace:/workspace"
 
 
 def test_launch_container_aborts_on_busy_port(wiz, capture_query, monkeypatch, tmp_path):
@@ -274,12 +274,12 @@ def test_down_purge_removes_all_six_volumes(wiz, capture_query, monkeypatch):
     wiz.down_container("podman", "acme", purge=True)
     removed = [c[3] for c in capture_query if c[:3] == ["podman", "volume", "rm"]]
     assert removed == [
-        "agent-env-acme-workspace",
-        "agent-env-acme-claude",
-        "agent-env-acme-codex",
-        "agent-env-acme-pi",
-        "agent-env-acme-shellenv",
-        "agent-env-acme-tmux",
+        "agent-container-acme-workspace",
+        "agent-container-acme-claude",
+        "agent-container-acme-codex",
+        "agent-container-acme-pi",
+        "agent-container-acme-shellenv",
+        "agent-container-acme-tmux",
     ]
     assert wiz.read_state_port("acme") is None  # state cleared
 
@@ -367,10 +367,10 @@ def test_resolve_local_from_state_file(wiz):
     assert wiz.resolve_attach_target("acme", "local") == ("dev", "localhost", "2206", "local")
 
 
-def test_resolve_local_honours_agent_env_host_and_user(wiz, monkeypatch):
+def test_resolve_local_honours_agent_container_host_and_user(wiz, monkeypatch):
     wiz.write_state("acme", 2206)
-    monkeypatch.setenv("AGENT_ENV_HOST", "lima-vm")
-    monkeypatch.setenv("AGENT_ENV_USER", "ops")
+    monkeypatch.setenv("AGENT_CONTAINER_HOST", "lima-vm")
+    monkeypatch.setenv("AGENT_CONTAINER_USER", "ops")
     assert wiz.resolve_attach_target("acme", "local") == ("ops", "lima-vm", "2206", "local")
 
 
@@ -430,15 +430,15 @@ def test_resolve_rejects_host_option_injection(wiz):
 
 
 def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
-    monkeypatch.setattr(wiz, "ps_agent_env", lambda rt, include_stopped=False: [
-        ("agent-env-acme", "localhost/agent-env:latest", "Up 2 hours", "2 hours ago"),
+    monkeypatch.setattr(wiz, "ps_agent_container", lambda rt, include_stopped=False: [
+        ("agent-container-acme", "localhost/agent-container:latest", "Up 2 hours", "2 hours ago"),
     ])
     wiz.write_state("acme", 2206)
     wiz.write_state("ghost", 2299)
     rows = wiz.gather_rows("podman")
     by_name = {r["name"]: r for r in rows}
-    assert by_name["agent-env-acme"]["port"] == "2206"
-    assert by_name["agent-env-acme"]["stale"] is False
-    assert by_name["agent-env-ghost"]["port"] == "2299"
-    assert by_name["agent-env-ghost"]["stale"] is True
-    assert by_name["agent-env-ghost"]["status"] == "stale"
+    assert by_name["agent-container-acme"]["port"] == "2206"
+    assert by_name["agent-container-acme"]["stale"] is False
+    assert by_name["agent-container-ghost"]["port"] == "2299"
+    assert by_name["agent-container-ghost"]["stale"] is True
+    assert by_name["agent-container-ghost"]["status"] == "stale"

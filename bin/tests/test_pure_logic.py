@@ -1,5 +1,5 @@
 """Pure-logic tests: every value here pins the byte-for-byte on-disk contract
-that agent-env defines — the port hash, container/volume naming, env-file
+that agent-container defines — the port hash, container/volume naming, env-file
 resolution order, and hosts.conf parsing. These constants are load-bearing;
 the shell completions read the same state files, so do not 'fix' them casually.
 """
@@ -44,7 +44,7 @@ def test_port_always_inside_window(wiz):
 
 def test_port_collision_is_possible_and_deterministic(wiz):
     # 'zz' and 'scratch' hash to the same port — a deterministic collision;
-    # agent-env must not "helpfully" disambiguate.
+    # agent-container must not "helpfully" disambiguate.
     assert wiz.port_for_name("zz") == wiz.port_for_name("scratch") == 2244
 
 
@@ -52,18 +52,18 @@ def test_port_collision_is_possible_and_deterministic(wiz):
 
 
 def test_container_and_volume_naming(wiz):
-    assert wiz.container_name("acme") == "agent-env-acme"
-    assert wiz.volume_name("acme") == "agent-env-acme-workspace"
-    assert wiz.container_name("my-box") == "agent-env-my-box"
-    assert wiz.volume_name("my-box") == "agent-env-my-box-workspace"
+    assert wiz.container_name("acme") == "agent-container-acme"
+    assert wiz.volume_name("acme") == "agent-container-acme-workspace"
+    assert wiz.container_name("my-box") == "agent-container-my-box"
+    assert wiz.volume_name("my-box") == "agent-container-my-box-workspace"
     # Each per-container naming helper has its own explicit contract assertion
     # rather than relying on doctest/argv side-coverage (the canonical order is
     # workspace, claude, codex, pi, shellenv, tmux).
-    assert wiz.claude_volume_name("acme") == "agent-env-acme-claude"
-    assert wiz.codex_volume_name("acme") == "agent-env-acme-codex"
-    assert wiz.pi_volume_name("acme") == "agent-env-acme-pi"
-    assert wiz.shellenv_volume_name("acme") == "agent-env-acme-shellenv"
-    assert wiz.tmux_volume_name("acme") == "agent-env-acme-tmux"
+    assert wiz.claude_volume_name("acme") == "agent-container-acme-claude"
+    assert wiz.codex_volume_name("acme") == "agent-container-acme-codex"
+    assert wiz.pi_volume_name("acme") == "agent-container-acme-pi"
+    assert wiz.shellenv_volume_name("acme") == "agent-container-acme-shellenv"
+    assert wiz.tmux_volume_name("acme") == "agent-container-acme-tmux"
 
 
 # --- name validation: ^[a-z0-9][a-z0-9_-]*$ ------------------------------------
@@ -218,16 +218,16 @@ def test_xdg_defaults_fall_back_to_home(load_wiz, tmp_path):
     # With XDG vars unset, paths must match bash's ${XDG_*:-$HOME/...} defaults.
     home = tmp_path / "home"
     mod = load_wiz(home=home, xdg_state=None, xdg_config=None)
-    assert mod.STATE_DIR == home / ".local/state" / "agent-env"
-    assert mod.CONFIG_DIR == home / ".config" / "agent-env"
-    assert mod.HOSTS_CONF == home / ".config" / "agent-env" / "hosts.conf"
+    assert mod.STATE_DIR == home / ".local/state" / "agent-container"
+    assert mod.CONFIG_DIR == home / ".config" / "agent-container"
+    assert mod.HOSTS_CONF == home / ".config" / "agent-container" / "hosts.conf"
 
 
 def test_xdg_env_vars_override_home(load_wiz, tmp_path):
     state, config = tmp_path / "s", tmp_path / "c"
     mod = load_wiz(xdg_state=state, xdg_config=config)
-    assert mod.STATE_DIR == state / "agent-env"
-    assert mod.CONFIG_DIR == config / "agent-env"
+    assert mod.STATE_DIR == state / "agent-container"
+    assert mod.CONFIG_DIR == config / "agent-container"
 
 
 # --- state file round-trip ---------------------------------------------------------
@@ -237,7 +237,7 @@ def test_state_write_read_round_trip(wiz):
     wiz.write_state("acme", 2206)
     f = wiz.state_file("acme")
     assert f == wiz.STATE_DIR / "acme.port"
-    assert f.read_text() == "2206\n"  # exact bytes agent-env writes; completions read these
+    assert f.read_text() == "2206\n"  # exact bytes agent-container writes; completions read these
     assert wiz.read_state_port("acme") == "2206"
 
 
@@ -292,24 +292,24 @@ def test_runtime_neither_present(wiz, fake_bin, monkeypatch):
 
 
 def test_runtime_override_wins_over_platform_default(wiz, fake_bin, monkeypatch):
-    # AGENT_ENV_RUNTIME beats the platform preference on both OSes.
+    # AGENT_CONTAINER_RUNTIME beats the platform preference on both OSes.
     for platform, forced in (("darwin", "podman"), ("linux", "docker")):
         monkeypatch.setattr(wiz.sys, "platform", platform)
         monkeypatch.setenv("PATH", str(fake_bin("podman", "docker")))
-        monkeypatch.setenv("AGENT_ENV_RUNTIME", forced)
+        monkeypatch.setenv("AGENT_CONTAINER_RUNTIME", forced)
         assert wiz.detect_runtime() == forced
 
 
 def test_runtime_override_must_be_on_path(wiz, fake_bin, monkeypatch):
     monkeypatch.setenv("PATH", str(fake_bin("docker")))
-    monkeypatch.setenv("AGENT_ENV_RUNTIME", "podman")
+    monkeypatch.setenv("AGENT_CONTAINER_RUNTIME", "podman")
     with pytest.raises(wiz.Fatal, match="not on PATH"):
         wiz.detect_runtime()
 
 
 def test_runtime_override_rejects_unknown_value(wiz, fake_bin, monkeypatch):
     monkeypatch.setenv("PATH", str(fake_bin("podman")))
-    monkeypatch.setenv("AGENT_ENV_RUNTIME", "containerd")
+    monkeypatch.setenv("AGENT_CONTAINER_RUNTIME", "containerd")
     with pytest.raises(wiz.Fatal, match="must be 'docker' or 'podman'"):
         wiz.detect_runtime()
 
@@ -319,7 +319,7 @@ def test_runtime_override_rejects_unknown_value(wiz, fake_bin, monkeypatch):
 
 def test_resolve_ssh_user_default_and_env(wiz, monkeypatch):
     assert wiz.resolve_ssh_user() == "dev"
-    monkeypatch.setenv("AGENT_ENV_USER", "ops")
+    monkeypatch.setenv("AGENT_CONTAINER_USER", "ops")
     assert wiz.resolve_ssh_user() == "ops"
     assert wiz.resolve_ssh_user("admin") == "admin"  # explicit override beats env
 

@@ -1,33 +1,33 @@
-#compdef agent-env
-# zsh completion for `agent-env` (bin/agent-env).
+#compdef agent-container
+# zsh completion for `agent-container` (bin/agent-container).
 #
-# Install (autoload):  copy/symlink this file as `_agent-env` into a dir on
+# Install (autoload):  copy/symlink this file as `_agent-container` into a dir on
 #                      $fpath (e.g. ~/.zfunc), then `autoload -U compinit && compinit`.
-# Install (source):    source /path/to/completions/agent-env.zsh from ~/.zshrc
+# Install (source):    source /path/to/completions/agent-container.zsh from ~/.zshrc
 #                      AFTER `compinit` has run.
 #
-# Completion keys off the command NAME, so `agent-env` must be on PATH
-# (symlink bin/agent-env into ~/.local/bin).
+# Completion keys off the command NAME, so `agent-container` must be on PATH
+# (symlink bin/agent-container into ~/.local/bin).
 #
-# Container names are gathered directly in-shell — agent-env/uv is NEVER spun
+# Container names are gathered directly in-shell — agent-container/uv is NEVER spun
 # up on TAB. Candidate names come from:
-#   * basenames of ${XDG_STATE_HOME:-$HOME/.local/state}/agent-env/*.port (minus .port)
+#   * basenames of ${XDG_STATE_HOME:-$HOME/.local/state}/agent-container/*.port (minus .port)
 #   * hosts.conf keys ending in _HOST, lowercased with '_' -> '-'
 # Missing dirs/files are tolerated silently. hosts.conf is parsed with shell
 # builtins only and never executed/sourced. Names go through `compadd -a`
 # (array add), so an embedded `$(...)` in a hostile name is never expanded.
 
 # Gather state-file names into the caller's `names` array.
-__agent_env_gather_local() {
-    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-env" f
+__agent_container_gather_local() {
+    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-container" f
     for f in "$state_dir"/*.port(N); do
         names+=("${f:t:r}")
     done
 }
 
 # Gather hosts.conf-derived names into the caller's `names` array.
-__agent_env_gather_hosts() {
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/agent-env"
+__agent_container_gather_hosts() {
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/agent-container"
     local hosts="${config_dir}/hosts.conf" line key
     [[ -f "$hosts" ]] || return
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -45,21 +45,21 @@ __agent_env_gather_hosts() {
 }
 
 # State-only names (local containers): safe source for down/logs/purge.
-__agent_env_names_local() {
+__agent_container_names_local() {
     local -aU names
-    __agent_env_gather_local
+    __agent_container_gather_local
     compadd -a names
 }
 
 # Union (local + remote): used by up/attach.
-__agent_env_names() {
+__agent_container_names() {
     local -aU names
-    __agent_env_gather_local
-    __agent_env_gather_hosts
+    __agent_container_gather_local
+    __agent_container_gather_hosts
     compadd -a names
 }
 
-_agent-env() {
+_agent-container() {
     local context state state_descr line
     typeset -A opt_args
     local -a cmds
@@ -83,7 +83,7 @@ _agent-env() {
 
     case $state in
         command)
-            _describe -t commands 'agent-env command' cmds
+            _describe -t commands 'agent-container command' cmds
             ;;
         args)
             case $line[1] in
@@ -91,18 +91,18 @@ _agent-env() {
                     _arguments \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
-                        '*:container:__agent_env_names'
+                        '*:container:__agent_container_names'
                     ;;
                 down)
                     _arguments \
                         '--purge[Also delete all per-container volumes]' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
-                        '*:container:__agent_env_names_local'
+                        '*:container:__agent_container_names_local'
                     ;;
                 purge)
                     _arguments \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
-                        '*:container:__agent_env_names_local'
+                        '*:container:__agent_container_names_local'
                     ;;
                 list)
                     _arguments '--json[Emit machine-readable JSON]'
@@ -111,15 +111,15 @@ _agent-env() {
                     _arguments \
                         '--local[Force local target (state file)]' \
                         '--remote[Force remote target (hosts.conf)]' \
-                        '--user[SSH user (default: AGENT_ENV_USER or dev)]:user:' \
+                        '--user[SSH user (default: AGENT_CONTAINER_USER or dev)]:user:' \
                         '--host[Override the resolved host]:host:_hosts' \
                         '(--window -w)'{--window,-w}'[Select tmux window NAME before attaching]:window:' \
-                        '*:container:__agent_env_names'
+                        '*:container:__agent_container_names'
                     ;;
                 logs)
                     _arguments \
                         '--no-follow[Print logs without following]' \
-                        '*:container:__agent_env_names_local'
+                        '*:container:__agent_container_names_local'
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh)'
@@ -129,9 +129,9 @@ _agent-env() {
     esac
 }
 
-# Dual-mode: works whether autoloaded from $fpath as `_agent-env` or sourced.
-if [[ "$funcstack[1]" == "_agent-env" ]]; then
-    _agent-env "$@"
+# Dual-mode: works whether autoloaded from $fpath as `_agent-container` or sourced.
+if [[ "$funcstack[1]" == "_agent-container" ]]; then
+    _agent-container "$@"
 else
-    (( $+functions[compdef] )) && compdef _agent-env agent-env
+    (( $+functions[compdef] )) && compdef _agent-container agent-container
 fi
