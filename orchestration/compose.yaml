@@ -1,0 +1,34 @@
+# compose.yaml — Docker Compose template for local Lima + docker-cli use.
+#
+# This is an OPTIONAL escape hatch for operators who prefer compose over
+# `agent-container`. The canonical path is `agent-container up <name>`, which calls
+# `docker run` / `podman run` directly. See docs/orchestration.md.
+#
+# Usage (from this directory):
+#   AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_PORT=2218 docker compose up -d
+#   AGENT_CONTAINER_NAME=alpha docker compose down
+#
+# Parallel-container safety: every per-container value (name, port, volume)
+# is parameterized via AGENT_CONTAINER_NAME / AGENT_CONTAINER_PORT, so running compose twice
+# with different env values yields two non-colliding stacks.
+
+services:
+  agent-container:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    image: localhost/agent-container:latest
+    container_name: "agent-container-${AGENT_CONTAINER_NAME:-default}"
+    env_file:
+      - ../.env
+    ports:
+      - "${AGENT_CONTAINER_PORT:-2200}:22"
+    volumes:
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-workspace:/workspace"
+    restart: unless-stopped
+
+volumes:
+  # Compose expands ${AGENT_CONTAINER_NAME} at parse time, so each invocation
+  # creates a distinct named volume. The volume survives `compose down`.
+  agent-container-${AGENT_CONTAINER_NAME:-default}-workspace:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-workspace"

@@ -1,0 +1,29 @@
+# Runtime credentials and per-host config — see docs/credentials.md
+.env
+.env.local
+.env.*.local
+
+# Claude Code harness artifacts (workflow scripts saved per-session)
+.claude/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor noise
+*.swp
+*.swo
+.idea/
+
+# Python build artifacts (bin/tests pytest suite)
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Packaging / uv project mode (root pyproject.toml)
+.venv/
+*.egg-info/
+dist/
+build/
+# NOTE: uv.lock IS committed. agent-container is an application/CLI (not a library), so
+# the lockfile is checked in for reproducible dev envs (`uv sync`). Do not ignore it.

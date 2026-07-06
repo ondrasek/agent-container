@@ -17,6 +17,12 @@ These are load-bearing design decisions, not preferences:
 3. **Multiple parallel containers.** Naming, port allocation, volume mounts, and git identity must all support N containers running simultaneously on the same host without collision.
 4. **Push auth must work non-interactively.** Agents commit autonomously, so SSH keys / git credentials inside the container must be configured to push without prompts. Never embed long-lived secrets in the image — inject at runtime.
 
+## Decisions
+
+- **Runtime + base image:** Podman + `debian:12-slim`. See [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
+- **CLI:** a single tool, `agent-container` (`bin/agent-container`) — a PEP 723 uv script (Typer + questionary + rich) covering the whole lifecycle (build/up/attach/logs/down/purge) plus an interactive wizard. Its on-disk contract (container names `agent-container-<name>`, the `2200 + name-hash` port, `$XDG_STATE_HOME/agent-container/<name>.port` state files, `~/.config/agent-container/hosts.conf`) is the single source of truth; the shell completions read the same state files. Runtime default is platform-aware (docker-first on macOS, podman-first on Linux); override with `AGENT_CONTAINER_RUNTIME`.
+- **Packaging + release:** ships to PyPI as the `agent_container` module via a hatchling `force-include` wheel (`bin/agent-container` → `agent_container/__init__.py`; completions → `agent_container/completions/*` package data). `REPO_ROOT` resolves location-independently (`AGENT_CONTAINER_REPO` → `Dockerfile`+`completions/` marker → `None`) so a **non-editable** PyPI install works standalone (`up/down/list/attach/logs/purge/completions`); only `build` needs a checkout (via `AGENT_CONTAINER_REPO`/`--context`). `uv tool install --editable .` remains the dev path. Push a `v*` tag → `.github/workflows/publish.yml` uploads via PyPI **Trusted Publishing** (OIDC, no stored secrets); `ci.yml` gates on the pytest suite + `uv build`. Licensed **MIT** ([`LICENSE`](LICENSE)).
+
 ## Architecture sketch (to be built)
 
 Expect the repo to grow into roughly:

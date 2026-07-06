@@ -1,0 +1,1327 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "typer>=0.12,<1",
+#   "questionary>=2.0,<3",
+#   "rich>=13,<15",
+# ]
+# ///
+#
+# agent-container — interactive wizard + CLI for agent-container containers.
+#
+# ============================================================================
+# This script is the SINGLE SOURCE OF TRUTH for the agent-container on-disk contract.
+# Everything below — container naming (agent-container-<name>), the port hash
+# (2200 + sum-of-char-codes mod 100), the per-name state files
+# ($XDG_STATE_HOME/agent-container/<name>.port), the env-file resolution order
+# (./.env -> ~/.config/agent-container/<name>.env -> ~/.config/agent-container/.env), and
+# the hosts.conf KEY=VALUE format (FOO_HOST / FOO_PORT) — is defined here and
+# only here. The shell completions read the same state files directly; keep
+# them in step with the constants in this file.
+# ============================================================================
+#
+# hosts.conf handling: this tool parses hosts.conf line-by-line and NEVER
+# executes/sources it. Quoting and unquoted trailing `# comment`s are handled
+# like bash `source`, but values containing `$` or backticks are taken
+# literally (no expansion), with a one-time warning.
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import termios
+from pathlib import Path
+from typing import List
+
+import questionary
+import typer
+from rich.console import Console
+from rich.table import Table
+
+# --- constants ---------------------------------------------------------------
+
+IMAGE_NAME = "localhost/agent-container:latest"
+CONTAINER_PREFIX = "agent-container-"
+PORT_BASE = 2200
+PORT_RANGE = 100  # 2200..2299
+
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
+HOSTS_CONF = CONFIG_DIR / "hosts.conf"
+
+def _is_repo_checkout(base: "Path") -> bool:
+    """Best-effort test that `base` is an agent-container checkout.
+
+    Keyed on `completions/agent-container.bash` (plus a Dockerfile for the build
+    context): a repo-specific sentinel rather than the generic `Dockerfile` +
+    `completions/` dir pair, which is common to unrelated trees. Requiring the
+    exact file _completion_script reads (bin/agent-container: REPO_ROOT/completions/
+    agent-container.<shell>) also makes the marker and that consumed path the same
+    invariant — a recognized checkout can never then serve stale package data.
+    This is a heuristic, not a guaranteed false-positive-free identifier.
+    """
+    return (base / "Dockerfile").is_file() and (base / "completions" / "agent-container.bash").is_file()
+
+
+def _find_repo_root() -> "Path | None":
+    """Locate the repo checkout in a way that survives a non-editable install.
+
+    A wheel copies this module into site-packages, so Path(__file__) no longer
+    points inside the repo. Resolution order:
+      1. AGENT_CONTAINER_REPO (explicit operator override): trusted only when it
+         satisfies the checkout marker (see _is_repo_checkout); a wrong/typo'd
+         path yields None rather than a bogus root (build then dies actionably).
+      2. Walk up from this file, then from cwd, looking for a dir that matches
+         the marker.
+    Returns None when no checkout is reachable — client subcommands still work
+    (completions falls back to bundled package data; build fails actionably).
+    Note: this cannot die here — it runs at import, before Fatal/die exist.
+    """
+    env = os.environ.get("AGENT_CONTAINER_REPO")
+    if env:
+        base = Path(env).expanduser().resolve()
+        return base if _is_repo_checkout(base) else None
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        if _is_repo_checkout(base):
+            return base
+    for base in (Path.cwd(), *Path.cwd().parents):
+        if _is_repo_checkout(base):
+            return base
+    return None
+
+
+REPO_ROOT = _find_repo_root()
+
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+# ssh argv injection guard: a user/host that begins with '-' would be parsed
+# by ssh as an option (e.g. -oProxyCommand=...). Conservative charsets that
+# can never start with '-'.
+SSH_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+SSH_HOST_RE = re.compile(r"[A-Za-z0-9_\[][A-Za-z0-9.:_\]-]*")
+# tmux window name: embedded in the ssh remote command (attach --window), so it
+# is charset-validated. Matches the entrypoint / agent-container window charset.
+WINDOW_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+console = Console()
+
+
+def eprint(msg: str) -> None:
+    # Plain stderr writer; rich would mangle "[agent-container]" as markup and wrap lines.
+    print(msg, file=sys.stderr)
+
+
+class Fatal(Exception):
+    """Fatal error; CLI exits 1, wizard prints and returns to the menu."""
+
+
+def die(msg: str) -> "typer.NoReturn":  # cli() turns Fatal into exit 1
+    raise Fatal(msg)
+
+
+# --- pure helpers ------------------------------------------------------------
+
+
+def validate_name(name: str) -> str:
+    """Validate the container short-name charset: ^[a-z0-9][a-z0-9_-]*$.
+
+    >>> validate_name("acme")
+    'acme'
+    >>> validate_name("my-box")
+    'my-box'
+    >>> validate_name("Bad")
+    Traceback (most recent call last):
+    ...
+    Fatal: invalid <name> 'Bad'; must match [a-z0-9][a-z0-9_-]*
+    """
+    if not name:
+        die("missing required <name> argument")
+    if not NAME_RE.fullmatch(name):
+        die(f"invalid <name> '{name}'; must match [a-z0-9][a-z0-9_-]*")
+    return name
+
+
+def container_name(name: str) -> str:
+    """
+    >>> container_name("acme")
+    'agent-container-acme'
+    """
+    return f"{CONTAINER_PREFIX}{name}"
+
+
+def volume_name(name: str) -> str:
+    """
+    >>> volume_name("acme")
+    'agent-container-acme-workspace'
+    """
+    return f"{CONTAINER_PREFIX}{name}-workspace"
+
+
+def claude_volume_name(name: str) -> str:
+    """
+    >>> claude_volume_name("acme")
+    'agent-container-acme-claude'
+    """
+    return f"{CONTAINER_PREFIX}{name}-claude"
+
+
+def codex_volume_name(name: str) -> str:
+    """
+    >>> codex_volume_name("acme")
+    'agent-container-acme-codex'
+    """
+    return f"{CONTAINER_PREFIX}{name}-codex"
+
+
+def pi_volume_name(name: str) -> str:
+    """
+    >>> pi_volume_name("acme")
+    'agent-container-acme-pi'
+    """
+    return f"{CONTAINER_PREFIX}{name}-pi"
+
+
+def shellenv_volume_name(name: str) -> str:
+    """
+    >>> shellenv_volume_name("acme")
+    'agent-container-acme-shellenv'
+    """
+    return f"{CONTAINER_PREFIX}{name}-shellenv"
+
+
+def tmux_volume_name(name: str) -> str:
+    """Persists ~/.config/tmux (tmux.conf + tpm plugins) across down/up.
+
+    >>> tmux_volume_name("acme")
+    'agent-container-acme-tmux'
+    """
+    return f"{CONTAINER_PREFIX}{name}-tmux"
+
+
+def all_volume_mounts(name: str) -> list[str]:
+    """The six per-container '-v' volume args, in the canonical fixed order
+    (workspace, claude, codex, pi, shellenv, tmux). pi-coding-agent's
+    config/auth dir is ~/.pi (verified from
+    the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
+
+    >>> all_volume_mounts("acme")
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux']
+    """
+    return [
+        f"{volume_name(name)}:/workspace",
+        f"{claude_volume_name(name)}:/home/dev/.claude",
+        f"{codex_volume_name(name)}:/home/dev/.codex",
+        f"{pi_volume_name(name)}:/home/dev/.pi",
+        f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
+        f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
+    ]
+
+
+def per_container_volumes(name: str) -> list[str]:
+    """All per-container volume NAMES, canonical order; used by --purge.
+
+    >>> per_container_volumes("acme")
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux']
+    """
+    return [
+        volume_name(name),
+        claude_volume_name(name),
+        codex_volume_name(name),
+        pi_volume_name(name),
+        shellenv_volume_name(name),
+        tmux_volume_name(name),
+    ]
+
+
+def resolve_bind_mount(spec: str) -> str:
+    """Resolve a '--mount HOSTDIR[:CONTAINERPATH]' spec into an absolute,
+    read-write '-v' value.
+
+    HOSTDIR is resolved to an absolute real path (Path.resolve()) and must be
+    an existing directory. CONTAINERPATH defaults to /workspace/<basename>; if
+    given explicitly it must be absolute. No secret/env value ever reaches argv.
+
+    Lima prerequisite: the host dir must sit under a path the Lima VM exposes
+    WRITABLE (set `writable: true` on the relevant mount and restart Lima),
+    otherwise the bind is read-only inside the VM.
+    """
+    host, sep, container = spec.partition(":")
+    if not host:
+        die(f"--mount: empty host directory in '{spec}'")
+    p = Path(host)
+    if not p.is_dir():
+        die(f"--mount: host path '{host}' does not exist or is not a directory")
+    abs_host = str(p.resolve())
+    if sep:  # an explicit ':' was present
+        if not container:
+            die(f"--mount: empty container path in '{spec}'")
+        if not container.startswith("/"):
+            die(f"--mount: container path '{container}' must be absolute")
+    else:
+        container = f"/workspace/{Path(abs_host).name}"
+    return f"{abs_host}:{container}"
+
+
+def port_for_name(name: str) -> int:
+    """Deterministic port: PORT_BASE + (sum of char codes mod PORT_RANGE).
+
+    Name charset is ASCII-only (enforced by NAME_RE), so ord() matches
+    bash's printf '%d' "'c" exactly.
+
+    >>> port_for_name("acme")
+    2206
+    >>> port_for_name("my-box")
+    2204
+    """
+    return PORT_BASE + (sum(ord(c) for c in name) % PORT_RANGE)
+
+
+def name_to_key(name: str) -> str:
+    """hosts.conf key prefix: hyphens -> underscores, uppercased.
+
+    >>> name_to_key("my-box")
+    'MY_BOX'
+    >>> name_to_key("acme")
+    'ACME'
+    """
+    return name.replace("-", "_").upper()
+
+
+def resolve_ssh_user(override: str | None = None) -> str:
+    """SSH user from --user / AGENT_CONTAINER_USER / 'dev', charset-checked so it can
+    never be parsed by ssh as an option.
+
+    >>> resolve_ssh_user("dev")
+    'dev'
+    >>> resolve_ssh_user("-oProxyCommand=x")
+    Traceback (most recent call last):
+    ...
+    Fatal: invalid ssh user '-oProxyCommand=x'
+    """
+    user = override or os.environ.get("AGENT_CONTAINER_USER") or "dev"
+    if not SSH_USER_RE.fullmatch(user):
+        die(f"invalid ssh user '{user}'")
+    return user
+
+
+def validate_window(window: str) -> str:
+    """tmux window name guard: it is embedded in the ssh remote shell command,
+    so reject anything outside the safe charset before building it.
+
+    >>> validate_window("agents")
+    'agents'
+    >>> validate_window("a; rm -rf ~")
+    Traceback (most recent call last):
+    ...
+    Fatal: invalid tmux window 'a; rm -rf ~'; must match [A-Za-z0-9._-]+
+    """
+    if not WINDOW_RE.fullmatch(window):
+        die(f"invalid tmux window '{window}'; must match [A-Za-z0-9._-]+")
+    return window
+
+
+def parse_kv_config(text: str) -> dict[str, str]:
+    """Literal KEY=VALUE parser for hosts.conf. Never executes the file.
+
+    Skips blank lines and # comments, strips an optional leading 'export ',
+    splits on the first '=', honours one pair of matching quotes, and — like
+    bash `source` — drops unquoted trailing ' # comment's (a '#' only starts
+    a comment when preceded by whitespace; 'A=#lit' keeps the '#').
+
+    >>> parse_kv_config("# c\\n\\nA=1\\nexport B='two'\\nC=\\"three\\"\\nD=a=b\\n")
+    {'A': '1', 'B': 'two', 'C': 'three', 'D': 'a=b'}
+    >>> parse_kv_config('H=vps.example.com # primary box\\nQ="a # b" # c\\nR=#lit\\n')
+    {'H': 'vps.example.com', 'Q': 'a # b', 'R': '#lit'}
+    """
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if value[:1] in ("'", '"'):
+            # Quoted: take up to the matching close quote; anything after it
+            # (e.g. a trailing comment) is ignored, as bash would.
+            closing = value.find(value[0], 1)
+            if closing != -1:
+                value = value[1:closing]
+        else:
+            m = re.search(r"\s#", value)
+            if m:
+                value = value[: m.start()].rstrip()
+        if key:
+            out[key] = value
+    return out
+
+
+def env_file_candidates(name: str, cwd: Path) -> list[Path]:
+    """Env-file resolution order (./.env, then per-name, then shared default).
+
+    >>> [str(p) for p in env_file_candidates("acme", Path("/w"))][0]
+    '/w/.env'
+    """
+    return [cwd / ".env", CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
+
+
+def resolve_env_file(name: str) -> Path | None:
+    # Secret hygiene: only existence checks; contents are never read.
+    for candidate in env_file_candidates(name, Path.cwd()):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def state_file(name: str) -> Path:
+    return STATE_DIR / f"{name}.port"
+
+
+# --- runtime -----------------------------------------------------------------
+
+_hosts_warned = False
+
+# Captured at startup so an abnormal ssh exit can't leave the terminal raw.
+try:
+    _ORIG_TERMIOS = termios.tcgetattr(sys.stdin.fileno()) if sys.stdin.isatty() else None
+except Exception:
+    _ORIG_TERMIOS = None
+
+
+def detect_runtime() -> str:
+    """Resolve the container runtime.
+
+    AGENT_CONTAINER_RUNTIME (validated docker|podman, must be on PATH) always wins.
+    Otherwise the default is platform-aware: on macOS the operator runs Lima +
+    docker-cli, so prefer docker then podman; on Linux (the VPS) prefer podman
+    then docker. Dies if neither is installed.
+    """
+    forced = os.environ.get("AGENT_CONTAINER_RUNTIME")
+    if forced:
+        if forced not in ("podman", "docker"):
+            die(f"AGENT_CONTAINER_RUNTIME must be 'docker' or 'podman', got: {forced}")
+        if not shutil.which(forced):
+            die(f"AGENT_CONTAINER_RUNTIME={forced} but '{forced}' is not on PATH")
+        return forced
+    order = ("docker", "podman") if sys.platform.startswith("darwin") else ("podman", "docker")
+    for rt in order:
+        if shutil.which(rt):
+            return rt
+    die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_CONTAINER_RUNTIME)")
+
+
+def query(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def container_running(rt: str, cname: str) -> bool:
+    r = query([rt, "ps", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
+    return cname in r.stdout.splitlines()  # exact match, mirrors grep -qx
+
+
+def container_exists(rt: str, cname: str) -> bool:
+    r = query([rt, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
+    return cname in r.stdout.splitlines()
+
+
+def ps_agent_container(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
+    """(cname, image, status, uptime) rows for agent-container-* containers.
+
+    Go-template + tab split, not --format json: podman and docker JSON
+    shapes are incompatible, the template output is not.
+    """
+    argv = [rt, "ps"] + (["-a"] if include_stopped else [])
+    argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
+    rows = []
+    for line in query(argv).stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[0].startswith(CONTAINER_PREFIX):
+            rows.append((parts[0], parts[1], parts[2], parts[3]))
+    return rows
+
+
+def image_exists(rt: str, tag: str) -> bool:
+    # `image inspect` works on both podman and docker (podman's `image exists` does not).
+    return query([rt, "image", "inspect", tag]).returncode == 0
+
+
+def port_free(port: int) -> bool:
+    # Wildcard bind: `-p {port}:22` publishes on ALL interfaces (parity with
+    # agent-container), so probe what will actually be bound, not just loopback.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", port))
+        return True
+    except OSError:
+        return False
+
+
+def write_state(name: str, port: int) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_file(name).write_text(f"{port}\n")
+
+
+def read_state_port(name: str) -> str | None:
+    f = state_file(name)
+    if not f.is_file():
+        return None
+    return f.read_text().strip() or None
+
+
+def clear_state(name: str) -> None:
+    state_file(name).unlink(missing_ok=True)
+
+
+def load_hosts_conf() -> dict[str, str]:
+    global _hosts_warned
+    if not HOSTS_CONF.is_file():
+        return {}
+    conf = parse_kv_config(HOSTS_CONF.read_text())
+    if not _hosts_warned and any("$" in v or "`" in v for v in conf.values()):
+        eprint(
+            "[agent-container] WARNING: hosts.conf contains '$' or '`' values; "
+            "agent-container does not perform shell expansion (agent-container does)."
+        )
+        _hosts_warned = True
+    return conf
+
+
+def hosts_entry(name: str) -> tuple[str, str] | None:
+    """(host, port) from hosts.conf, or None unless BOTH keys are present."""
+    conf = load_hosts_conf()
+    key = name_to_key(name)
+    host, port = conf.get(f"{key}_HOST"), conf.get(f"{key}_PORT")
+    if host and port:
+        return host, port
+    return None
+
+
+def quadlet_active(name: str) -> bool:
+    # Best-effort probe; systemctl is absent on macOS — ignore all failures.
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        r = query(["systemctl", "--user", "is-active", f"{container_name(name)}.service"])
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def is_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+# --- commands ----------------------------------------------------------------
+
+
+def log(msg: str) -> None:
+    eprint(f"[agent-container] {msg}")
+
+
+def warn(msg: str) -> None:
+    eprint(f"[agent-container] WARNING: {msg}")
+
+
+def hint(cmd: str) -> None:
+    console.print(f"hint: {cmd}", style="dim")
+
+
+def do_build(tag: str, context: "Path | None" = None) -> None:
+    # `build` is the one subcommand that needs a repo checkout: a docker build
+    # context IS a checkout. Resolve it explicitly (a PyPI install has REPO_ROOT
+    # is None) and fail actionably rather than with a traceback.
+    ctx = context
+    if ctx is None:
+        env = os.environ.get("AGENT_CONTAINER_REPO")
+        if env:
+            base = Path(env).expanduser().resolve()
+            if not _is_repo_checkout(base):
+                die(
+                    f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout "
+                    "(missing Dockerfile/completions/agent-container.bash)"
+                )
+            ctx = base
+        else:
+            ctx = REPO_ROOT
+    if ctx is None:
+        die(
+            "no repo checkout for the docker build context; run from a checkout, "
+            "set AGENT_CONTAINER_REPO=<checkout>, or pass --context <dir>"
+        )
+    rt = detect_runtime()
+    log(f"building image '{tag}' with {rt} from {ctx}")
+    # Inherited stdio: layer progress must stream, never capture.
+    rc = subprocess.run([rt, "build", "-t", tag, str(ctx)]).returncode
+    if rc != 0:
+        die(f"build failed (exit {rc})")
+
+
+def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | None = None) -> None:
+    """Build and run the container start argv.
+
+    `mounts` are already-resolved '<abs-host>:<container>' bind specs (from
+    resolve_bind_mount); they are appended after the standard per-container
+    volumes and before --restart.
+    """
+    cname, vname, port = container_name(name), volume_name(name), port_for_name(name)
+    if not port_free(port):
+        die(
+            f"port {port} is already in use (port = 2200 + name hash; "
+            f"collisions are possible). Stop whatever holds it (agent-container list) "
+            f"or pick a different name."
+        )
+    log(f"name={name} port={port} env-file={env_file}")
+    log(f"image={IMAGE_NAME} volume={vname}")
+    argv = [
+        rt, "run", "-d",
+        "--name", cname,
+        "--env-file", str(env_file),
+        # Publishes sshd on ALL host interfaces (remote hosts.conf attach needs
+        # it). Firewall the VPS.
+        "-p", f"{port}:22",
+    ]
+    # Standard per-container volumes (canonical order), then optional binds.
+    for vol in all_volume_mounts(name):
+        argv += ["-v", vol]
+    for m in (mounts or []):
+        argv += ["-v", m]
+    argv += ["--restart", "unless-stopped", IMAGE_NAME]
+    r = query(argv)
+    if r.returncode != 0:
+        die(f"{rt} run failed: {r.stderr.strip()}")
+    write_state(name, port)
+    log(f"started {cname}; attach with: agent-container attach {name}")
+    log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
+
+
+def do_up(name: str, env_file_override: Path | None = None, mounts: list[str] | None = None) -> None:
+    validate_name(name)
+    # Resolve binds up front so a bad --mount aborts before any runtime call.
+    resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
+    rt = detect_runtime()
+    cname = container_name(name)
+
+    if container_running(rt, cname):
+        port = read_state_port(name)
+        log(f"container {cname} already running" + (f" on port {port}" if port else ""))
+        log(f"attach with: agent-container attach {name}")
+        return
+
+    if container_exists(rt, cname):
+        die(f"container {cname} exists but is not running. Run: agent-container down {name}")
+
+    env_file = env_file_override or resolve_env_file(name)
+    if env_file is None:
+        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
+        die(f"no .env found. Looked in: {cands}")
+
+    if not image_exists(rt, IMAGE_NAME):
+        die(f"image {IMAGE_NAME} not found; run: agent-container build")
+
+    launch_container(rt, name, env_file, resolved_mounts)
+
+
+def down_container(rt: str, name: str, purge: bool) -> None:
+    cname = container_name(name)
+    if container_exists(rt, cname):
+        log(f"stopping {cname}")
+        query([rt, "stop", cname])
+        log(f"removing {cname}")
+        query([rt, "rm", "-f", cname])
+    else:
+        log(f"no container named {cname}")
+
+    # --purge drops ALL per-container volumes (workspace + claude + codex + pi +
+    # shellenv + tmux), tolerating absence; plain down preserves every one of them.
+    vols = per_container_volumes(name)
+    if purge:
+        for vname in vols:
+            log(f"purging volume {vname}")
+            if query([rt, "volume", "rm", vname]).returncode != 0:
+                warn(f"volume {vname} not removed (in use or absent)")
+    else:
+        log(f"volumes preserved (use --purge to remove): {', '.join(vols)}")
+
+    clear_state(name)
+
+
+def cli_down(name: str, purge: bool, yes: bool) -> None:
+    validate_name(name)
+    rt = detect_runtime()
+
+    if quadlet_active(name):
+        warn(
+            f"systemd user unit {container_name(name)}.service is active; "
+            f"systemd will restart the container after removal. Manage it via Quadlet instead."
+        )
+        if not yes:
+            eprint("[agent-container] re-run with -y/--yes to proceed despite the active unit")
+            raise typer.Exit(2)
+
+    if not yes:
+        if not is_tty():
+            eprint("[agent-container] refusing destructive 'down' without -y/--yes on a non-TTY")
+            raise typer.Exit(2)
+        what = f"stop and remove {container_name(name)}"
+        if purge:
+            what += f" and DELETE all per-container volumes ({', '.join(per_container_volumes(name))})"
+        if not questionary.confirm(f"{what}?", default=False).ask():
+            log("aborted")
+            return
+
+    down_container(rt, name, purge)
+
+
+def gather_rows(rt: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    running_short: set[str] = set()
+    for cname, image, status, uptime in ps_agent_container(rt):
+        short = cname[len(CONTAINER_PREFIX):]
+        running_short.add(short)
+        rows.append({
+            "name": cname,
+            "port": read_state_port(short) or "?",
+            "image": image,
+            "status": status,
+            "uptime": uptime,
+            "stale": False,
+        })
+    # Orphaned state files: a <name>.port with no running container.
+    if STATE_DIR.is_dir():
+        for f in sorted(STATE_DIR.glob("*.port")):
+            short = f.stem
+            if short in running_short:
+                continue
+            rows.append({
+                "name": container_name(short),
+                "port": read_state_port(short) or "?",
+                "image": "-",
+                "status": "stale",
+                "uptime": "-",
+                "stale": True,
+            })
+    return rows
+
+
+def do_list(as_json: bool) -> None:
+    rt = detect_runtime()
+    rows = gather_rows(rt)
+    if as_json:
+        print(json.dumps(rows, indent=2))
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("NAME", "PORT", "IMAGE", "STATUS", "UPTIME"):
+        table.add_column(col)
+    for row in rows:
+        style = "dim" if row["stale"] else None
+        table.add_row(
+            str(row["name"]), str(row["port"]), str(row["image"]),
+            str(row["status"]), str(row["uptime"]), style=style,
+        )
+    console.print(table)
+
+
+def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
+    # The one true attach command; argv list, never a shell string. Without a
+    # window the argv is unchanged (agent-container parity). With one, the remote
+    # command is a SINGLE compound string that selects the window (tolerating
+    # its absence) THEN attaches — select-window works on a detached session.
+    base = ["ssh", f"{user}@{host}", "-p", str(port), "-t"]
+    if window:
+        return base + [
+            f"tmux select-window -t main:{window} 2>/dev/null; exec tmux attach -t main"
+        ]
+    return base + ["tmux", "attach", "-t", "main"]
+
+
+def tmux_nest_warning() -> str | None:
+    if os.environ.get("TMUX"):
+        return "already inside tmux; detach the INNER session with Ctrl-B Ctrl-B d"
+    return None
+
+
+def resolve_attach_target(
+    name: str,
+    mode: str,  # "auto" | "local" | "remote"
+    user_override: str | None = None,
+    host_override: str | None = None,
+) -> tuple[str, str, str, str]:
+    """Returns (user, host, port, kind). kind is 'local' or 'remote'."""
+    # Case-insensitive like agent-container: 'My-Box' resolves the same
+    # MY_BOX_* keys (and the same lowercase state file agent-container writes).
+    name = validate_name(name.lower())
+    user = resolve_ssh_user(user_override)
+    if host_override is not None and not SSH_HOST_RE.fullmatch(host_override):
+        die(f"invalid ssh host '{host_override}'")
+    key = name_to_key(name)
+
+    if mode == "remote" and not HOSTS_CONF.is_file():
+        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/agent-container-hosts.example)")
+
+    entry = hosts_entry(name)
+    if mode == "remote" or (mode == "auto" and entry is not None):
+        if entry is None:
+            die(f"no host configured for {name} — add {key}_HOST and {key}_PORT to {HOSTS_CONF}")
+        host, port = entry
+        return user, host_override or host, port, "remote"
+
+    port = read_state_port(name)
+    if port is None:
+        if mode == "local":
+            die(
+                f"no local state for {name} at {state_file(name)} — is the container "
+                f"running? (try: agent-container up {name})"
+            )
+        die(
+            f"no attach target for {name}; checked {HOSTS_CONF} "
+            f"(no {key}_HOST/{key}_PORT) and {state_file(name)}"
+        )
+    host = host_override or os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
+    return user, host, port, "local"
+
+
+def cli_attach(
+    name: str,
+    mode: str,
+    user_override: str | None,
+    host_override: str | None,
+    window: str | None = None,
+) -> None:
+    # Validate the window BEFORE resolving/building the command (it is embedded
+    # in the remote shell string).
+    if window:
+        validate_window(window)
+    user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
+    if w := tmux_nest_warning():
+        warn(w)  # CLI mode: warn and proceed
+    session = f'"main"' + (f', window "{window}"' if window else "")
+    eprint(f"agent-container: {user}@{host}:{port} (tmux session {session})")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
+    # and the exit code belong to ssh — identical to bash `exec ssh`.
+    os.execvp("ssh", ssh_argv(user, host, port, window))
+
+
+def _child_default_sigint() -> None:
+    # SIG_IGN survives exec; without this reset a child spawned while the
+    # parent shields itself from Ctrl-C would ignore SIGINT too.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+def wizard_handover(
+    user: str,
+    host: str,
+    port: str,
+    logs_hint: str = "agent-container logs <name>",
+    window: str | None = None,
+) -> None:
+    """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
+    target = f"{user}@{host}:{port}"
+    session = f'"main"' + (f', window "{window}"' if window else "")
+    eprint(f"agent-container: {target} (tmux session {session})")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C goes to ssh only
+    try:
+        rc = subprocess.run(
+            ssh_argv(user, host, port, window), preexec_fn=_child_default_sigint
+        ).returncode
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        if _ORIG_TERMIOS is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _ORIG_TERMIOS)
+            except Exception:
+                pass
+    if rc == 0:
+        console.print(
+            f"Detached — tmux session 'main' is still running on {target}; agents keep working."
+        )
+    elif rc == 255:
+        warn(f"ssh could not connect to {target}; check hosts.conf or the container state.")
+    else:
+        warn(
+            f"remote command failed (exit {rc}); likely 'tmux attach' found no session "
+            f"'main'. Check the entrypoint via: {logs_hint}"
+        )
+
+
+def do_logs(name: str, follow: bool) -> int:
+    validate_name(name)
+    rt = detect_runtime()
+    argv = [rt, "logs"] + (["-f"] if follow else []) + [container_name(name)]
+    try:
+        return subprocess.run(argv).returncode  # inherited stdio
+    except KeyboardInterrupt:
+        return 130
+
+
+# --- wizard ------------------------------------------------------------------
+# Lifecycle pickers (start/stop/purge/logs) list LOCAL containers only;
+# remote (hosts.conf) targets appear exclusively in the Attach picker.
+
+
+def _validate_wiz_name(text: str):  # questionary validator: True or error string
+    return True if NAME_RE.fullmatch(text) else "must match [a-z0-9][a-z0-9_-]*"
+
+
+def _short(cname: str) -> str:
+    return cname[len(CONTAINER_PREFIX):]
+
+
+def wiz_build(rt: str) -> None:
+    tag = questionary.text("image tag", default=IMAGE_NAME).ask()
+    if not tag:
+        return
+    do_build(tag)
+    hint("agent-container build" + (f" {tag}" if tag != IMAGE_NAME else ""))
+
+
+def wiz_up(rt: str) -> None:
+    name = questionary.text("container name", validate=_validate_wiz_name).ask()
+    if not name:
+        return
+    cname = container_name(name)
+
+    if container_running(rt, cname):
+        port = read_state_port(name)
+        log(f"container {cname} already running" + (f" on port {port}" if port else ""))
+        return
+    if container_exists(rt, cname):
+        log(f"container {cname} exists but is stopped — remove it first (Stop / remove)")
+        return
+
+    env_file = resolve_env_file(name)
+    if env_file is None:
+        eprint("[agent-container] no env file found; looked in:")
+        for c in env_file_candidates(name, Path.cwd()):
+            eprint(f"  {c}")
+        target = CONFIG_DIR / f"{name}.env"
+        if questionary.confirm(f"create/edit {target} in $EDITOR now?", default=True).ask():
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            # $EDITOR gets the path only; agent-container never reads env contents.
+            subprocess.run([os.environ.get("EDITOR") or "vi", str(target)])
+            env_file = resolve_env_file(name)
+        if env_file is None:
+            log("still no env file; not starting")
+            return
+
+    if not image_exists(rt, IMAGE_NAME):
+        if not questionary.confirm(f"image {IMAGE_NAME} is missing — build it now?", default=True).ask():
+            return
+        do_build(IMAGE_NAME)
+        if not image_exists(rt, IMAGE_NAME):
+            log("image still missing; not starting")
+            return
+
+    # Optional single host-dir bind (empty = none). Resolved now so a bad path
+    # surfaces before the confirmation card; Fatal returns to the menu.
+    mounts: list[str] = []
+    mount_dir = questionary.text(
+        "host directory to mount read-write (empty = none)", default=""
+    ).ask()
+    if mount_dir:
+        mounts = [resolve_bind_mount(mount_dir)]
+
+    card = Table(show_header=False, box=None, pad_edge=False)
+    card.add_column(style="bold")
+    card.add_column()
+    card.add_row("env-file", str(env_file))  # path only, never contents
+    card.add_row("port", str(port_for_name(name)))
+    card.add_row("volumes", ", ".join(per_container_volumes(name)))
+    if mounts:
+        card.add_row("bind", mounts[0])
+    card.add_row("image", IMAGE_NAME)
+    console.print(card)
+
+    if not questionary.confirm(f"start {cname}?", default=True).ask():
+        return
+    launch_container(rt, name, env_file, mounts)  # port pre-check + actionable abort inside
+    hint(f"agent-container up {name}" + (f" --mount {mount_dir}" if mounts else ""))
+
+
+def wiz_attach(rt: str) -> None:
+    choices: list[questionary.Choice] = []
+    for cname, _image, _status, _uptime in ps_agent_container(rt):
+        short = _short(cname)
+        port = read_state_port(short) or "?"
+        choices.append(questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", "")))
+    conf = load_hosts_conf()
+    for key in sorted(conf):
+        if not key.endswith("_HOST"):
+            continue
+        base = key[: -len("_HOST")]
+        host, port = conf[key], conf.get(f"{base}_PORT")
+        if not (host and port):
+            continue
+        rname = base.lower()  # round-trips through name_to_key for the hint
+        choices.append(
+            questionary.Choice(f"{rname}  [remote {host}:{port}]", value=("remote", rname, host, port))
+        )
+    if not choices:
+        log("nothing to attach to: no running local containers and no hosts.conf entries")
+        return
+
+    sel = questionary.select("attach to", choices=choices).ask()
+    if sel is None:
+        return
+    if w := tmux_nest_warning():
+        warn(w)
+        if not questionary.confirm("continue attaching?", default=True).ask():
+            return
+
+    # Optional window to select before attaching (empty = session default).
+    # Validated now so a bad name aborts back to the menu (Fatal is caught there).
+    window = questionary.text("window to select (empty = default)", default="").ask() or None
+    if window:
+        validate_window(window)
+
+    kind, name, host, port = sel
+    user = resolve_ssh_user()
+    if kind == "local":
+        port = read_state_port(name)
+        if port is None:  # TOCTOU: state file vanished since the picker rendered
+            warn(f"state file for {name} disappeared; is the container still up?")
+            return
+        host = os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
+    wizard_handover(user, host, port, logs_hint=f"agent-container logs {name}", window=window)
+    hint(f"agent-container attach {name} --{kind}" + (f" --window {window}" if window else ""))
+
+
+def wiz_logs(rt: str) -> None:
+    rows = ps_agent_container(rt)
+    if not rows:
+        log("no running agent-container containers")
+        return
+    sel = questionary.select("logs for", choices=[_short(r[0]) for r in rows]).ask()
+    if sel is None:
+        return
+    log("streaming logs — Ctrl-C returns to the menu")
+    old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C stops the tail only
+    try:
+        subprocess.run([rt, "logs", "-f", container_name(sel)], preexec_fn=_child_default_sigint)
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+    hint(f"agent-container logs {sel}")
+
+
+def wiz_down(rt: str) -> None:
+    rows = ps_agent_container(rt, include_stopped=True)
+    if not rows:
+        log("no agent-container containers (running or stopped)")
+        return
+    choices = []
+    for cname, _image, status, _uptime in rows:
+        short = _short(cname)
+        label = f"{short}  [exited]" if status.lower().startswith("exited") else short
+        choices.append(questionary.Choice(label, value=short))
+    sel = questionary.select("stop / remove", choices=choices).ask()
+    if sel is None:
+        return
+    cname = container_name(sel)
+
+    if not container_exists(rt, cname):  # TOCTOU re-verify
+        warn(f"container {cname} no longer exists")
+        return
+    if quadlet_active(sel):
+        warn(
+            f"systemd user unit {cname}.service is active; systemd will restart "
+            f"the container after removal. Manage it via Quadlet instead."
+        )
+        if not questionary.confirm("proceed anyway?", default=False).ask():
+            return
+    if not questionary.confirm(f"stop and remove {cname}?", default=False).ask():
+        log("aborted")
+        return
+
+    purge = False
+    vols = per_container_volumes(sel)
+    if questionary.confirm(
+        f"also delete ALL per-container volumes ({', '.join(vols)})?", default=False
+    ).ask():
+        typed = questionary.text(f"type the container name ({cname}) to confirm volume deletion").ask()
+        if typed == cname:
+            purge = True
+        else:
+            log("name mismatch — volumes will be preserved")
+    down_container(rt, sel, purge)  # reports preserved vs purged, clears state
+    hint(f"agent-container down {sel}" + (" --purge" if purge else ""))
+
+
+def _volume_names(rt: str) -> list[str]:
+    out = query([rt, "volume", "ls", "--format", "{{.Name}}"]).stdout.splitlines()
+    return [v for v in out if re.fullmatch(re.escape(CONTAINER_PREFIX) + r".+-workspace", v)]
+
+
+def wiz_purge_volume(rt: str) -> None:
+    containers = {row[0] for row in ps_agent_container(rt, include_stopped=True)}
+    orphans = []
+    for vol in _volume_names(rt):
+        short = vol[len(CONTAINER_PREFIX): -len("-workspace")]
+        if container_name(short) not in containers:
+            orphans.append(vol)
+    if not orphans:
+        log("no orphaned agent-container volumes")
+        return
+    sel = questionary.select("purge orphaned volume", choices=orphans).ask()
+    if sel is None:
+        return
+    typed = questionary.text(f"type the volume name ({sel}) to confirm deletion").ask()
+    if typed != sel:
+        log("name mismatch — nothing removed")
+        return
+    if sel not in _volume_names(rt):  # TOCTOU re-verify
+        warn(f"volume {sel} no longer exists")
+        return
+    if query([rt, "volume", "rm", sel]).returncode != 0:
+        warn(f"volume {sel} not removed (in use)")
+    else:
+        log(f"volume {sel} purged")
+    hint(f"{rt} volume rm {sel}")
+
+
+_MENU: list[tuple[str, "object"]] = [
+    ("Provision (build image)", wiz_build),
+    ("Start a container", wiz_up),
+    ("Attach", wiz_attach),
+    ("Logs", wiz_logs),
+    ("Stop / remove", wiz_down),
+    ("Purge orphaned volume", wiz_purge_volume),
+    ("Quit", None),
+]
+
+
+def wizard_loop() -> int:
+    if not is_tty():
+        eprint("[agent-container] no TTY; interactive wizard unavailable. Use subcommands (agent-container --help).")
+        return 2
+    try:
+        rt = detect_runtime()
+    except Fatal as e:
+        eprint(f"[agent-container] FATAL: {e}")
+        return 1
+    actions = dict(_MENU)
+    while True:
+        try:
+            running = len(ps_agent_container(rt))
+            hosts = "present" if HOSTS_CONF.is_file() else "absent"
+            console.print(
+                f"runtime: {rt} | running local containers: {running} | hosts.conf: {hosts}",
+                style="dim",
+            )
+            choice = questionary.select("agent-container — what now?", choices=[t for t, _ in _MENU]).ask()
+            if choice is None or choice == "Quit":
+                return 0
+            try:
+                actions[choice](rt)
+            except Fatal as e:
+                eprint(f"[agent-container] ERROR: {e}")  # back to the menu, not exit
+        except (KeyboardInterrupt, EOFError):
+            return 0
+
+
+# --- entry -------------------------------------------------------------------
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    pretty_exceptions_enable=False,
+    help="Interactive wizard + CLI for agent-container containers.",
+)
+
+
+def fatal_exit(e: Fatal) -> "typer.NoReturn":
+    eprint(f"[agent-container] FATAL: {e}")
+    raise typer.Exit(1)
+
+
+def run_self_test() -> int:
+    import doctest
+
+    failures, tests = doctest.testmod(
+        sys.modules[__name__], optionflags=doctest.IGNORE_EXCEPTION_DETAIL
+    )
+    # Hard-coded port corpus: pins the deterministic port hash against regressions.
+    corpus = {
+        "acme": 2206,
+        "blog": 2220,
+        "scratch": 2244,
+        "my-box": 2204,
+        "a": 2297,
+        "devbox123": 2298,
+    }
+    bad = {n: (port_for_name(n), want) for n, want in corpus.items() if port_for_name(n) != want}
+    keys_ok = name_to_key("my-box") == "MY_BOX" and name_to_key("acme") == "ACME"
+    ok = failures == 0 and not bad and keys_ok
+    print(f"doctests: {tests - failures}/{tests} passed")
+    print(f"port corpus: {'ok' if not bad else f'MISMATCH {bad}'}")
+    print(f"key derivation: {'ok' if keys_ok else 'MISMATCH'}")
+    print("self-test:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+@app.command()
+def build(
+    tag: str = typer.Argument(IMAGE_NAME, help="Image tag to build."),
+    context: Path | None = typer.Option(
+        None,
+        "--context",
+        help="Docker build context (repo checkout). Defaults to AGENT_CONTAINER_REPO "
+        "or the auto-detected checkout; required when installed from PyPI.",
+    ),
+) -> None:
+    """Build the image from a repo checkout (streams build output)."""
+    do_build(tag, context)
+
+
+@app.command()
+def up(
+    name: str = typer.Argument(..., help="Container short name (agent-container-<name>)."),
+    env_file: Path | None = typer.Option(
+        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    ),
+    mount: List[str] = typer.Option(
+        None,
+        "--mount",
+        help="Bind-mount a host dir read-write (repeatable): HOSTDIR[:CONTAINERPATH]. "
+        "Default CONTAINERPATH is /workspace/<basename>. Lima: host dir must be "
+        "under a writable Lima mount.",
+    ),
+) -> None:
+    """Start container agent-container-NAME (detached)."""
+    if env_file is not None and not env_file.is_file():
+        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    do_up(name, env_file, mount or [])
+
+
+@app.command()
+def down(
+    name: str = typer.Argument(..., help="Container short name."),
+    purge: bool = typer.Option(False, "--purge", help="Also delete the workspace volume."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+) -> None:
+    """Stop and remove container agent-container-NAME."""
+    cli_down(name, purge, yes)
+
+
+@app.command()
+def purge(
+    name: str = typer.Argument(..., help="Container short name."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+) -> None:
+    """Sugar for: down NAME --purge."""
+    cli_down(name, purge=True, yes=yes)
+
+
+@app.command(name="list")
+def list_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """List running agent-container containers (plus stale state files)."""
+    do_list(as_json)
+
+
+@app.command()
+def attach(
+    name: str = typer.Argument(..., help="Container short name."),
+    local: bool = typer.Option(False, "--local", help="Force local target (state file)."),
+    remote: bool = typer.Option(False, "--remote", help="Force remote target (hosts.conf)."),
+    user: str | None = typer.Option(None, "--user", help="SSH user (default: AGENT_CONTAINER_USER or dev)."),
+    host: str | None = typer.Option(None, "--host", help="Override the resolved host."),
+    window: str | None = typer.Option(
+        None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
+    ),
+) -> None:
+    """ssh + tmux attach to container NAME (local state file or hosts.conf)."""
+    if local and remote:
+        raise typer.BadParameter("--local and --remote are mutually exclusive")
+    mode = "local" if local else ("remote" if remote else "auto")
+    cli_attach(name, mode, user, host, window)
+
+
+@app.command()
+def logs(
+    name: str = typer.Argument(..., help="Container short name."),
+    no_follow: bool = typer.Option(False, "--no-follow", help="Print logs without following."),
+) -> None:
+    """Tail container logs."""
+    raise typer.Exit(do_logs(name, follow=not no_follow))
+
+
+@app.command()
+def menu() -> None:
+    """Interactive wizard (same as bare agent-container)."""
+    raise typer.Exit(wizard_loop())
+
+
+def _completion_script(shell: str) -> str:
+    """Return the bash/zsh completion script text.
+
+    Prefers the on-disk checkout (dev / `uv run --script`, where REPO_ROOT
+    resolves via the __file__ marker); falls back to the completions bundled as
+    package data in a non-editable PyPI install (where REPO_ROOT is None).
+    """
+    if REPO_ROOT is not None:
+        p = REPO_ROOT / "completions" / f"agent-container.{shell}"
+        if p.is_file():
+            return p.read_text()
+    try:
+        import importlib.resources as ir
+
+        res = ir.files("agent_container").joinpath(f"completions/agent-container.{shell}")
+        if res.is_file():
+            return res.read_text()
+    except (ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError):
+        pass
+    die(f"completion script for '{shell}' not found (need a checkout or an installed package)")
+
+
+@app.command()
+def completions(
+    # Optional + manual validation so a bad/missing shell routes through die()
+    # (exit 1, '[agent-container] FATAL:' style), not Typer's exit-2 required-arg error.
+    shell: str = typer.Argument("", help="Shell to emit completion for: bash or zsh."),
+) -> None:
+    """Print the completion script for bash or zsh (from a checkout or package data)."""
+    if shell not in ("bash", "zsh"):
+        die("usage: agent-container completions <bash|zsh>")
+    sys.stdout.write(_completion_script(shell))
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    self_test: bool = typer.Option(False, "--self-test", help="Run doctests + port-hash corpus checks."),
+) -> None:
+    if self_test:
+        raise typer.Exit(run_self_test())
+    if ctx.invoked_subcommand is None:
+        raise typer.Exit(wizard_loop())
+
+
+def cli() -> None:
+    """Console-script entry point for `uv tool install` (see pyproject.toml).
+
+    uv's generated launcher does `from agent_container import cli; sys.exit(cli())`,
+    so the Fatal -> exit-1 handling that used to live only in the __main__ guard
+    is hoisted here. NOT named `main` — that is already the Typer @app.callback.
+    """
+    try:
+        app()
+    except Fatal as e:
+        eprint(f"[agent-container] FATAL: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli()

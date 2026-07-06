@@ -1,0 +1,37 @@
+# agent-container.container — Podman Quadlet TEMPLATE for VPS use.
+#
+# This is a TEMPLATE. The operator substitutes the ${NAME}, ${PORT}, and
+# ${ENV_FILE} placeholders below (see docs/orchestration.md) and installs the
+# instantiated unit at ~/.config/containers/systemd/agent-container-<name>.container.
+# One .container file per running container; do NOT edit the installed copies.
+#
+# After install, the operator runs:
+#   systemctl --user daemon-reload
+#   systemctl --user start agent-container-<name>.service
+#
+# (Quadlet translates each .container into a .service at daemon-reload time.)
+#
+# Parallel-container safety: every per-container value (ContainerName,
+# PublishPort, Volume, EnvironmentFile) is unique per substitution. Two
+# instantiations with different ${NAME} produce two non-colliding units.
+
+[Unit]
+Description=agent-container — remote persistent dev environment (${NAME})
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/agent-container:latest
+ContainerName=agent-container-${NAME}
+PublishPort=${PORT}:22
+Volume=agent-container-${NAME}-workspace:/workspace
+EnvironmentFile=${ENV_FILE}
+# UTC unless the .env overrides TZ.
+Timezone=UTC
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

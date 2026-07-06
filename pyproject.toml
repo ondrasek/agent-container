@@ -1,0 +1,72 @@
+# Packaging for a NON-editable install from PyPI (`uv tool install agent-container`,
+# `pipx install agent-container`) as well as `uv tool install --editable .` for dev.
+#
+# NAMING: the project is uniformly `agent-container` — distribution, `agent-container`
+# command, `agent_container` import module, and the github.com/ondrasek/agent-container
+# repo all match. (The original `agent-env` was blocked by PyPI's similarity guard
+# against the pre-existing `agentenv`, so the whole project was renamed for consistency.)
+#
+# agent-container is a single PEP 723 script (bin/agent-container) that also runs via
+# `uv run --script`. The wheel ships that one file as the `agent_container` module and
+# bundles the shell completions as package data (agent_container/completions/*), via a
+# force-include mapping — no code is duplicated and no symlink is needed. Because
+# a non-editable install copies the module out of the repo, REPO_ROOT is resolved
+# location-independently at runtime (see _find_repo_root in bin/agent-container):
+# client subcommands (up/down/list/attach/logs/purge/completions) work standalone,
+# and `completions` falls back to the bundled package data. Only `build` needs a
+# repo checkout for its docker build context — supply one via AGENT_CONTAINER_REPO or
+# `--context` (documented in the README).
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-container"
+version = "0.1.0"
+description = "Always-on containerized dev environment for AI coding agents, driven over SSH+tmux."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ondrej Krajicek", email = "ondrej.krajicek@ideastatica.com" }]
+keywords = ["dev-environment", "remote-development", "docker", "podman", "tmux", "ssh", "ai-agents", "cli"]
+# NOTE: no `License ::` trove classifier — the SPDX `license = "MIT"` above emits
+# `License-Expression: MIT` (Metadata 2.4); under PEP 639 a license classifier
+# alongside an SPDX expression is redundant/deprecated (setuptools>=78 errors).
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+# Mirror the PEP 723 dependency block in bin/agent-container EXACTLY — keep in sync.
+dependencies = [
+    "typer>=0.12,<1",
+    "questionary>=2.0,<3",
+    "rich>=13,<15",
+]
+
+[project.urls]
+Homepage = "https://github.com/ondrasek/agent-container"
+Repository = "https://github.com/ondrasek/agent-container"
+Issues = "https://github.com/ondrasek/agent-container/issues"
+
+[project.scripts]
+agent-container = "agent_container:cli"
+
+# Ship the single-file script as the `agent_container` module and the completion
+# scripts as package data. bypass-selection is required because there is no
+# conventionally-named package/module directory for hatchling to auto-detect.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"bin/agent-container" = "agent_container/__init__.py"
+"completions/agent-container.bash" = "agent_container/completions/agent-container.bash"
+"completions/agent-container.zsh" = "agent_container/completions/agent-container.zsh"
