@@ -17,9 +17,9 @@ jobs:
     name: Build sdist + wheel
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v8
       - name: Run the pytest suite
         # Gate the release on green: mirrors ci.yml (ci.yml does NOT run on tag
         # pushes, so the suite is re-run here). A failure here fails the build
@@ -32,7 +32,7 @@ jobs:
       - name: Build distributions
         run: uv build
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -46,7 +46,7 @@ jobs:
       id-token: write # OIDC token for Trusted Publishing
     steps:
       - name: Download dist artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
