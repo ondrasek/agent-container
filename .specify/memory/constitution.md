@@ -1,14 +1,23 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.0.0 → 1.1.0   (MINOR)
-Bump rationale: Net MINOR. Three amendments: (#1) a PATCH-level accuracy fix
-  to the installed-agent list; (#2) an expansion of Principle IV with a
-  stable-identity / compatibility MUST clause; (#3) a new Core Principle VI
-  promoted from a section bullet. Adding a principle and materially expanding
-  guidance dominate the patch fix, so MINOR wins.
+Version change: 1.1.0 → 2.0.0   (MAJOR)
+Bump rationale: Principle I was REDEFINED (a MAJOR event): "Ephemerality &
+  Commit-Push Discipline" → "Ephemerality". The principle was raised to the
+  invariant altitude and stripped of all technology-specific mechanism (SCM /
+  git / commit-push / named volumes), stating the broad rule instead: a
+  container is a disposable holder of short-lived working copies, no correctness
+  may rest on in-container persistence, durable state is externalized
+  continuously in small increments, and the system actively supports
+  ephemeralization. The commit-and-push mechanism now lives only in lower-
+  altitude guidance (Development Workflow section, CLAUDE.md).
 
-Amendments in this version:
+Amendments in 2.0.0:
+  Principle I REDEFINED & RENAMED — "Ephemerality & Commit-Push Discipline" →
+  "Ephemerality". Broadened to a technology-agnostic invariant; the git
+  commit-push mechanism is no longer part of the principle text.
+
+Amendments carried from 1.1.0:
   #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
      truth (Dockerfile Layer 3, lines 51-57) installs exactly three agent CLIs:
      Claude Code, Codex, pi-coding-agent. "opencode" removed; not installed.
@@ -24,7 +33,7 @@ Amendments in this version:
      principle.
 
 Principles (post-amendment):
-  I.   Ephemerality & Commit-Push Discipline
+  I.   Ephemerality                                          (redefined 2.0.0)
   II.  Rootless by Construction, Build-Time Dependencies
   III. Secrets Injected at Runtime — Never Baked, Never on Argv
   IV.  Parallel-Safe by Construction, One Source of Truth
@@ -57,17 +66,19 @@ reproducible, and parallel by construction. It supersedes convenience and habit.
 
 ## Core Principles
 
-### I. Ephemerality & Commit-Push Discipline
+### I. Ephemerality
 
-The container is disposable and treated as ephemeral at all times. Every agent
-and workflow MUST `commit` **and** `push` every change; durable state lives in
-git remotes, never in the container. Persistent volumes hold scratch and
-in-flight work only — they are a convenience, not a system of record, and any
-feature that depends on uncommitted or unpushed state to be correct is wrong by
-construction. If the container dies, no work may be lost.
+A container is disposable: it holds short-lived working copies and nothing
+durable. No correctness may rest on its storage surviving — in-container
+persistence is a convenience, never a contract. Durable state MUST live in an
+authoritative store beyond the container, kept current in small, continuous
+increments, so nothing of value is ever *only* local. Containers MUST be cheap
+to create and destroy; the system actively favors the short-lived over the
+long-lived.
 
-**Rationale:** the environment targets always-on remote containers that are
-routinely recreated; correctness cannot hinge on a filesystem that can vanish.
+**Rationale:** a container discardable at any instant without loss is resilient
+by construction — recreation becomes a non-event, and host loss, corruption, and
+drift cease to be failure modes.
 
 ### II. Rootless by Construction, Build-Time Dependencies
 
@@ -211,4 +222,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 1.1.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-07
+**Version**: 2.0.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-07
