@@ -1,20 +1,39 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: (template) → 1.0.0   (initial ratification)
-Bump rationale: First concrete constitution; establishes the five core
-  principles and governance. MAJOR baseline.
+Version change: 1.0.0 → 1.1.0   (MINOR)
+Bump rationale: Net MINOR. Three amendments: (#1) a PATCH-level accuracy fix
+  to the installed-agent list; (#2) an expansion of Principle IV with a
+  stable-identity / compatibility MUST clause; (#3) a new Core Principle VI
+  promoted from a section bullet. Adding a principle and materially expanding
+  guidance dominate the patch fix, so MINOR wins.
 
-Principles defined:
+Amendments in this version:
+  #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
+     truth (Dockerfile Layer 3, lines 51-57) installs exactly three agent CLIs:
+     Claude Code, Codex, pi-coding-agent. "opencode" removed; not installed.
+  #2 Principle IV — added a stable identity contract MUST clause: the
+     name/port/volume/XDG on-disk identifiers MUST NOT change the value
+     computed for an existing name without a versioned migration path, and any
+     change MUST be mirrored in the shell completions. Prevents orphaning live
+     containers/volumes, which would silently violate Principle I.
+  #3 New Core Principle VI "Idiomatic Python on uv" — promoted from the
+     "Platform & Interface Constraints" bullet of the same name; that bullet's
+     substance was moved into Principle VI to avoid duplication; the platform-
+     default and non-editable-PyPI-install facts are preserved in the new
+     principle.
+
+Principles (post-amendment):
   I.   Ephemerality & Commit-Push Discipline
   II.  Rootless by Construction, Build-Time Dependencies
   III. Secrets Injected at Runtime — Never Baked, Never on Argv
   IV.  Parallel-Safe by Construction, One Source of Truth
   V.   Hermetic, Contract-Pinned Testing & Real-Build Verification
+  VI.  Idiomatic Python on uv                                (new)
 
 Sections:
-  Added: "Platform & Interface Constraints"
-  Added: "Development Workflow & Quality Gates"
+  "Platform & Interface Constraints"     (Idiomatic-Python bullet promoted out)
+  "Development Workflow & Quality Gates"
 
 Templates reviewed:
   ✅ .specify/templates/plan-template.md — "Constitution Check" gate is
@@ -22,7 +41,8 @@ Templates reviewed:
      principle names, so it remains aligned. No edit required.
   ✅ .specify/templates/spec-template.md — no constitution references; aligned.
   ✅ .specify/templates/tasks-template.md — no constitution references; aligned.
-  ✅ CLAUDE.md — hard constraints + decisions already encode these principles.
+  ✅ CLAUDE.md — hard constraints + decisions already encode these principles,
+     including the uv/PyPI packaging facts now formalized in Principle VI.
 
 Deferred TODOs: none.
 -->
@@ -30,7 +50,7 @@ Deferred TODOs: none.
 # agent-container Constitution
 
 A containerized development environment that runs interactive and headless AI
-coding agents (pi-coding-agent, opencode, Codex, Claude Code) inside disposable
+coding agents (Claude Code, Codex, pi-coding-agent) inside disposable
 containers, driven over SSH + tmux and managed by a single CLI. This
 constitution encodes the non-negotiable rules that keep that system safe,
 reproducible, and parallel by construction. It supersedes convenience and habit.
@@ -86,7 +106,16 @@ ports, `$XDG_STATE_HOME` state files, and `~/.config/agent-container/hosts.conf`
 — is the authoritative source of truth; shell completions, orchestration
 templates (Compose/Quadlet), and any other consumer MUST read that same contract
 rather than reimplementing it. Orchestration templates MUST stay at parity with
-what the CLI produces.
+what the CLI produces. This on-disk contract is a **stable identity contract**:
+no change may alter the value computed for an existing name — the
+`agent-container-<name>` container (and `.service`) name, the
+`2200 + (ASCII-sum mod 100)` port formula, the seven per-container volume
+suffixes and their mount targets, or the XDG state/config paths (`<name>.port`,
+`<name>.authorized_keys`, `hosts.conf`) and the env-file resolution order —
+without a versioned migration path that renames or re-links live containers and
+volumes, and every such change MUST be mirrored in the shell completions that
+recompute the same values. An in-place change would orphan already-running
+containers and their named volumes, silently violating Principle I.
 
 **Rationale:** divergent copies of "where the port/volume/name comes from" are
 how parallel-safety and persistence guarantees silently rot.
@@ -106,6 +135,39 @@ observed working is not done.
 pinning turns the on-disk contract into an executable spec; real-build checks
 catch what mocks cannot.
 
+### VI. Idiomatic Python on uv
+
+The CLI is a single-file PEP 723 uv script (`bin/agent-container`, Typer +
+questionary + rich) carrying a `uv run --script` shebang and an inline metadata
+block that pins `requires-python = ">=3.11"` and its dependencies; that same
+file ships unchanged as the `agent_container` wheel via a hatchling
+`force-include`, so the PEP 723 dependency block MUST stay byte-for-byte in sync
+with `[project].dependencies` in `pyproject.toml`. The CLI MUST work as a
+non-editable PyPI / pipx install for every client subcommand through
+location-independent `REPO_ROOT` resolution; only `build` may require a checkout
+(supplied via `--context` / `AGENT_CONTAINER_REPO`). Runtime defaults MUST be
+platform-aware (docker-first on macOS, podman-first on Linux) and overridable
+via `AGENT_CONTAINER_RUNTIME`. Code MUST be idiomatic and stdlib-first: fully
+type-annotated signatures using PEP 604 unions under
+`from __future__ import annotations`, `pathlib.Path` in place of `os.path`
+munging, and module-scope constants plus compiled regexes as the single source
+of truth — with no third-party runtime dependency where the standard library
+suffices (`hosts.conf` is hand-parsed, not delegated to a config library).
+`subprocess` MUST always be invoked with an argv list and never `shell=True`,
+keeping secrets and user/host/window values off any shell line. Pure,
+side-effect-free helpers MUST stay separated from the runtime/subprocess,
+command, and wizard layers, MUST raise the custom `Fatal` exception rather than
+calling `sys.exit`, and MUST carry doctests that serve as their executable
+contract (hardened by the pinned `--self-test` corpus). Diagnostics SHOULD go to
+stderr while machine-readable output (`--json`, completion scripts) goes to
+stdout, so the two streams stay cleanly separable.
+
+**Rationale:** a single directly-executable uv script with pinned inline
+metadata is reproducible and needs no separate install step, while the
+stdlib-first, strongly-typed, doctested, layered style keeps the testable core
+hermetic (Principle V) and makes the on-disk contract (Principle IV) verifiable
+without ever touching a container runtime.
+
 ## Platform & Interface Constraints
 
 - **Editor-agnostic, SSH + tmux only.** The canonical attach path is
@@ -114,12 +176,6 @@ catch what mocks cannot.
 - **Single operator.** One operator (the user) is assumed; multi-user / multi-
   tenant access controls, and Kubernetes/cluster orchestration, are out of scope
   unless explicitly requested.
-- **Idiomatic Python on uv.** The CLI is a single PEP 723 uv script
-  (`bin/agent-container`, Typer + questionary + rich) that also ships as a wheel.
-  It MUST work as a non-editable PyPI install for the client subcommands
-  (location-independent `REPO_ROOT` resolution); only `build` may require a
-  checkout. Runtime defaults are platform-aware (docker-first on macOS,
-  podman-first on Linux) and overridable via `AGENT_CONTAINER_RUNTIME`.
 
 ## Development Workflow & Quality Gates
 
@@ -155,4 +211,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-06
+**Version**: 1.1.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-07
