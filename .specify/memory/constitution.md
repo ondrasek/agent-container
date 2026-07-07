@@ -28,6 +28,14 @@ technology-agnostic invariants; concrete mechanism relocated to CLAUDE.md):
   secrets, network surface, identity) is exposed no more widely than needed, in
   scope and reach. The secret-specific mechanism (no baking, no argv, runtime
   injection, host-scoped grants) lives in docs/credentials.md and CLAUDE.md.
+  Principle IV REDEFINED & RENAMED — "Parallel-Safe by Construction, One Source
+  of Truth" → "Deterministic Identity". Broadened to the invariant: per-instance
+  identity derives deterministically from one identifier, has one authoritative
+  definition, and is a stable contract. The concrete on-disk contract (the
+  agent-container-<name> name, the 2200 + ASCII-sum-mod-100 port formula, the
+  seven volume suffixes, the XDG state/config paths, completion mirroring) is now
+  mechanism in CLAUDE.md — so the specific port hash can be improved without a
+  constitutional amendment, only a migration path.
 
 Amendments carried from 1.1.0:
   #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
@@ -48,7 +56,7 @@ Principles (post-amendment):
   I.   Ephemerality                                          (redefined 2.0.0)
   II.  Least Privilege, Immutable Runtime                     (redefined 2.0.0)
   III. Least Exposure                                        (redefined 2.0.0)
-  IV.  Parallel-Safe by Construction, One Source of Truth
+  IV.  Deterministic Identity                                (redefined 2.0.0)
   V.   Hermetic, Contract-Pinned Testing & Real-Build Verification
   VI.  Idiomatic Python on uv                                (new)
 
@@ -118,29 +126,21 @@ scope and reach, even against convenience.
 narrow exposure shrinks both the blast radius of a leak and the number of places
 one can begin.
 
-### IV. Parallel-Safe by Construction, One Source of Truth
+### IV. Deterministic Identity
 
-N containers MUST run concurrently on one host without collision: naming
-(`agent-container-<name>`), port allocation (`2200 + name-hash`), per-container
-volumes, and per-container SSH identity are all derived deterministically from
-the container name. The single-file CLI's on-disk contract — container names,
-ports, `$XDG_STATE_HOME` state files, and `~/.config/agent-container/hosts.conf`
-— is the authoritative source of truth; shell completions, orchestration
-templates (Compose/Quadlet), and any other consumer MUST read that same contract
-rather than reimplementing it. Orchestration templates MUST stay at parity with
-what the CLI produces. This on-disk contract is a **stable identity contract**:
-no change may alter the value computed for an existing name — the
-`agent-container-<name>` container (and `.service`) name, the
-`2200 + (ASCII-sum mod 100)` port formula, the seven per-container volume
-suffixes and their mount targets, or the XDG state/config paths (`<name>.port`,
-`<name>.authorized_keys`, `hosts.conf`) and the env-file resolution order —
-without a versioned migration path that renames or re-links live containers and
-volumes, and every such change MUST be mirrored in the shell completions that
-recompute the same values. An in-place change would orphan already-running
-containers and their named volumes, silently violating Principle I.
+Many containers coexist on one host as independent, non-colliding instances.
+Everything that distinguishes one from another — name, addresses, storage, keys —
+MUST derive deterministically from a single identifier, so any part of the system
+can recompute it rather than store and risk desynchronizing it. That derivation
+has exactly one authoritative definition; no consumer may reinvent it. And it is
+a **stable contract**: the values computed for an existing container MUST NOT
+change without a migration path, or a live container is silently orphaned
+(violating Principle I).
 
-**Rationale:** divergent copies of "where the port/volume/name comes from" are
-how parallel-safety and persistence guarantees silently rot.
+**Rationale:** identity derived from one deterministic source makes parallelism
+collision-free by construction and keeps every consumer — launcher, tooling,
+orchestration — in lockstep without shared mutable state; stability protects the
+containers already built on it.
 
 ### V. Hermetic, Contract-Pinned Testing & Real-Build Verification
 
