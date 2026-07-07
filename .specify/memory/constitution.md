@@ -22,6 +22,12 @@ technology-agnostic invariants; concrete mechanism relocated to CLAUDE.md):
   rootless/no-sudo/no-runtime-apt/Podman mechanism to the underlying invariant
   (least privilege + a runtime fixed at build and immutable thereafter). The
   concrete rootless/build-time-deps mechanism lives in CLAUDE.md.
+  Principle III REDEFINED & RENAMED — "Secrets Injected at Runtime — Never
+  Baked, Never on Argv" → "Least Exposure". Broadened from a secrets-only rule
+  to the general dual of Principle II: whatever the system reveals (data,
+  secrets, network surface, identity) is exposed no more widely than needed, in
+  scope and reach. The secret-specific mechanism (no baking, no argv, runtime
+  injection, host-scoped grants) lives in docs/credentials.md and CLAUDE.md.
 
 Amendments carried from 1.1.0:
   #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
@@ -41,7 +47,7 @@ Amendments carried from 1.1.0:
 Principles (post-amendment):
   I.   Ephemerality                                          (redefined 2.0.0)
   II.  Least Privilege, Immutable Runtime                     (redefined 2.0.0)
-  III. Secrets Injected at Runtime — Never Baked, Never on Argv
+  III. Least Exposure                                        (redefined 2.0.0)
   IV.  Parallel-Safe by Construction, One Source of Truth
   V.   Hermetic, Contract-Pinned Testing & Real-Build Verification
   VI.  Idiomatic Python on uv                                (new)
@@ -99,18 +105,18 @@ of who launched it, when, or on which host runtime.
 alter turns the container into a predictable, disposable unit — mutation,
 escalation, and host-specific surprise cease to be failure modes.
 
-### III. Secrets Injected at Runtime — Never Baked, Never on Argv
+### III. Least Exposure
 
-No secret (tokens, API keys, private keys) may be baked into the image or
-committed to the repo. Secrets are injected at run time via `--env-file` /
-`EnvironmentFile=` or dedicated volumes, and MUST never appear on a process
-command line (`argv`) — secret material is streamed over stdin or read from
-files/env inside the container. Credential grants MUST be scoped to their
-intended host/service (e.g. the git helper is bound to `github.com`, not global).
+The dual of least privilege: whatever the system reveals — data, secrets,
+credentials, network surface, identity — MUST be exposed no more widely than its
+use demands. Each thing is granted only to the actor that needs it and carried
+only on channels others cannot observe; nothing rests where it need not, and
+nothing is visible more broadly than required. Exposure is minimized in both
+scope and reach, even against convenience.
 
-**Rationale:** this is a single-operator system running autonomous agents;
-argv, image layers, and over-broad credential scope are the leak vectors that
-matter, so they are closed by rule, not by care.
+**Rationale:** what is never exposed cannot be stolen, misused, or relied upon —
+narrow exposure shrinks both the blast radius of a leak and the number of places
+one can begin.
 
 ### IV. Parallel-Safe by Construction, One Source of Truth
 
