@@ -36,6 +36,14 @@ technology-agnostic invariants; concrete mechanism relocated to CLAUDE.md):
   seven volume suffixes, the XDG state/config paths, completion mirroring) is now
   mechanism in CLAUDE.md — so the specific port hash can be improved without a
   constitutional amendment, only a migration path.
+  Principle V REDEFINED & RENAMED — "Hermetic, Contract-Pinned Testing &
+  Real-Build Verification" → "Durable Spec, Disposable Code". Reframed from a
+  testing-mechanism principle to a spec-driven stance: the spec is the artifact
+  of record, code is disposable and re-derived (never patched), and verification
+  is inverted-pyramid, validation/acceptance-first. NOTE: directional — it runs
+  ahead of the current bottom-heavy, implementation-coupled test suite (argv
+  pins, doctests); adopting it implies migrating tests toward spec-level
+  validation and updating CLAUDE.md's testing guidance over time.
 
 Amendments carried from 1.1.0:
   #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
@@ -57,7 +65,7 @@ Principles (post-amendment):
   II.  Least Privilege, Immutable Runtime                     (redefined 2.0.0)
   III. Least Exposure                                        (redefined 2.0.0)
   IV.  Deterministic Identity                                (redefined 2.0.0)
-  V.   Hermetic, Contract-Pinned Testing & Real-Build Verification
+  V.   Durable Spec, Disposable Code                         (redefined 2.0.0)
   VI.  Idiomatic Python on uv                                (new)
 
 Sections:
@@ -142,20 +150,18 @@ collision-free by construction and keeps every consumer — launcher, tooling,
 orchestration — in lockstep without shared mutable state; stability protects the
 containers already built on it.
 
-### V. Hermetic, Contract-Pinned Testing & Real-Build Verification
+### V. Durable Spec, Disposable Code
 
-The pytest suite MUST run without docker, podman, ssh, or network access:
-runtime-facing behavior is verified by capturing and pinning the exact `argv`
-handed to the runtime/ssh, and the on-disk contract is pinned by doctests. Shell
-suites cover completions and the entrypoint. Every one of these MUST run in CI.
-Behavior that only a real container can prove (rootless sshd, key persistence,
-injection) MUST be verified against an actual `docker`/`podman` build before the
-change is considered done — riskiest unknowns first. A change that cannot be
-observed working is not done.
+The specification is the artifact of record; code is a disposable rendering of it
+— regenerated and replaced, never patched in place. What must endure lives in the
+spec, so changing behavior means changing the spec and re-deriving the code.
+Verification follows: it targets the spec's intended behavior, not the code's
+internals — an inverted pyramid, weighted toward validation and acceptance checks
+that survive regeneration, light on implementation-coupled tests that do not.
 
-**Rationale:** hermetic tests make the suite fast and portable; byte-level
-pinning turns the on-disk contract into an executable spec; real-build checks
-catch what mocks cannot.
+**Rationale:** code that is disposable, like the container that runs it, cannot
+anchor durable confidence — tests bound to its internals die with each rewrite;
+validating the spec's behavior outlives any single implementation.
 
 ### VI. Idiomatic Python on uv
 
@@ -233,4 +239,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.0.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-07
+**Version**: 2.0.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-08
