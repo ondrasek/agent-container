@@ -189,12 +189,6 @@ trust.
 regenerate, and replace (Principle V), and a smaller surface to break or
 exploit — reliance is the quiet cost that compounds.
 
-**Rationale:** a single directly-executable uv script with pinned inline
-metadata is reproducible and needs no separate install step, while the
-stdlib-first, strongly-typed, doctested, layered style keeps the testable core
-hermetic (Principle V) and makes the on-disk contract (Principle IV) verifiable
-without ever touching a container runtime.
-
 ## Platform & Interface Constraints
 
 - **Editor-agnostic, SSH + tmux only.** The canonical attach path is
