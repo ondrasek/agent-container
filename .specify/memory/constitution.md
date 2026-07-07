@@ -44,6 +44,18 @@ technology-agnostic invariants; concrete mechanism relocated to CLAUDE.md):
   ahead of the current bottom-heavy, implementation-coupled test suite (argv
   pins, doctests); adopting it implies migrating tests toward spec-level
   validation and updating CLAUDE.md's testing guidance over time.
+  Principle VI REDEFINED & RENAMED — "Idiomatic Python on uv" → "Least
+  Dependencies". Reframed from a Python/uv style-and-tooling spec to a broad
+  invariant (rely on the fewest packages and least coupling; every dependency
+  must earn its place), completing the Least Privilege / Least Exposure / Least
+  Dependencies trilogy and resolving the conflict with V (code named as
+  disposable must not be locked to a language/toolchain). The packaging/tooling
+  specifics (single-file PEP 723, Typer/questionary/rich, wheel↔pyproject sync,
+  non-editable install, platform-aware runtime) already live in CLAUDE.md's
+  Decisions/Packaging sections; the finer code conventions dropped from old VI
+  (Fatal-not-sys.exit, layer separation, doctests, stderr/stdout split, argv-not-
+  shell) are implementation practice visible in the code and MAY be ported to
+  CLAUDE.md as guidance if desired.
 
 Amendments carried from 1.1.0:
   #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
@@ -66,7 +78,7 @@ Principles (post-amendment):
   III. Least Exposure                                        (redefined 2.0.0)
   IV.  Deterministic Identity                                (redefined 2.0.0)
   V.   Durable Spec, Disposable Code                         (redefined 2.0.0)
-  VI.  Idiomatic Python on uv                                (new)
+  VI.  Least Dependencies                                    (redefined 2.0.0)
 
 Sections:
   "Platform & Interface Constraints"     (Idiomatic-Python bullet promoted out)
@@ -163,32 +175,19 @@ that survive regeneration, light on implementation-coupled tests that do not.
 anchor durable confidence — tests bound to its internals die with each rewrite;
 validating the spec's behavior outlives any single implementation.
 
-### VI. Idiomatic Python on uv
+### VI. Least Dependencies
 
-The CLI is a single-file PEP 723 uv script (`bin/agent-container`, Typer +
-questionary + rich) carrying a `uv run --script` shebang and an inline metadata
-block that pins `requires-python = ">=3.11"` and its dependencies; that same
-file ships unchanged as the `agent_container` wheel via a hatchling
-`force-include`, so the PEP 723 dependency block MUST stay byte-for-byte in sync
-with `[project].dependencies` in `pyproject.toml`. The CLI MUST work as a
-non-editable PyPI / pipx install for every client subcommand through
-location-independent `REPO_ROOT` resolution; only `build` may require a checkout
-(supplied via `--context` / `AGENT_CONTAINER_REPO`). Runtime defaults MUST be
-platform-aware (docker-first on macOS, podman-first on Linux) and overridable
-via `AGENT_CONTAINER_RUNTIME`. Code MUST be idiomatic and stdlib-first: fully
-type-annotated signatures using PEP 604 unions under
-`from __future__ import annotations`, `pathlib.Path` in place of `os.path`
-munging, and module-scope constants plus compiled regexes as the single source
-of truth — with no third-party runtime dependency where the standard library
-suffices (`hosts.conf` is hand-parsed, not delegated to a config library).
-`subprocess` MUST always be invoked with an argv list and never `shell=True`,
-keeping secrets and user/host/window values off any shell line. Pure,
-side-effect-free helpers MUST stay separated from the runtime/subprocess,
-command, and wizard layers, MUST raise the custom `Fatal` exception rather than
-calling `sys.exit`, and MUST carry doctests that serve as their executable
-contract (hardened by the pinned `--self-test` corpus). Diagnostics SHOULD go to
-stderr while machine-readable output (`--json`, completion scripts) goes to
-stdout, so the two streams stay cleanly separable.
+The implementation relies on as little as it can — the fewest external packages,
+the least coupling, nothing pulled in that the materials already at hand can do.
+Reach first for what is present before adding a dependency; add nothing on
+speculation. Every dependency MUST earn its place against doing without, because
+each is borrowed complexity and borrowed risk — a surface that can break, drift,
+or constrain. What you do not depend on, you never have to maintain, replace, or
+trust.
+
+**Rationale:** fewer dependencies mean code that is cheaper to understand,
+regenerate, and replace (Principle V), and a smaller surface to break or
+exploit — reliance is the quiet cost that compounds.
 
 **Rationale:** a single directly-executable uv script with pinned inline
 metadata is reproducible and needs no separate install step, while the
