@@ -12,10 +12,16 @@ Bump rationale: Principle I was REDEFINED (a MAJOR event): "Ephemerality &
   ephemeralization. The commit-and-push mechanism now lives only in lower-
   altitude guidance (Development Workflow section, CLAUDE.md).
 
-Amendments in 2.0.0:
+Amendments in 2.0.0 (altitude-raising pass — principles restated as broad,
+technology-agnostic invariants; concrete mechanism relocated to CLAUDE.md):
   Principle I REDEFINED & RENAMED — "Ephemerality & Commit-Push Discipline" →
   "Ephemerality". Broadened to a technology-agnostic invariant; the git
   commit-push mechanism is no longer part of the principle text.
+  Principle II REDEFINED & RENAMED — "Rootless by Construction, Build-Time
+  Dependencies" → "Least Privilege, Immutable Runtime". Broadened from the
+  rootless/no-sudo/no-runtime-apt/Podman mechanism to the underlying invariant
+  (least privilege + a runtime fixed at build and immutable thereafter). The
+  concrete rootless/build-time-deps mechanism lives in CLAUDE.md.
 
 Amendments carried from 1.1.0:
   #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
@@ -34,7 +40,7 @@ Amendments carried from 1.1.0:
 
 Principles (post-amendment):
   I.   Ephemerality                                          (redefined 2.0.0)
-  II.  Rootless by Construction, Build-Time Dependencies
+  II.  Least Privilege, Immutable Runtime                     (redefined 2.0.0)
   III. Secrets Injected at Runtime — Never Baked, Never on Argv
   IV.  Parallel-Safe by Construction, One Source of Truth
   V.   Hermetic, Contract-Pinned Testing & Real-Build Verification
@@ -80,19 +86,18 @@ long-lived.
 by construction — recreation becomes a non-event, and host loss, corruption, and
 drift cease to be failure modes.
 
-### II. Rootless by Construction, Build-Time Dependencies
+### II. Least Privilege, Immutable Runtime
 
-The container image has NO `sudo` and NO root at runtime. `sshd` runs as the
-non-root `dev` user on an unprivileged port; SSH host key and `authorized_keys`
-live on a dev-owned volume. All system dependencies MUST be installed at image
-**build** time (the Dockerfile apt/download layers) — agents MUST NOT
-`apt install` or otherwise mutate system packages at runtime. Rootless-friendly,
-Podman-compatible patterns are required; Docker-Desktop-only features are
-prohibited.
+A container runs untrusted agent code. It MUST hold no more privilege than its
+work requires and MUST NOT be able to escalate beyond it. Its runtime is fixed
+at build and immutable thereafter — everything the container needs is provisioned
+before it runs, and nothing reshapes the running system from within — so the
+container is reproducible, its blast radius bounded, and its behavior independent
+of who launched it, when, or on which host runtime.
 
-**Rationale:** untrusted agent code runs inside; removing runtime root removes
-the escalation surface, and baking deps at build keeps the image reproducible
-and the runtime immutable.
+**Rationale:** confining untrusted code to least privilege on a runtime it cannot
+alter turns the container into a predictable, disposable unit — mutation,
+escalation, and host-specific surprise cease to be failure modes.
 
 ### III. Secrets Injected at Runtime — Never Baked, Never on Argv
 
