@@ -3,8 +3,14 @@
 .env.local
 .env.*.local
 
-# Claude Code harness artifacts (workflow scripts saved per-session)
-.claude/
+# Claude Code harness artifacts (workflow scripts, hook logs, local plugins).
+# Ignore the CONTENTS but TRACK settings.json — it registers the shared quality-
+# gate Stop hook (scripts/quality-gate.sh) so every clone gets it. Personal
+# overrides go in settings.local.json (ignored). `.claude/*` (not `.claude/`) so
+# the negation can re-include a file — git won't descend into a fully-ignored dir.
+.claude/*
+!.claude/settings.json
+.claude/settings.local.json
 
 # OS noise
 .DS_Store
