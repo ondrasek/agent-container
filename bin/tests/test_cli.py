@@ -27,7 +27,7 @@ def combined_output(result) -> str:
     parts = [result.output]
     try:
         parts.append(result.stderr)
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         pass  # click<8.2 mixes stderr into .output already
     return "".join(parts)
 

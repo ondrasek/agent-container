@@ -26,7 +26,7 @@ name = "agent-container"
 version = "0.1.0"
 description = "Always-on containerized dev environment for AI coding agents, driven over SSH+tmux."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ondrej Krajicek", email = "ondrej.krajicek@ideastatica.com" }]
@@ -39,9 +39,7 @@ classifiers = [
     "Environment :: Console",
     "Operating System :: POSIX",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
     "Topic :: Utilities",
 ]
@@ -89,7 +87,7 @@ addopts = "-m 'not acceptance'"
 # script bin/agent-container, so include it explicitly.
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 extend-include = ["bin/agent-container"]
 
 [tool.ruff.lint]

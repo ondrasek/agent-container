@@ -17,6 +17,12 @@
 set -o pipefail
 cd "$(dirname "$0")/.." || exit 1  # repo root
 
+# Pin every `uv run` below to the support floor (mirrors requires-python). The
+# source uses 3.14-only syntax (PEP 758 parenthesis-less except); without this
+# an `--no-project` run on a host/CI box whose default python is < 3.14 would
+# SyntaxError. uv fetches 3.14 if absent. Bump this in lockstep with the floor.
+export UV_PYTHON="${UV_PYTHON:-3.14}"
+
 HOOK_LOG="${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.log"
 debuglog() {
     mkdir -p "$(dirname "$HOOK_LOG")" 2>/dev/null
@@ -29,6 +35,8 @@ declare -A TOOL_HINTS
 TOOL_HINTS=(
     [ruff-check]="Run 'uv run --no-project --with ruff ruff check --output-format=full' for details. Most issues auto-fix with '... ruff check --fix'. Read the reported file before editing."
     [ruff-format]="Run 'uv run --no-project --with ruff ruff format' to auto-fix formatting."
+    [ty]="A type error in bin/agent-container (ty, targeting the requires-python floor). Read the reported line. Common fixes: annotate/narrow None (a None-guard that calls die()/raise makes ty see the branch as terminating), correct return types, fix argument types. Re-check: 'uv run --no-project --with typer --with questionary --with rich --with ty ty check bin/agent-container'."
+    [bandit]="A MEDIUM-or-higher security finding in bin/agent-container. Read the flagged line. Typical fixes: never pass shell=True (use an argv list), use the 'secrets' module (not 'random') for tokens/keys, avoid eval/exec, never hardcode credentials. NOTE: low-severity subprocess notes (B603/B607/B404/B606) are expected for this container CLI and are filtered out by -ll — do NOT try to silence them."
     [self-test]="'./bin/agent-container --self-test' failed — a doctest or the port-hash/key-derivation corpus regressed. Read the failing doctest in bin/agent-container; fix the code, or the doctest if the on-disk contract intentionally changed."
     [pytest]="Read the failing test and the code it exercises. Re-run one test: 'uv run --no-project --with pytest --with typer --with questionary --with rich pytest bin/tests/test_FILE.py::test_NAME -x --tb=long'. Fix the source, not the test, unless the test is wrong."
     [shell-entrypoint]="bin/tests/test_entrypoint.sh failed — entrypoint tmux-layout / git-credential / host-key logic. Read entrypoint.sh and the failing assertion label."
@@ -59,12 +67,22 @@ run_check() {
     out=$("$@" 2>&1) || fail "$name" "$cmd" "$out"
 }
 
+# App runtime deps (mirrors the PEP 723 block); ty needs them to resolve typer/
+# rich/questionary and type-check against the real APIs.
+DEPS=(--with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15')
 RUFF=(uv run --no-project --with ruff ruff)
-PYT=(uv run --no-project --with pytest --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' pytest)
+TY=(uv run --no-project "${DEPS[@]}" --with ty ty)
+BANDIT=(uv run --no-project --with bandit bandit)
+PYT=(uv run --no-project "${DEPS[@]}" --with pytest pytest)
 
-# Ordered fastest / most-likely-to-fail first.
+# Ordered fastest / most-likely-to-fail first: static checks (lint, types,
+# security) before the behavioural ones (self-test, pytest, shell suites).
+# `-ll` reports MEDIUM+ severity only — the container CLI's legitimate subprocess
+# calls are all LOW and would otherwise be noise.
 run_check "ruff-check"        "${RUFF[@]}" check
 run_check "ruff-format"       "${RUFF[@]}" format --check
+run_check "ty"                "${TY[@]}" check bin/agent-container
+run_check "bandit"            "${BANDIT[@]}" -q -ll bin/agent-container
 run_check "self-test"         ./bin/agent-container --self-test
 run_check "pytest"            "${PYT[@]}" bin/tests -x -q
 run_check "shell-entrypoint"      bash bin/tests/test_entrypoint.sh

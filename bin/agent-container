@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.14"
 # dependencies = [
 #   "typer>=0.12,<1",
 #   "questionary>=2.0,<3",
@@ -26,8 +26,6 @@
 # like bash `source`, but values containing `$` or backticks are taken
 # literally (no expansion), with a one-time warning.
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -37,7 +35,9 @@ import socket
 import subprocess
 import sys
 import termios
+from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 import questionary
 import typer
@@ -126,7 +126,7 @@ class Fatal(Exception):
     """Fatal error; CLI exits 1, wizard prints and returns to the menu."""
 
 
-def die(msg: str) -> typer.NoReturn:  # cli() turns Fatal into exit 1
+def die(msg: str) -> NoReturn:  # cli() turns Fatal into exit 1
     raise Fatal(msg)
 
 
@@ -1279,7 +1279,7 @@ def wiz_keys(rt: str) -> None:
     )
 
 
-_MENU: list[tuple[str, object]] = [
+_MENU: list[tuple[str, Callable[[str], None] | None]] = [
     ("Provision (build image)", wiz_build),
     ("Start a container", wiz_up),
     ("Attach", wiz_attach),
@@ -1317,10 +1317,12 @@ def wizard_loop() -> int:
             if choice is None or choice == "Quit":
                 return 0
             try:
-                actions[choice](rt)
+                action = actions[choice]
+                if action is not None:
+                    action(rt)
             except Fatal as e:
                 eprint(f"[agent-container] ERROR: {e}")  # back to the menu, not exit
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             return 0
 
 
@@ -1334,7 +1336,7 @@ app = typer.Typer(
 )
 
 
-def fatal_exit(e: Fatal) -> typer.NoReturn:
+def fatal_exit(e: Fatal) -> NoReturn:
     eprint(f"[agent-container] FATAL: {e}")
     raise typer.Exit(1)
 
@@ -1514,7 +1516,7 @@ def _completion_script(shell: str) -> str:
         res = ir.files("agent_container").joinpath(f"completions/agent-container.{shell}")
         if res.is_file():
             return res.read_text()
-    except (ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError):
+    except ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError:
         pass
     die(f"completion script for '{shell}' not found (need a checkout or an installed package)")
 

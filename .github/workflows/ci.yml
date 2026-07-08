@@ -3,8 +3,9 @@
 # "what must pass", so local and CI can't diverge. Locally a failure feeds Claude
 # a fix prompt (exit 2); here a failure hard-fails the job. Because release.yml
 # gates on `ci` success, any quality-gate finding blocks the release (Principle
-# VII). The remaining jobs add what a single gate run can't: cross-version tests,
-# commit-message validation, the built artifact, and real-container acceptance.
+# VII). The remaining jobs add what a single gate run can't: a pinned-interpreter
+# pytest run, commit-message validation, the built artifact, and real-container
+# acceptance.
 name: ci
 
 on:
@@ -28,7 +29,7 @@ jobs:
         # tmux + zsh so the entrypoint-layout and zsh/oh-my-zsh completion suites
         # (run inside the gate) execute their full assertion set, not self-skip.
         run: sudo apt-get update && sudo apt-get install -y tmux zsh
-      - name: Quality gate (ruff · self-test · pytest · shell suites)
+      - name: Quality gate (ruff · ty · bandit · self-test · pytest · shell suites)
         run: scripts/quality-gate.sh
 
   commits:
@@ -52,13 +53,14 @@ jobs:
 
   test:
     name: pytest (py${{ matrix.python }})
-    # The gate runs pytest once on the default interpreter; this adds the
-    # cross-version matrix a single gate run cannot cover.
+    # The gate runs pytest once on the default interpreter; this pins the
+    # supported interpreter(s) explicitly. Kept as a matrix so re-widening the
+    # support floor later is a one-line change.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13"]
+        python: ["3.14"]
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
