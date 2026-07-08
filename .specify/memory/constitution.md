@@ -1,6 +1,16 @@
 <!--
 SYNC IMPACT REPORT
 ==================
+Version change: 2.0.0 → 2.1.0   (MINOR)
+Bump rationale: Added Principle VII "Continuous Deployment" — a new principle
+  (MINOR). `main` is always releasable and every substantive change is released
+  automatically (strict semver: what users receive ships; docs/chores/internal
+  churn cut no release); releasing is never a manual act. Broad/invariant
+  altitude — the mechanism (python-semantic-release, workflow_run gate, OIDC
+  PyPI publishing) lives in CLAUDE.md + README, not the principle. Intro triad
+  extended to "...spec-driven, and continuously delivered." Prior 2.0.0 report
+  retained below.
+
 Version change: 1.1.0 → 2.0.0   (MAJOR)
 Bump rationale: Principle I was REDEFINED (a MAJOR event): "Ephemerality &
   Commit-Push Discipline" → "Ephemerality". The principle was raised to the
@@ -110,7 +120,8 @@ A containerized development environment that runs interactive and headless AI
 coding agents (Claude Code, Codex, pi-coding-agent) inside disposable
 containers, driven over SSH + tmux and managed by a single CLI. This
 constitution encodes the non-negotiable rules that keep it disposable, minimal,
-deterministic, and spec-driven. It supersedes convenience and habit.
+deterministic, spec-driven, and continuously delivered. It supersedes convenience
+and habit.
 
 ## Core Principles
 
@@ -198,6 +209,20 @@ trust.
 regenerate, and replace (Principle V), and a smaller surface to break or
 exploit — reliance is the quiet cost that compounds.
 
+### VII. Continuous Deployment
+
+`main` is always releasable, and releasing is automatic — never a manual act.
+Every change that lands on `main` and alters the shipped software is published on
+its own, with nothing human between merge and release. The version is semantic
+and derived from the nature of the change: what users receive advances it and
+ships; what they do not (docs, chores, internal churn that ships identically)
+cuts no release. A change is not done until it is released.
+
+**Rationale:** when every merge ships, `main` cannot be allowed to rot — it must
+stay green and releasable at all times; the gap between "merged" and "in users'
+hands" collapses to zero, and the version becomes a truthful, automatic record of
+what changed.
+
 ## Platform & Interface Constraints
 
 - **Editor-agnostic, SSH + tmux only.** The canonical attach path is
@@ -238,4 +263,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.0.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-08
+**Version**: 2.1.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-08
