@@ -11,10 +11,8 @@ from __future__ import annotations
 import ast
 import sys
 import tomllib
-from pathlib import Path
 
 import pytest
-
 from conftest import SCRIPT_PATH
 
 REPO_ROOT = SCRIPT_PATH.parents[1]

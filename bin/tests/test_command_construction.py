@@ -46,23 +46,24 @@ def parse_run_argv(argv: list[str]) -> dict:
     i, end = 3, len(argv) - 1  # exclude the trailing image
     while i < end:
         tok = argv[i]
+        takes_value = True
         if tok == "-v":
             spec = argv[i + 1]
             target = spec.split(":", 1)[1].split(":")[0]  # source:TARGET[:opts]
             out["volumes"][target] = spec
-            i += 2
         elif tok == "-p":
-            out["publishes"].append(argv[i + 1]); i += 2
+            out["publishes"].append(argv[i + 1])
         elif tok == "--env-file":
-            out["env_file"] = argv[i + 1]; i += 2
+            out["env_file"] = argv[i + 1]
         elif tok in ("-e", "--env"):
-            out["inline_env"].append(argv[i + 1]); i += 2
+            out["inline_env"].append(argv[i + 1])
         elif tok == "--restart":
-            out["restart"] = argv[i + 1]; i += 2
+            out["restart"] = argv[i + 1]
         elif tok == "--name":
-            out["name"] = argv[i + 1]; i += 2
+            out["name"] = argv[i + 1]
         else:
-            i += 1
+            takes_value = False
+        i += 2 if takes_value else 1
     return out
 
 

@@ -1,8 +1,11 @@
-# CI gate for agent-container. Two jobs (constitution Principle V — inverted
-# pyramid): `test` runs the fast, runtime-free unit/contract suite + shell suites
-# + build; `acceptance` builds the image and runs the real-container end-to-end
-# validation (`pytest -m acceptance`), which needs no secrets. Neither runs on
-# tag pushes; the release is gated by publish.yml, which re-runs the fast suite.
+# CI for agent-container. Focused, parallel jobs:
+#   lint       — ruff (static analysis; format is intentionally hand-maintained).
+#   test       — the fast, runtime-free pytest suite across a Python matrix.
+#   shell      — the bash suites (entrypoint + completions) that pytest can't collect.
+#   build      — `uv build` (sdist + wheel).
+#   acceptance — real-container end-to-end validation (constitution Principle V);
+#                builds the image, needs no secrets.
+# None run on tag pushes; releases are handled by the release workflow.
 name: ci
 
 on:
@@ -17,32 +20,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: pytest + build
+  lint:
+    name: lint (ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      - name: ruff check
+        run: uv run --no-project --with ruff ruff check
+
+  test:
+    name: pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
       - name: Run the pytest suite
-        # --no-project keeps the run hermetic; the --with pins mirror the
-        # bin/agent-container PEP 723 inline metadata (kept in sync with pyproject).
+        # --no-project keeps the run hermetic; --python selects the matrix
+        # interpreter (uv fetches it). The --with pins mirror the bin/agent-container
+        # PEP 723 inline metadata (kept in sync with pyproject).
         run: >
-          uv run --no-project --with pytest
+          uv run --no-project --python ${{ matrix.python }} --with pytest
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
           pytest bin/tests
+
+  shell:
+    name: shell suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       - name: Install shell-test tools
         # tmux + zsh so the entrypoint-layout and zsh/oh-my-zsh completion suites
         # run their full assertion set instead of self-skipping.
         run: sudo apt-get update && sudo apt-get install -y tmux zsh
       - name: Run shell test suites
-        # These bash suites (entrypoint credential/tmux logic + completions) are
-        # NOT collected by pytest, so they must run as their own step or they
-        # silently rot. Any non-zero exit fails the job.
         run: |
           bash bin/tests/test_entrypoint.sh
           bash bin/tests/test_entrypoint_tmux_layout.sh
           bash bin/tests/test_completions.sh
+
+  build:
+    name: build (sdist + wheel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
       - name: Build distributions
         run: uv build
 

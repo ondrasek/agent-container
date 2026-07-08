@@ -81,3 +81,24 @@ markers = [
     "acceptance: real-container end-to-end validation (needs docker/podman; run with -m acceptance)",
 ]
 addopts = "-m 'not acceptance'"
+
+# Ruff — LINTING only (Principle VI: one tool for pyflakes/pycodestyle/isort/
+# pyupgrade/bugbear). Auto-formatting (`ruff format`) is deliberately NOT adopted:
+# it explodes the hand-paired argv lists this CLI is built around (`"--name",
+# cname,` -> one token per line), a real readability regression for command
+# construction. Formatting stays hand-maintained. E501 is off for the same reason
+# (doctest expected-output lines and paired argv cannot wrap). The CLI is the
+# extension-less PEP 723 script bin/agent-container, so include it explicitly.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-include = ["bin/agent-container"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# typer.Option/Argument as parameter defaults is the canonical Typer idiom, not
+# the B008 mutable-default footgun.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]

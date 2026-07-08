@@ -38,7 +38,6 @@ import subprocess
 import sys
 import termios
 from pathlib import Path
-from typing import List
 
 import questionary
 import typer
@@ -56,7 +55,7 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 
-def _is_repo_checkout(base: "Path") -> bool:
+def _is_repo_checkout(base: Path) -> bool:
     """Best-effort test that `base` is an agent-container checkout.
 
     Keyed on `completions/agent-container.bash` (plus a Dockerfile for the build
@@ -70,7 +69,7 @@ def _is_repo_checkout(base: "Path") -> bool:
     return (base / "Dockerfile").is_file() and (base / "completions" / "agent-container.bash").is_file()
 
 
-def _find_repo_root() -> "Path | None":
+def _find_repo_root() -> Path | None:
     """Locate the repo checkout in a way that survives a non-editable install.
 
     A wheel copies this module into site-packages, so Path(__file__) no longer
@@ -122,7 +121,7 @@ class Fatal(Exception):
     """Fatal error; CLI exits 1, wizard prints and returns to the menu."""
 
 
-def die(msg: str) -> "typer.NoReturn":  # cli() turns Fatal into exit 1
+def die(msg: str) -> typer.NoReturn:  # cli() turns Fatal into exit 1
     raise Fatal(msg)
 
 
@@ -304,7 +303,7 @@ def validate_private_key(path: Path) -> None:
 
 
 def resolve_ssh_injection(
-    name: str, host_key: "Path | None", authorized_keys: list[Path]
+    name: str, host_key: Path | None, authorized_keys: list[Path]
 ) -> list[str]:
     """Resolve `up --host-key/--authorized-key` into read-only '-v' bind specs.
 
@@ -603,7 +602,7 @@ def hint(cmd: str) -> None:
     console.print(f"hint: {cmd}", style="dim")
 
 
-def do_build(tag: str, context: "Path | None" = None) -> None:
+def do_build(tag: str, context: Path | None = None) -> None:
     # `build` is the one subcommand that needs a repo checkout: a docker build
     # context IS a checkout. Resolve it explicitly (a PyPI install has REPO_ROOT
     # is None) and fail actionably rather than with a traceback.
@@ -942,7 +941,7 @@ def cli_attach(
     user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
     if w := tmux_nest_warning():
         warn(w)  # CLI mode: warn and proceed
-    session = f'"main"' + (f', window "{window}"' if window else "")
+    session = '"main"' + (f', window "{window}"' if window else "")
     eprint(f"agent-container: {user}@{host}:{port} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
@@ -966,7 +965,7 @@ def wizard_handover(
 ) -> None:
     """Attach without killing the wizard: inherited-stdio subprocess + cleanup."""
     target = f"{user}@{host}:{port}"
-    session = f'"main"' + (f', window "{window}"' if window else "")
+    session = '"main"' + (f', window "{window}"' if window else "")
     eprint(f"agent-container: {target} (tmux session {session})")
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1252,7 +1251,7 @@ def wiz_keys(rt: str) -> None:
     )
 
 
-_MENU: list[tuple[str, "object"]] = [
+_MENU: list[tuple[str, object]] = [
     ("Provision (build image)", wiz_build),
     ("Start a container", wiz_up),
     ("Attach", wiz_attach),
@@ -1303,7 +1302,7 @@ app = typer.Typer(
 )
 
 
-def fatal_exit(e: Fatal) -> "typer.NoReturn":
+def fatal_exit(e: Fatal) -> typer.NoReturn:
     eprint(f"[agent-container] FATAL: {e}")
     raise typer.Exit(1)
 
@@ -1353,7 +1352,7 @@ def up(
     env_file: Path | None = typer.Option(
         None, "--env-file", help="Bypass env-file resolution; path must exist."
     ),
-    mount: List[str] = typer.Option(
+    mount: list[str] = typer.Option(
         None,
         "--mount",
         help="Bind-mount a host dir read-write (repeatable): HOSTDIR[:CONTAINERPATH]. "
@@ -1367,7 +1366,7 @@ def up(
         "a known SSH identity (persisted on the ~/.ssh volume). Must be "
         "unencrypted.",
     ),
-    authorized_key: List[Path] = typer.Option(
+    authorized_key: list[Path] = typer.Option(
         None,
         "--authorized-key",
         help="Inject an SSH public key into authorized_keys (repeatable), so you "
@@ -1388,7 +1387,7 @@ def keys(
         help="Install an unencrypted ed25519 PRIVATE host key into the running "
         "container and reload sshd (persists on the ~/.ssh volume).",
     ),
-    authorized_key: List[Path] = typer.Option(
+    authorized_key: list[Path] = typer.Option(
         None, "--authorized-key",
         help="Append an SSH public key to authorized_keys in the running "
         "container (repeatable; deduped; persists on the ~/.ssh volume).",
@@ -1492,10 +1491,40 @@ def completions(
     sys.stdout.write(_completion_script(shell))
 
 
+def _resolve_version() -> str:
+    """The tool's version, single-sourced from pyproject.toml. When installed
+    (wheel), it is read from package metadata; when run via `uv run --script`
+    from a checkout, it is read from pyproject directly — no hardcoded constant
+    to drift from the release version release-please bumps."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        return version("agent-container")
+    except PackageNotFoundError:
+        pass
+    if REPO_ROOT is not None:
+        try:
+            import tomllib
+            with (REPO_ROOT / "pyproject.toml").open("rb") as f:
+                return tomllib.load(f)["project"]["version"]
+        except Exception:
+            pass
+    return "0.0.0+unknown"
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(_resolve_version())
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     self_test: bool = typer.Option(False, "--self-test", help="Run doctests + port-hash corpus checks."),
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Show the agent-container version and exit.",
+    ),
 ) -> None:
     if self_test:
         raise typer.Exit(run_self_test())

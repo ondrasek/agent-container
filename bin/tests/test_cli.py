@@ -13,9 +13,8 @@ import shutil
 import subprocess
 
 import pytest
-from typer.testing import CliRunner
-
 from conftest import SCRIPT_PATH
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -150,6 +149,14 @@ def test_self_test_passes(wiz):
     result = runner.invoke(wiz.app, ["--self-test"])
     assert result.exit_code == 0
     assert "PASS" in result.output
+
+
+def test_version_prints_semver(wiz):
+    # Single-sourced from pyproject.toml (via REPO_ROOT here); assert the SHAPE,
+    # not a literal value, so release bumps don't break the test.
+    result = runner.invoke(wiz.app, ["--version"])
+    assert result.exit_code == 0
+    assert re.fullmatch(r"\d+\.\d+\.\d+(\+\w+)?", result.output.strip()), result.output
 
 
 # --- real entrypoint smoke tests (shebang -> uv run --script) ------------------------
