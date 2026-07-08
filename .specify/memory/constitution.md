@@ -64,8 +64,9 @@ Amendments carried from 1.1.0:
   #2 Principle IV — added a stable identity contract MUST clause: the
      name/port/volume/XDG on-disk identifiers MUST NOT change the value
      computed for an existing name without a versioned migration path, and any
-     change MUST be mirrored in the shell completions. Prevents orphaning live
-     containers/volumes, which would silently violate Principle I.
+     change MUST be mirrored in the shell completions. Prevents silently
+     orphaning running containers (unmanageable by their own tooling, identity
+     shifted under a connected operator).
   #3 New Core Principle VI "Idiomatic Python on uv" — promoted from the
      "Platform & Interface Constraints" bullet of the same name; that bullet's
      substance was moved into Principle VI to avoid duplication; the platform-
@@ -108,8 +109,8 @@ Deferred TODOs: none.
 A containerized development environment that runs interactive and headless AI
 coding agents (Claude Code, Codex, pi-coding-agent) inside disposable
 containers, driven over SSH + tmux and managed by a single CLI. This
-constitution encodes the non-negotiable rules that keep that system safe,
-reproducible, and parallel by construction. It supersedes convenience and habit.
+constitution encodes the non-negotiable rules that keep it disposable, minimal,
+deterministic, and spec-driven. It supersedes convenience and habit.
 
 ## Core Principles
 
@@ -161,8 +162,9 @@ MUST derive deterministically from a single identifier, so any part of the syste
 can recompute it rather than store and risk desynchronizing it. That derivation
 has exactly one authoritative definition; no consumer may reinvent it. And it is
 a **stable contract**: the values computed for an existing container MUST NOT
-change without a migration path, or a live container is silently orphaned
-(violating Principle I).
+change without a migration path, or a live container is silently orphaned — its
+own tooling can no longer find it, and its identity shifts beneath a connected
+operator.
 
 **Rationale:** identity derived from one deterministic source makes parallelism
 collision-free by construction and keeps every consumer — launcher, tooling,
