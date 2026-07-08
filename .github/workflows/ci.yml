@@ -32,6 +32,25 @@ jobs:
       - name: ruff format --check
         run: uv run --no-project --with ruff ruff format --check
 
+  commits:
+    name: conventional commits
+    # PRs only: validate the commits the PR introduces. Direct pushes to main are
+    # enforced server-side by the repo ruleset (see .github/conventional-commits-
+    # ruleset.json). commitizen passes merge/revert messages through natively.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: cz check (Conventional Commits)
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          uvx --from commitizen cz check --rev-range "origin/${{ github.base_ref }}..HEAD"
+
   test:
     name: pytest (py${{ matrix.python }})
     runs-on: ubuntu-latest

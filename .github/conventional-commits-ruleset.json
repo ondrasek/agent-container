@@ -1,0 +1,19 @@
+{
+  "name": "Conventional Commits on main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] }
+  },
+  "rules": [
+    {
+      "type": "commit_message_pattern",
+      "parameters": {
+        "name": "Conventional Commits",
+        "operator": "regex",
+        "pattern": "^((build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\\(.+\\))?!?: .+|Merge .+|Revert .+)",
+        "negate": false
+      }
+    }
+  ]
+}

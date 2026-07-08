@@ -117,3 +117,9 @@ commit_message = "chore(release): {version} [skip ci]"
 
 [tool.semantic_release.branches.main]
 match = "main"
+
+# commitizen — validate Conventional Commit messages (`cz check`). Used by the
+# local commit-msg hook (.githooks/) and the CI `commits` job. Enforces the same
+# convention python-semantic-release reads to compute releases (Principle VII).
+[tool.commitizen]
+name = "cz_conventional_commits"

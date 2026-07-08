@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Enforce Conventional Commits locally (Principle VII — the CD pipeline reads
+# these to compute releases). commitizen passes merge/revert messages through.
+# Emergency bypass: git commit --no-verify
+exec uvx --from commitizen cz check --commit-msg-file "$1"
