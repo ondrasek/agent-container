@@ -1,11 +1,10 @@
-# CI for agent-container. Focused, parallel jobs:
-#   lint       — ruff check + ruff format --check.
-#   test       — the fast, runtime-free pytest suite across a Python matrix.
-#   shell      — the bash suites (entrypoint + completions) that pytest can't collect.
-#   build      — `uv build` (sdist + wheel).
-#   acceptance — real-container end-to-end validation (constitution Principle V);
-#                builds the image, needs no secrets.
-# None run on tag pushes; releases are handled by the release workflow.
+# CI for agent-container. The `quality-gate` job runs the SAME script as the
+# local Claude Code Stop hook (scripts/quality-gate.sh) — one source of truth for
+# "what must pass", so local and CI can't diverge. Locally a failure feeds Claude
+# a fix prompt (exit 2); here a failure hard-fails the job. Because release.yml
+# gates on `ci` success, any quality-gate finding blocks the release (Principle
+# VII). The remaining jobs add what a single gate run can't: cross-version tests,
+# commit-message validation, the built artifact, and real-container acceptance.
 name: ci
 
 on:
@@ -13,29 +12,29 @@ on:
     branches: ["**"]
   pull_request:
 
-# Cancel superseded runs for the same ref so rapid successive pushes don't pile
-# up runners (does not dedupe the push/pull_request pair — different refs).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: lint (ruff)
+  quality-gate:
+    name: quality gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: ruff check
-        run: uv run --no-project --with ruff ruff check
-      - name: ruff format --check
-        run: uv run --no-project --with ruff ruff format --check
+      - name: Install shell-test tools
+        # tmux + zsh so the entrypoint-layout and zsh/oh-my-zsh completion suites
+        # (run inside the gate) execute their full assertion set, not self-skip.
+        run: sudo apt-get update && sudo apt-get install -y tmux zsh
+      - name: Quality gate (ruff · self-test · pytest · shell suites)
+        run: scripts/quality-gate.sh
 
   commits:
     name: conventional commits
     # PRs only: validate the commits the PR introduces. Direct pushes to main are
-    # enforced server-side by the repo ruleset (see .github/conventional-commits-
+    # enforced server-side by the repo ruleset (.github/conventional-commits-
     # ruleset.json). commitizen passes merge/revert messages through natively.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -53,6 +52,8 @@ jobs:
 
   test:
     name: pytest (py${{ matrix.python }})
+    # The gate runs pytest once on the default interpreter; this adds the
+    # cross-version matrix a single gate run cannot cover.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -63,28 +64,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Run the pytest suite
-        # --no-project keeps the run hermetic; --python selects the matrix
-        # interpreter (uv fetches it). The --with pins mirror the bin/agent-container
-        # PEP 723 inline metadata (kept in sync with pyproject).
         run: >
           uv run --no-project --python ${{ matrix.python }} --with pytest
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
           pytest bin/tests
-
-  shell:
-    name: shell suites
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install shell-test tools
-        # tmux + zsh so the entrypoint-layout and zsh/oh-my-zsh completion suites
-        # run their full assertion set instead of self-skipping.
-        run: sudo apt-get update && sudo apt-get install -y tmux zsh
-      - name: Run shell test suites
-        run: |
-          bash bin/tests/test_entrypoint.sh
-          bash bin/tests/test_entrypoint_tmux_layout.sh
-          bash bin/tests/test_completions.sh
 
   build:
     name: build (sdist + wheel)
@@ -104,11 +87,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Run acceptance suite
-        # Builds the image (via `agent-container build`, using the docker daemon
-        # preinstalled on ubuntu-latest) and drives real containers through the
-        # rootless SSH-identity flows. `-m acceptance` overrides the default
-        # `-m 'not acceptance'` from pyproject. ssh/ssh-keygen ship with the
-        # runner; no secrets are required (these paths never push).
+        # Builds the image (docker preinstalled on ubuntu-latest) and drives real
+        # containers through the rootless SSH-identity flows. `-m acceptance`
+        # overrides the default `-m 'not acceptance'` from pyproject. No secrets.
         run: >
           uv run --no-project --with pytest
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
