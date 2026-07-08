@@ -81,8 +81,15 @@ Principles (post-amendment):
   VI.  Least Dependencies                                    (redefined 2.0.0)
 
 Sections:
-  "Platform & Interface Constraints"     (Idiomatic-Python bullet promoted out)
-  "Development Workflow & Quality Gates"
+  "Platform & Interface Constraints"     (kept — genuine scope decisions:
+                                          editor-agnostic SSH+tmux, single operator)
+  "Development Workflow & Quality Gates" (TRIMMED to constitutional policy —
+                                          "verify before trust" (reconciled with
+                                          the reframed Principle V) and "spec and
+                                          docs track behavior". Concrete mechanics
+                                          — CI suite composition, uv build,
+                                          Trusted Publishing, commit-push cadence —
+                                          relocated to CLAUDE.md.)
 
 Templates reviewed:
   ✅ .specify/templates/plan-template.md — "Constitution Check" gate is
@@ -200,18 +207,15 @@ exploit — reliance is the quiet cost that compounds.
 
 ## Development Workflow & Quality Gates
 
-- **Green before commit.** The full suite (hermetic pytest + shell suites +
-  self-test) MUST pass, and non-trivial runtime changes MUST be exercised
-  against a real build, before a change is committed.
-- **CI is the gate.** `ci.yml` runs the pytest and shell suites plus `uv build`
-  on every push/PR; releases go to PyPI via Trusted Publishing (OIDC, no stored
-  secrets) on `v*` tags, re-running the suite first.
-- **Docs track code.** README, `docs/`, and CLAUDE.md MUST be updated in the same
-  change when behavior, setup, the on-disk contract, or the security posture
-  changes. Stale docs are treated as defects.
-- **Commit and push.** Consistent with Principle I, work is committed and pushed;
-  the commit-and-push discipline is a property of agent configuration, not
-  enforced by hooks alone.
+- **Verify before trust.** No change is trusted until its intended behavior has
+  been checked; verification is validation-first (Principle V) and cheap enough
+  to run on every change.
+- **Spec and docs track behavior.** The specification, README, `docs/`, and
+  CLAUDE.md MUST be updated in the same change as any change to behavior, scope,
+  the identity contract, or the security posture — stale spec or docs are defects.
+
+Concrete workflow mechanics (CI suite composition, `uv build`, Trusted Publishing
+on `v*` tags, the commit-and-push cadence) live in CLAUDE.md.
 
 ## Governance
 
