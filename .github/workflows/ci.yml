@@ -1,6 +1,8 @@
-# CI gate for agent-container: runs the runtime-free pytest suite and builds the
-# distributions on every push and PR. This does NOT run on tag pushes; the
-# release itself is gated by publish.yml, which re-runs the suite before build.
+# CI gate for agent-container. Two jobs (constitution Principle V — inverted
+# pyramid): `test` runs the fast, runtime-free unit/contract suite + shell suites
+# + build; `acceptance` builds the image and runs the real-container end-to-end
+# validation (`pytest -m acceptance`), which needs no secrets. Neither runs on
+# tag pushes; the release is gated by publish.yml, which re-runs the fast suite.
 name: ci
 
 on:
@@ -43,3 +45,21 @@ jobs:
           bash bin/tests/test_completions.sh
       - name: Build distributions
         run: uv build
+
+  acceptance:
+    name: acceptance (real container)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Run acceptance suite
+        # Builds the image (via `agent-container build`, using the docker daemon
+        # preinstalled on ubuntu-latest) and drives real containers through the
+        # rootless SSH-identity flows. `-m acceptance` overrides the default
+        # `-m 'not acceptance'` from pyproject. ssh/ssh-keygen ship with the
+        # runner; no secrets are required (these paths never push).
+        run: >
+          uv run --no-project --with pytest
+          --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
+          pytest bin/tests -m acceptance

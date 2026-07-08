@@ -70,3 +70,14 @@ bypass-selection = true
 "bin/agent-container" = "agent_container/__init__.py"
 "completions/agent-container.bash" = "agent_container/completions/agent-container.bash"
 "completions/agent-container.zsh" = "agent_container/completions/agent-container.zsh"
+
+# Test layering (constitution Principle V — inverted pyramid): the fast,
+# runtime-free unit/contract tests are the default inner loop; the real-container
+# acceptance suite (bin/tests/test_acceptance.py) is the authoritative validation
+# layer, opted into with `pytest -m acceptance`. `addopts` excludes it by default
+# so a bare `pytest` run (and the hermetic CI job) never need a container runtime.
+[tool.pytest.ini_options]
+markers = [
+    "acceptance: real-container end-to-end validation (needs docker/podman; run with -m acceptance)",
+]
+addopts = "-m 'not acceptance'"

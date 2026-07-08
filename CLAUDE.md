@@ -40,7 +40,7 @@ When adding a component, keep these layers separate. Don't bake host-specific or
 
 - The container is **rootless by decision** (see Decisions): no `sudo`/root at runtime, sshd as `dev` on port 2222. Keep it that way — don't reintroduce root-only steps; bake deps at build. Also avoid features that only work on Docker Desktop (stay Podman-compatible).
 - Treat the **commit-and-push discipline** as a property of the agent configuration, not something to enforce via git hooks alone (hooks can be bypassed; the agents themselves should be configured to push).
-- **Verify before commit.** The full suite (pytest + the shell suites + `--self-test`) must be green before committing, and container-only behavior (rootless sshd, key persistence/injection) must be exercised against a real `docker`/`podman` build; `ci.yml` re-runs the suite + `uv build` on every push/PR.
+- **Verify before commit (two tiers, per constitution Principle V — inverted pyramid).** Inner loop: the fast, runtime-free pytest suite (`pytest bin/tests`, which excludes `-m acceptance` by default) + the shell suites + `--self-test` must be green. Authoritative validation: the real-container acceptance suite (`pytest -m acceptance bin/tests` — builds the image, drives rootless sshd / key persistence / injection against real containers; needs a runtime + ssh, no secrets). `ci.yml` runs both as separate jobs on every push/PR (plus `uv build`). Locally on macOS+Lima, acceptance working files must sit on a Lima-shared path — the suite defaults to `~/.cache/agent-container-acceptance` (override via `AGENT_CONTAINER_ACCEPTANCE_TMPDIR`).
 - When proposing a tool or dependency, justify it against the constraints above — especially the "not VSCode-locked" one.
 
 ## Out of scope (don't add unless asked)

@@ -32,15 +32,77 @@ def make_env_file(tmp_path, secret="hunter2-super-secret"):
     return env_file, secret
 
 
-def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tmp_path):
+def parse_run_argv(argv: list[str]) -> dict:
+    """Parse a `<runtime> run -d …` argv into a structural view so behavioral
+    assertions don't couple to flag ORDER (constitution Principle V — validate
+    the command's meaning, not its exact byte sequence). Collects repeated -v/-p,
+    the --env-file, any inline -e/--env, the --restart policy, name, and image.
+    Volumes are keyed by their container-side mount target."""
+    assert argv[1:3] == ["run", "-d"], f"not a detached run argv: {argv}"
+    out = {
+        "runtime": argv[0], "image": argv[-1], "name": None, "env_file": None,
+        "restart": None, "publishes": [], "inline_env": [], "volumes": {},
+    }
+    i, end = 3, len(argv) - 1  # exclude the trailing image
+    while i < end:
+        tok = argv[i]
+        if tok == "-v":
+            spec = argv[i + 1]
+            target = spec.split(":", 1)[1].split(":")[0]  # source:TARGET[:opts]
+            out["volumes"][target] = spec
+            i += 2
+        elif tok == "-p":
+            out["publishes"].append(argv[i + 1]); i += 2
+        elif tok == "--env-file":
+            out["env_file"] = argv[i + 1]; i += 2
+        elif tok in ("-e", "--env"):
+            out["inline_env"].append(argv[i + 1]); i += 2
+        elif tok == "--restart":
+            out["restart"] = argv[i + 1]; i += 2
+        elif tok == "--name":
+            out["name"] = argv[i + 1]; i += 2
+        else:
+            i += 1
+    return out
+
+
+def test_launch_container_behavior(wiz, capture_query, monkeypatch, tmp_path):
+    """Behavioral (order-independent) assertions on the container start command:
+    it is what the container actually gets, but a regenerated implementation may
+    order flags differently. Assert MEANING via parse_run_argv, not exact bytes."""
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
     env_file, _ = make_env_file(tmp_path)
 
     wiz.launch_container("podman", "acme", env_file)
 
-    # Seven per-container named volumes in the canonical order, then --restart.
-    # This argv is the load-bearing container start command; pin it exactly.
-    # Container-side port is 2222 (rootless sshd runs as dev, cannot bind 22).
+    (argv,) = capture_query
+    run = parse_run_argv(argv)
+    assert run["runtime"] == "podman"
+    assert run["name"] == "agent-container-acme"
+    assert run["image"] == wiz.IMAGE_NAME
+    # Name-hash host port published to the rootless container-side port 2222.
+    assert run["publishes"] == ["2206:2222"]
+    # Credentials via --env-file only — never inlined on argv (Principle III).
+    assert run["env_file"] == str(env_file)
+    assert run["inline_env"] == []
+    assert run["restart"] == "unless-stopped"
+    # Mounts exactly the canonical per-container volume set (from the same
+    # source of truth the CLI uses), each at its documented target.
+    expected = {spec.split(":", 1)[1]: spec for spec in wiz.all_volume_mounts("acme")}
+    assert run["volumes"] == expected
+    # state file written (the completions and `attach` read it)
+    assert wiz.read_state_port("acme") == "2206"
+
+
+def test_launch_container_golden_argv(wiz, capture_query, monkeypatch, tmp_path):
+    """Golden snapshot of the full run argv — living documentation of the exact
+    canonical command. Unlike the behavioral test above this IS order-coupled;
+    update it deliberately when the command intentionally changes."""
+    monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    env_file, _ = make_env_file(tmp_path)
+
+    wiz.launch_container("podman", "acme", env_file)
+
     assert capture_query == [[
         "podman", "run", "-d",
         "--name", "agent-container-acme",
@@ -56,11 +118,11 @@ def test_launch_container_argv_flag_for_flag(wiz, capture_query, monkeypatch, tm
         "--restart", "unless-stopped",
         "localhost/agent-container:latest",
     ]]
-    # state file written (the completions and `attach` read it)
-    assert wiz.read_state_port("acme") == "2206"
 
 
-def test_launch_container_appends_binds_after_volumes(wiz, capture_query, monkeypatch, tmp_path):
+def test_launch_container_includes_extra_binds(wiz, capture_query, monkeypatch, tmp_path):
+    """--mount binds are mounted at their targets alongside the canonical volumes
+    (order is immaterial to the runtime, so it is not asserted)."""
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
     env_file, _ = make_env_file(tmp_path)
 
@@ -70,15 +132,12 @@ def test_launch_container_appends_binds_after_volumes(wiz, capture_query, monkey
     )
 
     (argv,) = capture_query
-    # Binds land immediately after the five standard volumes, before --restart.
-    ri = argv.index("--restart")
-    assert argv[ri - 4:ri] == [
-        "-v", "/abs/host:/opt/data",
-        "-v", "/another:/workspace/another",
-    ]
-    assert argv[ri:] == ["--restart", "unless-stopped", "localhost/agent-container:latest"]
-    # First -v is still the workspace volume.
-    assert argv[argv.index("-v") + 1] == "agent-container-acme-workspace:/workspace"
+    run = parse_run_argv(argv)
+    # Both binds present at their targets, on top of the seven canonical volumes.
+    assert run["volumes"]["/opt/data"] == "/abs/host:/opt/data"
+    assert run["volumes"]["/workspace/another"] == "/another:/workspace/another"
+    assert run["volumes"]["/workspace"] == "agent-container-acme-workspace:/workspace"
+    assert len(run["volumes"]) == 7 + 2
 
 
 # --- bind-mount resolution (--mount) -----------------------------------------
