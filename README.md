@@ -738,25 +738,34 @@ AGENT_CONTAINER_SMOKE_REPO=your-handle/agent-container-smoke-target ./scripts/sm
 
 Pre-flight refuses to run without `docker`/`podman`, `uv` plus `bin/agent-container`, a populated `.env`, and a target repo your `GH_TOKEN` can push to. Full details, safety properties, and what is intentionally *not* covered: [`docs/smoke-test.md`](docs/smoke-test.md).
 
-## Releasing
+## Releasing — Continuous Deployment
 
-`agent-container` publishes to PyPI via **Trusted Publishing** (OIDC — no API tokens
-stored in the repo). To cut a release:
+Releases are **fully automated** — there is no manual tagging and no release PR.
+**Every substantive merge to `main` is a release.**
 
-1. Bump `version` in `pyproject.toml`, commit, and push.
-2. Confirm `.github/workflows/ci.yml` is green for that commit (it runs the
-   pytest suite and `uv build` on every push/PR). CI does not run on tag pushes,
-   so this is a check on the pushed commit, not an automatic gate on the tag.
-3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+1. Land a change on `main` with a [Conventional Commit](https://www.conventionalcommits.org/)
+   message: `feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → minor
+   (while pre-1.0). `docs:`/`ci:`/`chore:`/`test:`/`style:` merges cut **no** release.
+2. `ci.yml` runs the full pipeline (lint · test matrix · shell · build · acceptance).
+3. Once `ci` is green on `main`, `release.yml` fires (via `workflow_run`).
+   [python-semantic-release](https://python-semantic-release.readthedocs.io/) computes
+   the next version from the commits, bumps `pyproject.toml` + `CHANGELOG.md`, commits
+   `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z`, creates the GitHub Release, and
+   publishes the wheel + sdist to PyPI via **Trusted Publishing** (OIDC — no stored
+   token). A red pipeline never ships (the release is gated on `ci` success).
 
-Pushing a `v*` tag triggers `.github/workflows/publish.yml`, which **re-runs the
-pytest suite**, then builds the sdist + wheel with `uv build` and uploads them
-through `pypa/gh-action-pypi-publish` using a short-lived OIDC token. Because the
-suite runs first in the `build` job and `publish` `needs: build`, a red tagged
-commit fails the build and never reaches PyPI. **One-time setup:**
-the operator configures the [PyPI trusted publisher](https://docs.pypi.org/trusted-publishers/)
-for the `agent-container` project (owner `ondrasek`, repo `agent-container`, workflow
-`publish.yml`, environment `release`) — after that, releases need no secrets.
+The version is single-sourced in `pyproject.toml`; check the installed version with
+`agent-container --version`.
+
+**One-time operator setup (arming CD):**
+1. Configure the [PyPI trusted publisher](https://docs.pypi.org/trusted-publishers/)
+   for the `agent-container` project (owner `ondrasek`, repo `agent-container`,
+   workflow `release.yml`, environment `release`).
+2. Arm the pipeline: `gh variable set RELEASE_ENABLED --body true`.
+
+Until `RELEASE_ENABLED` is set, `release.yml` stays dormant (so a release can't
+half-fire before PyPI is ready). After both steps, releases are automatic and
+need no stored secrets.
 
 ## License
 

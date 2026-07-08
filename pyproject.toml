@@ -100,3 +100,20 @@ ignore = ["E501"]
 # typer.Option/Argument as parameter defaults is the canonical Typer idiom, not
 # the B008 mutable-default footgun.
 extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+# python-semantic-release — Continuous Deployment (every substantive merge to
+# main cuts a release). Strict semver from Conventional Commits: feat -> minor,
+# fix -> patch, breaking -> minor while pre-1.0 (major_on_zero = false); docs/
+# ci/chore/test/style-only merges cut NO release. Version single-sources here in
+# [project].version (PSR bumps it + commits `chore(release): ... [skip ci]`).
+# PSR builds the dist (`uv build`); the workflow publishes it to PyPI via OIDC
+# Trusted Publishing (Principle III — no stored token). See release.yml.
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+major_on_zero = false
+allow_zero_version = true
+build_command = "uv build"
+commit_message = "chore(release): {version} [skip ci]"
+
+[tool.semantic_release.branches.main]
+match = "main"

@@ -1,0 +1,71 @@
+# Continuous Deployment — every substantive merge to main is released (the CD
+# endpoint of the CI/CD ladder). Gated on the FULL ci pipeline: this workflow
+# fires via workflow_run only after `ci` concludes successfully on main, so a red
+# pipeline never ships (no duplicated test runs).
+#
+# python-semantic-release reads the Conventional Commits since the last release,
+# computes the strict-semver bump (feat -> minor, fix -> patch, breaking -> minor
+# while pre-1.0), bumps pyproject.toml [project].version, updates CHANGELOG.md,
+# commits `chore(release): X.Y.Z [skip ci]`, tags vX.Y.Z, pushes, and creates the
+# GitHub Release + builds the dist. This job then publishes that dist to PyPI via
+# OIDC Trusted Publishing (constitution Principle III — no stored token).
+# docs/ci/chore/test/style-only merges produce no release.
+name: release
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+
+# Serialize releases; never cancel one mid-flight.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: semantic release + publish
+    # Fires only when ALL of:
+    #   - RELEASE_ENABLED repo variable == 'true' — the one-time "CD armed" switch.
+    #     Keep it UNSET until the PyPI Trusted Publisher is configured for this
+    #     workflow (release.yml + `release` environment); otherwise PSR would tag +
+    #     create a GitHub Release before the publish step fails, leaving a
+    #     half-release. Arm with: gh variable set RELEASE_ENABLED --body true
+    #   - the whole ci pipeline passed on main.
+    if: >-
+      vars.RELEASE_ENABLED == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # PSR: commit the version bump, tag, push, create the GitHub Release
+      id-token: write # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0 # PSR needs full history + tags to compute the bump
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Python Semantic Release (version + changelog + tag + GitHub Release)
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          uvx --from python-semantic-release semantic-release version
+          # A release happened iff HEAD now carries a v-tag (PSR commits then tags).
+          if git tag --points-at HEAD | grep -q '^v'; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "No releasable commits since the last release — nothing to publish."
+          fi
+      - name: Publish to PyPI (OIDC Trusted Publishing)
+        if: steps.release.outputs.released == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
