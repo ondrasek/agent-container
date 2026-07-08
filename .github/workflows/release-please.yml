@@ -1,0 +1,30 @@
+# Automated semantic-version releases (constitution Principle VI — one action).
+#
+# On every push to main, release-please reads the Conventional Commits since the
+# last release and maintains a standing "Release PR" that bumps the version in
+# pyproject.toml and regenerates CHANGELOG.md. Merging that PR cuts a GitHub
+# Release + `vX.Y.Z` tag.
+#
+# Phase 2 (this file): maintain the Release PR + create the release on merge.
+# Phase 3 will add: auto-merge the Release PR once CI is green, and build +
+# publish to PyPI (OIDC Trusted Publishing) here on `release_created` — because
+# a tag pushed by the default GITHUB_TOKEN does NOT trigger a separate workflow.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
