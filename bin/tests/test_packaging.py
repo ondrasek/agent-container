@@ -31,7 +31,7 @@ def _pep723_metadata() -> dict:
             break
     assert start is not None and end is not None, "PEP 723 script block not found"
     body = "\n".join(
-        (ln[2:] if ln.startswith("# ") else ln.lstrip("#")) for ln in lines[start + 1:end]
+        (ln[2:] if ln.startswith("# ") else ln.lstrip("#")) for ln in lines[start + 1 : end]
     )
     return tomllib.loads(body)
 
@@ -62,12 +62,16 @@ def test_wheel_force_include_ships_module_and_completions():
     # agent_container/__init__.py and bundle both completion scripts as package data
     # (agent_container/completions/*), so a PyPI install has the module AND the
     # completions without a repo checkout.
-    force_include = (
-        _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
-    )
+    force_include = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     assert force_include["bin/agent-container"] == "agent_container/__init__.py"
-    assert force_include["completions/agent-container.bash"] == "agent_container/completions/agent-container.bash"
-    assert force_include["completions/agent-container.zsh"] == "agent_container/completions/agent-container.zsh"
+    assert (
+        force_include["completions/agent-container.bash"]
+        == "agent_container/completions/agent-container.bash"
+    )
+    assert (
+        force_include["completions/agent-container.zsh"]
+        == "agent_container/completions/agent-container.zsh"
+    )
 
 
 def test_wheel_bypasses_selection():
@@ -106,12 +110,17 @@ def test_main_guard_routes_through_cli():
     # not app() directly — else `uv run --script` loses Fatal->exit-1.
     tree = ast.parse(SCRIPT_PATH.read_text())
     guard = next(
-        (n for n in tree.body
-         if isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
-         and isinstance(n.test.left, ast.Name) and n.test.left.id == "__name__"),
+        (
+            n
+            for n in tree.body
+            if isinstance(n, ast.If)
+            and isinstance(n.test, ast.Compare)
+            and isinstance(n.test.left, ast.Name)
+            and n.test.left.id == "__name__"
+        ),
         None,
     )
-    assert guard is not None, "`if __name__ == \"__main__\":` guard not found"
+    assert guard is not None, '`if __name__ == "__main__":` guard not found'
     assert len(guard.body) == 1
     stmt = guard.body[0]
     assert isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)

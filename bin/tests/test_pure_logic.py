@@ -12,15 +12,15 @@ import pytest
 
 # Ground truth: the deterministic port hash (2200 + sum-of-ASCII mod 100).
 PORT_CORPUS = {
-    "acme": 2206,       # 406 % 100 = 6
-    "blog": 2220,       # 420
-    "scratch": 2244,    # 744
-    "my-box": 2204,     # 604 ('-' is 45 and counts)
-    "a": 2297,          # 97 — single char lands near the top of the window
+    "acme": 2206,  # 406 % 100 = 6
+    "blog": 2220,  # 420
+    "scratch": 2244,  # 744
+    "my-box": 2204,  # 604 ('-' is 45 and counts)
+    "a": 2297,  # 97 — single char lands near the top of the window
     "devbox123": 2298,  # 798 — digits count via their ASCII codes
-    "zz": 2244,         # 244 wraps: collides with 'scratch' by design
-    "0": 2248,          # 48
-    "a_b-c9": 2291,     # 491 — '_' (95) and '-' (45) both count
+    "zz": 2244,  # 244 wraps: collides with 'scratch' by design
+    "0": 2248,  # 48
+    "a_b-c9": 2291,  # 491 — '_' (95) and '-' (45) both count
 }
 
 
@@ -33,6 +33,7 @@ def test_port_always_inside_window(wiz):
     # Sweep far beyond the concrete corpus: the 2200..2299 window must hold
     # for ANY valid name, not just the hand-computed ones above.
     import itertools
+
     alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
     names = [c for c in alphabet]
     names += [a + b for a, b in itertools.islice(itertools.product(alphabet, "az9_-"), 100)]
@@ -78,13 +79,13 @@ def test_validate_name_accepts(wiz, name):
 @pytest.mark.parametrize(
     "name",
     [
-        "Bad",        # uppercase anywhere
+        "Bad",  # uppercase anywhere
         "ACME",
-        "-leading",   # must start with [a-z0-9]
+        "-leading",  # must start with [a-z0-9]
         "_leading",
         "has space",
         "has.dot",
-        "café",       # non-ASCII would break ord()/printf parity
+        "café",  # non-ASCII would break ord()/printf parity
         "name\n",
         "a/b",
     ],
@@ -110,14 +111,14 @@ def test_validate_window_accepts(wiz, window):
 @pytest.mark.parametrize(
     "window",
     [
-        "a;b",           # command separator
-        "$(x)",          # command substitution
-        "a b",           # whitespace (bash would word-split into two args)
-        "`id`",          # backtick substitution
+        "a;b",  # command separator
+        "$(x)",  # command substitution
+        "a b",  # whitespace (bash would word-split into two args)
+        "`id`",  # backtick substitution
         "a|b",
         "a&b",
         "a>b",
-        "",              # empty is not a valid window name
+        "",  # empty is not a valid window name
         "win\n",
     ],
 )

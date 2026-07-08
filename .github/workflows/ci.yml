@@ -1,5 +1,5 @@
 # CI for agent-container. Focused, parallel jobs:
-#   lint       — ruff (static analysis; format is intentionally hand-maintained).
+#   lint       — ruff check + ruff format --check.
 #   test       — the fast, runtime-free pytest suite across a Python matrix.
 #   shell      — the bash suites (entrypoint + completions) that pytest can't collect.
 #   build      — `uv build` (sdist + wheel).
@@ -29,6 +29,8 @@ jobs:
         uses: astral-sh/setup-uv@v7
       - name: ruff check
         run: uv run --no-project --with ruff ruff check
+      - name: ruff format --check
+        run: uv run --no-project --with ruff ruff format --check
 
   test:
     name: pytest (py${{ matrix.python }})

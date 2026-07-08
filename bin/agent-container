@@ -51,9 +51,12 @@ CONTAINER_PREFIX = "agent-container-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
 
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
+STATE_DIR = (
+    Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
+)
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
+
 
 def _is_repo_checkout(base: Path) -> bool:
     """Best-effort test that `base` is an agent-container checkout.
@@ -66,7 +69,9 @@ def _is_repo_checkout(base: Path) -> bool:
     invariant — a recognized checkout can never then serve stale package data.
     This is a heuristic, not a guaranteed false-positive-free identifier.
     """
-    return (base / "Dockerfile").is_file() and (base / "completions" / "agent-container.bash").is_file()
+    return (base / "Dockerfile").is_file() and (
+        base / "completions" / "agent-container.bash"
+    ).is_file()
 
 
 def _find_repo_root() -> Path | None:
@@ -293,7 +298,9 @@ def validate_private_key(path: Path) -> None:
     stdin is closed so an encrypted key fails cleanly instead of prompting."""
     r = subprocess.run(
         ["ssh-keygen", "-y", "-f", str(path)],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
     if r.returncode != 0:
         die(
@@ -413,7 +420,7 @@ def parse_kv_config(text: str) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         if line.startswith("export "):
-            line = line[len("export "):].lstrip()
+            line = line[len("export ") :].lstrip()
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip()
@@ -649,19 +656,24 @@ def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | Non
     log(f"name={name} port={port} env-file={env_file}")
     log(f"image={IMAGE_NAME} volume={vname}")
     argv = [
-        rt, "run", "-d",
-        "--name", cname,
-        "--env-file", str(env_file),
+        rt,
+        "run",
+        "-d",
+        "--name",
+        cname,
+        "--env-file",
+        str(env_file),
         # Publishes sshd on ALL host interfaces (remote hosts.conf attach needs
         # it). Firewall the VPS. Container-side port is 2222: sshd runs rootless
         # as the dev user, which cannot bind the privileged port 22. The host
         # port (the hashed 2200+ value) is unchanged, so `attach` is unaffected.
-        "-p", f"{port}:2222",
+        "-p",
+        f"{port}:2222",
     ]
     # Standard per-container volumes (canonical order), then optional binds.
     for vol in all_volume_mounts(name):
         argv += ["-v", vol]
-    for m in (mounts or []):
+    for m in mounts or []:
         argv += ["-v", m]
     argv += ["--restart", "unless-stopped", IMAGE_NAME]
     r = query(argv)
@@ -811,7 +823,9 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
             raise typer.Exit(2)
         what = f"stop and remove {container_name(name)}"
         if purge:
-            what += f" and DELETE all per-container volumes ({', '.join(per_container_volumes(name))})"
+            what += (
+                f" and DELETE all per-container volumes ({', '.join(per_container_volumes(name))})"
+            )
         if not questionary.confirm(f"{what}?", default=False).ask():
             log("aborted")
             return
@@ -823,30 +837,34 @@ def gather_rows(rt: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     running_short: set[str] = set()
     for cname, image, status, uptime in ps_agent_container(rt):
-        short = cname[len(CONTAINER_PREFIX):]
+        short = cname[len(CONTAINER_PREFIX) :]
         running_short.add(short)
-        rows.append({
-            "name": cname,
-            "port": read_state_port(short) or "?",
-            "image": image,
-            "status": status,
-            "uptime": uptime,
-            "stale": False,
-        })
+        rows.append(
+            {
+                "name": cname,
+                "port": read_state_port(short) or "?",
+                "image": image,
+                "status": status,
+                "uptime": uptime,
+                "stale": False,
+            }
+        )
     # Orphaned state files: a <name>.port with no running container.
     if STATE_DIR.is_dir():
         for f in sorted(STATE_DIR.glob("*.port")):
             short = f.stem
             if short in running_short:
                 continue
-            rows.append({
-                "name": container_name(short),
-                "port": read_state_port(short) or "?",
-                "image": "-",
-                "status": "stale",
-                "uptime": "-",
-                "stale": True,
-            })
+            rows.append(
+                {
+                    "name": container_name(short),
+                    "port": read_state_port(short) or "?",
+                    "image": "-",
+                    "status": "stale",
+                    "uptime": "-",
+                    "stale": True,
+                }
+            )
     return rows
 
 
@@ -862,8 +880,12 @@ def do_list(as_json: bool) -> None:
     for row in rows:
         style = "dim" if row["stale"] else None
         table.add_row(
-            str(row["name"]), str(row["port"]), str(row["image"]),
-            str(row["status"]), str(row["uptime"]), style=style,
+            str(row["name"]),
+            str(row["port"]),
+            str(row["image"]),
+            str(row["status"]),
+            str(row["uptime"]),
+            style=style,
         )
     console.print(table)
 
@@ -875,9 +897,7 @@ def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -
     # its absence) THEN attaches — select-window works on a detached session.
     base = ["ssh", f"{user}@{host}", "-p", str(port), "-t"]
     if window:
-        return base + [
-            f"tmux select-window -t main:{window} 2>/dev/null; exec tmux attach -t main"
-        ]
+        return base + [f"tmux select-window -t main:{window} 2>/dev/null; exec tmux attach -t main"]
     return base + ["tmux", "attach", "-t", "main"]
 
 
@@ -1014,7 +1034,7 @@ def _validate_wiz_name(text: str):  # questionary validator: True or error strin
 
 
 def _short(cname: str) -> str:
-    return cname[len(CONTAINER_PREFIX):]
+    return cname[len(CONTAINER_PREFIX) :]
 
 
 def wiz_build(rt: str) -> None:
@@ -1055,7 +1075,9 @@ def wiz_up(rt: str) -> None:
             return
 
     if not image_exists(rt, IMAGE_NAME):
-        if not questionary.confirm(f"image {IMAGE_NAME} is missing — build it now?", default=True).ask():
+        if not questionary.confirm(
+            f"image {IMAGE_NAME} is missing — build it now?", default=True
+        ).ask():
             return
         do_build(IMAGE_NAME)
         if not image_exists(rt, IMAGE_NAME):
@@ -1093,7 +1115,9 @@ def wiz_attach(rt: str) -> None:
     for cname, _image, _status, _uptime in ps_agent_container(rt):
         short = _short(cname)
         port = read_state_port(short) or "?"
-        choices.append(questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", "")))
+        choices.append(
+            questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", ""))
+        )
     conf = load_hosts_conf()
     for key in sorted(conf):
         if not key.endswith("_HOST"):
@@ -1104,7 +1128,9 @@ def wiz_attach(rt: str) -> None:
             continue
         rname = base.lower()  # round-trips through name_to_key for the hint
         choices.append(
-            questionary.Choice(f"{rname}  [remote {host}:{port}]", value=("remote", rname, host, port))
+            questionary.Choice(
+                f"{rname}  [remote {host}:{port}]", value=("remote", rname, host, port)
+            )
         )
     if not choices:
         log("nothing to attach to: no running local containers and no hosts.conf entries")
@@ -1187,7 +1213,9 @@ def wiz_down(rt: str) -> None:
     if questionary.confirm(
         f"also delete ALL per-container volumes ({', '.join(vols)})?", default=False
     ).ask():
-        typed = questionary.text(f"type the container name ({cname}) to confirm volume deletion").ask()
+        typed = questionary.text(
+            f"type the container name ({cname}) to confirm volume deletion"
+        ).ask()
         if typed == cname:
             purge = True
         else:
@@ -1205,7 +1233,7 @@ def wiz_purge_volume(rt: str) -> None:
     containers = {row[0] for row in ps_agent_container(rt, include_stopped=True)}
     orphans = []
     for vol in _volume_names(rt):
-        short = vol[len(CONTAINER_PREFIX): -len("-workspace")]
+        short = vol[len(CONTAINER_PREFIX) : -len("-workspace")]
         if container_name(short) not in containers:
             orphans.append(vol)
     if not orphans:
@@ -1265,7 +1293,9 @@ _MENU: list[tuple[str, object]] = [
 
 def wizard_loop() -> int:
     if not is_tty():
-        eprint("[agent-container] no TTY; interactive wizard unavailable. Use subcommands (agent-container --help).")
+        eprint(
+            "[agent-container] no TTY; interactive wizard unavailable. Use subcommands (agent-container --help)."
+        )
         return 2
     try:
         rt = detect_runtime()
@@ -1281,7 +1311,9 @@ def wizard_loop() -> int:
                 f"runtime: {rt} | running local containers: {running} | hosts.conf: {hosts}",
                 style="dim",
             )
-            choice = questionary.select("agent-container — what now?", choices=[t for t, _ in _MENU]).ask()
+            choice = questionary.select(
+                "agent-container — what now?", choices=[t for t, _ in _MENU]
+            ).ask()
             if choice is None or choice == "Quit":
                 return 0
             try:
@@ -1383,12 +1415,14 @@ def up(
 def keys(
     name: str = typer.Argument(..., help="Container short name."),
     host_key: Path | None = typer.Option(
-        None, "--host-key",
+        None,
+        "--host-key",
         help="Install an unencrypted ed25519 PRIVATE host key into the running "
         "container and reload sshd (persists on the ~/.ssh volume).",
     ),
     authorized_key: list[Path] = typer.Option(
-        None, "--authorized-key",
+        None,
+        "--authorized-key",
         help="Append an SSH public key to authorized_keys in the running "
         "container (repeatable; deduped; persists on the ~/.ssh volume).",
     ),
@@ -1400,7 +1434,11 @@ def keys(
 @app.command()
 def down(
     name: str = typer.Argument(..., help="Container short name."),
-    purge: bool = typer.Option(False, "--purge", help="Also delete all seven per-container volumes (workspace + agent logins, shell env, tmux config, ssh)."),
+    purge: bool = typer.Option(
+        False,
+        "--purge",
+        help="Also delete all seven per-container volumes (workspace + agent logins, shell env, tmux config, ssh).",
+    ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
     """Stop and remove container agent-container-NAME."""
@@ -1429,7 +1467,9 @@ def attach(
     name: str = typer.Argument(..., help="Container short name."),
     local: bool = typer.Option(False, "--local", help="Force local target (state file)."),
     remote: bool = typer.Option(False, "--remote", help="Force remote target (hosts.conf)."),
-    user: str | None = typer.Option(None, "--user", help="SSH user (default: AGENT_CONTAINER_USER or dev)."),
+    user: str | None = typer.Option(
+        None, "--user", help="SSH user (default: AGENT_CONTAINER_USER or dev)."
+    ),
     host: str | None = typer.Option(None, "--host", help="Override the resolved host."),
     window: str | None = typer.Option(
         None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
@@ -1498,12 +1538,14 @@ def _resolve_version() -> str:
     to drift from the release version release-please bumps."""
     try:
         from importlib.metadata import PackageNotFoundError, version
+
         return version("agent-container")
     except PackageNotFoundError:
         pass
     if REPO_ROOT is not None:
         try:
             import tomllib
+
             with (REPO_ROOT / "pyproject.toml").open("rb") as f:
                 return tomllib.load(f)["project"]["version"]
         except Exception:
@@ -1520,9 +1562,14 @@ def _version_callback(value: bool) -> None:
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    self_test: bool = typer.Option(False, "--self-test", help="Run doctests + port-hash corpus checks."),
+    self_test: bool = typer.Option(
+        False, "--self-test", help="Run doctests + port-hash corpus checks."
+    ),
     version: bool = typer.Option(
-        False, "--version", callback=_version_callback, is_eager=True,
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
         help="Show the agent-container version and exit.",
     ),
 ) -> None:

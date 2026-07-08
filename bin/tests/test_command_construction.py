@@ -40,8 +40,14 @@ def parse_run_argv(argv: list[str]) -> dict:
     Volumes are keyed by their container-side mount target."""
     assert argv[1:3] == ["run", "-d"], f"not a detached run argv: {argv}"
     out = {
-        "runtime": argv[0], "image": argv[-1], "name": None, "env_file": None,
-        "restart": None, "publishes": [], "inline_env": [], "volumes": {},
+        "runtime": argv[0],
+        "image": argv[-1],
+        "name": None,
+        "env_file": None,
+        "restart": None,
+        "publishes": [],
+        "inline_env": [],
+        "volumes": {},
     }
     i, end = 3, len(argv) - 1  # exclude the trailing image
     while i < end:
@@ -104,21 +110,36 @@ def test_launch_container_golden_argv(wiz, capture_query, monkeypatch, tmp_path)
 
     wiz.launch_container("podman", "acme", env_file)
 
-    assert capture_query == [[
-        "podman", "run", "-d",
-        "--name", "agent-container-acme",
-        "--env-file", str(env_file),
-        "-p", "2206:2222",
-        "-v", "agent-container-acme-workspace:/workspace",
-        "-v", "agent-container-acme-claude:/home/dev/.claude",
-        "-v", "agent-container-acme-codex:/home/dev/.codex",
-        "-v", "agent-container-acme-pi:/home/dev/.pi",
-        "-v", "agent-container-acme-shellenv:/home/dev/.agent-container",
-        "-v", "agent-container-acme-tmux:/home/dev/.config/tmux",
-        "-v", "agent-container-acme-ssh:/home/dev/.ssh",
-        "--restart", "unless-stopped",
-        "localhost/agent-container:latest",
-    ]]
+    assert capture_query == [
+        [
+            "podman",
+            "run",
+            "-d",
+            "--name",
+            "agent-container-acme",
+            "--env-file",
+            str(env_file),
+            "-p",
+            "2206:2222",
+            "-v",
+            "agent-container-acme-workspace:/workspace",
+            "-v",
+            "agent-container-acme-claude:/home/dev/.claude",
+            "-v",
+            "agent-container-acme-codex:/home/dev/.codex",
+            "-v",
+            "agent-container-acme-pi:/home/dev/.pi",
+            "-v",
+            "agent-container-acme-shellenv:/home/dev/.agent-container",
+            "-v",
+            "agent-container-acme-tmux:/home/dev/.config/tmux",
+            "-v",
+            "agent-container-acme-ssh:/home/dev/.ssh",
+            "--restart",
+            "unless-stopped",
+            "localhost/agent-container:latest",
+        ]
+    ]
 
 
 def test_launch_container_includes_extra_binds(wiz, capture_query, monkeypatch, tmp_path):
@@ -128,7 +149,9 @@ def test_launch_container_includes_extra_binds(wiz, capture_query, monkeypatch, 
     env_file, _ = make_env_file(tmp_path)
 
     wiz.launch_container(
-        "podman", "acme", env_file,
+        "podman",
+        "acme",
+        env_file,
         ["/abs/host:/opt/data", "/another:/workspace/another"],
     )
 
@@ -228,7 +251,8 @@ def test_launch_container_aborts_on_busy_port(wiz, capture_query, monkeypatch, t
 def test_launch_container_failed_run_writes_no_state(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
     monkeypatch.setattr(
-        wiz, "query",
+        wiz,
+        "query",
         lambda argv: subprocess.CompletedProcess(argv, 125, stdout="", stderr="boom"),
     )
     env_file, _ = make_env_file(tmp_path)
@@ -274,7 +298,9 @@ def test_do_up_threads_mounts_through_to_argv(up_env, capture_query, monkeypatch
     assert "-v" in argv and f"{proj.resolve()}:/workspace/proj" in argv
 
 
-def test_do_up_rejects_bad_mount_before_any_runtime_call(up_env, capture_query, monkeypatch, tmp_path):
+def test_do_up_rejects_bad_mount_before_any_runtime_call(
+    up_env, capture_query, monkeypatch, tmp_path
+):
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
@@ -358,11 +384,27 @@ def test_down_without_purge_removes_no_volumes(wiz, capture_query, monkeypatch):
 
 def test_ssh_argv_is_the_canonical_attach_command(wiz):
     assert wiz.ssh_argv("dev", "localhost", 2206) == [
-        "ssh", "dev@localhost", "-p", "2206", "-t", "tmux", "attach", "-t", "main",
+        "ssh",
+        "dev@localhost",
+        "-p",
+        "2206",
+        "-t",
+        "tmux",
+        "attach",
+        "-t",
+        "main",
     ]
     # port may arrive as str (state file / hosts.conf) — same argv either way
     assert wiz.ssh_argv("dev", "vps.example.com", "2299") == [
-        "ssh", "dev@vps.example.com", "-p", "2299", "-t", "tmux", "attach", "-t", "main",
+        "ssh",
+        "dev@vps.example.com",
+        "-p",
+        "2299",
+        "-t",
+        "tmux",
+        "attach",
+        "-t",
+        "main",
     ]
 
 
@@ -383,16 +425,22 @@ def test_ssh_argv_with_window_selects_then_attaches_single_arg(wiz):
     argv = wiz.ssh_argv("dev", "localhost", 2206, "agents")
     # Prefix unchanged; the remote command is ONE compound string (select then attach).
     assert argv[:5] == ["ssh", "dev@localhost", "-p", "2206", "-t"]
-    assert argv[5:] == [
-        "tmux select-window -t main:agents 2>/dev/null; exec tmux attach -t main"
-    ]
+    assert argv[5:] == ["tmux select-window -t main:agents 2>/dev/null; exec tmux attach -t main"]
     assert len(argv) == 6  # -t is followed by exactly one remote-command arg
 
 
 def test_ssh_argv_without_window_is_unchanged(wiz):
     # Parity guard: the no-window argv must never gain the compound form.
     assert wiz.ssh_argv("dev", "localhost", 2206) == [
-        "ssh", "dev@localhost", "-p", "2206", "-t", "tmux", "attach", "-t", "main",
+        "ssh",
+        "dev@localhost",
+        "-p",
+        "2206",
+        "-t",
+        "tmux",
+        "attach",
+        "-t",
+        "main",
     ]
 
 
@@ -401,11 +449,19 @@ def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
     wiz.cli_attach("acme", "local", None, None, "edit")
-    assert execs == [(
-        "ssh",
-        ["ssh", "dev@localhost", "-p", "2206", "-t",
-         "tmux select-window -t main:edit 2>/dev/null; exec tmux attach -t main"],
-    )]
+    assert execs == [
+        (
+            "ssh",
+            [
+                "ssh",
+                "dev@localhost",
+                "-p",
+                "2206",
+                "-t",
+                "tmux select-window -t main:edit 2>/dev/null; exec tmux attach -t main",
+            ],
+        )
+    ]
 
 
 def test_cli_attach_rejects_bad_window_before_exec(wiz, monkeypatch):
@@ -440,7 +496,10 @@ def test_resolve_local_honours_agent_container_host_and_user(wiz, monkeypatch):
 def test_resolve_remote_from_hosts_conf(wiz):
     write_hosts(wiz, "MY_BOX_HOST=vps.example.com\nMY_BOX_PORT=2204\n")
     assert wiz.resolve_attach_target("my-box", "remote") == (
-        "dev", "vps.example.com", "2204", "remote",
+        "dev",
+        "vps.example.com",
+        "2204",
+        "remote",
     )
 
 
@@ -448,7 +507,10 @@ def test_resolve_auto_prefers_remote_over_local_state(wiz):
     wiz.write_state("acme", 2206)
     write_hosts(wiz, "ACME_HOST=vps.example.com\nACME_PORT=2299\n")
     assert wiz.resolve_attach_target("acme", "auto") == (
-        "dev", "vps.example.com", "2299", "remote",
+        "dev",
+        "vps.example.com",
+        "2299",
+        "remote",
     )
 
 
@@ -493,9 +555,18 @@ def test_resolve_rejects_host_option_injection(wiz):
 
 
 def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
-    monkeypatch.setattr(wiz, "ps_agent_container", lambda rt, include_stopped=False: [
-        ("agent-container-acme", "localhost/agent-container:latest", "Up 2 hours", "2 hours ago"),
-    ])
+    monkeypatch.setattr(
+        wiz,
+        "ps_agent_container",
+        lambda rt, include_stopped=False: [
+            (
+                "agent-container-acme",
+                "localhost/agent-container:latest",
+                "Up 2 hours",
+                "2 hours ago",
+            ),
+        ],
+    )
     wiz.write_state("acme", 2206)
     wiz.write_state("ghost", 2299)
     rows = wiz.gather_rows("podman")

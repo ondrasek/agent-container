@@ -39,9 +39,9 @@ def load_wiz(monkeypatch, tmp_path):
     """
     created: list[str] = []
 
-    def _load(*, home: Path | None = None,
-              xdg_state: Path | None = None,
-              xdg_config: Path | None = None):
+    def _load(
+        *, home: Path | None = None, xdg_state: Path | None = None, xdg_config: Path | None = None
+    ):
         if home is None:
             home = tmp_path / "home"
         home.mkdir(parents=True, exist_ok=True)
@@ -53,7 +53,12 @@ def load_wiz(monkeypatch, tmp_path):
                 Path(val).mkdir(parents=True, exist_ok=True)
                 monkeypatch.setenv(var, str(val))
         # A leaked operator env var must never steer a test.
-        for var in ("AGENT_CONTAINER_RUNTIME", "AGENT_CONTAINER_HOST", "AGENT_CONTAINER_USER", "TMUX"):
+        for var in (
+            "AGENT_CONTAINER_RUNTIME",
+            "AGENT_CONTAINER_HOST",
+            "AGENT_CONTAINER_USER",
+            "TMUX",
+        ):
             monkeypatch.delenv(var, raising=False)
 
         mod_name = f"_agent_container_under_test_{next(_counter)}"

@@ -82,13 +82,11 @@ markers = [
 ]
 addopts = "-m 'not acceptance'"
 
-# Ruff — LINTING only (Principle VI: one tool for pyflakes/pycodestyle/isort/
-# pyupgrade/bugbear). Auto-formatting (`ruff format`) is deliberately NOT adopted:
-# it explodes the hand-paired argv lists this CLI is built around (`"--name",
-# cname,` -> one token per line), a real readability regression for command
-# construction. Formatting stays hand-maintained. E501 is off for the same reason
-# (doctest expected-output lines and paired argv cannot wrap). The CLI is the
-# extension-less PEP 723 script bin/agent-container, so include it explicitly.
+# Ruff — lint + format (Principle VI: one tool for pyflakes/pycodestyle/isort/
+# pyupgrade/bugbear + the formatter). `ruff check` and `ruff format --check` both
+# gate in CI. E501 is off: doctest expected-output lines can't wrap, and the
+# formatter owns real line width anyway. The CLI is the extension-less PEP 723
+# script bin/agent-container, so include it explicitly.
 [tool.ruff]
 line-length = 100
 target-version = "py311"

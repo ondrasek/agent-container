@@ -54,7 +54,9 @@ def test_help_exits_zero(wiz):
         assert sub in result.output
 
 
-@pytest.mark.parametrize("sub", ["up", "down", "attach", "logs", "list", "build", "purge", "completions"])
+@pytest.mark.parametrize(
+    "sub", ["up", "down", "attach", "logs", "list", "build", "purge", "completions"]
+)
 def test_subcommand_help_exits_zero(wiz, sub):
     result = runner.invoke(wiz.app, [sub, "--help"])
     assert result.exit_code == 0
@@ -168,7 +170,10 @@ needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not install
 def test_script_help_via_uv(tmp_path):
     proc = subprocess.run(
         ["uv", "run", "--script", str(SCRIPT_PATH), "--help"],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=300,
     )
     assert proc.returncode == 0, proc.stderr
     assert "Usage" in proc.stdout
@@ -178,7 +183,10 @@ def test_script_help_via_uv(tmp_path):
 def test_script_bare_non_tty_via_uv(tmp_path):
     proc = subprocess.run(
         ["uv", "run", "--script", str(SCRIPT_PATH)],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=300,
     )
     assert proc.returncode == 2
     assert "no TTY" in proc.stderr
@@ -198,7 +206,11 @@ def test_script_fatal_exits_one_via_uv(tmp_path):
         env.pop(var, None)
     proc = subprocess.run(
         ["uv", "run", "--script", str(SCRIPT_PATH), "attach", "acme", "--local"],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300, env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=300,
+        env=env,
     )
     assert proc.returncode == 1
     assert "FATAL: no local state for acme" in proc.stderr

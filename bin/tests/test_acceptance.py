@@ -79,15 +79,20 @@ def _cli_env(state_dir: Path) -> dict[str, str]:
 
 def _run_cli(argv: list[str], state_dir: Path, timeout: int = 600):
     return subprocess.run(
-        argv, env=_cli_env(state_dir), capture_output=True, text=True,
-        stdin=subprocess.DEVNULL, timeout=timeout,
+        argv,
+        env=_cli_env(state_dir),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=timeout,
     )
 
 
 def _gen_keypair(path: Path) -> Path:
     subprocess.run(
         ["ssh-keygen", "-q", "-t", "ed25519", "-f", str(path), "-N", ""],
-        check=True, stdin=subprocess.DEVNULL,
+        check=True,
+        stdin=subprocess.DEVNULL,
     )
     return path
 
@@ -101,9 +106,16 @@ def _fingerprint(pub: Path) -> str:
 def _container_hostkey_fp(name: str) -> str:
     """Fingerprint of the host key the running container is actually using."""
     r = subprocess.run(
-        [RUNTIME, "exec", f"agent-container-{name}", "ssh-keygen", "-lf",
-         "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key.pub"],
-        capture_output=True, text=True,
+        [
+            RUNTIME,
+            "exec",
+            f"agent-container-{name}",
+            "ssh-keygen",
+            "-lf",
+            "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key.pub",
+        ],
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 0, r.stderr
     return r.stdout.split()[1]
@@ -123,11 +135,27 @@ def _wait_sshd(port: int, timeout: int = 45) -> None:
 
 def _ssh(port: int, key: Path, command: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["ssh", "-i", str(key), "-p", str(port),
-         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-         "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-         "dev@localhost", command],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30,
+        [
+            "ssh",
+            "-i",
+            str(key),
+            "-p",
+            str(port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "dev@localhost",
+            command,
+        ],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=30,
     )
 
 
@@ -163,7 +191,7 @@ def acc(_image):
         argv = [*AGENT_CONTAINER, "up", name, "--env-file", str(env_file)]
         if host_key is not None:
             argv += ["--host-key", str(host_key)]
-        for ak in (authorized_key or []):
+        for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
         r = _run_cli(argv, state_dir)
         assert r.returncode == 0, f"up {name} failed:\n{r.stderr}"
@@ -181,7 +209,7 @@ def acc(_image):
         argv = [*AGENT_CONTAINER, "keys", name]
         if host_key is not None:
             argv += ["--host-key", str(host_key)]
-        for ak in (authorized_key or []):
+        for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
         r = _run_cli(argv, state_dir)
         assert r.returncode == 0, f"keys {name} failed:\n{r.stderr}"
@@ -189,12 +217,17 @@ def acc(_image):
     def volumes_of(name) -> list[str]:
         out = subprocess.run(
             [RUNTIME, "volume", "ls", "--format", "{{.Name}}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         ).stdout.splitlines()
         return [v for v in out if v.startswith(f"agent-container-{name}-")]
 
     yield types.SimpleNamespace(
-        up=up, down=down, keys=keys, volumes_of=volumes_of, tmp=work,
+        up=up,
+        down=down,
+        keys=keys,
+        volumes_of=volumes_of,
+        tmp=work,
     )
 
     for name in dict.fromkeys(started):  # dedupe, preserve order
@@ -222,14 +255,13 @@ def test_identity_persists_across_recreate(acc):
     hostkey = _gen_keypair(acc.tmp / "hostkey")
     injected_fp = _fingerprint(hostkey.with_suffix(".pub"))
 
-    port = acc.up("accpersist", host_key=hostkey,
-                  authorized_key=[laptop.with_suffix(".pub")])
+    port = acc.up("accpersist", host_key=hostkey, authorized_key=[laptop.with_suffix(".pub")])
     assert _container_hostkey_fp("accpersist") == injected_fp
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
-    acc.down("accpersist")            # keep volumes
-    port2 = acc.up("accpersist")      # recreate, no injection this time
-    assert _container_hostkey_fp("accpersist") == injected_fp   # stable
+    acc.down("accpersist")  # keep volumes
+    port2 = acc.up("accpersist")  # recreate, no injection this time
+    assert _container_hostkey_fp("accpersist") == injected_fp  # stable
     assert _ssh(port2, laptop, "whoami").stdout.strip() == "dev"  # authkeys kept
 
 
@@ -257,10 +289,13 @@ def test_env_file_injection(acc):
     b64 = base64.b64encode(hostkey.read_bytes()).decode()
     pub = laptop.with_suffix(".pub").read_text().strip()
 
-    port = acc.up("accenv", env_extra=[
-        f"SSH_AUTHORIZED_KEYS={pub}",
-        f"SSH_HOST_ED25519_KEY_B64={b64}",
-    ])
+    port = acc.up(
+        "accenv",
+        env_extra=[
+            f"SSH_AUTHORIZED_KEYS={pub}",
+            f"SSH_HOST_ED25519_KEY_B64={b64}",
+        ],
+    )
     assert _container_hostkey_fp("accenv") == _fingerprint(hostkey.with_suffix(".pub"))
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
