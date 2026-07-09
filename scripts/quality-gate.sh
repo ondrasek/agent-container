@@ -35,7 +35,7 @@ declare -A TOOL_HINTS
 TOOL_HINTS=(
     [ruff-check]="Run 'uv run --no-project --with ruff ruff check --output-format=full' for details. Most issues auto-fix with '... ruff check --fix'. Read the reported file before editing."
     [ruff-format]="Run 'uv run --no-project --with ruff ruff format' to auto-fix formatting."
-    [ty]="A type error in bin/agent-container (ty, targeting the requires-python floor). Read the reported line. Common fixes: annotate/narrow None (a None-guard that calls die()/raise makes ty see the branch as terminating), correct return types, fix argument types. Re-check by re-running scripts/quality-gate.sh (it reuses the cached ty venv), or directly: \"\$TYVENV/bin/ty check bin/agent-container\"."
+    [ty]="A type error in bin/agent-container (ty, targeting the requires-python floor). Read the reported line. Common fixes: annotate/narrow None (a None-guard that calls die()/raise makes ty see the branch as terminating), correct return types, fix argument types. Re-check by re-running scripts/quality-gate.sh (it reuses the cached ty venv), or directly: \"\$TYVENV/bin/ty check --python \$TYVENV bin/agent-container\"."
     [bandit]="A MEDIUM-or-higher security finding in bin/agent-container. Read the flagged line. Typical fixes: never pass shell=True (use an argv list), use the 'secrets' module (not 'random') for tokens/keys, avoid eval/exec, never hardcode credentials. NOTE: low-severity subprocess notes (B603/B607/B404/B606) are expected for this container CLI and are filtered out by -ll — do NOT try to silence them."
     [self-test]="'./bin/agent-container --self-test' failed — a doctest or the port-hash/key-derivation corpus regressed. Read the failing doctest in bin/agent-container; fix the code, or the doctest if the on-disk contract intentionally changed."
     [pytest]="Read the failing test and the code it exercises. Re-run one test: 'uv run --no-project --with pytest --with typer --with questionary --with rich pytest bin/tests/test_FILE.py::test_NAME -x --tb=long'. Fix the source, not the test, unless the test is wrong."
@@ -73,13 +73,14 @@ RUFF=(uv run --no-project --with ruff ruff)
 BANDIT=(uv run --no-project --with bandit bandit)
 PYT=(uv run --no-project "${DEPS[@]}" --with pytest pytest)
 
-# ty resolves imports against a real environment it DISCOVERS (a venv / sys.prefix),
-# not uv's `--with` overlay — so to type-check bin/agent-container against the real
-# typer/rich/questionary APIs it needs them installed in an env we point it at
-# (without this, CI's clean checkout reports unresolved-import for all three).
-# Build a cached 3.14 venv with the runtime deps + ty; rebuild only when the pin
-# set changes (marker file). First build ~3s, cached runs instant; CI's temp dir
-# is fresh each run so it builds once.
+# ty resolves third-party imports against a Python environment. Left to its own
+# discovery it picks the system interpreter (on CI that is /usr/lib/python3.12,
+# which lacks typer/questionary) — NOT uv's `--with` overlay and NOT ty's own
+# install venv. So build a 3.14 venv holding the runtime deps and point ty at it
+# EXPLICITLY with `--python` below; without that flag ty ignores this venv and
+# reports unresolved-import on a clean checkout. Cache it, rebuilding only when
+# the pin set changes (marker file): first build ~3s, cached runs instant; CI's
+# temp dir is fresh each run so it builds once.
 TY_DEPS="typer>=0.12,<1 questionary>=2.0,<3 rich>=13,<15 ty"
 TYVENV="${TMPDIR:-/tmp}/agent-container-tyvenv"
 if [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" != "$TY_DEPS" ]; then
@@ -96,7 +97,7 @@ fi
 # bandit `-ll` = MEDIUM+ only; the CLI's legitimate subprocess calls are all LOW.
 run_check "ruff-check"        "${RUFF[@]}" check
 run_check "ruff-format"       "${RUFF[@]}" format --check
-run_check "ty"                "$TYVENV/bin/ty" check bin/agent-container
+run_check "ty"                "$TYVENV/bin/ty" check --python "$TYVENV" bin/agent-container
 run_check "bandit"            "${BANDIT[@]}" -q -ll bin/agent-container
 run_check "self-test"         ./bin/agent-container --self-test
 run_check "pytest"            "${PYT[@]}" bin/tests -x -q
