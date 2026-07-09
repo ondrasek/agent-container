@@ -593,12 +593,19 @@ def test_resolve_ssh_injection_builds_ro_binds(wiz, monkeypatch, tmp_path):
     p2.write_text("ssh-ed25519 BBBBB b")  # no trailing newline -> normalized
     specs = wiz.resolve_ssh_injection("acme", hk, [p1, p2])
     assert specs == [
-        f"{hk.resolve()}:/run/agent-container/ssh_host_ed25519_key:ro",
+        f"{wiz.STATE_DIR}/acme.host_key:/run/agent-container/ssh_host_ed25519_key:ro",
         f"{wiz.STATE_DIR}/acme.authorized_keys:/run/agent-container/authorized_keys:ro",
     ]
+    # Host key is staged as a copy (not the original mounted directly) so the
+    # container's dev user can read it regardless of host uid; see the docstring.
+    hk_staged = wiz.STATE_DIR / "acme.host_key"
+    assert hk_staged.read_text() == "PRIVATE"
     ak = wiz.STATE_DIR / "acme.authorized_keys"
     assert ak.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
-    assert (ak.stat().st_mode & 0o777) == 0o600
+    # 0644 (container-readable) — safe because STATE_DIR is locked to 0700.
+    assert (ak.stat().st_mode & 0o777) == 0o644
+    assert (hk_staged.stat().st_mode & 0o777) == 0o644
+    assert (wiz.STATE_DIR.stat().st_mode & 0o777) == 0o700
 
 
 def test_resolve_ssh_injection_rejects_missing_files(wiz, monkeypatch, tmp_path):

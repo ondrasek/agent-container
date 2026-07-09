@@ -315,18 +315,33 @@ def resolve_ssh_injection(
     """Resolve `up --host-key/--authorized-key` into read-only '-v' bind specs.
 
     The entrypoint installs whatever appears at the container-side inject paths
-    onto the persisted ~/.ssh volume at boot. The host key file is mounted
-    directly; authorized_keys are concatenated into a stable per-container
-    state file (`<name>.authorized_keys`) so the bind survives a container
+    onto the persisted ~/.ssh volume at boot. Both the host key and the
+    concatenated authorized_keys are staged as per-container files under
+    STATE_DIR and bind-mounted from there, so the bind survives a container
     restart (a temp file would vanish and leave an empty mount).
+
+    The staged files are mode 0644 on purpose: the entrypoint reads them as the
+    unprivileged `dev` user, whose uid need NOT equal the host uid that ran `up`
+    (it does not on CI runners / any host with a different login uid). Docker has
+    no bind-mount chown (unlike podman's `:U`), so an 0600 file owned by the host
+    user is unreadable inside the container — the read fails and, under the
+    entrypoint's `set -e`, crash-loops sshd. 0644 is safe: STATE_DIR is locked to
+    0700 so no other HOST user can traverse to these files, while the container
+    reads each file inode directly through the mount (host dir perms don't gate
+    it). authorized_keys are public regardless; the host key stays dir-protected.
     """
     specs: list[str] = []
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.chmod(0o700)
     if host_key is not None:
         hk = host_key.expanduser()
         if not hk.is_file():
             die(f"--host-key: {host_key} does not exist or is not a file")
         validate_private_key(hk)
-        specs.append(f"{hk.resolve()}:{INJECT_HOST_KEY_PATH}:ro")
+        hk_file = STATE_DIR / f"{name}.host_key"
+        hk_file.write_bytes(hk.read_bytes())
+        hk_file.chmod(0o644)
+        specs.append(f"{hk_file}:{INJECT_HOST_KEY_PATH}:ro")
     if authorized_keys:
         blob = ""
         for p in authorized_keys:
@@ -335,10 +350,9 @@ def resolve_ssh_injection(
                 die(f"--authorized-key: {p} does not exist or is not a file")
             text = pk.read_text()
             blob += text if text.endswith("\n") else text + "\n"
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
         ak_file = STATE_DIR / f"{name}.authorized_keys"
         ak_file.write_text(blob)
-        ak_file.chmod(0o600)
+        ak_file.chmod(0o644)
         specs.append(f"{ak_file}:{INJECT_AUTHORIZED_KEYS_PATH}:ro")
     return specs
 
