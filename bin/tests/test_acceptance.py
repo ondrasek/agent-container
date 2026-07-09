@@ -121,6 +121,33 @@ def _container_hostkey_fp(name: str) -> str:
     return r.stdout.split()[1]
 
 
+def _container_diag(name: str) -> str:
+    """Container status + recent logs — surfaced when sshd fails to come up so a
+    CI failure shows WHY (crash, missing host key, sshd exit) instead of a bare
+    'not reachable'. Reproducing this locally is hard (the failures are specific
+    to the CI runtime), so the diagnostics must travel with the assertion."""
+    cname = f"agent-container-{name}"
+    chunks = []
+    for label, argv in (
+        (
+            "ps",
+            [
+                RUNTIME,
+                "ps",
+                "-a",
+                "--filter",
+                f"name={cname}",
+                "--format",
+                "{{.Status}} | {{.Ports}}",
+            ],
+        ),
+        ("logs (tail 80)", [RUNTIME, "logs", "--tail", "80", cname]),
+    ):
+        r = subprocess.run(argv, capture_output=True, text=True)
+        chunks.append(f"--- {label} ---\n{(r.stdout + r.stderr).strip()}")
+    return "\n".join(chunks)
+
+
 def _wait_sshd(port: int, timeout: int = 45) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -197,7 +224,10 @@ def acc(_image):
         assert r.returncode == 0, f"up {name} failed:\n{r.stderr}"
         started.append(name)
         port = int((state_dir / "agent-container" / f"{name}.port").read_text().strip())
-        _wait_sshd(port)
+        try:
+            _wait_sshd(port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{_container_diag(name)}") from None
         return port
 
     def down(name, *, purge=False):
