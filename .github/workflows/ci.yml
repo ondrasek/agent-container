@@ -1,7 +1,7 @@
 # CI for agent-container. The `quality-gate` job runs the SAME script as the
 # local Claude Code Stop hook (scripts/quality-gate.sh) — one source of truth for
 # "what must pass", so local and CI can't diverge. Locally a failure feeds Claude
-# a fix prompt (exit 2); here a failure hard-fails the job. Because release.yml
+# a fix prompt (exit 2); here a failure hard-fails the job. Because publish.yml
 # gates on `ci` success, any quality-gate finding blocks the release (Principle
 # VII). The remaining jobs add what a single gate run can't: a pinned-interpreter
 # pytest run, commit-message validation, the built artifact, and real-container

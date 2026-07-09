@@ -747,7 +747,7 @@ Releases are **fully automated** — there is no manual tagging and no release P
    message: `feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → minor
    (while pre-1.0). `docs:`/`ci:`/`chore:`/`test:`/`style:` merges cut **no** release.
 2. `ci.yml` runs the full pipeline (lint · test matrix · shell · build · acceptance).
-3. Once `ci` is green on `main`, `release.yml` fires (via `workflow_run`).
+3. Once `ci` is green on `main`, `publish.yml` fires (via `workflow_run`).
    [python-semantic-release](https://python-semantic-release.readthedocs.io/) computes
    the next version from the commits, bumps `pyproject.toml` + `CHANGELOG.md`, commits
    `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z`, creates the GitHub Release, and
@@ -760,10 +760,10 @@ The version is single-sourced in `pyproject.toml`; check the installed version w
 **One-time operator setup (arming CD):**
 1. Configure the [PyPI trusted publisher](https://docs.pypi.org/trusted-publishers/)
    for the `agent-container` project (owner `ondrasek`, repo `agent-container`,
-   workflow `release.yml`, environment `release`).
+   workflow `publish.yml`, environment `release`).
 2. Arm the pipeline: `gh variable set RELEASE_ENABLED --body true`.
 
-Until `RELEASE_ENABLED` is set, `release.yml` stays dormant (so a release can't
+Until `RELEASE_ENABLED` is set, `publish.yml` stays dormant (so a release can't
 half-fire before PyPI is ready). After both steps, releases are automatic and
 need no stored secrets.
 

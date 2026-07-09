@@ -10,6 +10,12 @@
 # GitHub Release + builds the dist. This job then publishes that dist to PyPI via
 # OIDC Trusted Publishing (constitution Principle III — no stored token).
 # docs/ci/chore/test/style-only merges produce no release.
+#
+# FILENAME: this file MUST stay `publish.yml`. PyPI's Trusted Publisher for the
+# `agent-container` project is bound to (owner: ondrasek, repo: agent-container,
+# workflow: publish.yml, environment: release). The OIDC token carries the
+# workflow FILENAME as a claim, so renaming this file breaks the publisher match
+# (`invalid-publisher`). The in-workflow `name:` below is cosmetic and can differ.
 name: release
 
 on:
@@ -36,7 +42,7 @@ jobs:
     # Fires only when ALL of:
     #   - RELEASE_ENABLED repo variable == 'true' — the one-time "CD armed" switch.
     #     Keep it UNSET until the PyPI Trusted Publisher is configured for this
-    #     workflow (release.yml + `release` environment); otherwise PSR would tag +
+    #     workflow (publish.yml + `release` environment); otherwise PSR would tag +
     #     create a GitHub Release before the publish step fails, leaving a
     #     half-release. Arm with: gh variable set RELEASE_ENABLED --body true
     #   - the whole ci pipeline passed on main.
