@@ -17,6 +17,13 @@ on:
     workflows: ["ci"]
     types: [completed]
     branches: [main]
+  # Manual recovery / re-publish: build the version currently in pyproject.toml
+  # on main and upload it to PyPI, WITHOUT running semantic-release. Use when a
+  # release was tagged + GitHub-released but the PyPI upload failed (e.g. the
+  # Trusted Publisher was not yet configured), since PSR will not re-release an
+  # already-tagged version. `skip-existing` makes it a safe no-op if the version
+  # is already on PyPI.
+  workflow_dispatch: {}
 
 # Serialize releases; never cancel one mid-flight.
 concurrency:
@@ -69,3 +76,28 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           attestations: true
+
+  publish-current:
+    name: build + publish current version to PyPI (manual)
+    # workflow_dispatch only — build the version in pyproject.toml on main and
+    # upload it via the same OIDC Trusted Publishing path, without PSR. For
+    # recovering a release whose PyPI upload failed after the tag/GitHub release
+    # were already created.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Build distributions
+        run: uv build
+      - name: Publish to PyPI (OIDC Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
+          skip-existing: true
