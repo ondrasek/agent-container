@@ -93,6 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      contents: read # checkout (declaring `permissions` drops all others to none)
       id-token: write # OIDC token for PyPI Trusted Publishing
     steps:
       - uses: actions/checkout@v7
