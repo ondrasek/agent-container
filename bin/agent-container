@@ -35,6 +35,7 @@ import socket
 import subprocess
 import sys
 import termios
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
@@ -553,6 +554,20 @@ def port_free(port: int) -> bool:
         return False
 
 
+def wait_port_released(port: int, timeout: float = 15.0) -> None:
+    """Block until `port` is bindable again (or timeout elapses). `<rt> rm`
+    returns before the daemon has finished tearing down the published-port
+    forwarding, so an immediate `up` on the same name hits a false 'port in
+    use'. Making `down` wait keeps a down+up (recreate) cycle on one name
+    reliable. Best-effort: on timeout we simply return and let `up` report the
+    real state."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if port_free(port):
+            return
+        time.sleep(0.25)
+
+
 def write_state(name: str, port: int) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_file(name).write_text(f"{port}\n")
@@ -740,6 +755,9 @@ def down_container(rt: str, name: str, purge: bool) -> None:
         query([rt, "stop", cname])
         log(f"removing {cname}")
         query([rt, "rm", "-f", cname])
+        # `rm` returns before the daemon frees the published port; wait so an
+        # immediate re-`up` on the same name doesn't hit a false 'port in use'.
+        wait_port_released(port_for_name(name))
     else:
         log(f"no container named {cname}")
 
