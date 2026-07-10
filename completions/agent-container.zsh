@@ -20,7 +20,8 @@
 # Gather state-file names into the caller's `names` array.
 __agent_container_gather_local() {
     local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-container" f
-    for f in "$state_dir"/*.port(N); do
+    # Per-host state (<state>/<host>/<name>.port) plus any legacy flat files.
+    for f in "$state_dir"/*.port(N) "$state_dir"/*/*.port(N); do
         names+=("${f:t:r}")
     done
 }
@@ -65,6 +66,7 @@ _agent-container() {
     local -a cmds
     cmds=(
         'build:Build the image at the repo root'
+        'host:Manage deployment hosts (add, ls)'
         'up:Start a container (detached)'
         'keys:Inject SSH host key / authorized keys into a running container'
         'down:Stop and remove a container'
@@ -95,11 +97,22 @@ _agent-container() {
                     ;;
                 up)
                     _arguments \
+                        '--host[Deploy to this registered host]:host:' \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
                         '--host-key[Inject an ed25519 private host key]:file:_files' \
                         '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
                         '*:container:__agent_container_names'
+                    ;;
+                host)
+                    _arguments \
+                        '1:subcommand:(add ls)' \
+                        '--driver[Runtime driver: docker or podman]:driver:(docker podman)' \
+                        '--docker-context[Existing docker context]:context:' \
+                        '--connection[Podman system connection]:connection:' \
+                        '--address[Attach address override]:address:' \
+                        '--default[Make this the default deploy target]' \
+                        '--json[Emit machine-readable JSON]'
                     ;;
                 keys)
                     _arguments \
@@ -109,6 +122,7 @@ _agent-container() {
                     ;;
                 down)
                     _arguments \
+                        '--host[Host the container runs on]:host:' \
                         '--purge[Also delete all per-container volumes]' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
                         '*:container:__agent_container_names_local'
