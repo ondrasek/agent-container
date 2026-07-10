@@ -1,10 +1,14 @@
-"""Command-construction tests: assert the exact argv the wizard would hand to
+"""Command-construction tests: assert the exact argv/compose the CLI hands to
 the container runtime and to ssh, WITHOUT docker/podman/ssh being present.
 subprocess/exec entry points are captured, never executed.
+
+Feature 001: the run mechanism is compose (generated file + `<rt> compose up`),
+not imperative `docker run`; state is namespaced per host.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -12,7 +16,7 @@ import pytest
 
 @pytest.fixture
 def capture_query(wiz, monkeypatch):
-    """Replace wiz.query with a recorder returning success."""
+    """Replace wiz.query with a recorder returning success (used for ps/down)."""
     calls: list[list[str]] = []
 
     def fake_query(argv):
@@ -23,7 +27,17 @@ def capture_query(wiz, monkeypatch):
     return calls
 
 
-# --- container start argv -------------------------------------------------------
+@pytest.fixture
+def capture_compose(wiz, monkeypatch):
+    """Record subprocess.run argv (the `compose up` invocation) and succeed."""
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *a, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(wiz.subprocess, "run", fake_run)
+    return calls
 
 
 def make_env_file(tmp_path, secret="hunter2-super-secret"):
@@ -32,136 +46,96 @@ def make_env_file(tmp_path, secret="hunter2-super-secret"):
     return env_file, secret
 
 
-def parse_run_argv(argv: list[str]) -> dict:
-    """Parse a `<runtime> run -d …` argv into a structural view so behavioral
-    assertions don't couple to flag ORDER (constitution Principle V — validate
-    the command's meaning, not its exact byte sequence). Collects repeated -v/-p,
-    the --env-file, any inline -e/--env, the --restart policy, name, and image.
-    Volumes are keyed by their container-side mount target."""
-    assert argv[1:3] == ["run", "-d"], f"not a detached run argv: {argv}"
-    out = {
-        "runtime": argv[0],
-        "image": argv[-1],
-        "name": None,
-        "env_file": None,
-        "restart": None,
-        "publishes": [],
-        "inline_env": [],
-        "volumes": {},
-    }
-    i, end = 3, len(argv) - 1  # exclude the trailing image
-    while i < end:
-        tok = argv[i]
-        takes_value = True
-        if tok == "-v":
-            spec = argv[i + 1]
-            target = spec.split(":", 1)[1].split(":")[0]  # source:TARGET[:opts]
-            out["volumes"][target] = spec
-        elif tok == "-p":
-            out["publishes"].append(argv[i + 1])
-        elif tok == "--env-file":
-            out["env_file"] = argv[i + 1]
-        elif tok in ("-e", "--env"):
-            out["inline_env"].append(argv[i + 1])
-        elif tok == "--restart":
-            out["restart"] = argv[i + 1]
-        elif tok == "--name":
-            out["name"] = argv[i + 1]
-        else:
-            takes_value = False
-        i += 2 if takes_value else 1
-    return out
+LOCAL_HOST = {"driver": "podman", "context": "", "address": "localhost"}
 
 
-def test_launch_container_behavior(wiz, capture_query, monkeypatch, tmp_path):
-    """Behavioral (order-independent) assertions on the container start command:
-    it is what the container actually gets, but a regenerated implementation may
-    order flags differently. Assert MEANING via parse_run_argv, not exact bytes."""
+# --- compose up exec ----------------------------------------------------------
+
+
+def test_compose_up_exec_generates_file_and_runs(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
 
-    wiz.launch_container("podman", "acme", env_file)
+    wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
 
-    (argv,) = capture_query
-    run = parse_run_argv(argv)
-    assert run["runtime"] == "podman"
-    assert run["name"] == "agent-container-acme"
-    assert run["image"] == wiz.IMAGE_NAME
-    # Name-hash host port published to the rootless container-side port 2222.
-    assert run["publishes"] == ["2206:2222"]
-    # Credentials via --env-file only — never inlined on argv (Principle III).
-    assert run["env_file"] == str(env_file)
-    assert run["inline_env"] == []
-    assert run["restart"] == "unless-stopped"
-    # Mounts exactly the canonical per-container volume set (from the same
-    # source of truth the CLI uses), each at its documented target.
-    expected = {spec.split(":", 1)[1]: spec for spec in wiz.all_volume_mounts("acme")}
-    assert run["volumes"] == expected
-    # state file written (the completions and `attach` read it)
-    assert wiz.read_state_port("acme") == "2206"
+    # A compose file is written under the per-host state dir.
+    cf = wiz.compose_file_path("local", "acme")
+    assert cf.is_file()
+    model = json.loads(cf.read_text())
+    assert model["name"] == "agent-container-acme"
+    assert model["services"]["agent"]["container_name"] == "agent-container-acme"
+    assert model["services"]["agent"]["ports"] == ["2206:2222"]
+    assert model["services"]["agent"]["env_file"] == [str(env_file)]
+    assert set(model["volumes"]) == set(wiz.per_container_volumes("acme"))
+
+    # compose up -d --build invoked on the host's runtime.
+    (argv,) = capture_compose
+    assert argv[0] == "podman"  # driver runtime (context "" -> bare)
+    for tok in ("compose", "-p", "agent-container-acme", "-f", str(cf), "up", "-d", "--build"):
+        assert tok in argv
+
+    # State written under the host segment.
+    assert wiz.read_state_port("local", "acme") == "2206"
 
 
-def test_launch_container_golden_argv(wiz, capture_query, monkeypatch, tmp_path):
-    """Golden snapshot of the full run argv — living documentation of the exact
-    canonical command. Unlike the behavioral test above this IS order-coupled;
-    update it deliberately when the command intentionally changes."""
+def test_compose_up_exec_never_inlines_secrets(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    env_file, _ = make_env_file(tmp_path)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    env_file, secret = make_env_file(tmp_path)
 
-    wiz.launch_container("podman", "acme", env_file)
+    wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
 
-    assert capture_query == [
-        [
-            "podman",
-            "run",
-            "-d",
-            "--name",
-            "agent-container-acme",
-            "--env-file",
-            str(env_file),
-            "-p",
-            "2206:2222",
-            "-v",
-            "agent-container-acme-workspace:/workspace",
-            "-v",
-            "agent-container-acme-claude:/home/dev/.claude",
-            "-v",
-            "agent-container-acme-codex:/home/dev/.codex",
-            "-v",
-            "agent-container-acme-pi:/home/dev/.pi",
-            "-v",
-            "agent-container-acme-shellenv:/home/dev/.agent-container",
-            "-v",
-            "agent-container-acme-tmux:/home/dev/.config/tmux",
-            "-v",
-            "agent-container-acme-ssh:/home/dev/.ssh",
-            "--restart",
-            "unless-stopped",
-            "localhost/agent-container:latest",
-        ]
-    ]
+    (argv,) = capture_compose
+    joined = "\x00".join(argv)
+    assert secret not in joined  # env-file is referenced, not inlined
+    assert "GITHUB_TOKEN" not in joined
+    # And the generated compose file references the env file, never its contents.
+    assert secret not in wiz.compose_file_path("local", "acme").read_text()
 
 
-def test_launch_container_includes_extra_binds(wiz, capture_query, monkeypatch, tmp_path):
-    """--mount binds are mounted at their targets alongside the canonical volumes
-    (order is immaterial to the runtime, so it is not asserted)."""
+def test_compose_up_exec_port_is_name_hash(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
+    wiz.compose_up_exec("local", LOCAL_HOST, "my-box", env_file, [], None, [])
+    model = json.loads(wiz.compose_file_path("local", "my-box").read_text())
+    assert model["services"]["agent"]["ports"] == ["2204:2222"]
 
-    wiz.launch_container(
-        "podman",
-        "acme",
-        env_file,
-        ["/abs/host:/opt/data", "/another:/workspace/another"],
+
+def test_compose_up_exec_aborts_on_busy_port(wiz, capture_compose, monkeypatch, tmp_path):
+    monkeypatch.setattr(wiz, "port_free", lambda port: False)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    env_file, _ = make_env_file(tmp_path)
+    with pytest.raises(wiz.Fatal, match="port 2206 is already in use"):
+        wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
+    assert capture_compose == []  # no compose up attempted
+    assert wiz.read_state_port("local", "acme") is None  # no state written
+
+
+def test_compose_up_exec_failed_run_writes_no_state(wiz, monkeypatch, tmp_path):
+    monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(
+        wiz.subprocess, "run", lambda argv, *a, **k: subprocess.CompletedProcess(argv, 1)
     )
+    env_file, _ = make_env_file(tmp_path)
+    with pytest.raises(wiz.Fatal, match="compose up failed"):
+        wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
+    assert wiz.read_state_port("local", "acme") is None
 
-    (argv,) = capture_query
-    run = parse_run_argv(argv)
-    # Both binds present at their targets, on top of the seven canonical volumes.
-    assert run["volumes"]["/opt/data"] == "/abs/host:/opt/data"
-    assert run["volumes"]["/workspace/another"] == "/another:/workspace/another"
-    assert run["volumes"]["/workspace"] == "agent-container-acme-workspace:/workspace"
-    assert len(run["volumes"]) == 7 + 2
+
+def test_compose_up_exec_threads_binds_into_volumes(wiz, capture_compose, monkeypatch, tmp_path):
+    monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    env_file, _ = make_env_file(tmp_path)
+    wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, ["/abs/host:/opt/data"], None, [])
+    vols = json.loads(wiz.compose_file_path("local", "acme").read_text())["services"]["agent"][
+        "volumes"
+    ]
+    assert "/abs/host:/opt/data" in vols
+    assert "agent-container-acme-workspace:/workspace" in vols
+    assert len(vols) == 7 + 1
 
 
 # --- bind-mount resolution (--mount) -----------------------------------------
@@ -199,15 +173,12 @@ def test_resolve_bind_mount_rejects_file(wiz, tmp_path):
 
 
 def test_resolve_bind_mount_makes_relative_host_absolute(wiz, tmp_path, monkeypatch):
-    # A relative host dir must become absolute (would fail if .resolve() dropped).
     (tmp_path / "proj").mkdir()
     monkeypatch.chdir(tmp_path)
     assert wiz.resolve_bind_mount("proj") == f"{(tmp_path / 'proj').resolve()}:/workspace/proj"
 
 
 def test_resolve_bind_mount_dereferences_symlinked_host(wiz, tmp_path):
-    # The load-bearing pwd -P / Path.resolve() behavior: a symlinked host dir
-    # resolves to its real target, and the container basename follows the target.
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
@@ -215,77 +186,34 @@ def test_resolve_bind_mount_dereferences_symlinked_host(wiz, tmp_path):
     assert wiz.resolve_bind_mount(str(link)) == f"{real.resolve()}:/workspace/real"
 
 
-def test_launch_container_never_inlines_secrets(wiz, capture_query, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    env_file, secret = make_env_file(tmp_path)
-
-    wiz.launch_container("docker", "acme", env_file)
-
-    (argv,) = capture_query
-    joined = "\x00".join(argv)
-    assert secret not in joined
-    assert "GITHUB_TOKEN" not in joined
-    assert "-e" not in argv and "--env" not in argv  # only --env-file is allowed
-    assert "--env-file" in argv
-    assert argv[argv.index("--env-file") + 1] == str(env_file)
-
-
-def test_launch_container_port_is_name_hash(wiz, capture_query, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    env_file, _ = make_env_file(tmp_path)
-    wiz.launch_container("podman", "my-box", env_file)
-    (argv,) = capture_query
-    assert argv[argv.index("-p") + 1] == "2204:2222"
-    assert argv[argv.index("-v") + 1] == "agent-container-my-box-workspace:/workspace"
-
-
-def test_launch_container_aborts_on_busy_port(wiz, capture_query, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "port_free", lambda port: False)
-    env_file, _ = make_env_file(tmp_path)
-    with pytest.raises(wiz.Fatal, match="port 2206 is already in use"):
-        wiz.launch_container("podman", "acme", env_file)
-    assert capture_query == []  # no `run` attempted
-    assert wiz.read_state_port("acme") is None  # no state written
-
-
-def test_launch_container_failed_run_writes_no_state(wiz, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(
-        wiz,
-        "query",
-        lambda argv: subprocess.CompletedProcess(argv, 125, stdout="", stderr="boom"),
-    )
-    env_file, _ = make_env_file(tmp_path)
-    with pytest.raises(wiz.Fatal, match="run failed"):
-        wiz.launch_container("podman", "acme", env_file)
-    assert wiz.read_state_port("acme") is None
-
-
-# --- do_up orchestration (no runtime calls beyond the mocks) ----------------------
+# --- do_up orchestration (compose path) --------------------------------------
 
 
 @pytest.fixture
-def up_env(wiz, monkeypatch):
+def up_env(wiz, monkeypatch, tmp_path):
+    # No registry -> implicit local host; no containers running; port free; a
+    # resolvable build context; compose up is captured, not executed.
     monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
-    monkeypatch.setattr(wiz, "container_running", lambda rt, cname: False)
-    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
-    monkeypatch.setattr(wiz, "image_exists", lambda rt, tag: True)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
     return wiz
 
 
-def test_do_up_resolves_env_file_and_runs(up_env, capture_query, monkeypatch, tmp_path):
+def test_do_up_resolves_env_file_and_runs(up_env, capture_compose, monkeypatch, tmp_path):
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
     (work / ".env").write_text("TOKEN=x\n")
     monkeypatch.chdir(work)
     wiz.do_up("acme")
-    (argv,) = capture_query
-    assert argv[argv.index("--env-file") + 1] == str(work / ".env")
+    (argv,) = capture_compose
+    assert "compose" in argv and "up" in argv
+    model = json.loads(wiz.compose_file_path("local", "acme").read_text())
+    assert model["services"]["agent"]["env_file"] == [str(work / ".env")]
 
 
-def test_do_up_threads_mounts_through_to_argv(up_env, capture_query, monkeypatch, tmp_path):
+def test_do_up_threads_mounts_through(up_env, capture_compose, monkeypatch, tmp_path):
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
@@ -294,12 +222,14 @@ def test_do_up_threads_mounts_through_to_argv(up_env, capture_query, monkeypatch
     proj.mkdir()
     monkeypatch.chdir(work)
     wiz.do_up("acme", mounts=[str(proj)])
-    (argv,) = capture_query
-    assert "-v" in argv and f"{proj.resolve()}:/workspace/proj" in argv
+    vols = json.loads(wiz.compose_file_path("local", "acme").read_text())["services"]["agent"][
+        "volumes"
+    ]
+    assert f"{proj.resolve()}:/workspace/proj" in vols
 
 
 def test_do_up_rejects_bad_mount_before_any_runtime_call(
-    up_env, capture_query, monkeypatch, tmp_path
+    up_env, capture_compose, monkeypatch, tmp_path
 ):
     wiz = up_env
     work = tmp_path / "work"
@@ -308,78 +238,81 @@ def test_do_up_rejects_bad_mount_before_any_runtime_call(
     monkeypatch.chdir(work)
     with pytest.raises(wiz.Fatal, match="does not exist or is not a directory"):
         wiz.do_up("acme", mounts=[str(tmp_path / "missing")])
-    assert capture_query == []
+    assert capture_compose == []
 
 
-def test_do_up_dies_without_env_file(up_env, capture_query, monkeypatch, tmp_path):
+def test_do_up_dies_without_env_file(up_env, capture_compose, monkeypatch, tmp_path):
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
     with pytest.raises(wiz.Fatal, match="no .env found"):
         wiz.do_up("acme")
-    assert capture_query == []
+    assert capture_compose == []
 
 
-def test_do_up_noop_when_already_running(up_env, capture_query, monkeypatch):
+def test_do_up_noop_when_already_running(up_env, capture_compose, monkeypatch):
     wiz = up_env
-    monkeypatch.setattr(wiz, "container_running", lambda rt, cname: True)
+    monkeypatch.setattr(
+        wiz, "host_container_names", lambda host, include_stopped=False: {"agent-container-acme"}
+    )
     wiz.do_up("acme")  # logs and returns
-    assert capture_query == []
+    assert capture_compose == []
 
 
-def test_do_up_dies_on_stopped_leftover(up_env, monkeypatch):
+def test_do_up_dies_on_stopped_leftover(up_env, capture_compose, monkeypatch):
     wiz = up_env
-    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: True)
+    monkeypatch.setattr(
+        wiz,
+        "host_container_names",
+        lambda host, include_stopped=False: {"agent-container-acme"} if include_stopped else set(),
+    )
     with pytest.raises(wiz.Fatal, match="exists but is not running"):
         wiz.do_up("acme")
+    assert capture_compose == []
 
 
-def test_do_up_dies_when_image_missing(up_env, monkeypatch, tmp_path):
-    wiz = up_env
-    work = tmp_path / "work"
-    work.mkdir()
-    (work / ".env").write_text("TOKEN=x\n")
-    monkeypatch.chdir(work)
-    monkeypatch.setattr(wiz, "image_exists", lambda rt, tag: False)
-    with pytest.raises(wiz.Fatal, match="image .* not found"):
-        wiz.do_up("acme")
-
-
-def test_do_up_rejects_invalid_name_before_any_runtime_call(up_env, capture_query):
+def test_do_up_rejects_invalid_name_before_any_runtime_call(up_env, capture_compose):
     wiz = up_env
     with pytest.raises(wiz.Fatal, match="invalid <name>"):
         wiz.do_up("Bad Name")
-    assert capture_query == []
+    assert capture_compose == []
 
 
-# --- down / purge volume removal ----------------------------------------------------
+# --- down / purge via compose ------------------------------------------------
 
 
-def test_down_purge_removes_all_seven_volumes(wiz, capture_query, monkeypatch):
-    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
-    wiz.write_state("acme", 2206)
-    wiz.down_container("podman", "acme", purge=True)
-    removed = [c[3] for c in capture_query if c[:3] == ["podman", "volume", "rm"]]
-    assert removed == [
-        "agent-container-acme-workspace",
-        "agent-container-acme-claude",
-        "agent-container-acme-codex",
-        "agent-container-acme-pi",
-        "agent-container-acme-shellenv",
-        "agent-container-acme-tmux",
-        "agent-container-acme-ssh",
-    ]
-    assert wiz.read_state_port("acme") is None  # state cleared
+def _seed_compose(wiz, name="acme"):
+    wiz.write_compose_file("local", name, wiz.build_compose_model(name, "/repo"))
+    wiz.write_state("local", name, wiz.port_for_name(name))
 
 
-def test_down_without_purge_removes_no_volumes(wiz, capture_query, monkeypatch):
-    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: True)
-    wiz.down_container("podman", "acme", purge=False)
-    assert not any(c[:3] == ["podman", "volume", "rm"] for c in capture_query)
+def test_down_purge_uses_compose_down_volumes(wiz, capture_query, monkeypatch):
+    _seed_compose(wiz)
+    monkeypatch.setattr(
+        wiz, "host_container_names", lambda h, include_stopped=False: {"agent-container-acme"}
+    )
+    monkeypatch.setattr(wiz, "wait_port_released", lambda port: None)
+    wiz.down_container("local", LOCAL_HOST, "acme", purge=True)
+    downs = [c for c in capture_query if "down" in c]
+    assert downs and any("--volumes" in c for c in downs)
+    assert wiz.read_state_port("local", "acme") is None  # state cleared
+    assert not wiz.compose_file_path("local", "acme").is_file()  # artifact removed on purge
 
 
-# --- attach argv -------------------------------------------------------------------
+def test_down_without_purge_preserves_volumes(wiz, capture_query, monkeypatch):
+    _seed_compose(wiz)
+    monkeypatch.setattr(
+        wiz, "host_container_names", lambda h, include_stopped=False: {"agent-container-acme"}
+    )
+    monkeypatch.setattr(wiz, "wait_port_released", lambda port: None)
+    wiz.down_container("local", LOCAL_HOST, "acme", purge=False)
+    downs = [c for c in capture_query if "down" in c]
+    assert downs and not any("--volumes" in c for c in downs)
+    assert wiz.compose_file_path("local", "acme").is_file()  # preserved
+
+
+# --- attach argv -------------------------------------------------------------
 
 
 def test_ssh_argv_is_the_canonical_attach_command(wiz):
@@ -394,7 +327,6 @@ def test_ssh_argv_is_the_canonical_attach_command(wiz):
         "-t",
         "main",
     ]
-    # port may arrive as str (state file / hosts.conf) — same argv either way
     assert wiz.ssh_argv("dev", "vps.example.com", "2299") == [
         "ssh",
         "dev@vps.example.com",
@@ -409,7 +341,7 @@ def test_ssh_argv_is_the_canonical_attach_command(wiz):
 
 
 def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
     wiz.cli_attach("acme", "local", None, None)
@@ -418,19 +350,17 @@ def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
     ]
 
 
-# --- attach --window ---------------------------------------------------------------
+# --- attach --window ---------------------------------------------------------
 
 
 def test_ssh_argv_with_window_selects_then_attaches_single_arg(wiz):
     argv = wiz.ssh_argv("dev", "localhost", 2206, "agents")
-    # Prefix unchanged; the remote command is ONE compound string (select then attach).
     assert argv[:5] == ["ssh", "dev@localhost", "-p", "2206", "-t"]
     assert argv[5:] == ["tmux select-window -t main:agents 2>/dev/null; exec tmux attach -t main"]
-    assert len(argv) == 6  # -t is followed by exactly one remote-command arg
+    assert len(argv) == 6
 
 
 def test_ssh_argv_without_window_is_unchanged(wiz):
-    # Parity guard: the no-window argv must never gain the compound form.
     assert wiz.ssh_argv("dev", "localhost", 2206) == [
         "ssh",
         "dev@localhost",
@@ -445,7 +375,7 @@ def test_ssh_argv_without_window_is_unchanged(wiz):
 
 
 def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
     wiz.cli_attach("acme", "local", None, None, "edit")
@@ -465,15 +395,15 @@ def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
 
 
 def test_cli_attach_rejects_bad_window_before_exec(wiz, monkeypatch):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     execs: list = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, argv)))
     with pytest.raises(wiz.Fatal, match="invalid tmux window"):
         wiz.cli_attach("acme", "local", None, None, "a; rm -rf ~")
-    assert execs == []  # never reached ssh
+    assert execs == []
 
 
-# --- attach target resolution --------------------------------------------------------
+# --- attach target resolution ------------------------------------------------
 
 
 def write_hosts(wiz, text):
@@ -482,12 +412,12 @@ def write_hosts(wiz, text):
 
 
 def test_resolve_local_from_state_file(wiz):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     assert wiz.resolve_attach_target("acme", "local") == ("dev", "localhost", "2206", "local")
 
 
 def test_resolve_local_honours_agent_container_host_and_user(wiz, monkeypatch):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     monkeypatch.setenv("AGENT_CONTAINER_HOST", "lima-vm")
     monkeypatch.setenv("AGENT_CONTAINER_USER", "ops")
     assert wiz.resolve_attach_target("acme", "local") == ("ops", "lima-vm", "2206", "local")
@@ -504,7 +434,7 @@ def test_resolve_remote_from_hosts_conf(wiz):
 
 
 def test_resolve_auto_prefers_remote_over_local_state(wiz):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     write_hosts(wiz, "ACME_HOST=vps.example.com\nACME_PORT=2299\n")
     assert wiz.resolve_attach_target("acme", "auto") == (
         "dev",
@@ -515,7 +445,7 @@ def test_resolve_auto_prefers_remote_over_local_state(wiz):
 
 
 def test_resolve_auto_falls_back_to_local_state(wiz):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     assert wiz.resolve_attach_target("acme", "auto") == ("dev", "localhost", "2206", "local")
 
 
@@ -530,7 +460,7 @@ def test_resolve_remote_requires_hosts_conf(wiz):
 
 
 def test_resolve_remote_requires_both_keys(wiz):
-    write_hosts(wiz, "ACME_HOST=vps.example.com\n")  # _PORT missing
+    write_hosts(wiz, "ACME_HOST=vps.example.com\n")
     with pytest.raises(wiz.Fatal, match="no host configured for acme"):
         wiz.resolve_attach_target("acme", "remote")
 
@@ -546,12 +476,12 @@ def test_resolve_auto_with_nothing_dies(wiz):
 
 
 def test_resolve_rejects_host_option_injection(wiz):
-    wiz.write_state("acme", 2206)
+    wiz.write_state("local", "acme", 2206)
     with pytest.raises(wiz.Fatal, match="invalid ssh host"):
         wiz.resolve_attach_target("acme", "local", host_override="-oProxyCommand=evil")
 
 
-# --- list / stale-state rows -----------------------------------------------------------
+# --- list / stale-state rows -------------------------------------------------
 
 
 def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
@@ -567,23 +497,22 @@ def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
             ),
         ],
     )
-    wiz.write_state("acme", 2206)
-    wiz.write_state("ghost", 2299)
+    wiz.write_state("local", "acme", 2206)
+    wiz.write_state("local", "ghost", 2299)
     rows = wiz.gather_rows("podman")
     by_name = {r["name"]: r for r in rows}
     assert by_name["agent-container-acme"]["port"] == "2206"
     assert by_name["agent-container-acme"]["stale"] is False
+    assert by_name["agent-container-acme"]["host"] == "local"
     assert by_name["agent-container-ghost"]["port"] == "2299"
     assert by_name["agent-container-ghost"]["stale"] is True
     assert by_name["agent-container-ghost"]["status"] == "stale"
 
 
-# --- SSH injection: up flags + keys subcommand ---------------------------------
+# --- SSH injection: staging (compose secrets/configs) + keys subcommand ------
 
 
-def test_resolve_ssh_injection_builds_ro_binds(wiz, monkeypatch, tmp_path):
-    # ssh-keygen validation is exercised for real elsewhere; stub it here so the
-    # test stays hermetic (no ssh binary required).
+def test_stage_ssh_injection_writes_local_files(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
     hk = tmp_path / "hostkey"
     hk.write_text("PRIVATE")
@@ -591,29 +520,27 @@ def test_resolve_ssh_injection_builds_ro_binds(wiz, monkeypatch, tmp_path):
     p1.write_text("ssh-ed25519 AAAAA a\n")
     p2 = tmp_path / "b.pub"
     p2.write_text("ssh-ed25519 BBBBB b")  # no trailing newline -> normalized
-    specs = wiz.resolve_ssh_injection("acme", hk, [p1, p2])
-    assert specs == [
-        f"{wiz.STATE_DIR}/acme.host_key:/run/agent-container/ssh_host_ed25519_key:ro",
-        f"{wiz.STATE_DIR}/acme.authorized_keys:/run/agent-container/authorized_keys:ro",
-    ]
-    # Host key is staged as a copy (not the original mounted directly) so the
-    # container's dev user can read it regardless of host uid; see the docstring.
-    hk_staged = wiz.STATE_DIR / "acme.host_key"
-    assert hk_staged.read_text() == "PRIVATE"
-    ak = wiz.STATE_DIR / "acme.authorized_keys"
-    assert ak.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
-    # 0644 (container-readable) — safe because STATE_DIR is locked to 0700.
-    assert (ak.stat().st_mode & 0o777) == 0o644
-    assert (hk_staged.stat().st_mode & 0o777) == 0o644
-    assert (wiz.STATE_DIR.stat().st_mode & 0o777) == 0o700
+    hk_file, ak_file = wiz.stage_ssh_injection("local", "acme", hk, [p1, p2])
+    assert hk_file == wiz.host_state_dir("local") / "acme.host_key"
+    assert hk_file.read_text() == "PRIVATE"
+    assert ak_file.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
+    # Staged locally: the private key can be 0600 (read by the compose CLI as the
+    # operator, not by the container uid — no bind-mount uid clash).
+    assert (hk_file.stat().st_mode & 0o777) == 0o600
+    assert (ak_file.stat().st_mode & 0o777) == 0o644
 
 
-def test_resolve_ssh_injection_rejects_missing_files(wiz, monkeypatch, tmp_path):
+def test_stage_ssh_injection_none_when_absent(wiz):
+    hk_file, ak_file = wiz.stage_ssh_injection("local", "acme", None, [])
+    assert hk_file is None and ak_file is None
+
+
+def test_stage_ssh_injection_rejects_missing_files(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
     with pytest.raises(wiz.Fatal, match="--host-key"):
-        wiz.resolve_ssh_injection("acme", tmp_path / "nope", [])
+        wiz.stage_ssh_injection("local", "acme", tmp_path / "nope", [])
     with pytest.raises(wiz.Fatal, match="--authorized-key"):
-        wiz.resolve_ssh_injection("acme", None, [tmp_path / "nope.pub"])
+        wiz.stage_ssh_injection("local", "acme", None, [tmp_path / "nope.pub"])
 
 
 def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
@@ -643,8 +570,7 @@ def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
     assert ak_argv[:4] == ["podman", "exec", "-i", "agent-container-acme"]
 
 
-# --- driver argv builders (Feature 001) -------------------------------------
-# Pure argv for the compose run mechanism, per host driver. No runtime needed.
+# --- driver argv builders (Feature 001) --------------------------------------
 
 
 def test_driver_runtime_argv_docker_and_podman(wiz):

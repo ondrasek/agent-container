@@ -619,20 +619,20 @@ def wait_port_released(port: int, timeout: float = 15.0) -> None:
         time.sleep(0.25)
 
 
-def write_state(name: str, port: int) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_file(name).write_text(f"{port}\n")
+def write_state(host: str, name: str, port: int) -> None:
+    host_state_dir(host).mkdir(parents=True, exist_ok=True)
+    state_file_for(host, name).write_text(f"{port}\n")
 
 
-def read_state_port(name: str) -> str | None:
-    f = state_file(name)
+def read_state_port(host: str, name: str) -> str | None:
+    f = state_file_for(host, name)
     if not f.is_file():
         return None
     return f.read_text().strip() or None
 
 
-def clear_state(name: str) -> None:
-    state_file(name).unlink(missing_ok=True)
+def clear_state(host: str, name: str) -> None:
+    state_file_for(host, name).unlink(missing_ok=True)
 
 
 def load_hosts_conf() -> dict[str, str]:
@@ -905,10 +905,14 @@ def build_compose_model(
     build_context: Path | str,
     host_key_file: Path | None = None,
     authorized_keys_file: Path | None = None,
+    env_file: Path | None = None,
+    extra_mounts: list[str] | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
-    files referenced via compose secrets/configs (never inlined).
+    files referenced via compose secrets/configs (never inlined). env_file is
+    read client-side by compose and merged into the service environment;
+    extra_mounts are already-resolved '<abs-host>:<container>' bind specs.
 
     NOTE: the exact in-container mount path for compose secrets vs configs (an
     absolute `target`) is validated in the acceptance tier (research R5); the
@@ -920,12 +924,17 @@ def build_compose_model(
         "build": {"context": str(build_context)},
         "restart": "unless-stopped",
         "ports": [f"{port}:2222"],
-        "volumes": list(all_volume_mounts(name)),
+        "volumes": list(all_volume_mounts(name)) + list(extra_mounts or []),
     }
+    if env_file is not None:
+        service["env_file"] = [str(env_file)]
     model: dict = {
         "name": compose_project(name),
         "services": {"agent": service},
-        "volumes": {vn: {} for vn in per_container_volumes(name)},
+        # Pin each volume's `name` so compose does NOT prefix it with the project
+        # ("<project>_<vol>"); the seven volume names are the deterministic identity
+        # contract (Constitution IV) that `--purge` and the completions rely on.
+        "volumes": {vn: {"name": vn} for vn in per_container_volumes(name)},
     }
     if host_key_file is not None:
         service["secrets"] = [{"source": "ssh_host_key", "target": INJECT_HOST_KEY_PATH}]
@@ -1006,111 +1015,223 @@ def do_build(tag: str, context: Path | None = None) -> None:
         die(f"build failed (exit {rc})")
 
 
-def launch_container(rt: str, name: str, env_file: Path, mounts: list[str] | None = None) -> None:
-    """Build and run the container start argv.
+def resolve_build_context() -> Path:
+    """The repo checkout used as the compose build context (image builds on the
+    host). Same resolution as do_build (AGENT_CONTAINER_REPO -> REPO_ROOT); dies
+    actionably when no checkout is reachable (e.g. a bare PyPI install)."""
+    env = os.environ.get("AGENT_CONTAINER_REPO")
+    if env:
+        base = Path(env).expanduser().resolve()
+        if not _is_repo_checkout(base):
+            die(f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout")
+        return base
+    if REPO_ROOT is not None:
+        return REPO_ROOT
+    die(
+        "no repo checkout for the compose build context; run from a checkout "
+        "or set AGENT_CONTAINER_REPO=<checkout>"
+    )
 
-    `mounts` are already-resolved '<abs-host>:<container>' bind specs (from
-    resolve_bind_mount); they are appended after the standard per-container
-    volumes and before --restart.
-    """
-    cname, vname, port = container_name(name), volume_name(name), port_for_name(name)
-    if not port_free(port):
+
+def host_is_local(host: dict) -> bool:
+    return driver_reachable_address(host) == "localhost"
+
+
+def implicit_local_host(rt: str | None = None) -> dict:
+    """A synthetic 'local' host using the default runtime context — the smooth
+    upgrade path from the pre-registry single-host tool."""
+    return {
+        "driver": rt or detect_runtime(),
+        "context": "",
+        "address": "localhost",
+        "provisioning": None,
+        "created_by_tool": False,
+    }
+
+
+def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
+    """Resolve (host_name, host_record) for a deploy/lifecycle op. An explicit
+    --host must exist; otherwise the registry default; and if the registry is
+    empty, an implicit local host (behaves like the pre-multi-host tool)."""
+    reg = load_registry()
+    if host_name is not None:
+        h = get_host(reg, host_name)
+        if h is None:
+            die(f"no host named '{host_name}' (see: agent-container host ls)")
+        return host_name, h
+    default = default_host_name(reg)
+    if default is not None:
+        h = get_host(reg, default)
+        if h is not None:
+            return default, h
+    log(
+        f"no hosts registered; using an implicit local host "
+        f"(register one with: agent-container host add {DEFAULT_HOST} --docker-context <ctx>)"
+    )
+    return DEFAULT_HOST, implicit_local_host()
+
+
+def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
+    """(cname, image, status, uptime) rows for agent-container-* on a host's daemon."""
+    argv = driver_runtime_argv(host) + ["ps"] + (["-a"] if include_stopped else [])
+    argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
+    rows = []
+    for line in query(argv).stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[0].startswith(CONTAINER_PREFIX):
+            rows.append((parts[0], parts[1], parts[2], parts[3]))
+    return rows
+
+
+def host_container_names(host: dict, include_stopped: bool = False) -> set[str]:
+    return {row[0] for row in host_ps_rows(host, include_stopped)}
+
+
+def stage_ssh_injection(
+    host: str, name: str, host_key: Path | None, authorized_keys: list[Path]
+) -> tuple[Path | None, Path | None]:
+    """Stage injected SSH material as LOCAL files under the per-host state dir,
+    returning (host_key_file, authorized_keys_file) for the compose model to
+    reference as secrets/configs. Compose reads them client-side and transfers
+    the contents over the context (a bind would resolve empty on a remote host).
+    Unlike the old bind-mount staging these can be 0600/0644 on the host: they
+    are read by the compose CLI as the operator, not by the container's uid."""
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    hk_file: Path | None = None
+    ak_file: Path | None = None
+    if host_key is not None:
+        hk = host_key.expanduser()
+        if not hk.is_file():
+            die(f"--host-key: {host_key} does not exist or is not a file")
+        validate_private_key(hk)
+        hk_file = d / f"{name}.host_key"
+        hk_file.write_bytes(hk.read_bytes())
+        hk_file.chmod(0o600)
+    if authorized_keys:
+        blob = ""
+        for p in authorized_keys:
+            pk = p.expanduser()
+            if not pk.is_file():
+                die(f"--authorized-key: {p} does not exist or is not a file")
+            text = pk.read_text()
+            blob += text if text.endswith("\n") else text + "\n"
+        ak_file = d / f"{name}.authorized_keys"
+        ak_file.write_text(blob)
+        ak_file.chmod(0o644)
+    return hk_file, ak_file
+
+
+def compose_up_exec(
+    host_name: str,
+    host_rec: dict,
+    name: str,
+    env_file: Path,
+    mounts: list[str],
+    host_key: Path | None,
+    authorized_keys: list[Path],
+) -> None:
+    """Generate the compose project and bring it up on the host (image builds on
+    the host). Replaces the imperative `<rt> run` path."""
+    port = port_for_name(name)
+    if host_is_local(host_rec) and not port_free(port):
         die(
             f"port {port} is already in use (port = 2200 + name hash; "
             f"collisions are possible). Stop whatever holds it (agent-container list) "
             f"or pick a different name."
         )
-    log(f"name={name} port={port} env-file={env_file}")
-    log(f"image={IMAGE_NAME} volume={vname}")
-    argv = [
-        rt,
-        "run",
-        "-d",
-        "--name",
-        cname,
-        "--env-file",
-        str(env_file),
-        # Publishes sshd on ALL host interfaces (remote hosts.conf attach needs
-        # it). Firewall the VPS. Container-side port is 2222: sshd runs rootless
-        # as the dev user, which cannot bind the privileged port 22. The host
-        # port (the hashed 2200+ value) is unchanged, so `attach` is unaffected.
-        "-p",
-        f"{port}:2222",
-    ]
-    # Standard per-container volumes (canonical order), then optional binds.
-    for vol in all_volume_mounts(name):
-        argv += ["-v", vol]
-    for m in mounts or []:
-        argv += ["-v", m]
-    argv += ["--restart", "unless-stopped", IMAGE_NAME]
-    r = query(argv)
-    if r.returncode != 0:
-        die(f"{rt} run failed: {r.stderr.strip()}")
-    write_state(name, port)
-    log(f"started {cname}; attach with: agent-container attach {name}")
-    log(f"or directly: ssh dev@localhost -p {port} -t tmux attach -t main")
+    hk_file, ak_file = stage_ssh_injection(host_name, name, host_key, authorized_keys)
+    build_ctx = resolve_build_context()
+    model = build_compose_model(name, build_ctx, hk_file, ak_file, env_file, mounts)
+    compose_file = write_compose_file(host_name, name, model)
+    log(f"host={host_name} name={name} port={port} env-file={env_file}")
+    log(f"compose={compose_file}")
+    argv = driver_up_argv(host_rec, compose_project(name), compose_file)
+    rc = subprocess.run(argv).returncode  # inherited stdio: build output streams
+    if rc != 0:
+        die(f"compose up failed (exit {rc})")
+    write_state(host_name, name, port)
+    addr = driver_reachable_address(host_rec)
+    hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
+    log(f"started {container_name(name)}; attach with: agent-container attach {name}{hflag}")
+    log(f"or directly: ssh dev@{addr} -p {port} -t tmux attach -t main")
 
 
 def do_up(
     name: str,
+    host: str | None = None,
     env_file_override: Path | None = None,
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
 ) -> None:
     validate_name(name)
-    # Resolve binds up front so a bad --mount / --host-key aborts before any
-    # runtime call. SSH-injection binds are appended after the user --mounts.
+    migrate_flat_state()
+    # Resolve binds up front so a bad --mount aborts before any runtime call.
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
-    resolved_mounts += resolve_ssh_injection(name, host_key, authorized_keys or [])
-    rt = detect_runtime()
+    host_name, host_rec = resolve_deploy_host(host)
     cname = container_name(name)
+    hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
 
-    if container_running(rt, cname):
-        port = read_state_port(name)
-        log(f"container {cname} already running" + (f" on port {port}" if port else ""))
-        log(f"attach with: agent-container attach {name}")
+    existing = host_container_names(host_rec, include_stopped=True)
+    if cname in host_container_names(host_rec):
+        port = read_state_port(host_name, name)
+        log(
+            f"container {cname} already running on {host_name}"
+            + (f" (port {port})" if port else "")
+        )
+        log(f"attach with: agent-container attach {name}{hflag}")
         return
-
-    if container_exists(rt, cname):
-        die(f"container {cname} exists but is not running. Run: agent-container down {name}")
+    if cname in existing:
+        die(
+            f"container {cname} exists but is not running on {host_name}. Run: agent-container down {name}{hflag}"
+        )
 
     env_file = env_file_override or resolve_env_file(name)
     if env_file is None:
         cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
         die(f"no .env found. Looked in: {cands}")
 
-    if not image_exists(rt, IMAGE_NAME):
-        die(f"image {IMAGE_NAME} not found; run: agent-container build")
+    # The image builds on the host via compose (`up --build`) — no pre-built
+    # image or registry needed.
+    compose_up_exec(
+        host_name, host_rec, name, env_file, resolved_mounts, host_key, authorized_keys or []
+    )
 
-    launch_container(rt, name, env_file, resolved_mounts)
 
-
-def down_container(rt: str, name: str, purge: bool) -> None:
+def down_container(host_name: str, host_rec: dict, name: str, purge: bool) -> None:
     cname = container_name(name)
-    if container_exists(rt, cname):
-        log(f"stopping {cname}")
-        query([rt, "stop", cname])
-        log(f"removing {cname}")
-        query([rt, "rm", "-f", cname])
-        # `rm` returns before the daemon frees the published port; wait so an
-        # immediate re-`up` on the same name doesn't hit a false 'port in use'.
-        wait_port_released(port_for_name(name))
-    else:
-        log(f"no container named {cname}")
-
-    # --purge drops ALL per-container volumes (workspace + claude + codex + pi +
-    # shellenv + tmux), tolerating absence; plain down preserves every one of them.
+    compose_file = compose_file_path(host_name, name)
+    exists = cname in host_container_names(host_rec, include_stopped=True)
     vols = per_container_volumes(name)
+
+    if exists or compose_file.is_file():
+        log(f"stopping and removing {cname} on {host_name}")
+        if compose_file.is_file():
+            # compose down removes the container (+ networks); --volumes also drops
+            # the seven named volumes. Without --volumes they are preserved.
+            query(driver_down_argv(host_rec, compose_project(name), compose_file, purge))
+        else:
+            # No compose file (e.g. a pre-compose container): fall back to rm and,
+            # on purge, explicit volume removal.
+            query(driver_runtime_argv(host_rec) + ["rm", "-f", cname])
+            if purge:
+                for vname in vols:
+                    query(driver_runtime_argv(host_rec) + ["volume", "rm", vname])
+        # `rm`/compose-down returns before the daemon frees the published port;
+        # wait so an immediate re-`up` on the same name doesn't hit 'port in use'.
+        if host_is_local(host_rec):
+            wait_port_released(port_for_name(name))
+    else:
+        log(f"no container named {cname} on {host_name}")
+
     if purge:
-        for vname in vols:
-            log(f"purging volume {vname}")
-            if query([rt, "volume", "rm", vname]).returncode != 0:
-                warn(f"volume {vname} not removed (in use or absent)")
+        compose_file.unlink(missing_ok=True)  # the derived artifact goes too
+        log(f"purged volumes: {', '.join(vols)}")
     else:
         log(f"volumes preserved (use --purge to remove): {', '.join(vols)}")
 
-    clear_state(name)
+    clear_state(host_name, name)
 
 
 # Host-side paths of the persisted SSH material inside the container (rootless,
@@ -1174,11 +1295,11 @@ def cli_keys(name: str, host_key: Path | None, authorized_keys: list[Path]) -> N
     inject_keys(rt, name, host_key, authorized_keys)
 
 
-def cli_down(name: str, purge: bool, yes: bool) -> None:
+def cli_down(name: str, purge: bool, yes: bool, host: str | None = None) -> None:
     validate_name(name)
-    rt = detect_runtime()
+    host_name, host_rec = resolve_deploy_host(host)
 
-    if quadlet_active(name):
+    if host_is_local(host_rec) and quadlet_active(name):
         warn(
             f"systemd user unit {container_name(name)}.service is active; "
             f"systemd will restart the container after removal. Manage it via Quadlet instead."
@@ -1191,7 +1312,7 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
         if not is_tty():
             eprint("[agent-container] refusing destructive 'down' without -y/--yes on a non-TTY")
             raise typer.Exit(2)
-        what = f"stop and remove {container_name(name)}"
+        what = f"stop and remove {container_name(name)} on {host_name}"
         if purge:
             what += (
                 f" and DELETE all per-container volumes ({', '.join(per_container_volumes(name))})"
@@ -1200,57 +1321,67 @@ def cli_down(name: str, purge: bool, yes: bool) -> None:
             log("aborted")
             return
 
-    down_container(rt, name, purge)
+    down_container(host_name, host_rec, name, purge)
 
 
 def gather_rows(rt: str) -> list[dict[str, object]]:
+    """Rows for `list`. Live status comes from the LOCAL runtime; containers on
+    other hosts are surfaced from their per-host state files (querying every
+    remote daemon on each `list` is deferred to the lifecycle feature)."""
     rows: list[dict[str, object]] = []
-    running_short: set[str] = set()
+    local_running: set[str] = set()
     for cname, image, status, uptime in ps_agent_container(rt):
         short = cname[len(CONTAINER_PREFIX) :]
-        running_short.add(short)
+        local_running.add(short)
         rows.append(
             {
                 "name": cname,
-                "port": read_state_port(short) or "?",
+                "host": DEFAULT_HOST,
+                "port": read_state_port(DEFAULT_HOST, short) or "?",
                 "image": image,
                 "status": status,
                 "uptime": uptime,
                 "stale": False,
             }
         )
-    # Orphaned state files: a <name>.port with no running container.
+    # Per-host state files (local orphans + containers on other hosts).
     if STATE_DIR.is_dir():
-        for f in sorted(STATE_DIR.glob("*.port")):
-            short = f.stem
-            if short in running_short:
-                continue
-            rows.append(
-                {
-                    "name": container_name(short),
-                    "port": read_state_port(short) or "?",
-                    "image": "-",
-                    "status": "stale",
-                    "uptime": "-",
-                    "stale": True,
-                }
-            )
+        for host_dir in sorted(p for p in STATE_DIR.iterdir() if p.is_dir()):
+            hname = host_dir.name
+            for f in sorted(host_dir.glob("*.port")):
+                short = f.stem
+                if hname == DEFAULT_HOST and short in local_running:
+                    continue
+                is_local = hname == DEFAULT_HOST
+                rows.append(
+                    {
+                        "name": container_name(short),
+                        "host": hname,
+                        "port": read_state_port(hname, short) or "?",
+                        "image": "-",
+                        "status": "stale" if is_local else "on remote host",
+                        "uptime": "-",
+                        "stale": is_local,
+                    }
+                )
     return rows
 
 
 def do_list(as_json: bool) -> None:
+    migrate_flat_state()
     rt = detect_runtime()
     rows = gather_rows(rt)
     if as_json:
         print(json.dumps(rows, indent=2))
         return
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
-    for col in ("NAME", "PORT", "IMAGE", "STATUS", "UPTIME"):
+    for col in ("NAME", "HOST", "PORT", "IMAGE", "STATUS", "UPTIME"):
         table.add_column(col)
     for row in rows:
         style = "dim" if row["stale"] else None
         table.add_row(
             str(row["name"]),
+            str(row["host"]),
             str(row["port"]),
             str(row["image"]),
             str(row["status"]),
@@ -1302,16 +1433,19 @@ def resolve_attach_target(
         host, port = entry
         return user, host_override or host, port, "remote"
 
-    port = read_state_port(name)
+    # Local target: per-host state under the implicit 'local' host. (Attaching to
+    # a specific registered host by name is a follow-up; today `up`/`down` carry
+    # --host and local attach covers the default-host loop.)
+    port = read_state_port(DEFAULT_HOST, name)
     if port is None:
+        sf = state_file_for(DEFAULT_HOST, name)
         if mode == "local":
             die(
-                f"no local state for {name} at {state_file(name)} — is the container "
+                f"no local state for {name} at {sf} — is the container "
                 f"running? (try: agent-container up {name})"
             )
         die(
-            f"no attach target for {name}; checked {HOSTS_CONF} "
-            f"(no {key}_HOST/{key}_PORT) and {state_file(name)}"
+            f"no attach target for {name}; checked {HOSTS_CONF} (no {key}_HOST/{key}_PORT) and {sf}"
         )
     host = host_override or os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
     return user, host, port, "local"
@@ -1328,6 +1462,7 @@ def cli_attach(
     # in the remote shell string).
     if window:
         validate_window(window)
+    migrate_flat_state()
     user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
     if w := tmux_nest_warning():
         warn(w)  # CLI mode: warn and proceed
@@ -1419,13 +1554,15 @@ def wiz_up(rt: str) -> None:
     name = questionary.text("container name", validate=_validate_wiz_name).ask()
     if not name:
         return
+    migrate_flat_state()
     cname = container_name(name)
+    host_rec = implicit_local_host(rt)  # the wizard deploys to the local host
 
-    if container_running(rt, cname):
-        port = read_state_port(name)
+    if cname in host_container_names(host_rec):
+        port = read_state_port(DEFAULT_HOST, name)
         log(f"container {cname} already running" + (f" on port {port}" if port else ""))
         return
-    if container_exists(rt, cname):
+    if cname in host_container_names(host_rec, include_stopped=True):
         log(f"container {cname} exists but is stopped — remove it first (Stop / remove)")
         return
 
@@ -1442,16 +1579,6 @@ def wiz_up(rt: str) -> None:
             env_file = resolve_env_file(name)
         if env_file is None:
             log("still no env file; not starting")
-            return
-
-    if not image_exists(rt, IMAGE_NAME):
-        if not questionary.confirm(
-            f"image {IMAGE_NAME} is missing — build it now?", default=True
-        ).ask():
-            return
-        do_build(IMAGE_NAME)
-        if not image_exists(rt, IMAGE_NAME):
-            log("image still missing; not starting")
             return
 
     # Optional single host-dir bind (empty = none). Resolved now so a bad path
@@ -1471,12 +1598,13 @@ def wiz_up(rt: str) -> None:
     card.add_row("volumes", ", ".join(per_container_volumes(name)))
     if mounts:
         card.add_row("bind", mounts[0])
-    card.add_row("image", IMAGE_NAME)
+    card.add_row("image", "built on host via compose")
     console.print(card)
 
     if not questionary.confirm(f"start {cname}?", default=True).ask():
         return
-    launch_container(rt, name, env_file, mounts)  # port pre-check + actionable abort inside
+    # Compose build + up (port pre-check + actionable abort inside).
+    compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, None, [])
     hint(f"agent-container up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
@@ -1484,7 +1612,7 @@ def wiz_attach(rt: str) -> None:
     choices: list[questionary.Choice] = []
     for cname, _image, _status, _uptime in ps_agent_container(rt):
         short = _short(cname)
-        port = read_state_port(short) or "?"
+        port = read_state_port(DEFAULT_HOST, short) or "?"
         choices.append(
             questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", ""))
         )
@@ -1523,7 +1651,7 @@ def wiz_attach(rt: str) -> None:
     kind, name, host, port = sel
     user = resolve_ssh_user()
     if kind == "local":
-        port = read_state_port(name)
+        port = read_state_port(DEFAULT_HOST, name)
         if port is None:  # TOCTOU: state file vanished since the picker rendered
             warn(f"state file for {name} disappeared; is the container still up?")
             return
@@ -1590,7 +1718,7 @@ def wiz_down(rt: str) -> None:
             purge = True
         else:
             log("name mismatch — volumes will be preserved")
-    down_container(rt, sel, purge)  # reports preserved vs purged, clears state
+    down_container(DEFAULT_HOST, implicit_local_host(rt), sel, purge)  # reports + clears state
     hint(f"agent-container down {sel}" + (" --purge" if purge else ""))
 
 
@@ -1753,6 +1881,9 @@ def build(
 @app.command()
 def up(
     name: str = typer.Argument(..., help="Container short name (agent-container-<name>)."),
+    host: str | None = typer.Option(
+        None, "--host", help="Deploy to this registered host (default: the registry default)."
+    ),
     env_file: Path | None = typer.Option(
         None, "--env-file", help="Bypass env-file resolution; path must exist."
     ),
@@ -1780,7 +1911,7 @@ def up(
     """Start container agent-container-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_up(name, env_file, mount or [], host_key, authorized_key or [])
+    do_up(name, host, env_file, mount or [], host_key, authorized_key or [])
 
 
 @app.command()
@@ -1806,6 +1937,9 @@ def keys(
 @app.command()
 def down(
     name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(
+        None, "--host", help="Host the container runs on (default: the registry default)."
+    ),
     purge: bool = typer.Option(
         False,
         "--purge",
@@ -1814,7 +1948,7 @@ def down(
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
     """Stop and remove container agent-container-NAME."""
-    cli_down(name, purge, yes)
+    cli_down(name, purge, yes, host)
 
 
 @app.command()

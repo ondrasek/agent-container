@@ -236,25 +236,25 @@ def test_xdg_env_vars_override_home(load_wiz, tmp_path):
 
 
 def test_state_write_read_round_trip(wiz):
-    wiz.write_state("acme", 2206)
-    f = wiz.state_file("acme")
-    assert f == wiz.STATE_DIR / "acme.port"
+    wiz.write_state("local", "acme", 2206)
+    f = wiz.state_file_for("local", "acme")
+    assert f == wiz.STATE_DIR / "local" / "acme.port"
     assert f.read_text() == "2206\n"  # exact bytes agent-container writes; completions read these
-    assert wiz.read_state_port("acme") == "2206"
+    assert wiz.read_state_port("local", "acme") == "2206"
 
 
 def test_state_read_missing_and_empty(wiz):
-    assert wiz.read_state_port("ghost") is None
-    wiz.STATE_DIR.mkdir(parents=True, exist_ok=True)
-    (wiz.STATE_DIR / "empty.port").write_text("")
-    assert wiz.read_state_port("empty") is None
+    assert wiz.read_state_port("local", "ghost") is None
+    wiz.host_state_dir("local").mkdir(parents=True, exist_ok=True)
+    (wiz.host_state_dir("local") / "empty.port").write_text("")
+    assert wiz.read_state_port("local", "empty") is None
 
 
 def test_clear_state(wiz):
-    wiz.write_state("acme", 2206)
-    wiz.clear_state("acme")
-    assert not wiz.state_file("acme").exists()
-    wiz.clear_state("acme")  # idempotent on missing file
+    wiz.write_state("local", "acme", 2206)
+    wiz.clear_state("local", "acme")
+    assert not wiz.state_file_for("local", "acme").exists()
+    wiz.clear_state("local", "acme")  # idempotent on missing file
 
 
 # --- runtime detection (platform-aware default) --------------------------------------

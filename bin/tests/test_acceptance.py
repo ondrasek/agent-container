@@ -223,7 +223,9 @@ def acc(_image):
         r = _run_cli(argv, state_dir)
         assert r.returncode == 0, f"up {name} failed:\n{r.stderr}"
         started.append(name)
-        port = int((state_dir / "agent-container" / f"{name}.port").read_text().strip())
+        # Feature 001: state is namespaced per host; `up` with no --host uses the
+        # implicit 'local' host, so the port state lands under local/.
+        port = int((state_dir / "agent-container" / "local" / f"{name}.port").read_text().strip())
         try:
             _wait_sshd(port)
         except AssertionError as e:
