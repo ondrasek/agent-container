@@ -2,6 +2,8 @@
 
 The CLI is the product's interface (Typer). New/changed commands for Feature 001. Grammar is flag-based (not `key=value` positionals). Exit non-zero with a clear diagnostic on every failure (FR-022).
 
+**Grammar rationale (decided 2026-07-10).** Two nouns, two lifespans: **hosts** are long-lived infrastructure, so they are a noun-group (`host add/ls/show/rm`); **containers** are the daily unit, so they are bare verbs (`up`/`down`/`attach`/`logs`) with the machine named via `--host` (default: the registry `default`). This is deliberate and docker-idiomatic (`docker run` bare vs `docker context add`) — the common path stays terse (`up alpha`) while machine management is explicitly grouped. Alternatives considered and rejected: `name@host` addressing (cleaner symmetry, but drops the familiar `--host` flag) and fully noun-grouped `container <verb>` (symmetric but verbose, breaks the existing bare-verb muscle memory / back-compat).
+
 ## `host add <name> [options]`
 
 Register a named host.
