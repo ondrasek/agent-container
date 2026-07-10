@@ -931,7 +931,10 @@ def build_compose_model(
     model: dict = {
         "name": compose_project(name),
         "services": {"agent": service},
-        "volumes": {vn: {} for vn in per_container_volumes(name)},
+        # Pin each volume's `name` so compose does NOT prefix it with the project
+        # ("<project>_<vol>"); the seven volume names are the deterministic identity
+        # contract (Constitution IV) that `--purge` and the completions rely on.
+        "volumes": {vn: {"name": vn} for vn in per_container_volumes(name)},
     }
     if host_key_file is not None:
         service["secrets"] = [{"source": "ssh_host_key", "target": INJECT_HOST_KEY_PATH}]

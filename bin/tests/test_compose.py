@@ -29,6 +29,10 @@ def test_model_declares_seven_named_volumes(wiz):
     # Top-level named volumes: exactly the seven per-container volumes.
     assert set(m["volumes"].keys()) == set(wiz.per_container_volumes("acme"))
     assert len(m["volumes"]) == 7
+    # Each volume pins its `name` so compose does NOT project-prefix it — the
+    # deterministic identity contract (Constitution IV) must be the real volume name.
+    for vn in wiz.per_container_volumes("acme"):
+        assert m["volumes"][vn] == {"name": vn}
     # And the service mounts all seven (short "name:path" syntax).
     assert m["services"]["agent"]["volumes"] == wiz.all_volume_mounts("acme")
 
