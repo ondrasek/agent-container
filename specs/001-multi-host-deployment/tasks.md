@@ -62,9 +62,9 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 
 **Independent Test**: `host add local … --default` → `up alpha` → `attach alpha` (tmux) → detach → `down alpha` → immediate `up alpha` (no stale-port failure), all local (quickstart Scenario A).
 
-- [ ] T012 [P] [US1] Write failing CLI test: `host add --driver docker --docker-context <ctx> --default` writes `hosts.json`, `host ls` shows it as default, in `bin/tests/test_host_cli.py`.
+- [X] T012 [P] [US1] Write failing CLI test: `host add --driver docker --docker-context <ctx> --default` writes `hosts.json`, `host ls` shows it as default, in `bin/tests/test_host_cli.py`.
 - [ ] T013 [P] [US1] Rewrite `bin/tests/test_command_construction.py` deploy assertions: `up alpha` generates the compose file (7 volumes + secrets/configs) and invokes `<rt> --context <ctx> compose -p agent-container-alpha up -d --build` — **replacing** the old `docker run` argv assertions.
-- [ ] T014 [US1] Implement `host add` for local `docker`/`podman` (with `--docker-context`/`--connection`, `--default`, `capability_check` at registration) in `bin/agent-container`.
+- [X] T014 [US1] Implement `host add` for local `docker`/`podman` (with `--docker-context`/`--connection`, `--default`, `capability_check` at registration) in `bin/agent-container`.
 - [ ] T015 [US1] Rewrite `do_up`/`launch_container` to resolve the target Host, generate compose (T011), and run `up_argv` on the host; report reachable address+port; in `bin/agent-container`.
 - [ ] T016 [US1] Move SSH identity injection from bind mounts to compose `secrets`/`configs` (update `resolve_ssh_injection`; host key=secret, authorized_keys=config) in `bin/agent-container`.
 - [ ] T017 [US1] Rewrite `down_container` to `compose down` (keep the 7 volumes; `--purge`→`--volumes`) then `wait_port_released` before returning, in `bin/agent-container`.

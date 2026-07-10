@@ -733,6 +733,106 @@ def default_host_name(reg: dict) -> str | None:
     return d if isinstance(d, str) else None
 
 
+def address_from_context(context: str) -> str:
+    """Attach address implied by a runtime context: the host of an ssh:// context,
+    else localhost (a local context publishes to the local machine).
+
+    >>> address_from_context("ssh://root@203.0.113.7")
+    '203.0.113.7'
+    >>> address_from_context("ssh://ops@vps.example.com:22")
+    'vps.example.com'
+    >>> address_from_context("lima-docker")
+    'localhost'
+    """
+    m = re.match(r"ssh://(?:[^@/]+@)?([^:/]+)", context)
+    return m.group(1) if m else "localhost"
+
+
+def probe_host_runtime(host: dict) -> str | None:
+    """Best-effort capability probe: returns an error string if the host's
+    runtime is not usable (binary missing / context unreachable), else None.
+    Non-blocking by design — a host may be registered before its context is
+    reachable (e.g. just-provisioned); the deploy path fails hard later if still
+    unusable. Bounded so a dead ssh:// context can't hang registration."""
+    try:
+        argv = driver_runtime_argv(host) + ["version"]
+    except Fatal:
+        return "driver is attach-only"
+    if not shutil.which(argv[0]):
+        return f"'{argv[0]}' is not on PATH"
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return f"runtime probe failed: {e}"
+    if r.returncode != 0:
+        return (r.stderr.strip() or "runtime probe failed").splitlines()[0][:160]
+    return None
+
+
+def cli_host_add(
+    name: str,
+    driver: str,
+    context: str | None,
+    address: str | None,
+    make_default: bool,
+) -> None:
+    """Register a local/remote container-runtime host in the registry. Cloud
+    provisioning (--provider) arrives in a later feature; this handles the
+    docker/podman context drivers."""
+    validate_name(name)
+    if driver not in ("docker", "podman"):
+        die(f"--driver must be 'docker' or 'podman' (got '{driver}')")
+    if not context:
+        opt = "--docker-context" if driver == "docker" else "--connection"
+        die(f"host add: a {driver} host needs {opt} <context>")
+    record = {
+        "driver": driver,
+        "context": context,
+        "address": address or address_from_context(context),
+        "provisioning": None,
+        "created_by_tool": False,
+    }
+    reg = load_registry()
+    hosts = registry_hosts(reg)
+    existed = name in hosts
+    hosts[name] = record
+    reg["hosts"] = hosts
+    if make_default or default_host_name(reg) is None:
+        reg["default"] = name
+    save_registry(reg)
+    verb = "updated" if existed else "registered"
+    is_default = " [default]" if default_host_name(reg) == name else ""
+    log(f"{verb} host '{name}' (driver={driver}, context={context}){is_default}")
+    err = probe_host_runtime(record)
+    if err is not None:
+        warn(f"host '{name}' registered but its runtime is not usable yet: {err}")
+
+
+def do_host_ls(as_json: bool) -> None:
+    reg = load_registry()
+    hosts = registry_hosts(reg)
+    default = default_host_name(reg)
+    if as_json:
+        print(json.dumps({"default": default, "hosts": hosts}, indent=2))
+        return
+    if not hosts:
+        log("no hosts registered (add one: agent-container host add <name> --docker-context <ctx>)")
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("NAME", "DRIVER", "CONTEXT", "ADDRESS", "DEFAULT"):
+        table.add_column(col)
+    for hname in sorted(hosts):
+        h = hosts[hname]
+        table.add_row(
+            hname,
+            str(h.get("driver", "?")),
+            str(h.get("context") or "-"),
+            str(h.get("address") or "-"),
+            "*" if hname == default else "",
+        )
+    console.print(table)
+
+
 # --- driver seam (Feature 001) -----------------------------------------------
 # A driver abstracts build/run/connect on a host so local and remote share one
 # path. Pure argv builders (no runtime needed) — the docker/podman asymmetry is
@@ -1732,6 +1832,49 @@ def list_cmd(
 ) -> None:
     """List running agent-container containers (plus stale state files)."""
     do_list(as_json)
+
+
+# The `host` group manages WHERE containers run (registered targets). Container
+# lifecycle (up/down/attach/logs) stays as bare top-level verbs; a container is
+# addressed by name and lives on a host chosen with --host (default: the registry
+# default). There is deliberately no `host up`/`host down` — those are container
+# operations, not host operations. Deprovisioning a host is `host rm` (later).
+host_app = typer.Typer(
+    no_args_is_help=True,
+    help="Manage deployment hosts (the machines/contexts where containers run).",
+)
+app.add_typer(host_app, name="host")
+
+
+@host_app.command("add")
+def host_add(
+    name: str = typer.Argument(..., help="Host short name (registry key)."),
+    driver: str = typer.Option("docker", "--driver", help="Runtime driver: docker or podman."),
+    docker_context: str | None = typer.Option(
+        None,
+        "--docker-context",
+        help="Existing docker context (local endpoint or ssh://user@host).",
+    ),
+    connection: str | None = typer.Option(
+        None, "--connection", help="Podman system connection name (for --driver podman)."
+    ),
+    address: str | None = typer.Option(
+        None, "--address", help="Attach address override (default: derived from the context)."
+    ),
+    make_default: bool = typer.Option(
+        False, "--default", help="Make this the default deploy target."
+    ),
+) -> None:
+    """Register a container-runtime host (where `up --host NAME` deploys)."""
+    cli_host_add(name, driver, docker_context or connection, address, make_default)
+
+
+@host_app.command("ls")
+def host_ls(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """List registered hosts (name, driver, context, address, default)."""
+    do_host_ls(as_json)
 
 
 @app.command()
