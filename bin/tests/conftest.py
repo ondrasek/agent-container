@@ -55,6 +55,7 @@ def load_wiz(monkeypatch, tmp_path):
         # A leaked operator env var must never steer a test.
         for var in (
             "AGENT_CONTAINER_RUNTIME",
+            "HCLOUD_TOKEN",
             "AGENT_CONTAINER_HOST",
             "AGENT_CONTAINER_USER",
             "TMUX",
