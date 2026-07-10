@@ -2,6 +2,70 @@
 
 <!-- version list -->
 
+## v0.3.0 (2026-07-10)
+
+### Bug Fixes
+
+- Deliver injected SSH host key via compose config, not secret
+  ([`49ce1bc`](https://github.com/ondrasek/agent-container/commit/49ce1bc4baf22db63f5ae8410f7939b310028be9))
+
+- Pin compose volume names to preserve the identity contract
+  ([`e3af85e`](https://github.com/ondrasek/agent-container/commit/e3af85e5fb49e2430b7ef781117394c5f403caad))
+
+- Stage injected SSH host key 0644 so the container's dev can read it
+  ([`fe1b719`](https://github.com/ondrasek/agent-container/commit/fe1b7195da462e54ad8553c33457112305c870fd))
+
+### Chores
+
+- Add host add/ls commands (specs/001 US1, held pre-release)
+  ([`f03fe70`](https://github.com/ondrasek/agent-container/commit/f03fe70eb816256870405a6434024247e96ffb40))
+
+- Add multi-host foundational engine (specs/001 phases 1-2)
+  ([`678be55`](https://github.com/ondrasek/agent-container/commit/678be5536383204853131bc828e385fb90b0e3d9))
+
+### Continuous Integration
+
+- Grant contents:read to the manual publish job so checkout works
+  ([`c97b79d`](https://github.com/ondrasek/agent-container/commit/c97b79df0bb02d942aab9fd7b2b8ee135c80d7c2))
+
+- Rename release.yml back to publish.yml to match the PyPI publisher
+  ([`fd236f0`](https://github.com/ondrasek/agent-container/commit/fd236f004599146594065a8aef9d64019ef9f642))
+
+### Documentation
+
+- Add agent execution & session management specification (specs/004)
+  ([`2d67a8a`](https://github.com/ondrasek/agent-container/commit/2d67a8a50ca55d94c39127a3fb27fe05a4a52dec))
+
+- Add agent provisioning & credentialing specification (specs/003)
+  ([`8d39f30`](https://github.com/ondrasek/agent-container/commit/8d39f303acb6f0246d21c6b01ed1cd759b63b492))
+
+- Add container lifecycle engine specification (specs/002)
+  ([`801113f`](https://github.com/ondrasek/agent-container/commit/801113f945882f3777086f2bdab8bf9dff052a4b))
+
+- Add implementation plan for multi-host deployment (specs/001)
+  ([`5063f74`](https://github.com/ondrasek/agent-container/commit/5063f74b824cc751c8540106434616730192278e))
+
+- Add multi-host deployment specification (specs/001)
+  ([`891f15f`](https://github.com/ondrasek/agent-container/commit/891f15f28247ee1d208aab04eb426038fdb463fe))
+
+- Add task breakdown for multi-host deployment (specs/001)
+  ([`09b871d`](https://github.com/ondrasek/agent-container/commit/09b871dc56da61a66683ca52a585d29e1b6cf8b7))
+
+- Document multi-host hosts/--host and the compose run mechanism (specs/001)
+  ([`db60061`](https://github.com/ondrasek/agent-container/commit/db6006139765d4e15496bfec1447cbaf847e4567))
+
+- Record CLI grammar rationale for multi-host (specs/001)
+  ([`3ab86f4`](https://github.com/ondrasek/agent-container/commit/3ab86f499269e0d097e8292413a1d13d50529f20))
+
+### Features
+
+- Complete host/--host shell completions and per-host state (specs/001 US1)
+  ([`032d57a`](https://github.com/ondrasek/agent-container/commit/032d57ab84b6fca9b4afb8f7052f6645d478acfa))
+
+- Compose-based deploy path with --host (specs/001 US1)
+  ([`0709756`](https://github.com/ondrasek/agent-container/commit/0709756e7499dd0f7680a12aa0ffe6cdd8489438))
+
+
 ## v0.2.0 (2026-07-09)
 
 ### Bug Fixes
