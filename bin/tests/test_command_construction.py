@@ -641,3 +641,54 @@ def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
     ak_argv, ak_input = calls[1]
     assert ak_input == b"ssh-ed25519 PUBPUB u"
     assert ak_argv[:4] == ["podman", "exec", "-i", "agent-container-acme"]
+
+
+# --- driver argv builders (Feature 001) -------------------------------------
+# Pure argv for the compose run mechanism, per host driver. No runtime needed.
+
+
+def test_driver_runtime_argv_docker_and_podman(wiz):
+    assert wiz.driver_runtime_argv({"driver": "docker", "context": "lima"}) == [
+        "docker",
+        "--context",
+        "lima",
+    ]
+    assert wiz.driver_runtime_argv({"driver": "podman", "context": "vps"}) == [
+        "podman",
+        "--connection",
+        "vps",
+    ]
+    assert wiz.driver_runtime_argv({"driver": "docker", "context": ""}) == ["docker"]
+
+
+def test_driver_runtime_argv_existing_ssh_is_attach_only(wiz):
+    with pytest.raises(wiz.Fatal, match="attach-only"):
+        wiz.driver_runtime_argv({"driver": "existing-ssh", "address": "vps"})
+
+
+def test_driver_up_and_down_argv(wiz, tmp_path):
+    host = {"driver": "docker", "context": "lima"}
+    f = tmp_path / "acme.compose.yaml"
+    up = wiz.driver_up_argv(host, "agent-container-acme", f)
+    assert up == [
+        "docker",
+        "--context",
+        "lima",
+        "compose",
+        "-p",
+        "agent-container-acme",
+        "-f",
+        str(f),
+        "up",
+        "-d",
+        "--build",
+    ]
+    down = wiz.driver_down_argv(host, "agent-container-acme", f)
+    assert down[-1] == "down"
+    down_purge = wiz.driver_down_argv(host, "agent-container-acme", f, purge=True)
+    assert down_purge[-2:] == ["down", "--volumes"]
+
+
+def test_driver_reachable_address(wiz):
+    assert wiz.driver_reachable_address({"address": "1.2.3.4"}) == "1.2.3.4"
+    assert wiz.driver_reachable_address({}) == "localhost"

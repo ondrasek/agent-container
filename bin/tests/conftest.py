@@ -82,6 +82,26 @@ def wiz(load_wiz, tmp_path):
 
 
 @pytest.fixture
+def make_registry(wiz):
+    """Write a hosts.json into the isolated config dir of the `wiz` module.
+
+    Feature 001: gives registry/compose tests a hermetic host registry without
+    touching the real ~/.config. Returns the module so callers can also reach
+    wiz.load_registry() etc. Pass the registry dict; a minimal valid skeleton is
+    filled in when keys are omitted.
+    """
+    import json as _json
+
+    def _write(reg: dict):
+        reg = {"version": 1, "default": None, "hosts": {}, **reg}
+        wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        wiz.HOSTS_JSON.write_text(_json.dumps(reg))
+        return wiz
+
+    return _write
+
+
+@pytest.fixture
 def fake_bin(tmp_path):
     """Factory for a PATH dir holding fake executables (runtime detection)."""
     bin_dir = tmp_path / "fake-bin"

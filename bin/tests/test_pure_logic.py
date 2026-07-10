@@ -329,3 +329,53 @@ def test_resolve_ssh_user_default_and_env(wiz, monkeypatch):
 def test_resolve_ssh_user_rejects_option_injection(wiz):
     with pytest.raises(wiz.Fatal, match="invalid ssh user"):
         wiz.resolve_ssh_user("-oProxyCommand=evil")
+
+
+# --- per-host identity + migration (Feature 001) ----------------------------
+# Identity VALUES are unchanged; only the state file LOCATION gains a host
+# segment. The pre-per-host flat <name>.port files migrate into local/ once.
+
+
+def test_identity_values_unchanged_by_per_host(wiz):
+    # The stable-contract guarantee (Constitution IV): namespacing per host must
+    # NOT change the values computed for an existing name.
+    assert wiz.container_name("acme") == "agent-container-acme"
+    assert wiz.port_for_name("acme") == 2206
+    assert wiz.per_container_volumes("acme")[0] == "agent-container-acme-workspace"
+
+
+def test_per_host_state_paths(wiz):
+    p = wiz.state_file_for("hz1", "acme")
+    assert p == wiz.host_state_dir("hz1") / "acme.port"
+    # Same name on two hosts → distinct state paths, no collision.
+    assert wiz.state_file_for("local", "acme") != wiz.state_file_for("hz1", "acme")
+    assert wiz.compose_file_path("local", "acme").name == "acme.compose.yaml"
+
+
+def test_migrate_flat_state_relocates_into_local(wiz):
+    wiz.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.STATE_DIR / "acme.port").write_text("2206\n")
+    (wiz.STATE_DIR / "acme.host_key").write_bytes(b"KEY")
+    (wiz.STATE_DIR / "acme.authorized_keys").write_text("pub")
+    wiz.migrate_flat_state()
+    local = wiz.host_state_dir("local")
+    assert (local / "acme.port").read_text() == "2206\n"
+    assert (local / "acme.host_key").read_bytes() == b"KEY"
+    assert (local / "acme.authorized_keys").read_text() == "pub"
+    # Flat originals are gone (moved, not copied).
+    assert not (wiz.STATE_DIR / "acme.port").exists()
+
+
+def test_migrate_flat_state_is_idempotent_and_nondestructive(wiz):
+    wiz.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.STATE_DIR / "acme.port").write_text("2206\n")
+    wiz.migrate_flat_state()
+    # A second flat file with the same name must NOT clobber the migrated one.
+    (wiz.STATE_DIR / "acme.port").write_text("9999\n")
+    wiz.migrate_flat_state()
+    assert (wiz.host_state_dir("local") / "acme.port").read_text() == "2206\n"
+
+
+def test_migrate_flat_state_noop_without_state_dir(wiz):
+    # Must not raise when STATE_DIR does not exist yet.
+    wiz.migrate_flat_state()

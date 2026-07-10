@@ -57,6 +57,12 @@ STATE_DIR = (
 )
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
+# Feature 001: the host registry (hosts.json) supersedes the flat hosts.conf
+# address book. DEFAULT_HOST is the implicit local host name; per-host runtime
+# state lives under STATE_DIR/<host>/. See specs/001-multi-host-deployment/.
+HOSTS_JSON = CONFIG_DIR / "hosts.json"
+REGISTRY_VERSION = 1
+DEFAULT_HOST = "local"
 
 
 def _is_repo_checkout(base: Path) -> bool:
@@ -475,6 +481,51 @@ def state_file(name: str) -> Path:
     return STATE_DIR / f"{name}.port"
 
 
+# --- per-host state (Feature 001) --------------------------------------------
+# Runtime state is namespaced per host: STATE_DIR/<host>/<name>.{port,compose.yaml,
+# host_key,authorized_keys}. Identity VALUES (container_name/port_for_name/volume
+# names) are unchanged — only the state file LOCATION gains a host segment, so the
+# same name may run on different hosts without collision (per-host daemons make
+# project/volume collisions structurally impossible). The pre-per-host flat
+# STATE_DIR/<name>.* files belong to the implicit 'local' host; migrate_flat_state()
+# relocates them once, keeping the identity contract stable (Constitution IV).
+
+
+def host_state_dir(host: str) -> Path:
+    return STATE_DIR / host
+
+
+def state_file_for(host: str, name: str) -> Path:
+    return host_state_dir(host) / f"{name}.port"
+
+
+def compose_file_path(host: str, name: str) -> Path:
+    return host_state_dir(host) / f"{name}.compose.yaml"
+
+
+# Flat state artifacts written before per-host namespacing existed. Migrated into
+# STATE_DIR/local/ on first host-aware access.
+_FLAT_STATE_SUFFIXES = (".port", ".host_key", ".authorized_keys")
+
+
+def migrate_flat_state() -> None:
+    """One-time: relocate flat STATE_DIR/<name>.{port,host_key,authorized_keys}
+    into STATE_DIR/local/ (the implicit host). Idempotent: skips when the target
+    already exists and never overwrites. Safe to call repeatedly."""
+    if not STATE_DIR.is_dir():
+        return
+    local_dir = host_state_dir(DEFAULT_HOST)
+    for f in sorted(STATE_DIR.iterdir()):
+        if not f.is_file() or f.suffix not in _FLAT_STATE_SUFFIXES:
+            continue
+        # Skip .compose.yaml (never existed flat) and anything already migrated.
+        target = local_dir / f.name
+        if target.exists():
+            continue
+        local_dir.mkdir(parents=True, exist_ok=True)
+        os.replace(f, target)
+
+
 # --- runtime -----------------------------------------------------------------
 
 _hosts_warned = False
@@ -606,6 +657,193 @@ def hosts_entry(name: str) -> tuple[str, str] | None:
     if host and port:
         return host, port
     return None
+
+
+# --- host registry (Feature 001) ---------------------------------------------
+# The registry (hosts.json) is the single source of truth for WHERE containers
+# run, superseding the flat hosts.conf address book. Shape:
+#   {"version": 1, "default": "<name>|null", "hosts": {"<name>": {Host}, ...}}
+# A Host record: {driver, context, address, port?, provisioning, created_by_tool}.
+# When hosts.json is absent, a legacy hosts.conf is read into read-only
+# 'existing-ssh' (attach-only) hosts for a deprecation window. The registry is
+# written atomically and its content is NEVER executed (parity with hosts.conf).
+
+
+def _synthesize_legacy_registry() -> dict:
+    """Read a legacy hosts.conf into attach-only 'existing-ssh' Host records.
+    Not written back; removed after the deprecation window."""
+    conf = load_hosts_conf()
+    hosts: dict = {}
+    for key in conf:
+        if not key.endswith("_HOST"):
+            continue
+        base = key[: -len("_HOST")]
+        host, port = conf[key], conf.get(f"{base}_PORT")
+        if not (host and port):
+            continue
+        hosts[base.lower()] = {
+            "driver": "existing-ssh",
+            "context": "",
+            "address": host,
+            "port": port,
+            "provisioning": None,
+            "created_by_tool": False,
+        }
+    return {"version": REGISTRY_VERSION, "default": None, "hosts": hosts}
+
+
+def load_registry() -> dict:
+    """The host registry. Reads hosts.json when present, else synthesizes a
+    read-only legacy registry from hosts.conf. Dies on a malformed file rather
+    than silently losing host records."""
+    if HOSTS_JSON.is_file():
+        try:
+            data = json.loads(HOSTS_JSON.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            die(f"invalid host registry at {HOSTS_JSON}: {e}")
+        if not isinstance(data, dict) or not isinstance(data.get("hosts"), dict):
+            die(f"invalid host registry at {HOSTS_JSON}: missing 'hosts' object")
+        data.setdefault("version", REGISTRY_VERSION)
+        data.setdefault("default", None)
+        return data
+    return _synthesize_legacy_registry()
+
+
+def save_registry(reg: dict) -> None:
+    """Persist the registry atomically (temp + os.replace) so a crash mid-write
+    never truncates hosts.json."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = HOSTS_JSON.with_name(HOSTS_JSON.name + ".tmp")
+    tmp.write_text(json.dumps(reg, indent=2) + "\n")
+    os.replace(tmp, HOSTS_JSON)
+
+
+def registry_hosts(reg: dict) -> dict:
+    hosts = reg.get("hosts")
+    return hosts if isinstance(hosts, dict) else {}
+
+
+def get_host(reg: dict, name: str) -> dict | None:
+    return registry_hosts(reg).get(name)
+
+
+def default_host_name(reg: dict) -> str | None:
+    """The registry's default deploy target, or None."""
+    d = reg.get("default")
+    return d if isinstance(d, str) else None
+
+
+# --- driver seam (Feature 001) -----------------------------------------------
+# A driver abstracts build/run/connect on a host so local and remote share one
+# path. Pure argv builders (no runtime needed) — the docker/podman asymmetry is
+# absorbed here: docker targets `--context`, podman targets `--connection`. An
+# 'existing-ssh' host is attach-only and rejects container operations.
+
+
+def driver_runtime_argv(host: dict) -> list[str]:
+    """Base argv targeting a host's runtime.
+
+    >>> driver_runtime_argv({"driver": "docker", "context": "lima"})
+    ['docker', '--context', 'lima']
+    >>> driver_runtime_argv({"driver": "podman", "context": "vps"})
+    ['podman', '--connection', 'vps']
+    >>> driver_runtime_argv({"driver": "docker", "context": ""})
+    ['docker']
+    """
+    driver = host.get("driver")
+    ctx = host.get("context") or ""
+    if driver == "docker":
+        return ["docker", "--context", ctx] if ctx else ["docker"]
+    if driver == "podman":
+        return ["podman", "--connection", ctx] if ctx else ["podman"]
+    die(f"host driver '{driver}' is attach-only; it cannot build or run containers")
+
+
+def driver_compose_argv(host: dict, project: str, file: Path, *args: str) -> list[str]:
+    """`<runtime> --context/-connection X compose -p <project> -f <file> …`.
+
+    >>> from pathlib import Path
+    >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "agent-container-acme", Path("/s/acme.compose.yaml"), "up", "-d")
+    ['docker', '--context', 'lima', 'compose', '-p', 'agent-container-acme', '-f', '/s/acme.compose.yaml', 'up', '-d']
+    """
+    return driver_runtime_argv(host) + ["compose", "-p", project, "-f", str(file), *args]
+
+
+def driver_up_argv(host: dict, project: str, file: Path) -> list[str]:
+    return driver_compose_argv(host, project, file, "up", "-d", "--build")
+
+
+def driver_down_argv(host: dict, project: str, file: Path, purge: bool = False) -> list[str]:
+    return driver_compose_argv(host, project, file, "down", *(["--volumes"] if purge else []))
+
+
+def driver_reachable_address(host: dict) -> str:
+    """Address used for attach: the host's own address (localhost for local)."""
+    return host.get("address") or "localhost"
+
+
+# --- compose generation (Feature 001) ----------------------------------------
+# The per-container deployment is a generated, inspectable compose project,
+# emitted as JSON (a valid YAML subset) so no YAML dependency is needed. It
+# declares the seven named volumes and expresses injected SSH identity as compose
+# `secrets` (private host key) / `configs` (public authorized_keys) referencing
+# LOCAL files, so the material transfers over a remote context (a bind would
+# resolve empty on the remote). No secret value is ever written inline — only
+# `file:` references. Regenerated from parameters on every up (derived artifact).
+
+
+def compose_project(name: str) -> str:
+    """
+    >>> compose_project("acme")
+    'agent-container-acme'
+    """
+    return container_name(name)
+
+
+def build_compose_model(
+    name: str,
+    build_context: Path | str,
+    host_key_file: Path | None = None,
+    authorized_keys_file: Path | None = None,
+) -> dict:
+    """Build the compose model for container <name>. Pure: embeds paths as
+    strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
+    files referenced via compose secrets/configs (never inlined).
+
+    NOTE: the exact in-container mount path for compose secrets vs configs (an
+    absolute `target`) is validated in the acceptance tier (research R5); the
+    entrypoint reads the INJECT_* paths.
+    """
+    port = port_for_name(name)
+    service: dict = {
+        "container_name": container_name(name),
+        "build": {"context": str(build_context)},
+        "restart": "unless-stopped",
+        "ports": [f"{port}:2222"],
+        "volumes": list(all_volume_mounts(name)),
+    }
+    model: dict = {
+        "name": compose_project(name),
+        "services": {"agent": service},
+        "volumes": {vn: {} for vn in per_container_volumes(name)},
+    }
+    if host_key_file is not None:
+        service["secrets"] = [{"source": "ssh_host_key", "target": INJECT_HOST_KEY_PATH}]
+        model["secrets"] = {"ssh_host_key": {"file": str(host_key_file)}}
+    if authorized_keys_file is not None:
+        service["configs"] = [
+            {"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH}
+        ]
+        model["configs"] = {"ssh_authorized_keys": {"file": str(authorized_keys_file)}}
+    return model
+
+
+def write_compose_file(host: str, name: str, model: dict) -> Path:
+    """Write the (regenerable) compose model as JSON to the per-host state dir."""
+    host_state_dir(host).mkdir(parents=True, exist_ok=True)
+    p = compose_file_path(host, name)
+    p.write_text(json.dumps(model, indent=2) + "\n")
+    return p
 
 
 def quadlet_active(name: str) -> bool:

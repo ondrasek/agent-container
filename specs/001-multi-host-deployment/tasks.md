@@ -20,8 +20,8 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 [P] Write ADR `docs/decisions/0002-host-driver-provisioner-and-compose-run.md` capturing research decisions R1–R8 (docker-context universal runtime, compose-as-JSON, hosts.json registry, Hetzner-via-urllib, secrets/configs injection, per-host identity, remote build, safe teardown).
-- [ ] T002 [P] Add hermetic fixtures in `bin/tests/conftest.py`: a temp `XDG_STATE_HOME`/`XDG_CONFIG_HOME` home and a fake-registry factory, so registry/identity/compose unit tests never touch the real config/state.
+- [X] T001 [P] Write ADR `docs/decisions/0002-host-driver-provisioner-and-compose-run.md` capturing research decisions R1–R8 (docker-context universal runtime, compose-as-JSON, hosts.json registry, Hetzner-via-urllib, secrets/configs injection, per-host identity, remote build, safe teardown).
+- [X] T002 [P] Add hermetic fixtures in `bin/tests/conftest.py`: a temp `XDG_STATE_HOME`/`XDG_CONFIG_HOME` home and a fake-registry factory, so registry/identity/compose unit tests never touch the real config/state.
 
 **Checkpoint**: ADR recorded; test harness can isolate config/state.
 
@@ -33,24 +33,24 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 
 ### Host registry (data-model: Host, Host Registry)
 
-- [ ] T003 [P] Write failing unit tests for the host registry (round-trip, atomic temp+`os.replace` write, `default` resolution, legacy `hosts.conf`→`existing-ssh` synthesis, no file eval) in `bin/tests/test_registry.py`.
-- [ ] T004 Implement the `Host` record + `hosts.json` load/save (atomic write, `version`, `default`, per-`data-model.md` schema) in `bin/agent-container`.
-- [ ] T005 Implement read-only legacy `hosts.conf` → `existing-ssh` Host synthesis (deprecation window) in `bin/agent-container`.
+- [X] T003 [P] Write failing unit tests for the host registry (round-trip, atomic temp+`os.replace` write, `default` resolution, legacy `hosts.conf`→`existing-ssh` synthesis, no file eval) in `bin/tests/test_registry.py`.
+- [X] T004 Implement the `Host` record + `hosts.json` load/save (atomic write, `version`, `default`, per-`data-model.md` schema) in `bin/agent-container`.
+- [X] T005 Implement read-only legacy `hosts.conf` → `existing-ssh` Host synthesis (deprecation window) in `bin/agent-container`.
 
 ### Per-host identity + migration (data-model: Deployment identity; R6)
 
-- [ ] T006 [P] Extend `bin/tests/test_pure_logic.py` with failing tests: per-host state paths `<state>/<host>/<name>.*`, flat→`local/` migration, and that `container_name`/`port_for_name`/volume-name **values are unchanged** for an existing name (stable contract).
-- [ ] T007 Namespace runtime state per host (`state_file` and the SSH-staging paths become `<host>/<name>.*`) and implement the one-time flat→`local/` migration in `bin/agent-container`.
+- [X] T006 [P] Extend `bin/tests/test_pure_logic.py` with failing tests: per-host state paths `<state>/<host>/<name>.*`, flat→`local/` migration, and that `container_name`/`port_for_name`/volume-name **values are unchanged** for an existing name (stable contract).
+- [X] T007 Namespace runtime state per host (`state_file` and the SSH-staging paths become `<host>/<name>.*`) and implement the one-time flat→`local/` migration in `bin/agent-container`.
 
 ### Driver seam (contracts/driver.md)
 
-- [ ] T008 [P] Extend `bin/tests/test_command_construction.py` with failing tests for driver argv builders: `runtime_argv`/`compose_argv`/`up_argv`/`down_argv` for `DockerContextDriver`, `PodmanConnectionDriver`, and `ExistingSshDriver` (deploy rejected, attach allowed).
-- [ ] T009 Implement the Driver seam (`runtime_argv`, `compose_argv`, `up_argv`, `down_argv`, `reachable_address`, `capability_check`, `ps_on_host`) with the three driver kinds in `bin/agent-container`.
+- [X] T008 [P] Extend `bin/tests/test_command_construction.py` with failing tests for driver argv builders: `runtime_argv`/`compose_argv`/`up_argv`/`down_argv` for `DockerContextDriver`, `PodmanConnectionDriver`, and `ExistingSshDriver` (deploy rejected, attach allowed).
+- [X] T009 Implement the Driver seam (`runtime_argv`, `compose_argv`, `up_argv`, `down_argv`, `reachable_address`, `capability_check`, `ps_on_host`) with the three driver kinds in `bin/agent-container`.
 
 ### Compose generation (data-model: Generated Compose Model; R2, R5)
 
-- [ ] T010 [P] Write failing unit tests for the compose builder in `bin/tests/test_compose.py`: JSON-as-YAML output is deterministic, declares the 7 volumes, maps host key→`secrets` and authorized_keys→`configs`, and contains **no inline secret** (only `file:` refs).
-- [ ] T011 Implement the compose-model builder + JSON writer to `<state>/<host>/<name>.compose.yaml` (services/volumes/secrets/configs, `restart: unless-stopped`, `build.context`) in `bin/agent-container`.
+- [X] T010 [P] Write failing unit tests for the compose builder in `bin/tests/test_compose.py`: JSON-as-YAML output is deterministic, declares the 7 volumes, maps host key→`secrets` and authorized_keys→`configs`, and contains **no inline secret** (only `file:` refs).
+- [X] T011 Implement the compose-model builder + JSON writer to `<state>/<host>/<name>.compose.yaml` (services/volumes/secrets/configs, `restart: unless-stopped`, `build.context`) in `bin/agent-container`.
 
 **Checkpoint**: registry, per-host identity, driver seam, and compose generation exist and are unit-tested. User stories can begin.
 
