@@ -85,7 +85,7 @@ neovim tarball). Subsequent builds reuse cached layers.
 
 Two paths. Pick one per container.
 
-**Quick path** — `agent-container up` (needs `uv` + `agent-container`, installed in Step 4). Runs `podman run -d`. Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
+**Quick path** — `agent-container up` (needs `uv` + `agent-container`, installed in Step 4, plus a **Compose v2**-capable runtime). Generates a compose project and runs it on the host (building the image there). Survives SSH disconnects (because of `enable-linger`) but **not** a VPS reboot. Fine for experimentation and for environments you intentionally want to recreate often:
 
 ```bash
 agent-container up acme
@@ -221,17 +221,31 @@ PEP 723 single-file script (`bin/agent-container`) and needs nothing but
 
 ```bash
 agent-container                # interactive menu: build, start, attach, logs, stop, purge
-agent-container up acme        # every menu action has a scriptable subcommand
+agent-container host add local --docker-context lima-docker --default  # register a host
+agent-container host ls        # list registered hosts (where containers run)
+agent-container up acme        # deploy to the default host; --host NAME picks another
 agent-container list --json    # machine-readable state (merges runtime ps + state files)
 agent-container attach acme    # hosts.conf -> remote, else local state file; execs ssh
 agent-container --self-test    # doctests + port-hash corpus (port hash, key derivation)
 ```
 
-It keeps all state on disk (container names, the port hash, `<name>.port` state
-files, env-file resolution, `hosts.conf`) so a container that dies loses nothing.
-`attach` resolves a target as remote when the name has a `hosts.conf` entry, else
-local from the state file — pass `--local`/`--remote` to force one. `down`/`purge`
-confirm before destroying anything, so scripts must pass `-y`/`--yes`.
+**Hosts and the run mechanism.** A *host* is a named target where containers run — a
+local or remote container-runtime context, registered with `host add` and stored in
+`~/.config/agent-container/hosts.json` (the registry supersedes the older `hosts.conf`
+address book, which is still read for attach-only legacy targets). `up`/`down` take
+`--host NAME` (default: the registry default). Deployment is **compose-based**: `up`
+generates an inspectable compose project under
+`$XDG_STATE_HOME/agent-container/<host>/<name>.compose.yaml` and runs it on the host,
+building the image **on the host** — so a **Compose v2**-capable runtime is required
+(`docker compose` / `podman compose`). Injected SSH identity travels as compose
+secrets/configs (so it works over a remote context, not just locally).
+
+It keeps all state on disk, namespaced per host (container names, the port hash,
+`<host>/<name>.port` state files, env-file resolution, the host registry) so a
+container that dies loses nothing. `attach` resolves a target as remote when the name
+has a `hosts.conf` entry, else local from the state file — pass `--local`/`--remote`
+to force one. `down`/`purge` confirm before destroying anything, so scripts must pass
+`-y`/`--yes`.
 
 The CLI has a pytest suite in `bin/tests/` that pins its on-disk contract (port
 hash, naming, env-file resolution, hosts.conf parsing, generated `run`/`ssh`
@@ -304,9 +318,9 @@ plugin), both resolve to the same code — harmless.
 `agent-container` ships bash and zsh completions under [`completions/`](completions/):
 subcommands, per-subcommand flags (including the repeatable `--mount`), and
 **container-name completion** for `up` / `down` / `attach` / `logs` / `purge`.
-Names are gathered directly in the shell from your state files
-(`$XDG_STATE_HOME/agent-container/*.port`) and `hosts.conf` — no `docker`, `podman`, or
-`uv` is spawned on Tab, so completion stays instant and works offline.
+Names are gathered directly in the shell from your per-host state files
+(`$XDG_STATE_HOME/agent-container/<host>/*.port`) and `hosts.conf` — no `docker`,
+`podman`, or `uv` is spawned on Tab, so completion stays instant and works offline.
 
 Completion triggers on the command **name**, so put the tool on your `PATH`
 (this also lets the `build` / `completions` subcommands find the repo):
