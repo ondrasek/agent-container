@@ -386,27 +386,32 @@ def test_hetzner_provision_deploy_destroy(tmp_path):
     env["XDG_STATE_HOME"] = str(state)
     env["XDG_CONFIG_HOME"] = str(config)
 
+    # Overridable so a run can dodge a "resource_unavailable" placement (ARM/region
+    # capacity varies). Default to a broadly-available x86 shared type.
+    srv_type = os.environ.get("AGENT_CONTAINER_ACC_SERVER_TYPE", "cpx11")
+    srv_loc = os.environ.get("AGENT_CONTAINER_ACC_LOCATION", "nbg1")
+    add_argv = [
+        *AGENT_CONTAINER,
+        "host",
+        "add",
+        name,
+        "--provider",
+        "hetzner",
+        "--create",
+        "--server-type",
+        srv_type,
+        "--location",
+        srv_loc,
+    ]
+    # Authorize a specific operator PUBLIC key when ~/.ssh/id_*.pub is absent
+    # (e.g. a hardware/agent-backed key). AGENT_CONTAINER_SSH_PUBKEY = its path.
+    pub = os.environ.get("AGENT_CONTAINER_SSH_PUBKEY")
+    if pub:
+        add_argv += ["--ssh-pubkey", pub]
+
     host: dict | None = None
     try:
-        r = subprocess.run(
-            [
-                *AGENT_CONTAINER,
-                "host",
-                "add",
-                name,
-                "--provider",
-                "hetzner",
-                "--create",
-                "--server-type",
-                "cax11",
-                "--location",
-                "nbg1",
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
+        r = subprocess.run(add_argv, env=env, capture_output=True, text=True, timeout=900)
         assert r.returncode == 0, f"provision failed:\n{r.stderr}"
         reg = _json.loads((config / "agent-container" / "hosts.json").read_text())
         host = reg["hosts"][name]
