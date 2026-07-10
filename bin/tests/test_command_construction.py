@@ -524,10 +524,13 @@ def test_stage_ssh_injection_writes_local_files(wiz, monkeypatch, tmp_path):
     assert hk_file == wiz.host_state_dir("local") / "acme.host_key"
     assert hk_file.read_text() == "PRIVATE"
     assert ak_file.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
-    # Staged locally: the private key can be 0600 (read by the compose CLI as the
-    # operator, not by the container uid — no bind-mount uid clash).
-    assert (hk_file.stat().st_mode & 0o777) == 0o600
+    # BOTH files are 0644: compose exposes the source mode into the container,
+    # where dev (uid 1000 != host uid) must read them — a 0600 key crash-loops
+    # the entrypoint on a uid-mismatched host (e.g. CI). The per-host state dir is
+    # 0700 for host-side protection.
+    assert (hk_file.stat().st_mode & 0o777) == 0o644
     assert (ak_file.stat().st_mode & 0o777) == 0o644
+    assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
 
 
 def test_stage_ssh_injection_none_when_absent(wiz):

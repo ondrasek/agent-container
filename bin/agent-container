@@ -1103,12 +1103,20 @@ def stage_ssh_injection(
 ) -> tuple[Path | None, Path | None]:
     """Stage injected SSH material as LOCAL files under the per-host state dir,
     returning (host_key_file, authorized_keys_file) for the compose model to
-    reference as secrets/configs. Compose reads them client-side and transfers
-    the contents over the context (a bind would resolve empty on a remote host).
-    Unlike the old bind-mount staging these can be 0600/0644 on the host: they
-    are read by the compose CLI as the operator, not by the container's uid."""
+    reference as configs (transfers over a remote context; a bind resolves empty
+    on a remote host).
+
+    Both files are staged **0644**: compose exposes the source file's mode into
+    the container, where the unprivileged `dev` user reads it — and dev's uid
+    (1000) need NOT equal the host uid that ran `up` (it does not on CI runners),
+    so a 0600 file is unreadable inside the container and crash-loops the
+    entrypoint. 0644 is safe because the per-host state dir is locked to 0700, so
+    no other HOST user can traverse to the files, while the container reads each
+    inode through the mount. (This mirrors the original bind-mount rationale;
+    staging 0600 here was a regression that broke on ubuntu docker.)"""
     d = host_state_dir(host)
     d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)  # host-side protection for the 0644 key files
     hk_file: Path | None = None
     ak_file: Path | None = None
     if host_key is not None:
@@ -1118,7 +1126,7 @@ def stage_ssh_injection(
         validate_private_key(hk)
         hk_file = d / f"{name}.host_key"
         hk_file.write_bytes(hk.read_bytes())
-        hk_file.chmod(0o600)
+        hk_file.chmod(0o644)
     if authorized_keys:
         blob = ""
         for p in authorized_keys:
