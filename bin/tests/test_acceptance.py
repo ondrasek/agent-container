@@ -346,3 +346,97 @@ def test_distinct_containers_get_distinct_identities(acc):
     acc.up("accdist1")
     acc.up("accdist2")
     assert _container_hostkey_fp("accdist1") != _container_hostkey_fp("accdist2")
+
+
+# --- Hetzner provisioning (US2) — OPT-IN, BILLABLE, never in CI ---------------
+# Requires HCLOUD_TOKEN in the env; skips otherwise. Provisions a REAL server,
+# verifies docker + compose came up (cloud-init), then destroys it in a finally
+# so an assertion failure can never leave a billable orphan. Deletes ONLY the
+# server it created (by the unique name / its own server_id) — never any other
+# server in the project.
+
+import importlib.util  # noqa: E402
+from importlib.machinery import SourceFileLoader  # noqa: E402
+
+
+def _load_cli():
+    loader = SourceFileLoader("_ac_prov", str(SCRIPT_PATH))
+    spec = importlib.util.spec_from_loader("_ac_prov", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.skipif(
+    not os.environ.get("HCLOUD_TOKEN"),
+    reason="no HCLOUD_TOKEN — opt-in billable Hetzner provisioning test",
+)
+def test_hetzner_provision_deploy_destroy(tmp_path):
+    import json as _json
+
+    name = "acc-hz"  # unique, RFC-1123; matches the created server + docker context name
+    token = os.environ["HCLOUD_TOKEN"]
+    cli = _load_cli()
+
+    state = tmp_path / "state"
+    config = tmp_path / "config"
+    state.mkdir()
+    config.mkdir()
+    env = dict(os.environ)
+    env["XDG_STATE_HOME"] = str(state)
+    env["XDG_CONFIG_HOME"] = str(config)
+
+    host: dict | None = None
+    try:
+        r = subprocess.run(
+            [
+                *AGENT_CONTAINER,
+                "host",
+                "add",
+                name,
+                "--provider",
+                "hetzner",
+                "--create",
+                "--server-type",
+                "cax11",
+                "--location",
+                "nbg1",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        assert r.returncode == 0, f"provision failed:\n{r.stderr}"
+        reg = _json.loads((config / "agent-container" / "hosts.json").read_text())
+        host = reg["hosts"][name]
+        assert host["created_by_tool"] is True
+        assert isinstance(host["provisioning"]["server_id"], int)
+        assert host["context"] == "agent-container-acc-hz"
+        # cloud-init actually installed docker + the compose v2 plugin.
+        ctx = host["context"]
+        assert (
+            subprocess.run(
+                ["docker", "--context", ctx, "version"], env=env, capture_output=True, timeout=60
+            ).returncode
+            == 0
+        ), "docker not reachable on the provisioned server"
+        assert (
+            subprocess.run(
+                ["docker", "--context", ctx, "compose", "version"],
+                env=env,
+                capture_output=True,
+                timeout=60,
+            ).returncode
+            == 0
+        ), "docker compose plugin missing on the provisioned server"
+    finally:
+        # ALWAYS destroy — primary path via the tool, then a hcloud fallback, so a
+        # billable server is never left running even if the tool's teardown fails.
+        if host is not None:
+            try:
+                cli.provisioner_destroy(host, token)
+            except Exception as e:  # noqa: BLE001
+                print(f"provisioner_destroy failed: {e}")
+        if shutil.which("hcloud"):
+            subprocess.run(["hcloud", "server", "delete", name], capture_output=True)
