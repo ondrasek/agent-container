@@ -802,13 +802,21 @@ def cli_host_add(
                 ssh_key=ssh_key,
                 ssh_pubkey=ssh_pubkey,
             )
-        else:  # --reuse: register an operator-supplied ssh:// server; never destroyable
+        else:  # --reuse: register an operator-supplied server; never destroyable
             if not context:
-                die("--reuse needs --docker-context ssh://user@host")
+                die("--reuse needs --docker-context (ssh://user@host or an existing context name)")
+            if context.startswith("ssh://"):
+                # A raw ssh:// URL is not a valid `docker --context` value; wrap it
+                # in a named local context so the deploy path works unchanged.
+                ctx_name = docker_context_name(name)
+                docker_context_create(ctx_name, context)
+                reuse_ctx, reuse_addr = ctx_name, address or address_from_context(context)
+            else:
+                reuse_ctx, reuse_addr = context, address or "localhost"
             record = {
                 "driver": "docker",
-                "context": context,
-                "address": address or address_from_context(context),
+                "context": reuse_ctx,
+                "address": reuse_addr,
                 "provisioning": {"provider": provider, "created": False},
                 "created_by_tool": False,
             }
@@ -887,6 +895,24 @@ HCLOUD_API = "https://api.hetzner.cloud/v1"
 HETZNER_DEFAULT_SERVER_TYPE = "cax11"  # cheapest ARM shared vCPU; override with --server-type
 HETZNER_DEFAULT_LOCATION = "nbg1"
 HETZNER_IMAGE = "debian-12"
+HETZNER_CODENAME = "bookworm"  # debian-12 suite on download.docker.com (pinned to HETZNER_IMAGE)
+# Hetzner server names must be RFC-1123 labels (no underscore; <=63) — stricter than validate_name.
+HETZNER_NAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Strip the Bearer header on any redirect so the token never follows a
+    cross-host Location (defense in depth; Hetzner does not redirect)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.remove_header("Authorization")
+        return new
+
+
+_HCLOUD_OPENER = urllib.request.build_opener(_NoAuthRedirect())
+_HCLOUD_IDEMPOTENT = {"GET", "DELETE"}  # safe to retry; POST is not (double-create risk)
 
 
 def _hcloud_token() -> str:
@@ -901,50 +927,84 @@ def _hcloud_token() -> str:
     return tok
 
 
+def _retry_delay(exc: urllib.error.HTTPError | None, attempt: int) -> float:
+    """Backoff: honor Retry-After on a 429/503 if present, else exponential (cap 15s)."""
+    if exc is not None and exc.headers:
+        ra = exc.headers.get("Retry-After")
+        if ra and ra.strip().isdigit():
+            return min(float(ra), 30.0)
+    return min(2.0**attempt, 15.0)
+
+
 def _hcloud_request(
-    method: str, path: str, token: str, body: dict | None = None, *, timeout: float = 15.0
+    method: str,
+    path: str,
+    token: str,
+    body: dict | None = None,
+    *,
+    timeout: float = 15.0,
+    retries: int = 3,
 ) -> tuple[int, dict]:
-    """One Hetzner REST call via stdlib urllib. Bearer header, JSON body, explicit
-    timeout. Returns (status, parsed_json_or_empty). Non-2xx and transport errors
-    become Fatal with the API's error.code/message (token never appears in the
-    message)."""
+    """One Hetzner REST call via stdlib urllib. Bearer header (stripped on redirect),
+    JSON body, explicit timeout. Transient 429/5xx and transport errors are retried
+    with backoff for idempotent methods (GET/DELETE) — never POST, to avoid double
+    allocation. Non-2xx becomes Fatal with the API's error.code/message; the token
+    never appears in the message."""
     url = f"{HCLOUD_API}{path}"
     if not url.startswith("https://"):  # defense: scheme is always the fixed HCLOUD_API host
         die(f"refusing non-https Hetzner API URL: {url}")
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Content-Type", "application/json")
-    try:
-        # url is always the fixed https HCLOUD_API base (guarded above), not user scheme.
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as e:
-        raw = e.read()
+    retryable = method in _HCLOUD_IDEMPOTENT
+    attempt = 0
+    while True:
+        attempt += 1
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
         try:
-            err = json.loads(raw).get("error", {})
-            msg = f"{err.get('code', e.code)}: {err.get('message', e.reason)}"
-        except ValueError, AttributeError:
-            msg = f"{e.code}: {e.reason}"
-        die(f"Hetzner API {method} {path} failed ({msg})")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        die(f"Hetzner API {method} {path} unreachable ({e})")
+            # opener.open (not urlopen); url is the fixed https HCLOUD_API base.
+            with _HCLOUD_OPENER.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as e:
+            if (e.code == 429 or e.code >= 500) and retryable and attempt <= retries:
+                time.sleep(_retry_delay(e, attempt))
+                continue
+            raw = e.read()
+            try:
+                err = json.loads(raw).get("error", {})
+                msg = f"{err.get('code', e.code)}: {err.get('message', e.reason)}"
+            except ValueError, AttributeError:
+                msg = f"{e.code}: {e.reason}"
+            die(f"Hetzner API {method} {path} failed ({msg})")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if retryable and attempt <= retries:
+                time.sleep(_retry_delay(None, attempt))
+                continue
+            die(f"Hetzner API {method} {path} unreachable ({e})")
 
 
 def resolve_operator_pubkey(override: Path | None = None) -> str:
     """The operator SSH PUBLIC key to authorize on the new server (so the operator's
     docker ssh:// context + attach can reach it). --ssh-pubkey wins, else the first
     of ~/.ssh/id_ed25519.pub / id_rsa.pub."""
+
+    def _public(text: str, src: str) -> str:
+        # Guard against embedding a PRIVATE key in user_data (it would land in the
+        # server's cloud-init logs). Public keys start with a known type prefix.
+        if "PRIVATE KEY" in text or not re.match(r"(ssh-|ecdsa-|sk-)", text):
+            die(f"{src} is not an SSH PUBLIC key (expected ssh-ed25519/ssh-rsa/…)")
+        return text
+
     if override is not None:
         p = override.expanduser()
         if not p.is_file():
             die(f"--ssh-pubkey: {override} does not exist")
-        return p.read_text().strip()
+        return _public(p.read_text().strip(), f"--ssh-pubkey {override}")
     for cand in ("id_ed25519.pub", "id_rsa.pub"):
         p = Path.home() / ".ssh" / cand
         if p.is_file():
-            return p.read_text().strip()
+            return _public(p.read_text().strip(), str(p))
     die(
         "no SSH public key found (~/.ssh/id_ed25519.pub or id_rsa.pub); pass "
         "--ssh-pubkey <path> so the server authorizes a key you hold"
@@ -955,8 +1015,13 @@ def hetzner_build_user_data(operator_pubkey: str) -> str:
     """cloud-init that installs Docker + the Compose v2 plugin and authorizes the
     operator key for root on a fresh Debian 12 server. Passed verbatim as
     user_data (plain YAML, ~1 KB, no base64)."""
+    # The apt suite is pinned to HETZNER_CODENAME (not computed via a nested
+    # $(. /etc/os-release && echo "$VERSION_CODENAME"), whose quoting broke under
+    # YAML/sh and 404'd the repo). ssh_pwauth:false disables the generated root
+    # password so key auth is the only path.
     return (
         "#cloud-config\n"
+        "ssh_pwauth: false\n"
         "ssh_authorized_keys:\n"
         f"  - {operator_pubkey}\n"
         "package_update: true\n"
@@ -967,7 +1032,7 @@ def hetzner_build_user_data(operator_pubkey: str) -> str:
         "  - install -m 0755 -d /etc/apt/keyrings\n"
         "  - curl -fsSL --retry 5 --retry-connrefused https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc\n"
         "  - chmod a+r /etc/apt/keyrings/docker.asc\n"
-        '  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo \\"$VERSION_CODENAME\\") stable" > /etc/apt/sources.list.d/docker.list\n'
+        f'  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {HETZNER_CODENAME} stable" > /etc/apt/sources.list.d/docker.list\n'
         "  - apt-get update -o DPkg::Lock::Timeout=600\n"
         "  - DEBIAN_FRONTEND=noninteractive apt-get install -y -o DPkg::Lock::Timeout=600 docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin\n"
         "  - systemctl enable --now docker\n"
@@ -999,6 +1064,17 @@ def hetzner_get_server(server_id: int, token: str) -> dict:
     return resp.get("server", {})
 
 
+def hetzner_find_server_by_name(name: str, token: str) -> dict | None:
+    """Best-effort lookup by exact name — used to reconcile a server that a POST
+    created but whose response was lost, so we can still delete it (no orphan)."""
+    try:
+        _status, resp = _hcloud_request("GET", f"/servers?name={name}", token)
+    except Fatal:
+        return None
+    servers = resp.get("servers") or []
+    return servers[0] if servers else None
+
+
 def hetzner_delete_server(server_id: int, token: str) -> None:
     """DELETE /servers/<id>, idempotent (404 => already gone) and best-effort so a
     failed teardown never masks the original error."""
@@ -1021,10 +1097,12 @@ def cleanup_on_failure(server_id: int | None, token: str) -> None:
 
 def seed_known_hosts(ip: str) -> None:
     """Pin the new server's host key so `docker context` over ssh:// and `attach`
-    connect non-interactively (best-effort; a failure just means the first ssh may
-    prompt/verify)."""
+    connect non-interactively. First drop any stale key for this IP — Hetzner
+    recycles public IPv4s, and a stale entry makes ssh refuse the new host
+    (REMOTE HOST IDENTIFICATION HAS CHANGED), which would hang the docker poll."""
     kh = Path.home() / ".ssh" / "known_hosts"
     kh.parent.mkdir(mode=0o700, exist_ok=True)
+    query(["ssh-keygen", "-R", ip])  # remove any recycled/stale key + dedup
     scan = query(["ssh-keyscan", "-t", "ed25519", "-T", "10", ip])
     if scan.returncode == 0 and scan.stdout:
         with kh.open("a") as f:
@@ -1035,36 +1113,62 @@ def docker_context_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}"  # agent-container-<name>, mirrors the project name
 
 
-def docker_context_create(ctx: str, ip: str) -> None:
-    """Create (idempotently) a named local docker context pointing at the server's
-    ssh:// endpoint, so `docker --context <ctx> compose` (which honors --context)
-    builds/runs on the server."""
+def docker_context_create(ctx: str, endpoint: str) -> None:
+    """Create (idempotently) a named local docker context pointing at an ssh://
+    endpoint, so `docker --context <ctx> compose` (which honors --context) builds/
+    runs on the server. `endpoint` is a full docker host, e.g. ssh://root@1.2.3.4."""
     query(["docker", "context", "rm", "-f", ctx])  # tolerate a stale one
-    r = query(["docker", "context", "create", ctx, "--docker", f"host=ssh://root@{ip}"])
+    r = query(["docker", "context", "create", ctx, "--docker", f"host={endpoint}"])
     if r.returncode != 0:
         die(f"could not create docker context {ctx}: {r.stderr.strip()}")
 
 
+def _docker_ctx_ready(ctx: str) -> bool:
+    """`docker --context <ctx> version` exits 0, with a HARD timeout so a first-
+    connect ssh host-key prompt can never hang the poll forever (BatchMode is not
+    guaranteed on docker's ssh helper; known_hosts is seeded first as the primary
+    guard, this is the backstop)."""
+    try:
+        r = subprocess.run(
+            ["docker", "--context", ctx, "version"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=20,
+        )
+        return r.returncode == 0
+    except subprocess.TimeoutExpired, OSError:
+        return False
+
+
 def wait_until_reachable(
-    ip: str, ctx: str, *, overall_timeout: float = 240.0, poll_interval: float = 5.0
+    ip: str,
+    ctx: str,
+    *,
+    ssh_timeout: float = 150.0,
+    docker_timeout: float = 420.0,
+    poll_interval: float = 5.0,
 ) -> None:
-    """Poll until the server is usable: SSH port open (cloud-init added the key),
-    then `docker --context <ctx> version` exits 0 (docker from cloud-init is up)."""
-    deadline = time.monotonic() + overall_timeout
-    while time.monotonic() < deadline:
+    """Two independent budgets: SSH port open (cloud-init authorized the key), THEN
+    — with its own fresh, larger budget — `docker version` succeeds (docker install
+    from cloud-init finishes, minutes on a small ARM node). A shared deadline would
+    starve the docker phase when boot is slow."""
+    ssh_deadline = time.monotonic() + ssh_timeout
+    while time.monotonic() < ssh_deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(5)
             if s.connect_ex((ip, 22)) == 0:
                 break
         time.sleep(poll_interval)
     else:
-        die(f"server {ip} SSH never became reachable within {overall_timeout:.0f}s")
+        die(f"server {ip}: SSH never became reachable within {ssh_timeout:.0f}s")
     seed_known_hosts(ip)
-    while time.monotonic() < deadline:
-        if query(["docker", "--context", ctx, "version"]).returncode == 0:
+    docker_deadline = time.monotonic() + docker_timeout
+    while time.monotonic() < docker_deadline:
+        if _docker_ctx_ready(ctx):
             return
         time.sleep(poll_interval)
-    die(f"docker on {ip} never became reachable (cloud-init still installing?)")
+    die(f"server {ip}: docker never became reachable within {docker_timeout:.0f}s (cloud-init?)")
 
 
 def provisioner_create(
@@ -1079,26 +1183,38 @@ def provisioner_create(
     and return the Host record. On any post-allocation failure, destroys the server
     (no orphaned billable server) and dies."""
     user_data = hetzner_build_user_data(operator_pubkey)
-    resp = hetzner_create_server(name, server_type, location, user_data, token, ssh_key)
-    server = resp.get("server", {})
-    server_id = server.get("id")
-    if not isinstance(server_id, int):
-        die(f"Hetzner create returned no server id: {resp}")
+    ctx = docker_context_name(name)
+    server_id: int | None = None
+    # ONE guard around allocation AND everything after it. BaseException (not just
+    # Fatal) so a Ctrl-C during the multi-minute wait, a missing docker/ssh binary
+    # (OSError), or a decode error still destroys the billable server (FR-011).
     try:
+        resp = hetzner_create_server(name, server_type, location, user_data, token, ssh_key)
+        server = resp.get("server", {})
+        sid = server.get("id")
+        if not isinstance(sid, int):
+            # Redacted: the create response can carry a generated root_password.
+            die(f"Hetzner create returned no server id (response keys: {sorted(resp)})")
+        server_id = sid
         ip = (server.get("public_net", {}).get("ipv4") or {}).get("ip")
         deadline = time.monotonic() + 120
         while not ip and time.monotonic() < deadline:
             time.sleep(3)
-            srv = hetzner_get_server(server_id, token)
+            srv = hetzner_get_server(server_id, token)  # transient GET failures retry internally
             ip = (srv.get("public_net", {}).get("ipv4") or {}).get("ip")
         if not ip:
             die(f"server {server_id} never reported a public IPv4")
         log(f"server {server_id} allocated at {ip}; waiting for docker (cloud-init)…")
-        ctx = docker_context_name(name)
-        docker_context_create(ctx, ip)
+        docker_context_create(ctx, f"ssh://root@{ip}")
         wait_until_reachable(ip, ctx)
-    except Fatal:
+    except BaseException:
+        # A POST may have created a server whose response we never saw — find it by
+        # name so it is not orphaned, then delete + drop the half-made context.
+        if server_id is None:
+            found = hetzner_find_server_by_name(name, token)
+            server_id = found.get("id") if isinstance(found, dict) else None
         cleanup_on_failure(server_id, token)
+        query(["docker", "context", "rm", "-f", ctx])
         raise
     return {
         "driver": "docker",
@@ -1116,9 +1232,11 @@ def provisioner_create(
 
 
 def provisioner_destroy(host: dict, token: str) -> None:
-    """US2-internal deprovision: delete the server and remove the local docker
-    context. Only for hosts this tool created. (Operator-facing `host rm --destroy`
-    is US3.)"""
+    """Deprovision: delete the server and remove the local docker context. Refuses
+    a host this tool did not create (defense in depth for the future US3 caller;
+    FR-010 — never destroy infrastructure we did not allocate)."""
+    if not host.get("created_by_tool"):
+        die("refusing to deprovision a server this tool did not create")
     prov = host.get("provisioning") or {}
     server_id = prov.get("server_id")
     if isinstance(server_id, int):
@@ -1141,6 +1259,11 @@ def provision_host(
     Host record for host `name`. Token read once from env; billable allocation only."""
     if provider != "hetzner":
         die(f"unknown --provider '{provider}' (only 'hetzner' is supported)")
+    if not HETZNER_NAME_RE.fullmatch(name):
+        die(
+            f"'{name}' is not a valid cloud server name (RFC-1123: lowercase letters, "
+            "digits, hyphens; no underscore; <=63 chars)"
+        )
     token = _hcloud_token()
     operator_pubkey = resolve_operator_pubkey(ssh_pubkey)
     return provisioner_create(

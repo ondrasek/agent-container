@@ -40,7 +40,7 @@ def hcloud(wiz, monkeypatch):
     # POST /servers -> a running server with an IPv4; DELETE -> ok.
     server = {"id": 42, "public_net": {"ipv4": {"ip": "203.0.113.9"}}}
 
-    def fake_urlopen(req, timeout=None):
+    def fake_open(req, timeout=None):
         reqs.append(req)
         method = req.get_method()
         if method == "POST":
@@ -51,7 +51,7 @@ def hcloud(wiz, monkeypatch):
             return FakeResp(200, {"action": {"id": 1}})
         return FakeResp(200, {})
 
-    monkeypatch.setattr(wiz.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(wiz._HCLOUD_OPENER, "open", fake_open)
     monkeypatch.setattr(
         wiz,
         "query",
@@ -116,25 +116,34 @@ def test_cleanup_destroys_server_on_post_allocation_failure(hcloud, monkeypatch)
 
 def test_missing_token_dies_before_any_http(wiz, monkeypatch):
     monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
-    called = {"urlopen": False}
+    called = {"open": False}
     monkeypatch.setattr(
-        wiz.urllib.request,
-        "urlopen",
-        lambda *a, **k: called.__setitem__("urlopen", True) or FakeResp(200, {}),
+        wiz._HCLOUD_OPENER,
+        "open",
+        lambda *a, **k: called.__setitem__("open", True) or FakeResp(200, {}),
     )
     with pytest.raises(wiz.Fatal, match="HCLOUD_TOKEN"):
         wiz.provision_host(
             "hetzner", "hz1", server_type="cax11", location="nbg1", ssh_key=None, ssh_pubkey=None
         )
-    assert called["urlopen"] is False  # never reached the network
+    assert called["open"] is False  # never reached the network
 
 
 def test_reuse_never_provisions(wiz, monkeypatch):
     # --reuse must register an existing server without touching the provider API.
     monkeypatch.setattr(
-        wiz.urllib.request,
-        "urlopen",
-        lambda *a, **k: pytest.fail("urlopen must not be called for --reuse"),
+        wiz._HCLOUD_OPENER,
+        "open",
+        lambda *a, **k: pytest.fail("the Hetzner API must not be called for --reuse"),
+    )
+    # --reuse wraps an ssh:// URL in a named context (local docker call) — stub it.
+    argvs: list[list[str]] = []
+    monkeypatch.setattr(
+        wiz,
+        "query",
+        lambda a: (argvs.append(list(a)), subprocess.CompletedProcess(a, 0, stdout="", stderr=""))[
+            1
+        ],
     )
     wiz.cli_host_add(
         "hzold",
@@ -148,6 +157,99 @@ def test_reuse_never_provisions(wiz, monkeypatch):
     rec = wiz.get_host(wiz.load_registry(), "hzold")
     assert rec["created_by_tool"] is False
     assert rec["provisioning"]["created"] is False
+    # A named context was created (so `docker --context <name>` works), not the raw URL.
+    assert rec["context"] == "agent-container-hzold"
+    assert any(a[:3] == ["docker", "context", "create"] for a in argvs)
+
+
+def test_keyboard_interrupt_during_wait_still_destroys_server(hcloud, monkeypatch):
+    wiz, reqs, _argvs = hcloud
+    monkeypatch.setenv("HCLOUD_TOKEN", "t")
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(wiz, "wait_until_reachable", boom)
+    with pytest.raises(KeyboardInterrupt):
+        wiz.provision_host(
+            "hetzner", "hz1", server_type="cax11", location="nbg1", ssh_key=None, ssh_pubkey=None
+        )
+    # Ctrl-C mid-provision must NOT orphan the billable server.
+    assert any(r.get_method() == "DELETE" and r.full_url.endswith("/servers/42") for r in reqs)
+
+
+def test_missing_binary_during_provision_still_destroys_server(hcloud, monkeypatch):
+    wiz, reqs, _argvs = hcloud
+    monkeypatch.setenv("HCLOUD_TOKEN", "t")
+    monkeypatch.setattr(
+        wiz,
+        "docker_context_create",
+        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("docker")),
+    )
+    with pytest.raises(FileNotFoundError):
+        wiz.provision_host(
+            "hetzner", "hz1", server_type="cax11", location="nbg1", ssh_key=None, ssh_pubkey=None
+        )
+    assert any(r.get_method() == "DELETE" and r.full_url.endswith("/servers/42") for r in reqs)
+
+
+def test_defaults_reach_the_create_body(hcloud, monkeypatch):
+    wiz, reqs, _argvs = hcloud
+    monkeypatch.setenv("HCLOUD_TOKEN", "t")
+    wiz.provision_host(
+        "hetzner", "hz1", server_type=None, location=None, ssh_key=None, ssh_pubkey=None
+    )
+    post = next(r for r in reqs if r.get_method() == "POST")
+    body = json.loads(post.data)
+    assert body["server_type"] == "cax11"  # HETZNER_DEFAULT_SERVER_TYPE
+    assert body["location"] == "nbg1"  # HETZNER_DEFAULT_LOCATION
+    assert body["image"] == "debian-12"
+    assert "ssh_keys" not in body  # none passed -> cloud-init handles the key
+    assert body["user_data"].startswith("#cloud-config")
+
+
+def test_provider_rejects_non_rfc1123_name(wiz, monkeypatch):
+    monkeypatch.setenv("HCLOUD_TOKEN", "t")
+    called = {"open": False}
+    monkeypatch.setattr(
+        wiz._HCLOUD_OPENER, "open", lambda *a, **k: called.__setitem__("open", True)
+    )
+    with pytest.raises(wiz.Fatal, match="RFC-1123"):
+        wiz.provision_host(
+            "hetzner", "my_box", server_type=None, location=None, ssh_key=None, ssh_pubkey=None
+        )
+    assert called["open"] is False  # rejected before allocation
+
+
+def test_reject_private_key_as_operator_pubkey(wiz, tmp_path):
+    priv = tmp_path / "id_ed25519"
+    priv.write_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nxxxx\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
+    with pytest.raises(wiz.Fatal, match="PUBLIC key"):
+        wiz.resolve_operator_pubkey(priv)
+
+
+def test_hcloud_request_retries_transient_5xx_on_get(wiz, monkeypatch):
+    import io
+
+    calls = {"n": 0}
+
+    def flaky_open(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise wiz.urllib.error.HTTPError(req.full_url, 503, "busy", {}, io.BytesIO(b""))
+        return FakeResp(200, {"servers": []})
+
+    monkeypatch.setattr(wiz._HCLOUD_OPENER, "open", flaky_open)
+    monkeypatch.setattr(wiz.time, "sleep", lambda *_: None)  # no real backoff wait
+    status, resp = wiz._hcloud_request("GET", "/servers", "t")
+    assert status == 200 and calls["n"] == 2  # retried once, then succeeded
+
+
+def test_provisioner_destroy_refuses_foreign_host(wiz):
+    with pytest.raises(wiz.Fatal, match="did not create"):
+        wiz.provisioner_destroy({"created_by_tool": False, "provisioning": {"server_id": 5}}, "t")
 
 
 def test_create_and_reuse_are_mutually_exclusive(wiz):

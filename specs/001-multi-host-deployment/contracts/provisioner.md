@@ -6,7 +6,7 @@ A Provisioner allocates/deallocates a server for a provider and yields a `docker
 
 | Operation | Signature (conceptual) | Contract |
 |-----------|------------------------|----------|
-| `create` | `(params, token) → Host` | Allocate a server; supply **cloud-init user-data** that installs the container runtime and authorizes the operator's SSH public key; poll until SSH-reachable and the runtime responds; return a Host `{driver:"docker", context:"ssh://root@<ip>", address:"<ip>", provisioning:{provider, server_id, server_type, location, created:true}, created_by_tool:true}`. |
+| `create` | `(params, token) → Host` | Allocate a server; supply **cloud-init user-data** that installs the container runtime and authorizes the operator's SSH public key; poll until SSH-reachable and the runtime responds; create a **named local docker context** (`docker context create <name> --docker host=ssh://root@<ip>`) since `docker --context` needs a context *name*, not an `ssh://` URL; return a Host `{driver:"docker", context:"agent-container-<name>", address:"<ip>", provisioning:{provider, server_id, server_type, location, created:true}, created_by_tool:true}`. |
 | `destroy` | `(host, token) → None` | Deallocate the server named by `provisioning.server_id`. Precondition (enforced by caller): `created_by_tool` **and** no containers remain on the host (FR-009/010). |
 | `cleanup_on_failure` | `(partial, token) → None` | If `create` fails after allocation, destroy the half-provisioned server so no unusable billable server is left running (FR-011, SC-009). |
 
