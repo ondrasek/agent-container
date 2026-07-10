@@ -936,14 +936,25 @@ def build_compose_model(
         # contract (Constitution IV) that `--purge` and the completions rely on.
         "volumes": {vn: {"name": vn} for vn in per_container_volumes(name)},
     }
+    # Injected SSH identity rides as compose `configs` (NOT `secrets`). Both the
+    # host key and authorized_keys are delivered this way because a compose
+    # `secret` with an ABSOLUTE target crash-loops the container on some docker
+    # engines (observed on GitHub ubuntu runners; compose `configs` with an
+    # absolute target are portable). The material is still handled as sensitive:
+    # staged locally 0600, ephemeral (never persisted to a volume), never baked
+    # into the image, never on argv (Constitution III — least exposure holds; the
+    # secret-vs-config choice is a portability-forced compose mechanism detail).
+    svc_configs: list[dict] = []
+    model_configs: dict = {}
     if host_key_file is not None:
-        service["secrets"] = [{"source": "ssh_host_key", "target": INJECT_HOST_KEY_PATH}]
-        model["secrets"] = {"ssh_host_key": {"file": str(host_key_file)}}
+        svc_configs.append({"source": "ssh_host_key", "target": INJECT_HOST_KEY_PATH})
+        model_configs["ssh_host_key"] = {"file": str(host_key_file)}
     if authorized_keys_file is not None:
-        service["configs"] = [
-            {"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH}
-        ]
-        model["configs"] = {"ssh_authorized_keys": {"file": str(authorized_keys_file)}}
+        svc_configs.append({"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH})
+        model_configs["ssh_authorized_keys"] = {"file": str(authorized_keys_file)}
+    if svc_configs:
+        service["configs"] = svc_configs
+        model["configs"] = model_configs
     return model
 
 

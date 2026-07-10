@@ -45,13 +45,17 @@ def test_no_injection_means_no_secrets_or_configs(wiz):
     assert "configs" not in m["services"]["agent"]
 
 
-def test_host_key_maps_to_secret(wiz, tmp_path):
+def test_host_key_maps_to_config(wiz, tmp_path):
+    # Delivered as a compose `config` (not `secret`): a secret with an absolute
+    # target crash-loops the container on some docker engines; configs are portable.
     hk = tmp_path / "acme.host_key"
     hk.write_text("PRIVATE-KEY-MATERIAL")
     m = wiz.build_compose_model("acme", "/repo", host_key_file=hk)
-    assert m["secrets"]["ssh_host_key"]["file"] == str(hk)
-    svc_secrets = m["services"]["agent"]["secrets"]
-    assert svc_secrets == [{"source": "ssh_host_key", "target": wiz.INJECT_HOST_KEY_PATH}]
+    assert "secrets" not in m  # never uses compose secrets
+    assert m["configs"]["ssh_host_key"]["file"] == str(hk)
+    assert {"source": "ssh_host_key", "target": wiz.INJECT_HOST_KEY_PATH} in m["services"]["agent"][
+        "configs"
+    ]
 
 
 def test_authorized_keys_maps_to_config(wiz, tmp_path):
