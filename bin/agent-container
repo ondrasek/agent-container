@@ -26,6 +26,8 @@
 # like bash `source`, but values containing `$` or backticks are taken
 # literally (no expansion), with a one-time warning.
 
+import atexit
+import hashlib
 import json
 import os
 import re
@@ -34,6 +36,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 import urllib.error
@@ -756,6 +759,7 @@ def probe_host_runtime(host: dict) -> str | None:
     Non-blocking by design — a host may be registered before its context is
     reachable (e.g. just-provisioned); the deploy path fails hard later if still
     unusable. Bounded so a dead ssh:// context can't hang registration."""
+    ensure_tunnel(host)
     try:
         argv = driver_runtime_argv(host) + ["version"]
     except Fatal:
@@ -1119,15 +1123,32 @@ def hetzner_delete_server(server_id: int, token: str) -> None:
         warn(f"could not delete Hetzner server {server_id}: {e}")
 
 
-def cleanup_on_failure(server_id: int | None, token: str, *, ssh_key_id: int | None = None) -> None:
-    """Destroy a half-provisioned server (and an ssh key we uploaded) so a failed
-    `host add` leaves nothing billable/dangling (FR-011). No-op for anything not
-    allocated yet."""
+def remove_automation_key(name: str) -> None:
+    """Delete the local file-based automation keypair for host `name`."""
+    key = automation_key_path(name)
+    key.unlink(missing_ok=True)
+    (key.parent / f"{key.name}.pub").unlink(missing_ok=True)
+
+
+def cleanup_on_failure(
+    server_id: int | None,
+    token: str,
+    *,
+    ssh_key_ids: tuple[int | None, ...] = (),
+    name: str | None = None,
+) -> None:
+    """Destroy a half-provisioned server (and any keys we uploaded, plus the local
+    automation key + its tunnel) so a failed `host add` leaves nothing billable or
+    dangling (FR-011). No-op for anything not allocated yet."""
     if server_id is not None:
         warn(f"cleaning up half-provisioned Hetzner server {server_id}")
         hetzner_delete_server(server_id, token)
-    if ssh_key_id is not None:
-        hetzner_delete_ssh_key(ssh_key_id, token)
+    for key_id in ssh_key_ids:
+        if isinstance(key_id, int):
+            hetzner_delete_ssh_key(key_id, token)
+    if name:
+        _close_tunnel(name)
+        remove_automation_key(name)
 
 
 def seed_known_hosts(ip: str) -> None:
@@ -1182,6 +1203,133 @@ def _docker_ctx_ready(ctx: str) -> tuple[bool, str]:
         return False, f"docker invocation failed: {e}"
 
 
+# --- provisioned-host automation identity + ssh socket-forward ---------------
+# A provisioned host authorizes a dedicated, FILE-based automation key alongside
+# the operator key. All of the tool's docker traffic runs over an ssh LOCAL-socket
+# forward that presents that key with every ssh option passed as a command-line
+# arg (-i / -o …) — so it signs unattended regardless of the operator's ~/.ssh/
+# config or agent (e.g. a 1Password key that needs interactive approval per use).
+# The operator key stays authorized for interactive `attach`. The docker context
+# for such a host points at unix://<sock> (not ssh://), so every existing
+# `docker --context` deploy/ps/down path is unchanged — only the sock must be live.
+
+_TUNNELS: dict[str, subprocess.Popen] = {}
+
+
+def host_name_from_context(ctx: str) -> str:
+    return ctx[len(CONTAINER_PREFIX) :] if ctx.startswith(CONTAINER_PREFIX) else ctx
+
+
+def automation_key_path(name: str) -> Path:
+    """File-based ed25519 automation private key for host `name` (0600)."""
+    return host_state_dir(name) / "automation_key"
+
+
+def _socket_base() -> Path:
+    """Short, user-private base dir for the docker forward sockets. NOT under
+    STATE_DIR: a unix socket's sun_path is capped (~104 bytes on macOS) and a deep
+    XDG_STATE_HOME (e.g. a pytest tmp dir) would overflow it. Prefer XDG_RUNTIME_DIR
+    (the standard socket home on Linux); else a per-uid dir under the system tmp."""
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    base = Path(rt) if rt else Path(tempfile.gettempdir()) / f"agent-container-{os.getuid()}"
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return base
+
+
+def daemon_socket_path(name: str) -> Path:
+    """Local unix socket the docker context connects to (hashed to a short name)."""
+    h = hashlib.sha256(name.encode()).hexdigest()[:12]
+    return _socket_base() / f"ac-{h}.sock"
+
+
+def generate_automation_key(name: str) -> str:
+    """Create (idempotently) the automation keypair and return its public key."""
+    key = automation_key_path(name)
+    key.parent.mkdir(parents=True, exist_ok=True)
+    if not key.exists():
+        query(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-q",
+             "-C", f"agent-container-{name}-automation", "-f", str(key)]
+        )  # fmt: skip
+        key.chmod(0o600)
+    return (key.parent / f"{key.name}.pub").read_text().strip()
+
+
+def _forward_argv(ip: str, key: Path, sock: Path) -> list[str]:
+    """ssh LOCAL-socket forward to the remote docker daemon — every option a literal
+    CLI arg (no ~/.ssh/config, no agent): the automation key only, agent disabled,
+    host key auto-pinned. `-N` (no remote shell); run foreground so we own the pid."""
+    kh = Path.home() / ".ssh" / "known_hosts"
+    return [
+        shutil.which("ssh") or "ssh",
+        "-i", str(key),
+        "-o", "IdentitiesOnly=yes",
+        "-o", "IdentityAgent=none",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={kh}",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=15",
+        "-o", "BatchMode=yes",
+        "-N", "-L", f"{sock}:/var/run/docker.sock", f"root@{ip}",
+    ]  # fmt: skip
+
+
+def _close_tunnel(name: str) -> None:
+    proc = _TUNNELS.pop(name, None)
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    daemon_socket_path(name).unlink(missing_ok=True)
+
+
+atexit.register(lambda: [_close_tunnel(n) for n in list(_TUNNELS)])
+
+
+def _start_tunnel(name: str, ip: str) -> subprocess.Popen:
+    """(Re)start the docker socket-forward for host `name`; idempotent — a running
+    tunnel is reused. A dead one (auth not yet injected during cloud-init) is
+    replaced so the readiness poll self-heals."""
+    proc = _TUNNELS.get(name)
+    if proc and proc.poll() is None:
+        return proc
+    sock = daemon_socket_path(name)
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    sock.unlink(missing_ok=True)
+    proc = subprocess.Popen(
+        _forward_argv(ip, automation_key_path(name), sock),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _TUNNELS[name] = proc
+    return proc
+
+
+def ensure_tunnel(host: dict) -> None:
+    """For a provisioned (ssh-forward) host, ensure its docker socket-forward is up
+    for the life of this process, waiting briefly for the socket to bind. No-op for
+    local / user-supplied-context / existing-ssh hosts."""
+    prov = host.get("provisioning") or {}
+    if prov.get("connection") != "ssh-forward":
+        return
+    name = host_name_from_context(host.get("context") or "")
+    ip = host.get("address")
+    if not name or not ip:
+        return
+    sock = daemon_socket_path(name)
+    proc = _start_tunnel(name, ip)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if sock.exists():
+            return
+        if proc.poll() is not None:  # tunnel died — retry (idempotent)
+            proc = _start_tunnel(name, ip)
+        time.sleep(0.3)
+
+
 def wait_until_reachable(
     ip: str,
     ctx: str,
@@ -1191,12 +1339,15 @@ def wait_until_reachable(
     poll_interval: float = 5.0,
 ) -> None:
     """Two independent budgets: SSH port open (cloud-init authorized the key), THEN
-    — with its own fresh, larger budget — `docker version` succeeds (docker install
-    from cloud-init finishes, minutes on a small ARM node). A shared deadline would
-    starve the docker phase when boot is slow. Both budgets are env-tunable
-    (AGENT_CONTAINER_HZ_SSH_TIMEOUT / _DOCKER_TIMEOUT) for slow images/regions."""
+    — with its own fresh, larger budget — `docker version` succeeds over the socket-
+    forward (docker install from cloud-init finishes, minutes on a small node). A
+    shared deadline would starve the docker phase when boot is slow. Both budgets
+    are env-tunable (AGENT_CONTAINER_HZ_SSH_TIMEOUT / _DOCKER_TIMEOUT). The forward
+    is (re)established each poll: early on the automation key may not be injected
+    yet, so the tunnel dies and is retried until auth succeeds."""
     ssh_timeout = float(os.environ.get("AGENT_CONTAINER_HZ_SSH_TIMEOUT", ssh_timeout))
     docker_timeout = float(os.environ.get("AGENT_CONTAINER_HZ_DOCKER_TIMEOUT", docker_timeout))
+    name = host_name_from_context(ctx)
     ssh_deadline = time.monotonic() + ssh_timeout
     while time.monotonic() < ssh_deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1210,6 +1361,7 @@ def wait_until_reachable(
     docker_deadline = time.monotonic() + docker_timeout
     last_why = "(no probe completed)"
     while time.monotonic() < docker_deadline:
+        _start_tunnel(name, ip)  # (re)establish; heals a tunnel that died pre-auth
         ready, last_why = _docker_ctx_ready(ctx)
         if ready:
             return
@@ -1234,16 +1386,21 @@ def provisioner_create(
     any key we uploaded (no orphaned billable server / dangling key) and dies."""
     user_data = hetzner_build_user_data()
     ctx = docker_context_name(name)
+    sock = daemon_socket_path(name)
+    automation_pub = generate_automation_key(name)
     server_id: int | None = None
-    key_id: int | None = None
-    our_key: int | None = None  # the key we uploaded and must clean up
+    our_op_key: int | None = None  # operator key — only if WE uploaded it
+    auto_key_id: int | None = None  # automation key — always ours, always cleaned up
     # ONE guard around key upload, allocation AND everything after. BaseException
     # (not just Fatal) so a Ctrl-C during the multi-minute wait, a missing docker/
     # ssh binary (OSError), or a decode error still tears everything down (FR-011).
     try:
-        key_id, created = hetzner_ensure_ssh_key(docker_context_name(name), operator_pubkey, token)
-        our_key = key_id if created else None
-        ssh_keys: list = [key_id] + ([extra_ssh_key] if extra_ssh_key else [])
+        op_key_id, created = hetzner_ensure_ssh_key(ctx, operator_pubkey, token)
+        our_op_key = op_key_id if created else None
+        auto_key_id, _ = hetzner_ensure_ssh_key(f"{ctx}-automation", automation_pub, token)
+        # Authorize BOTH on root: the automation key for the tool's unattended docker
+        # socket-forward, the operator key for interactive `attach`.
+        ssh_keys: list = [op_key_id, auto_key_id] + ([extra_ssh_key] if extra_ssh_key else [])
         resp = hetzner_create_server(name, server_type, location, user_data, token, ssh_keys)
         server = resp.get("server", {})
         sid = server.get("id")
@@ -1260,15 +1417,18 @@ def provisioner_create(
         if not ip:
             die(f"server {server_id} never reported a public IPv4")
         log(f"server {server_id} allocated at {ip}; waiting for docker (cloud-init)…")
-        docker_context_create(ctx, f"ssh://root@{ip}")
+        # Context targets the local forwarded socket, not ssh:// — the tool owns the
+        # ssh invocation (automation key, no agent) via the _forward_argv tunnel.
+        docker_context_create(ctx, f"unix://{sock}")
         wait_until_reachable(ip, ctx)
     except BaseException:
         # A POST may have created a server whose response we never saw — find it by
-        # name so it is not orphaned, then delete server + our key + the context.
+        # name so it is not orphaned, then delete server + the keys we uploaded, the
+        # local automation key, the tunnel and the context.
         if server_id is None:
             found = hetzner_find_server_by_name(name, token)
             server_id = found.get("id") if isinstance(found, dict) else None
-        cleanup_on_failure(server_id, token, ssh_key_id=our_key)
+        cleanup_on_failure(server_id, token, ssh_key_ids=(our_op_key, auto_key_id), name=name)
         query(["docker", "context", "rm", "-f", ctx])
         raise
     return {
@@ -1280,7 +1440,9 @@ def provisioner_create(
             "server_id": server_id,
             "server_type": server_type,
             "location": location,
-            "ssh_key_id": our_key,  # only set when WE uploaded it (destroy removes it)
+            "connection": "ssh-forward",
+            "ssh_key_id": our_op_key,  # operator key, only if WE uploaded it (destroy removes it)
+            "automation_ssh_key_id": auto_key_id,  # always ours; destroy removes it
             "created": True,
         },
         "created_by_tool": True,
@@ -1297,10 +1459,15 @@ def provisioner_destroy(host: dict, token: str) -> None:
     server_id = prov.get("server_id")
     if isinstance(server_id, int):
         hetzner_delete_server(server_id, token)
-    key_id = prov.get("ssh_key_id")
-    if isinstance(key_id, int):  # only the key WE uploaded; a reused key is left alone
-        hetzner_delete_ssh_key(key_id, token)
+    # Both keys we uploaded; a reused operator key (ssh_key_id is None) is left alone.
+    for key_id in (prov.get("ssh_key_id"), prov.get("automation_ssh_key_id")):
+        if isinstance(key_id, int):
+            hetzner_delete_ssh_key(key_id, token)
     ctx = host.get("context")
+    name = host_name_from_context(ctx) if isinstance(ctx, str) else ""
+    if name:
+        _close_tunnel(name)
+        remove_automation_key(name)
     if isinstance(ctx, str) and ctx.startswith(CONTAINER_PREFIX):
         query(["docker", "context", "rm", "-f", ctx])
 
@@ -1586,6 +1753,7 @@ def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
 
 def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
     """(cname, image, status, uptime) rows for agent-container-* on a host's daemon."""
+    ensure_tunnel(host)
     argv = driver_runtime_argv(host) + ["ps"] + (["-a"] if include_stopped else [])
     argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
     rows = []
@@ -1691,6 +1859,7 @@ def do_up(
     # Resolve binds up front so a bad --mount aborts before any runtime call.
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     host_name, host_rec = resolve_deploy_host(host)
+    ensure_tunnel(host_rec)
     cname = container_name(name)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
 
@@ -1721,6 +1890,7 @@ def do_up(
 
 
 def down_container(host_name: str, host_rec: dict, name: str, purge: bool) -> None:
+    ensure_tunnel(host_rec)
     cname = container_name(name)
     compose_file = compose_file_path(host_name, name)
     exists = cname in host_container_names(host_rec, include_stopped=True)

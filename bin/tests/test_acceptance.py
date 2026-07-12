@@ -378,20 +378,22 @@ _IN_CI = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
     _IN_CI or not os.environ.get("HCLOUD_TOKEN"),
     reason="billable real provisioning — never runs in CI; opt-in locally via HCLOUD_TOKEN",
 )
-def test_hetzner_provision_deploy_destroy(tmp_path):
+def test_hetzner_provision_deploy_destroy(tmp_path, monkeypatch):
     import json as _json
 
     name = "acc-hz"  # unique, RFC-1123; matches the created server + docker context name
     token = os.environ["HCLOUD_TOKEN"]
-    cli = _load_cli()
 
     state = tmp_path / "state"
     config = tmp_path / "config"
     state.mkdir()
     config.mkdir()
+    # Point THIS process's cli at the same XDG dirs as the host-add subprocess, so
+    # the in-process tunnel re-check below finds the automation key host-add wrote.
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    cli = _load_cli()
     env = dict(os.environ)
-    env["XDG_STATE_HOME"] = str(state)
-    env["XDG_CONFIG_HOME"] = str(config)
 
     # Overridable so a run can dodge a "resource_unavailable" placement (ARM/region
     # capacity varies). Default to a broadly-available x86 shared type.
@@ -419,29 +421,29 @@ def test_hetzner_provision_deploy_destroy(tmp_path):
     host: dict | None = None
     try:
         r = subprocess.run(add_argv, env=env, capture_output=True, text=True, timeout=900)
+        # host add succeeding IS the end-to-end proof: the tool polled `docker
+        # version` over the automation-key socket-forward until docker answered.
         assert r.returncode == 0, f"provision failed:\n{r.stderr}"
         reg = _json.loads((config / "agent-container" / "hosts.json").read_text())
         host = reg["hosts"][name]
         assert host["created_by_tool"] is True
         assert isinstance(host["provisioning"]["server_id"], int)
+        assert host["provisioning"]["connection"] == "ssh-forward"
+        assert isinstance(host["provisioning"]["automation_ssh_key_id"], int)
         assert host["context"] == "agent-container-acc-hz"
-        # cloud-init actually installed docker + the compose v2 plugin.
+        # From a FRESH tunnel in THIS process (the provisioning tunnel is gone),
+        # the compose v2 plugin answers over the forward — proving both the
+        # socket-forward reconnects across invocations and compose is installed.
+        cli.ensure_tunnel(host)
         ctx = host["context"]
         assert (
             subprocess.run(
-                ["docker", "--context", ctx, "version"], env=env, capture_output=True, timeout=60
-            ).returncode
-            == 0
-        ), "docker not reachable on the provisioned server"
-        assert (
-            subprocess.run(
                 ["docker", "--context", ctx, "compose", "version"],
-                env=env,
                 capture_output=True,
                 timeout=60,
             ).returncode
             == 0
-        ), "docker compose plugin missing on the provisioned server"
+        ), "compose plugin missing / socket-forward did not re-establish"
     finally:
         # ALWAYS destroy — primary path via the tool, then a hcloud fallback, so a
         # billable server is never left running even if the tool's teardown fails.

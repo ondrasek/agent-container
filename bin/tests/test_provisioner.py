@@ -39,13 +39,17 @@ def hcloud(wiz, monkeypatch):
     argvs: list[list[str]] = []
     # POST /servers -> a running server with an IPv4; DELETE -> ok.
     server = {"id": 42, "public_net": {"ipv4": {"ip": "203.0.113.9"}}}
+    # Two keys are uploaded per provision (operator then automation); hand out
+    # distinct ids so tests can tell them apart.
+    next_key_id = {"n": 6}
 
     def fake_open(req, timeout=None):
         reqs.append(req)
         method, path = req.get_method(), req.full_url
         if "/ssh_keys" in path:
             if method == "POST":
-                return FakeResp(201, {"ssh_key": {"id": 7}})  # we uploaded it
+                next_key_id["n"] += 1  # 7 (operator), then 8 (automation)
+                return FakeResp(201, {"ssh_key": {"id": next_key_id["n"]}})
             if method == "GET":
                 return FakeResp(200, {"ssh_keys": []})  # none exist -> upload
             return FakeResp(200, {"action": {"id": 1}})  # DELETE
@@ -64,6 +68,8 @@ def hcloud(wiz, monkeypatch):
         ],
     )
     monkeypatch.setattr(wiz, "wait_until_reachable", lambda *a, **k: None)
+    # Never shell out to ssh-keygen in unit tests; hand back a fixed automation key.
+    monkeypatch.setattr(wiz, "generate_automation_key", lambda name: "ssh-ed25519 AAAA auto@host")
     monkeypatch.setattr(wiz, "resolve_operator_pubkey", lambda o=None: "ssh-ed25519 AAAA op@host")
     return wiz, reqs, argvs
 
@@ -98,9 +104,14 @@ def test_create_returns_docker_driver_host(hcloud, monkeypatch):
     assert rec["created_by_tool"] is True
     assert rec["provisioning"]["server_id"] == 42
     assert rec["provisioning"]["provider"] == "hetzner"
-    assert rec["provisioning"]["ssh_key_id"] == 7  # we uploaded it -> destroy removes it
-    # The record drives the existing driver seam unchanged.
+    assert rec["provisioning"]["ssh_key_id"] == 7  # operator key we uploaded -> destroy removes it
+    assert rec["provisioning"]["automation_ssh_key_id"] == 8  # automation key -> destroy removes it
+    assert rec["provisioning"]["connection"] == "ssh-forward"  # docker over the tunnel
+    # The record drives the existing driver seam unchanged (context name is stable).
     assert wiz.driver_runtime_argv(rec) == ["docker", "--context", "agent-container-hz1"]
+    # The docker context targets the local forwarded socket, not ssh://.
+    ctx_create = next(a for a in _argvs if a[:3] == ["docker", "context", "create"])
+    assert any(arg.startswith("host=unix://") for arg in ctx_create)
 
 
 def test_cleanup_destroys_server_on_post_allocation_failure(hcloud, monkeypatch):
@@ -209,7 +220,7 @@ def test_defaults_reach_the_create_body(hcloud, monkeypatch):
     assert body["server_type"] == "cax11"  # HETZNER_DEFAULT_SERVER_TYPE
     assert body["location"] == "nbg1"  # HETZNER_DEFAULT_LOCATION
     assert body["image"] == "debian-12"
-    assert body["ssh_keys"] == [7]  # the uploaded operator key id (root injection)
+    assert body["ssh_keys"] == [7, 8]  # operator + automation key ids (both root-injected)
     assert body["user_data"].startswith("#cloud-config")
 
 
@@ -255,6 +266,40 @@ def test_hcloud_request_retries_transient_5xx_on_get(wiz, monkeypatch):
 def test_provisioner_destroy_refuses_foreign_host(wiz):
     with pytest.raises(wiz.Fatal, match="did not create"):
         wiz.provisioner_destroy({"created_by_tool": False, "provisioning": {"server_id": 5}}, "t")
+
+
+def test_provisioner_destroy_removes_server_and_both_keys(wiz, monkeypatch):
+    # Teardown must delete the server AND both keys the tool uploaded (operator +
+    # automation), leaving nothing billable/dangling.
+    deletes: list[str] = []
+
+    def fake_open(req, timeout=None):
+        if req.get_method() == "DELETE":
+            deletes.append(req.full_url)
+        return FakeResp(200, {"action": {"id": 1}})
+
+    monkeypatch.setattr(wiz._HCLOUD_OPENER, "open", fake_open)
+    monkeypatch.setattr(wiz, "query", lambda a: subprocess.CompletedProcess(a, 0, "", ""))
+    host = {
+        "created_by_tool": True,
+        "context": "agent-container-hz1",
+        "address": "203.0.113.9",
+        "provisioning": {"server_id": 42, "ssh_key_id": 7, "automation_ssh_key_id": 8},
+    }
+    wiz.provisioner_destroy(host, "t")
+    assert any(u.endswith("/servers/42") for u in deletes)
+    assert any(u.endswith("/ssh_keys/7") for u in deletes)  # operator key
+    assert any(u.endswith("/ssh_keys/8") for u in deletes)  # automation key
+
+
+def test_ensure_tunnel_is_noop_for_non_forward_hosts(wiz, monkeypatch):
+    # Only ssh-forward (provisioned) hosts get a tunnel; local / user-context /
+    # existing-ssh hosts must never trigger an ssh forward.
+    started = {"n": 0}
+    monkeypatch.setattr(wiz, "_start_tunnel", lambda *a, **k: started.__setitem__("n", 1))
+    wiz.ensure_tunnel({"driver": "docker", "context": "lima", "provisioning": None})
+    wiz.ensure_tunnel({"driver": "docker", "context": "agent-container-x", "provisioning": {}})
+    assert started["n"] == 0
 
 
 def test_create_and_reuse_are_mutually_exclusive(wiz):
