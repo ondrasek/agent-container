@@ -71,7 +71,12 @@ run_check() {
 DEPS=(--with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15')
 RUFF=(uv run --no-project --with ruff ruff)
 BANDIT=(uv run --no-project --with bandit bandit)
-PYT=(uv run --no-project "${DEPS[@]}" --with pytest pytest)
+# pytest-github-actions-annotate-failures turns failures into inline GitHub
+# annotations (file:line) under Actions; it auto-detects GITHUB_ACTIONS and is a
+# no-op locally, so it rides in the one shared pytest env without changing local
+# behavior. It's a test-only plugin — never a runtime dep of the CLI.
+PYT=(uv run --no-project "${DEPS[@]}" --with pytest
+     --with 'pytest-github-actions-annotate-failures>=0.2,<1' pytest)
 
 # ty resolves third-party imports against a Python environment. Left to its own
 # discovery it picks the system interpreter (on CI that is /usr/lib/python3.12,

@@ -346,3 +346,111 @@ def test_distinct_containers_get_distinct_identities(acc):
     acc.up("accdist1")
     acc.up("accdist2")
     assert _container_hostkey_fp("accdist1") != _container_hostkey_fp("accdist2")
+
+
+# --- Hetzner provisioning (US2) — OPT-IN, BILLABLE, never in CI ---------------
+# Requires HCLOUD_TOKEN in the env; skips otherwise. Provisions a REAL server,
+# verifies docker + compose came up (cloud-init), then destroys it in a finally
+# so an assertion failure can never leave a billable orphan. Deletes ONLY the
+# server it created (by the unique name / its own server_id) — never any other
+# server in the project.
+
+import importlib.util  # noqa: E402
+from importlib.machinery import SourceFileLoader  # noqa: E402
+
+
+def _load_cli():
+    loader = SourceFileLoader("_ac_prov", str(SCRIPT_PATH))
+    spec = importlib.util.spec_from_loader("_ac_prov", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# Policy: CI/CD MUST NEVER provision real infrastructure or incur cost. This test
+# is a developer-only, intentional, LOCAL action. The CI guard is belt-and-braces:
+# it refuses to run under any CI runner even if a token is present in the env, so
+# accidentally exposing HCLOUD_TOKEN to a workflow can't trigger a billable run.
+_IN_CI = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+
+
+@pytest.mark.skipif(
+    _IN_CI or not os.environ.get("HCLOUD_TOKEN"),
+    reason="billable real provisioning — never runs in CI; opt-in locally via HCLOUD_TOKEN",
+)
+def test_hetzner_provision_deploy_destroy(tmp_path, monkeypatch):
+    import json as _json
+
+    name = "acc-hz"  # unique, RFC-1123; matches the created server + docker context name
+    token = os.environ["HCLOUD_TOKEN"]
+
+    state = tmp_path / "state"
+    config = tmp_path / "config"
+    state.mkdir()
+    config.mkdir()
+    # Point THIS process's cli at the same XDG dirs as the host-add subprocess, so
+    # the in-process tunnel re-check below finds the automation key host-add wrote.
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    cli = _load_cli()
+    env = dict(os.environ)
+
+    # Overridable so a run can dodge a "resource_unavailable" placement (ARM/region
+    # capacity varies). Default to a broadly-available x86 shared type.
+    srv_type = os.environ.get("AGENT_CONTAINER_ACC_SERVER_TYPE", "cpx11")
+    srv_loc = os.environ.get("AGENT_CONTAINER_ACC_LOCATION", "nbg1")
+    add_argv = [
+        *AGENT_CONTAINER,
+        "host",
+        "add",
+        name,
+        "--provider",
+        "hetzner",
+        "--create",
+        "--server-type",
+        srv_type,
+        "--location",
+        srv_loc,
+    ]
+    # Authorize a specific operator PUBLIC key when ~/.ssh/id_*.pub is absent
+    # (e.g. a hardware/agent-backed key). AGENT_CONTAINER_SSH_PUBKEY = its path.
+    pub = os.environ.get("AGENT_CONTAINER_SSH_PUBKEY")
+    if pub:
+        add_argv += ["--ssh-pubkey", pub]
+
+    host: dict | None = None
+    try:
+        r = subprocess.run(add_argv, env=env, capture_output=True, text=True, timeout=900)
+        # host add succeeding IS the end-to-end proof: the tool polled `docker
+        # version` over the automation-key socket-forward until docker answered.
+        assert r.returncode == 0, f"provision failed:\n{r.stderr}"
+        reg = _json.loads((config / "agent-container" / "hosts.json").read_text())
+        host = reg["hosts"][name]
+        assert host["created_by_tool"] is True
+        assert isinstance(host["provisioning"]["server_id"], int)
+        assert host["provisioning"]["connection"] == "ssh-forward"
+        assert isinstance(host["provisioning"]["automation_ssh_key_id"], int)
+        assert host["context"] == "agent-container-acc-hz"
+        # From a FRESH tunnel in THIS process (the provisioning tunnel is gone),
+        # the compose v2 plugin answers over the forward — proving both the
+        # socket-forward reconnects across invocations and compose is installed.
+        cli.ensure_tunnel(host)
+        ctx = host["context"]
+        assert (
+            subprocess.run(
+                ["docker", "--context", ctx, "compose", "version"],
+                capture_output=True,
+                timeout=60,
+            ).returncode
+            == 0
+        ), "compose plugin missing / socket-forward did not re-establish"
+    finally:
+        # ALWAYS destroy — primary path via the tool, then a hcloud fallback, so a
+        # billable server is never left running even if the tool's teardown fails.
+        if host is not None:
+            try:
+                cli.provisioner_destroy(host, token)
+            except Exception as e:  # noqa: BLE001
+                print(f"provisioner_destroy failed: {e}")
+        if shutil.which("hcloud"):
+            subprocess.run(["hcloud", "server", "delete", name], capture_output=True)
