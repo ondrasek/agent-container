@@ -68,6 +68,7 @@ jobs:
       - name: Run the pytest suite
         run: >
           uv run --no-project --python ${{ matrix.python }} --with pytest
+          --with 'pytest-github-actions-annotate-failures>=0.2,<1'
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
           pytest bin/tests
 
@@ -94,5 +95,6 @@ jobs:
         # overrides the default `-m 'not acceptance'` from pyproject. No secrets.
         run: >
           uv run --no-project --python 3.14 --with pytest
+          --with 'pytest-github-actions-annotate-failures>=0.2,<1'
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
           pytest bin/tests -m acceptance
