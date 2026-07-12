@@ -42,14 +42,18 @@ def hcloud(wiz, monkeypatch):
 
     def fake_open(req, timeout=None):
         reqs.append(req)
-        method = req.get_method()
-        if method == "POST":
+        method, path = req.get_method(), req.full_url
+        if "/ssh_keys" in path:
+            if method == "POST":
+                return FakeResp(201, {"ssh_key": {"id": 7}})  # we uploaded it
+            if method == "GET":
+                return FakeResp(200, {"ssh_keys": []})  # none exist -> upload
+            return FakeResp(200, {"action": {"id": 1}})  # DELETE
+        if method == "POST":  # /servers
             return FakeResp(201, {"server": server})
-        if method == "GET":
+        if method == "GET":  # /servers/<id>
             return FakeResp(200, {"server": server})
-        if method == "DELETE":
-            return FakeResp(200, {"action": {"id": 1}})
-        return FakeResp(200, {})
+        return FakeResp(200, {"action": {"id": 1}})  # DELETE /servers/<id>
 
     monkeypatch.setattr(wiz._HCLOUD_OPENER, "open", fake_open)
     monkeypatch.setattr(
@@ -94,6 +98,7 @@ def test_create_returns_docker_driver_host(hcloud, monkeypatch):
     assert rec["created_by_tool"] is True
     assert rec["provisioning"]["server_id"] == 42
     assert rec["provisioning"]["provider"] == "hetzner"
+    assert rec["provisioning"]["ssh_key_id"] == 7  # we uploaded it -> destroy removes it
     # The record drives the existing driver seam unchanged.
     assert wiz.driver_runtime_argv(rec) == ["docker", "--context", "agent-container-hz1"]
 
@@ -199,12 +204,12 @@ def test_defaults_reach_the_create_body(hcloud, monkeypatch):
     wiz.provision_host(
         "hetzner", "hz1", server_type=None, location=None, ssh_key=None, ssh_pubkey=None
     )
-    post = next(r for r in reqs if r.get_method() == "POST")
+    post = next(r for r in reqs if r.get_method() == "POST" and r.full_url.endswith("/servers"))
     body = json.loads(post.data)
     assert body["server_type"] == "cax11"  # HETZNER_DEFAULT_SERVER_TYPE
     assert body["location"] == "nbg1"  # HETZNER_DEFAULT_LOCATION
     assert body["image"] == "debian-12"
-    assert "ssh_keys" not in body  # none passed -> cloud-init handles the key
+    assert body["ssh_keys"] == [7]  # the uploaded operator key id (root injection)
     assert body["user_data"].startswith("#cloud-config")
 
 
@@ -271,8 +276,31 @@ def test_unknown_provider_dies(wiz, monkeypatch):
         )
 
 
-def test_user_data_is_cloud_config_with_key_and_docker(wiz):
-    ud = wiz.hetzner_build_user_data("ssh-ed25519 AAAA op@host")
+def test_user_data_installs_docker_and_carries_no_key(wiz):
+    # Docker-install only: key auth is via the Hetzner ssh_keys API (root
+    # injection), NOT cloud-init, which does not authorize root on this image.
+    ud = wiz.hetzner_build_user_data()
     assert ud.startswith("#cloud-config\n")
-    assert "ssh-ed25519 AAAA op@host" in ud
     assert "docker-ce" in ud and "docker-compose-plugin" in ud
+    assert "ssh_authorized_keys" not in ud
+    assert "bookworm" in ud  # apt suite pinned (no fragile nested $(...) quoting)
+
+
+def test_ensure_ssh_key_reuses_existing_by_public_key(wiz, monkeypatch):
+    # When the operator's key is already in the project, reuse it (created_by_us
+    # False) so destroy never removes a key they use elsewhere.
+    calls: list = []
+
+    def fake_open(req, timeout=None):
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "GET":
+            return FakeResp(
+                200, {"ssh_keys": [{"id": 99, "name": "x", "public_key": "ssh-ed25519 AAAA me"}]}
+            )
+        pytest.fail("must not POST/DELETE when the key already exists")
+
+    monkeypatch.setattr(wiz._HCLOUD_OPENER, "open", fake_open)
+    key_id, created = wiz.hetzner_ensure_ssh_key(
+        "agent-container-hz1", "ssh-ed25519 AAAA me@host", "t"
+    )
+    assert key_id == 99 and created is False

@@ -1011,19 +1011,17 @@ def resolve_operator_pubkey(override: Path | None = None) -> str:
     )
 
 
-def hetzner_build_user_data(operator_pubkey: str) -> str:
-    """cloud-init that installs Docker + the Compose v2 plugin and authorizes the
-    operator key for root on a fresh Debian 12 server. Passed verbatim as
-    user_data (plain YAML, ~1 KB, no base64)."""
-    # The apt suite is pinned to HETZNER_CODENAME (not computed via a nested
-    # $(. /etc/os-release && echo "$VERSION_CODENAME"), whose quoting broke under
-    # YAML/sh and 404'd the repo). ssh_pwauth:false disables the generated root
-    # password so key auth is the only path.
+def hetzner_build_user_data() -> str:
+    """cloud-init that installs Docker + the Compose v2 plugin on a fresh Debian 12
+    server. Passed verbatim as user_data (plain YAML, no base64)."""
+    # DOCKER INSTALL ONLY — key authorization is handled via Hetzner's ssh_keys
+    # API (injected into root at provision time), NOT cloud-init: on the Hetzner
+    # debian-12 image cloud-init's top-level `ssh_authorized_keys` does NOT
+    # authorize root (verified live — root rejects the key), so `root@ip` auth
+    # would fail and the docker-over-ssh poll would never succeed. The apt suite
+    # is pinned to HETZNER_CODENAME (not a nested $(...) whose quoting broke).
     return (
         "#cloud-config\n"
-        "ssh_pwauth: false\n"
-        "ssh_authorized_keys:\n"
-        f"  - {operator_pubkey}\n"
         "package_update: true\n"
         "packages:\n"
         "  - ca-certificates\n"
@@ -1040,10 +1038,16 @@ def hetzner_build_user_data(operator_pubkey: str) -> str:
 
 
 def hetzner_create_server(
-    name: str, server_type: str, location: str, user_data: str, token: str, ssh_key: str | None
+    name: str,
+    server_type: str,
+    location: str,
+    user_data: str,
+    token: str,
+    ssh_keys: list,
 ) -> dict:
     """POST /servers (pure allocation; the caller owns cleanup of a half-provisioned
-    server). Returns the parsed create response (server.id, server.public_net.ipv4.ip)."""
+    server). ssh_keys (ids/names) are injected into root by Hetzner. Returns the
+    parsed create response (server.id, server.public_net.ipv4.ip)."""
     body: dict = {
         "name": name,
         "server_type": server_type,
@@ -1052,11 +1056,40 @@ def hetzner_create_server(
         "start_after_create": True,
         "public_net": {"enable_ipv4": True, "enable_ipv6": True},
         "user_data": user_data,
+        "ssh_keys": ssh_keys,
     }
-    if ssh_key:
-        body["ssh_keys"] = [ssh_key]
     _status, resp = _hcloud_request("POST", "/servers", token, body, timeout=30.0)
     return resp
+
+
+def hetzner_ensure_ssh_key(name: str, pubkey: str, token: str) -> tuple[int, bool]:
+    """Ensure `pubkey` exists as a Hetzner project SSH key and return (id, created_by_us).
+    Reuses an existing key with the same public key (so we never delete a key the
+    operator uses elsewhere); otherwise uploads it under `name` (replacing a stale
+    same-named key first). Injecting via the API is what actually authorizes root —
+    cloud-init's ssh_authorized_keys does not on this image."""
+    want = pubkey.split()[:2]  # match on type + base64, ignore the trailing comment
+    _status, existing = _hcloud_request("GET", "/ssh_keys", token)
+    keys = existing.get("ssh_keys", [])
+    for k in keys:
+        if k.get("public_key", "").split()[:2] == want:
+            return int(k["id"]), False
+    for k in keys:  # drop a stale key with our name (e.g. a prior failed run)
+        if k.get("name") == name:
+            _hcloud_request("DELETE", f"/ssh_keys/{k['id']}", token)
+    _status, resp = _hcloud_request(
+        "POST", "/ssh_keys", token, {"name": name, "public_key": pubkey}
+    )
+    return int(resp["ssh_key"]["id"]), True
+
+
+def hetzner_delete_ssh_key(key_id: int, token: str) -> None:
+    """DELETE /ssh_keys/<id>, idempotent + best-effort (only for keys we uploaded)."""
+    try:
+        _hcloud_request("DELETE", f"/ssh_keys/{key_id}", token)
+    except Fatal as e:
+        if "not_found" not in str(e):
+            warn(f"could not delete Hetzner ssh key {key_id}: {e}")
 
 
 def hetzner_get_server(server_id: int, token: str) -> dict:
@@ -1086,13 +1119,15 @@ def hetzner_delete_server(server_id: int, token: str) -> None:
         warn(f"could not delete Hetzner server {server_id}: {e}")
 
 
-def cleanup_on_failure(server_id: int | None, token: str) -> None:
-    """Destroy a half-provisioned server so no orphaned billable server survives a
-    failed `host add` (FR-011). No-op if nothing was allocated yet."""
-    if server_id is None:
-        return
-    warn(f"cleaning up half-provisioned Hetzner server {server_id}")
-    hetzner_delete_server(server_id, token)
+def cleanup_on_failure(server_id: int | None, token: str, *, ssh_key_id: int | None = None) -> None:
+    """Destroy a half-provisioned server (and an ssh key we uploaded) so a failed
+    `host add` leaves nothing billable/dangling (FR-011). No-op for anything not
+    allocated yet."""
+    if server_id is not None:
+        warn(f"cleaning up half-provisioned Hetzner server {server_id}")
+        hetzner_delete_server(server_id, token)
+    if ssh_key_id is not None:
+        hetzner_delete_ssh_key(ssh_key_id, token)
 
 
 def seed_known_hosts(ip: str) -> None:
@@ -1179,20 +1214,26 @@ def provisioner_create(
     server_type: str,
     location: str,
     operator_pubkey: str,
-    ssh_key: str | None,
+    extra_ssh_key: str | None,
     token: str,
 ) -> dict:
-    """Allocate a server, wait until docker is up, register a local docker context,
-    and return the Host record. On any post-allocation failure, destroys the server
-    (no orphaned billable server) and dies."""
-    user_data = hetzner_build_user_data(operator_pubkey)
+    """Authorize the operator key via Hetzner's ssh_keys API (injected into root),
+    allocate a server, wait until docker is up, register a local docker context, and
+    return the Host record. On any post-allocation failure, destroys the server AND
+    any key we uploaded (no orphaned billable server / dangling key) and dies."""
+    user_data = hetzner_build_user_data()
     ctx = docker_context_name(name)
     server_id: int | None = None
-    # ONE guard around allocation AND everything after it. BaseException (not just
-    # Fatal) so a Ctrl-C during the multi-minute wait, a missing docker/ssh binary
-    # (OSError), or a decode error still destroys the billable server (FR-011).
+    key_id: int | None = None
+    our_key: int | None = None  # the key we uploaded and must clean up
+    # ONE guard around key upload, allocation AND everything after. BaseException
+    # (not just Fatal) so a Ctrl-C during the multi-minute wait, a missing docker/
+    # ssh binary (OSError), or a decode error still tears everything down (FR-011).
     try:
-        resp = hetzner_create_server(name, server_type, location, user_data, token, ssh_key)
+        key_id, created = hetzner_ensure_ssh_key(docker_context_name(name), operator_pubkey, token)
+        our_key = key_id if created else None
+        ssh_keys: list = [key_id] + ([extra_ssh_key] if extra_ssh_key else [])
+        resp = hetzner_create_server(name, server_type, location, user_data, token, ssh_keys)
         server = resp.get("server", {})
         sid = server.get("id")
         if not isinstance(sid, int):
@@ -1212,11 +1253,11 @@ def provisioner_create(
         wait_until_reachable(ip, ctx)
     except BaseException:
         # A POST may have created a server whose response we never saw — find it by
-        # name so it is not orphaned, then delete + drop the half-made context.
+        # name so it is not orphaned, then delete server + our key + the context.
         if server_id is None:
             found = hetzner_find_server_by_name(name, token)
             server_id = found.get("id") if isinstance(found, dict) else None
-        cleanup_on_failure(server_id, token)
+        cleanup_on_failure(server_id, token, ssh_key_id=our_key)
         query(["docker", "context", "rm", "-f", ctx])
         raise
     return {
@@ -1228,6 +1269,7 @@ def provisioner_create(
             "server_id": server_id,
             "server_type": server_type,
             "location": location,
+            "ssh_key_id": our_key,  # only set when WE uploaded it (destroy removes it)
             "created": True,
         },
         "created_by_tool": True,
@@ -1244,6 +1286,9 @@ def provisioner_destroy(host: dict, token: str) -> None:
     server_id = prov.get("server_id")
     if isinstance(server_id, int):
         hetzner_delete_server(server_id, token)
+    key_id = prov.get("ssh_key_id")
+    if isinstance(key_id, int):  # only the key WE uploaded; a reused key is left alone
+        hetzner_delete_ssh_key(key_id, token)
     ctx = host.get("context")
     if isinstance(ctx, str) and ctx.startswith(CONTAINER_PREFIX):
         query(["docker", "context", "rm", "-f", ctx])
