@@ -367,9 +367,16 @@ def _load_cli():
     return mod
 
 
+# Policy: CI/CD MUST NEVER provision real infrastructure or incur cost. This test
+# is a developer-only, intentional, LOCAL action. The CI guard is belt-and-braces:
+# it refuses to run under any CI runner even if a token is present in the env, so
+# accidentally exposing HCLOUD_TOKEN to a workflow can't trigger a billable run.
+_IN_CI = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+
+
 @pytest.mark.skipif(
-    not os.environ.get("HCLOUD_TOKEN"),
-    reason="no HCLOUD_TOKEN — opt-in billable Hetzner provisioning test",
+    _IN_CI or not os.environ.get("HCLOUD_TOKEN"),
+    reason="billable real provisioning — never runs in CI; opt-in locally via HCLOUD_TOKEN",
 )
 def test_hetzner_provision_deploy_destroy(tmp_path):
     import json as _json
