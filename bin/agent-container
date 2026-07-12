@@ -1158,11 +1158,13 @@ def docker_context_create(ctx: str, endpoint: str) -> None:
         die(f"could not create docker context {ctx}: {r.stderr.strip()}")
 
 
-def _docker_ctx_ready(ctx: str) -> bool:
+def _docker_ctx_ready(ctx: str) -> tuple[bool, str]:
     """`docker --context <ctx> version` exits 0, with a HARD timeout so a first-
     connect ssh host-key prompt can never hang the poll forever (BatchMode is not
     guaranteed on docker's ssh helper; known_hosts is seeded first as the primary
-    guard, this is the backstop)."""
+    guard, this is the backstop). Returns (ready, why) — `why` carries the last
+    failure reason (ssh host-key/auth vs. daemon-not-up) so a poll timeout can say
+    what actually kept failing instead of a blind 'never became reachable'."""
     try:
         r = subprocess.run(
             ["docker", "--context", ctx, "version"],
@@ -1171,9 +1173,13 @@ def _docker_ctx_ready(ctx: str) -> bool:
             stdin=subprocess.DEVNULL,
             timeout=20,
         )
-        return r.returncode == 0
-    except subprocess.TimeoutExpired, OSError:
-        return False
+        if r.returncode == 0:
+            return True, ""
+        return False, (r.stderr.strip() or r.stdout.strip() or f"exit {r.returncode}")
+    except subprocess.TimeoutExpired:
+        return False, "docker version timed out after 20s"
+    except OSError as e:
+        return False, f"docker invocation failed: {e}"
 
 
 def wait_until_reachable(
@@ -1202,11 +1208,16 @@ def wait_until_reachable(
         die(f"server {ip}: SSH never became reachable within {ssh_timeout:.0f}s")
     seed_known_hosts(ip)
     docker_deadline = time.monotonic() + docker_timeout
+    last_why = "(no probe completed)"
     while time.monotonic() < docker_deadline:
-        if _docker_ctx_ready(ctx):
+        ready, last_why = _docker_ctx_ready(ctx)
+        if ready:
             return
         time.sleep(poll_interval)
-    die(f"server {ip}: docker never became reachable within {docker_timeout:.0f}s (cloud-init?)")
+    die(
+        f"server {ip}: docker never became reachable within {docker_timeout:.0f}s "
+        f"(cloud-init?); last probe error: {last_why}"
+    )
 
 
 def provisioner_create(
