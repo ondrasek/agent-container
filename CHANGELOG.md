@@ -2,6 +2,61 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-07-12)
+
+### Bug Fixes
+
+- Apply adversarial-review fixes to the Hetzner provisioner (specs/001 US2)
+  ([`d35f5b7`](https://github.com/ondrasek/agent-container/commit/d35f5b7186a9cfc5dc9986752f546345e00ad066))
+
+- Authenticate provisioned-host docker over an ssh socket-forward
+  ([`5a463c6`](https://github.com/ondrasek/agent-container/commit/5a463c6a2002d7e205babe6dc1be4e78b77d721c))
+
+- Authorize Hetzner root via the ssh_keys API, not cloud-init (specs/001 US2)
+  ([`81491f9`](https://github.com/ondrasek/agent-container/commit/81491f9e2c4922186a39a94d21ca7d471bd8d924))
+
+- Surface why the Hetzner docker-over-ssh readiness probe fails
+  ([`c5f81fe`](https://github.com/ondrasek/agent-container/commit/c5f81fed3f9e2133a1e3e9facd647dd1a1759d7c))
+
+### Continuous Integration
+
+- Annotate pytest failures inline via pytest-github-actions plugin
+  ([`192da84`](https://github.com/ondrasek/agent-container/commit/192da844a57c70c6d0227cfb9b835be4c9234950))
+
+- Full-fetch the base ref for the conventional-commits check
+  ([`ea16a7d`](https://github.com/ondrasek/agent-container/commit/ea16a7d5214e0f587b242198ff7e39a77a84f206))
+
+### Documentation
+
+- Add shell-integration specification (specs/005)
+  ([`de6d759`](https://github.com/ondrasek/agent-container/commit/de6d759f18c4470ef32009317ba4493075bd3573))
+
+- **specs**: Add Feature 006 agent-as-code declarative spec
+  ([`524f110`](https://github.com/ondrasek/agent-container/commit/524f1102bd14a09679cbd89e3cc71a748021c616))
+
+- **specs**: Update provisioner contract for the socket-forward automation key
+  ([`4089bef`](https://github.com/ondrasek/agent-container/commit/4089bef948e69b448437e3b50088fbf7430d941e))
+
+### Features
+
+- Add Hetzner provisioner and host add --provider (specs/001 US2)
+  ([`8adfb05`](https://github.com/ondrasek/agent-container/commit/8adfb0517efa382792a9177dfdb25cd98220d290))
+
+- Make Hetzner readiness timeouts env-tunable (specs/001 US2)
+  ([`f6fdf65`](https://github.com/ondrasek/agent-container/commit/f6fdf652c03ed6d28ce28d5674e478fff4c0cf38))
+
+### Testing
+
+- Add opt-in tokened Hetzner provisioning acceptance (specs/001 US2, T026)
+  ([`21dee6c`](https://github.com/ondrasek/agent-container/commit/21dee6ca9748200da1e16b697f1864fe1e8951b9))
+
+- Guard the billable Hetzner provisioning test out of CI
+  ([`96926c9`](https://github.com/ondrasek/agent-container/commit/96926c95f85960d92dc0280c81ff707abea3aaba))
+
+- Make the Hetzner acceptance test env-configurable (specs/001 US2)
+  ([`5753e80`](https://github.com/ondrasek/agent-container/commit/5753e80af8b43750d2b2b9a31f450e53da2507df))
+
+
 ## v0.3.0 (2026-07-10)
 
 ### Bug Fixes
