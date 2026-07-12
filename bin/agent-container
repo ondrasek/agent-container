@@ -1152,7 +1152,10 @@ def wait_until_reachable(
     """Two independent budgets: SSH port open (cloud-init authorized the key), THEN
     — with its own fresh, larger budget — `docker version` succeeds (docker install
     from cloud-init finishes, minutes on a small ARM node). A shared deadline would
-    starve the docker phase when boot is slow."""
+    starve the docker phase when boot is slow. Both budgets are env-tunable
+    (AGENT_CONTAINER_HZ_SSH_TIMEOUT / _DOCKER_TIMEOUT) for slow images/regions."""
+    ssh_timeout = float(os.environ.get("AGENT_CONTAINER_HZ_SSH_TIMEOUT", ssh_timeout))
+    docker_timeout = float(os.environ.get("AGENT_CONTAINER_HZ_DOCKER_TIMEOUT", docker_timeout))
     ssh_deadline = time.monotonic() + ssh_timeout
     while time.monotonic() < ssh_deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
