@@ -47,8 +47,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: cz check (Conventional Commits)
+        # Full fetch of the base (NOT --depth=1): a shallow base ref cannot locate
+        # the real merge base once the PR branch has merged main in, so
+        # origin/main..HEAD would wrongly include main's own (grandfathered) history.
         run: |
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          git fetch --no-tags origin "${{ github.base_ref }}"
           uvx --from commitizen cz check --rev-range "origin/${{ github.base_ref }}..HEAD"
 
   test:
