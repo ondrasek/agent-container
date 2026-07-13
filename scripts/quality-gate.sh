@@ -83,18 +83,31 @@ PYT=(uv run --no-project "${DEPS[@]}" --with pytest
 # which lacks typer/questionary) — NOT uv's `--with` overlay and NOT ty's own
 # install venv. So build a 3.14 venv holding the runtime deps and point ty at it
 # EXPLICITLY with `--python` below; without that flag ty ignores this venv and
-# reports unresolved-import on a clean checkout. Cache it, rebuilding only when
-# the pin set changes (marker file): first build ~3s, cached runs instant; CI's
-# temp dir is fresh each run so it builds once.
+# reports unresolved-import on a clean checkout. Cache it in a temp dir: first
+# build ~3s, cached runs instant; CI's temp dir is fresh each run so it builds
+# once. The cache lives in a VOLATILE temp dir, so its packages can vanish
+# (TMPDIR reaping, a partial clean) while the .deps marker still matches — that
+# yields phantom `unresolved-import` errors on unchanged code. So validate the
+# cache is actually USABLE (pin set matches AND the deps still import) and
+# rebuild if not — self-healing rather than failing the gate.
 TY_DEPS="typer>=0.12,<1 questionary>=2.0,<3 rich>=13,<15 ty"
 TYVENV="${TMPDIR:-/tmp}/agent-container-tyvenv"
-if [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" != "$TY_DEPS" ]; then
+ty_env_usable() {
+    [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" = "$TY_DEPS" ] \
+        && [ -x "$TYVENV/bin/ty" ] \
+        && "$TYVENV/bin/python" -c "import typer, questionary, rich" 2>/dev/null
+}
+build_ty_env() {
     rm -rf "$TYVENV"
     # shellcheck disable=SC2086 # deliberate word-splitting of the pin list
     uv venv "$TYVENV" --python "$UV_PYTHON" -q \
         && uv pip install --python "$TYVENV" -q $TY_DEPS \
-        && echo "$TY_DEPS" >"$TYVENV/.deps" \
-        || { echo "quality-gate: failed to build the ty environment" >&2; exit 1; }
+        && echo "$TY_DEPS" >"$TYVENV/.deps"
+}
+if ! ty_env_usable; then
+    debuglog "ty env missing/stale — (re)building $TYVENV"
+    build_ty_env || { echo "quality-gate: failed to build the ty environment" >&2; exit 1; }
+    ty_env_usable || { echo "quality-gate: ty environment unusable after rebuild" >&2; exit 1; }
 fi
 
 # Ordered fastest / most-likely-to-fail first: static checks (lint, types,
