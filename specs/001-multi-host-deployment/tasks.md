@@ -66,7 +66,7 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 - [X] T013 [P] [US1] Rewrite `bin/tests/test_command_construction.py` deploy assertions: `up alpha` generates the compose file (7 volumes + secrets/configs) and invokes `<rt> --context <ctx> compose -p agent-container-alpha up -d --build` — **replacing** the old `docker run` argv assertions.
 - [X] T014 [US1] Implement `host add` for local `docker`/`podman` (with `--docker-context`/`--connection`, `--default`, `capability_check` at registration) in `bin/agent-container`.
 - [X] T015 [US1] Rewrite `do_up`/`launch_container` to resolve the target Host, generate compose (T011), and run `up_argv` on the host; report reachable address+port; in `bin/agent-container`.
-- [X] T016 [US1] Move SSH identity injection from bind mounts to compose `secrets`/`configs` (update `resolve_ssh_injection`; host key=secret, authorized_keys=config) in `bin/agent-container`.
+- [X] T016 [US1] Move SSH identity injection from bind mounts to compose injected material (update `resolve_ssh_injection`). NOTE: both the host key AND authorized_keys ship as compose **`configs`** (0644), not `secrets` — a compose `secret` with an absolute `target` crash-loops the container on some daemons, and secret files staged 0600 are unreadable by the container's `dev` uid (host uid ≠ container uid). See R5 / `contracts/provisioner.md`; this deviates from FR-015's "host key as secret" for portability. In `bin/agent-container`.
 - [X] T017 [US1] Rewrite `down_container` to `compose down` (keep the 7 volumes; `--purge`→`--volumes`) then `wait_port_released` before returning, in `bin/agent-container`.
 - [X] T018 [US1] Make `attach` host-address-aware (resolve `Host.address`; local→localhost; `existing-ssh` legacy fallback) in `bin/agent-container`.
 - [X] T019 [US1] Implicit-local upgrade: a bare `up`/`down`/`attach` with no registered hosts assumes a `local` docker host from `detect_runtime()` and tells the operator, in `bin/agent-container`.
@@ -83,11 +83,11 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 
 **Independent Test**: (tokened, opt-in) `host add hz1 --provider hetzner --create …` → `up beta --host hz1` (image built on server) → `attach beta --host hz1` → `down` (quickstart Scenario C). Depends on US1's deploy path existing.
 
-- [ ] T022 [P] [US2] Write failing provisioner tests in `bin/tests/test_provisioner.py`: token never on argv (passed via urllib headers), `create` returns a `docker`-driver Host with `created_by_tool=true`, and `cleanup_on_failure` runs on post-allocation failure.
-- [ ] T023 [US2] Implement `HetznerProvisioner` (stdlib `urllib` REST: create/destroy; cloud-init user-data installing docker + authorizing the operator key; poll until SSH+runtime reachable) in `bin/agent-container`.
-- [ ] T024 [US2] Wire `host add --provider hetzner` with `--create`/`--reuse`/`--server-type`/`--location`/`--ssh-key` to the provisioner; register the resulting Host; on failure invoke cleanup and report (no orphaned billable server), in `bin/agent-container`.
-- [ ] T025 [US2] Verify/ensure the deploy path builds on the remote over the `ssh://` context (no local image transfer) for cloud hosts, in `bin/agent-container` (`do_up` build path).
-- [ ] T026 [P] [US2] Add opt-in tokened acceptance (marker-gated, never CI): provision→deploy(build-on-server)→attach→destroy, plus the partial-failure cleanup path, in `bin/tests/test_acceptance.py`.
+- [X] T022 [P] [US2] Write failing provisioner tests in `bin/tests/test_provisioner.py`: token never on argv (passed via urllib headers), `create` returns a `docker`-driver Host with `created_by_tool=true`, and `cleanup_on_failure` runs on post-allocation failure.
+- [X] T023 [US2] Implement the Hetzner provisioner (stdlib `urllib` REST: create/destroy; docker-only cloud-init user-data; root authorized via the Hetzner **ssh_keys API** — cloud-init's `ssh_authorized_keys` does not on this image — with **both** a tool-generated file-based **automation key** and the operator key; readiness polled over an **ssh `-L` socket-forward**) in `bin/agent-container`.
+- [X] T024 [US2] Wire `host add --provider hetzner` with `--create`/`--reuse`/`--server-type`/`--location`/`--ssh-key` to the provisioner; register the resulting Host; on failure invoke cleanup and report (no orphaned billable server), in `bin/agent-container`.
+- [X] T025 [US2] Deploy path builds on the remote over the provisioned host's docker context (no local image transfer). NOTE: the context targets a local `unix://<sock>` bridged to the remote daemon by an ssh `-L` socket-forward using the automation key (not a bare `ssh://` context) — so it authenticates unattended regardless of the operator's `~/.ssh/config`/agent; in `bin/agent-container` (`do_up` build path).
+- [X] T026 [P] [US2] Add opt-in tokened acceptance (marker-gated, never CI): provision→docker/compose reachable over a fresh socket-forward→destroy (host-add success proves reachability), plus the partial-failure cleanup path, in `bin/tests/test_acceptance.py`. **Validated live** against a real Hetzner cpx22/hel1 server (0.4.0).
 
 **Checkpoint**: one flow yields an attachable cloud agent; image built remotely; identity transferred via secrets/configs.
 
@@ -111,9 +111,9 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T032 [P] Update `README.md`: host workflow (`host add/ls/show/rm`), `--host`, Hetzner provisioning, compose run mechanism, `hosts.json` supersedes `hosts.conf`.
-- [ ] T033 [P] Update `CLAUDE.md` Decisions (host/driver/provisioner split, compose run, `hosts.json`) within the 2000-token project budget — prune before adding.
-- [ ] T034 Run `scripts/quality-gate.sh` (ruff · ty · bandit · pytest · shell suites) and fix all findings.
+- [X] T032 [P] Update `README.md`: host workflow (`host add/ls`), `--host`, Hetzner provisioning, compose run mechanism, `hosts.json` supersedes `hosts.conf`. (`host show/rm` deferred with US3.)
+- [X] T033 [P] Update `CLAUDE.md` Decisions (host/driver/provisioner split, compose run, `hosts.json`) within the 2000-token project budget — prune before adding.
+- [X] T034 Run `scripts/quality-gate.sh` (ruff · ty · bandit · pytest · shell suites) and fix all findings. (Gate green; enforced continuously via the Stop hook + CI.)
 - [ ] T035 Run quickstart.md Scenarios A/B/E (local + inspection + multi-host no-collision) and the local acceptance tier; record results.
 - [ ] T036 Retire the legacy `hosts.conf`-only code paths behind the deprecation note and reconcile any `orchestration/` quadlet references with the compose run path, in `bin/agent-container` and `orchestration/`.
 
