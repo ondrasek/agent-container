@@ -2,6 +2,32 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-07-13)
+
+### Bug Fixes
+
+- Make the US3 safe-teardown guard fail-closed (adversarial review)
+  ([`1764cd1`](https://github.com/ondrasek/agent-container/commit/1764cd191f1483f45045b29f343f7ceb2d2a51f9))
+
+### Continuous Integration
+
+- Self-heal a broken ty cache in the quality gate
+  ([`7a4bc30`](https://github.com/ondrasek/agent-container/commit/7a4bc30aa1880726bc61f072ff5208c8d819c3fc))
+
+### Documentation
+
+- Record US3 safe-teardown (tasks, README, CLAUDE)
+  ([`3e0124d`](https://github.com/ondrasek/agent-container/commit/3e0124df3dba9494c8a4421480ed18b28819ac2b))
+
+- **specs**: Reconcile 001 artifacts with the shipped US2 implementation
+  ([`4018caa`](https://github.com/ondrasek/agent-container/commit/4018caab5f5cfdf1430ba6716d90839a3cd95137))
+
+### Features
+
+- Add host show / rm / rm --destroy with the safe-teardown guard (specs/001 US3)
+  ([`e4e8c37`](https://github.com/ondrasek/agent-container/commit/e4e8c37c44c333808c9b4265b18c88d7bb4bbe23))
+
+
 ## v0.4.0 (2026-07-12)
 
 ### Bug Fixes
