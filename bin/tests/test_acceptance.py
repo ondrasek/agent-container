@@ -17,6 +17,7 @@ Codifies the manual verification performed during the SSH-identity work.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import socket
@@ -346,6 +347,101 @@ def test_distinct_containers_get_distinct_identities(acc):
     acc.up("accdist1")
     acc.up("accdist2")
     assert _container_hostkey_fp("accdist1") != _container_hostkey_fp("accdist2")
+
+
+def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
+    """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
+    ANY container is still present on the host, and release only once it is empty.
+    Proves host_container_names actually reflects live daemon state (the unit tests
+    stub it). No cloud call is ever made — we seed a tool-created hetzner-shaped host
+    that points at the LOCAL daemon (context="", no `connection` so the ssh tunnel
+    is a no-op), and pop HCLOUD_TOKEN so the emptiness-passed case fails at the token
+    gate ('HCLOUD_TOKEN') rather than 'still present' — the deterministic tell that
+    the guard released without deprovisioning anything."""
+
+    driver = "podman" if "podman" in RUNTIME else "docker"
+    config = tmp_path / "config" / "agent-container"
+    config.mkdir(parents=True)
+    reg = {
+        "version": 1,
+        "default": "acchz",
+        "hosts": {
+            "acchz": {
+                "driver": driver,
+                "context": "",  # the default local daemon — host_container_names sees acc's containers
+                "address": "localhost",
+                "provisioning": {"provider": "hetzner", "server_id": 999, "created": True},
+                "created_by_tool": True,
+            }
+        },
+    }
+    (config / "hosts.json").write_text(json.dumps(reg))
+
+    def host_rm_destroy():
+        env = _cli_env(acc.tmp / "state")
+        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env.pop("HCLOUD_TOKEN", None)  # never make a real cloud call from this test
+        return subprocess.run(
+            [*AGENT_CONTAINER, "host", "rm", "acchz", "--destroy", "-y"],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+        )
+
+    acc.up("acchza")
+    acc.up("acchzb")
+    r = host_rm_destroy()
+    assert r.returncode != 0 and "still present" in r.stderr, r.stderr  # refused: 2 present
+
+    acc.down("acchza")
+    r = host_rm_destroy()
+    assert r.returncode != 0 and "still present" in r.stderr, r.stderr  # sibling still present
+
+    acc.down("acchzb")
+    r = host_rm_destroy()
+    # Empty now: the guard released — it fails ONLY at the token gate, proving it got
+    # past the emptiness check without touching (or destroying) a loaded server.
+    assert r.returncode != 0, r.stdout
+    assert "HCLOUD_TOKEN" in r.stderr and "still present" not in r.stderr, r.stderr
+
+
+def test_host_rm_destroy_fails_closed_when_daemon_unreachable(tmp_path):
+    """Fail-CLOSED at the real CLI (review #5): a tool-created host whose daemon
+    cannot be reached (here a nonexistent docker context, so `ps` exits non-zero)
+    must REFUSE --destroy — a failed enumeration is never read as 'empty', so an
+    unreachable server is never destroyed. No containers, no cloud call (no token)."""
+    driver = "podman" if "podman" in RUNTIME else "docker"
+    config = tmp_path / "config" / "agent-container"
+    config.mkdir(parents=True)
+    reg = {
+        "version": 1,
+        "default": "deadhz",
+        "hosts": {
+            "deadhz": {
+                "driver": driver,
+                "context": "agent-container-nonexistent-xyz",  # no such context -> ps fails
+                "address": "203.0.113.200",
+                "provisioning": {"provider": "hetzner", "server_id": 777, "created": True},
+                "created_by_tool": True,
+            }
+        },
+    }
+    (config / "hosts.json").write_text(json.dumps(reg))
+    env = _cli_env(tmp_path / "state")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env.pop("HCLOUD_TOKEN", None)
+    r = subprocess.run(
+        [*AGENT_CONTAINER, "host", "rm", "deadhz", "--destroy", "-y"],
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    assert r.returncode != 0, r.stdout
+    assert "could not confirm" in r.stderr, r.stderr  # refused: enumeration failed, not "empty"
 
 
 # --- Hetzner provisioning (US2) — OPT-IN, BILLABLE, never in CI ---------------

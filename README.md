@@ -223,6 +223,9 @@ PEP 723 single-file script (`bin/agent-container`) and needs nothing but
 agent-container                # interactive menu: build, start, attach, logs, stop, purge
 agent-container host add local --docker-context lima-docker --default  # register a host
 agent-container host ls        # list registered hosts (where containers run)
+agent-container host show hz1 --json   # one host's full record (driver/context/provisioning)
+agent-container host rm hz1            # remove the registration only (server left untouched)
+agent-container host rm hz1 --destroy  # also deprovision — refused if it still hosts containers
 agent-container up acme        # deploy to the default host; --host NAME picks another
 agent-container list --json    # machine-readable state (merges runtime ps + state files)
 agent-container attach acme    # hosts.conf -> remote, else local state file; execs ssh
@@ -238,7 +241,10 @@ generates an inspectable compose project under
 `$XDG_STATE_HOME/agent-container/<host>/<name>.compose.yaml` and runs it on the host,
 building the image **on the host** — so a **Compose v2**-capable runtime is required
 (`docker compose` / `podman compose`). Injected SSH identity travels as compose
-secrets/configs (so it works over a remote context, not just locally).
+configs (so it works over a remote context, not just locally). **Server and
+container lifecycles are separate:** `down` never touches the server; removing a
+tool-provisioned server is the explicit `host rm --destroy`, which is refused while
+the server still hosts any container and for hosts the tool did not create.
 
 It keeps all state on disk, namespaced per host (container names, the port hash,
 `<host>/<name>.port` state files, env-file resolution, the host registry) so a

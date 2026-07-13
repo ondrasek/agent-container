@@ -99,11 +99,11 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 
 **Independent Test**: two containers on one host → `host rm --destroy` refused → `down` one → server + sibling intact → `host rm --destroy` succeeds when empty (quickstart Scenario D). Depends on US1 (deploy) and US2 (a cloud host to destroy).
 
-- [ ] T027 [P] [US3] Write failing tests in `bin/tests/test_host_cli.py`: `host rm --destroy` refused while containers remain (`ps_on_host`), `existing-ssh`/`--reuse` host never destroys a server, and registration-only `host rm` leaves infrastructure untouched.
-- [ ] T028 [US3] Implement `host ls`, `host show`, and registration-only `host rm` (with `--json`) in `bin/agent-container`.
-- [ ] T029 [US3] Implement `host rm --destroy`: only when `created_by_tool`, enumerate containers via `ps_on_host`, refuse if non-empty, else deprovision via the provisioner, in `bin/agent-container`.
-- [ ] T030 [US3] Update `list`/`gather_rows` to show the host column and reconcile against host daemons where feasible, in `bin/agent-container`.
-- [ ] T031 [P] [US3] Add acceptance for safe teardown (two containers; destroy refused; down one; sibling+server intact; destroy when empty) — local-analog for the guard logic + tokened for real deprovision — in `bin/tests/test_acceptance.py`.
+- [X] T027 [P] [US3] Write failing tests in `bin/tests/test_host_cli.py`: `host rm --destroy` refused while containers remain, `existing-ssh`/`--reuse` host never destroys a server, and registration-only `host rm` leaves infrastructure untouched.
+- [X] T028 [US3] Implement `host show` (--json) and registration-only `host rm` (repoints/nulls the default pointer; warns on a tool-created host) in `bin/agent-container`. (`host ls` already existed from US1.)
+- [X] T029 [US3] Implement `host rm --destroy`: refuse unless `created_by_tool` + hetzner provider + **provably empty**, then deprovision. Hardened after adversarial review to be **fail-CLOSED** (`assert_host_empty`): a failed/unreachable `docker ps` refuses rather than being read as empty; `ensure_tunnel(required=True)`; `hetzner_delete_server(strict=True)` so a failed delete retains the registry entry (no orphaned server); unregister only after a successful deprovision. In `bin/agent-container`.
+- [X] T030 [US3] `list`/`gather_rows` already shows the HOST column + per-host state rows. Live remote-daemon reconciliation (querying every host on each `list`) is **deferred to Feature 002 (container-lifecycle)** per gather_rows' own docstring — it would make `list` N remote round-trips with real latency/failure surface, out of scope for the US3 safety increment.
+- [X] T031 [P] [US3] Acceptance in `bin/tests/test_acceptance.py`: real-container emptiness guard (two containers → destroy refused; down one → still refused; empty → guard releases, fails only at the token gate, no cloud call) + fail-closed-when-daemon-unreachable. Tokened real-deprovision left as an opt-in follow-up.
 
 **Checkpoint**: fleet is manageable and teardown is safe; all three stories independently testable.
 
