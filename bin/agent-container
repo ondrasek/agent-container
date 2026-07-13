@@ -882,6 +882,96 @@ def do_host_ls(as_json: bool) -> None:
     console.print(table)
 
 
+def do_host_show(name: str, as_json: bool) -> None:
+    """Show one host's full record. Read-only: never saves, never fetches a token,
+    never contacts a daemon (the record holds no secret — only ids)."""
+    validate_name(name)
+    reg = load_registry()
+    h = get_host(reg, name)
+    if h is None:
+        die(f"no host named '{name}' (see: agent-container host ls)")
+    is_default = default_host_name(reg) == name
+    if as_json:
+        print(json.dumps({"name": name, "default": is_default, **h}, indent=2))
+        return
+    prov = h.get("provisioning")
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("name", name)
+    table.add_row("driver", str(h.get("driver", "?")))
+    table.add_row("context", str(h.get("context") or "-"))
+    table.add_row("address", str(h.get("address") or "-"))
+    table.add_row("default", "yes" if is_default else "no")
+    table.add_row("created_by_tool", "yes" if h.get("created_by_tool") else "no")
+    table.add_row("provisioning", json.dumps(prov) if prov else "-")
+    console.print(table)
+
+
+def cli_host_rm(name: str, destroy: bool, yes: bool) -> None:
+    """Remove a host from the registry. Without --destroy, only the registration
+    is removed — infrastructure is NEVER touched (FR-010). With --destroy, also
+    deprovision the cloud server, but ONLY when: the tool created it, its provider
+    has a deprovisioner, and no container remains on it (FR-008/009/010, SC-005).
+    The registry entry is removed only AFTER a successful deprovision, so a partial
+    teardown leaves the record for an idempotent retry."""
+    validate_name(name)
+    reg = load_registry()
+    h = get_host(reg, name)
+    if h is None:
+        die(f"no host named '{name}' (see: agent-container host ls)")
+    if destroy:
+        if not h.get("created_by_tool"):
+            die(
+                f"refusing --destroy on '{name}': this tool did not create its server "
+                f"(FR-010). Remove just the registry entry with: agent-container host rm {name}"
+            )
+        prov = h.get("provisioning") or {}
+        if prov.get("provider") != "hetzner":
+            die(
+                f"cannot --destroy '{name}': no deprovisioner for provider '{prov.get('provider')}'"
+            )
+        # FR-009 / SC-005: never destroy a server that still hosts containers.
+        # Routed through host_container_names (which ensure_tunnel()s the provisioned
+        # host first) — a raw docker ps on a not-yet-forwarded socket could falsely
+        # report empty and let a loaded server be destroyed. include_stopped: a
+        # stopped agent-container-* still occupies the server and holds its volumes.
+        names = host_container_names(h, include_stopped=True)
+        if names:
+            die(
+                f"refusing to destroy '{name}': {len(names)} container(s) still present "
+                f"({', '.join(sorted(names))}); remove them first "
+                f"(e.g. agent-container down <name> --host {name})"
+            )
+        if not yes:
+            if not is_tty():
+                eprint(
+                    f"[agent-container] refusing to destroy host '{name}' "
+                    f"without -y/--yes on a non-TTY"
+                )
+                raise typer.Exit(2)
+            if not questionary.confirm(
+                f"destroy the cloud server for host '{name}' (irreversible)?", default=False
+            ).ask():
+                log("aborted")
+                return
+        token = _hcloud_token()  # only here, only after every refusal + the confirm
+        provisioner_destroy(h, token)
+    elif h.get("created_by_tool"):
+        warn(
+            f"host '{name}' was provisioned by this tool; its cloud server is left "
+            f"running (and billable). Use 'host rm --destroy {name}' to deallocate it."
+        )
+    was_default = default_host_name(reg) == name
+    hosts = registry_hosts(reg)
+    hosts.pop(name, None)
+    reg["hosts"] = hosts
+    if was_default:  # never leave the default pointing at a removed host
+        reg["default"] = next(iter(sorted(hosts)), None)
+    save_registry(reg)
+    log(f"removed host '{name}'" + (" and destroyed its server" if destroy else ""))
+
+
 # --- Hetzner provisioner (Feature 001, US2) ----------------------------------
 # A provisioner allocates a cloud server and yields a plain docker-driver host,
 # so all provider specifics stay confined here (adding a provider is a new
@@ -2663,7 +2753,8 @@ def list_cmd(
 # lifecycle (up/down/attach/logs) stays as bare top-level verbs; a container is
 # addressed by name and lives on a host chosen with --host (default: the registry
 # default). There is deliberately no `host up`/`host down` — those are container
-# operations, not host operations. Deprovisioning a host is `host rm` (later).
+# operations, not host operations. Deprovisioning a host is `host rm --destroy`
+# (guarded: refused while containers remain, or for hosts the tool did not create).
 host_app = typer.Typer(
     no_args_is_help=True,
     help="Manage deployment hosts (the machines/contexts where containers run).",
@@ -2740,6 +2831,30 @@ def host_ls(
 ) -> None:
     """List registered hosts (name, driver, context, address, default)."""
     do_host_ls(as_json)
+
+
+@host_app.command("show")
+def host_show(
+    name: str = typer.Argument(..., help="Host short name."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show one host's full record (driver, context, address, provisioning state)."""
+    do_host_show(name, as_json)
+
+
+@host_app.command("rm")
+def host_rm(
+    name: str = typer.Argument(..., help="Host short name to remove."),
+    destroy: bool = typer.Option(
+        False,
+        "--destroy",
+        help="Also deprovision the cloud server (tool-created hosts only; irreversible).",
+    ),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+) -> None:
+    """Remove a host from the registry. With --destroy also deallocate its cloud
+    server — refused if the server still hosts containers or the tool didn't create it."""
+    cli_host_rm(name, destroy, yes)
 
 
 @app.command()
