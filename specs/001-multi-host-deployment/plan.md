@@ -6,7 +6,7 @@
 
 ## Summary
 
-Introduce a **host abstraction** to `agent-container`: a *host* is a named target backed by a *driver* (a container-runtime context — local endpoint or `ssh://` remote) with optional *provisioning* (allocate a cloud server via a provider). The imperative `docker run` path (`launch_container`) is replaced by a **generated declarative compose project** per container, run via `<runtime> --context <host> compose -f <state>/<name>.compose.yaml -p agent-container-<name> up -d`. Images build **on the target host** over its context (no registry). The static `hosts.conf` address book is superseded by a **host registry** (single source of truth). Injected SSH identity moves from `docker run` bind mounts to compose **`secrets`/`configs`** so it transfers over a remote context. Cloud provisioning (Hetzner) is confined to a **provisioner** that creates a server, installs the runtime via cloud-init, and yields an `ssh://` context.
+Introduce a **host abstraction** to `agent-container`: a *host* is a named target backed by a *driver* (a container-runtime context — local endpoint or `ssh://` remote) with optional *provisioning* (allocate a cloud server via a provider). The imperative `docker run` path (`launch_container`) is replaced by a **generated declarative compose project** per container, run via `<runtime> --context <host> compose -f <state>/<name>.compose.yaml -p agent-container-<name> up -d`. Images build **on the target host** over its context (no registry). The static `hosts.conf` address book is superseded by a **host registry** (single source of truth). Injected SSH identity moves from `docker run` bind mounts to compose **`configs`** so it transfers over a remote context (both host key and authorized_keys as configs — a `secret` with an absolute target crash-loops the container; see R5). Cloud provisioning (Hetzner) is confined to a **provisioner** that creates a server and installs docker via cloud-init. **As implemented (US2, shipped 0.4.0):** the provisioner authorizes root via the Hetzner **ssh_keys API** (cloud-init's `ssh_authorized_keys` does not authorize root on this image) with **two** keys — a tool-generated **file-based automation key** and the operator key — and the tool's docker traffic runs over an **ssh `-L` socket-forward** (context = local `unix://<sock>`, options passed as CLI args, no operator agent) so it authenticates unattended regardless of the operator's `~/.ssh/config`/agent; the operator key remains for interactive `attach`. (This supersedes the original "yields an `ssh://` context" design — see `contracts/provisioner.md`.)
 
 The load-bearing insight from the spec: **docker context is the universal runtime; a provider is a provisioner that yields a context** — so local and remote share one run/build/attach path and all provider-specific code is isolated to provisioning.
 
@@ -26,7 +26,7 @@ The load-bearing insight from the spec: **docker context is the universal runtim
 
 **Performance Goals**: Not throughput-bound. Targets: local deploy → attachable in the time to build+start a container; remote provision → attachable cloud agent in a single flow (SC-002); teardown releases the port before returning (FR-020, existing `wait_port_released`).
 
-**Constraints**: Rootless target container (no runtime apt, sshd as `dev` on 2222 — unchanged). Secrets never baked, never on argv (Constitution III). Podman-compatible locally; docker-context is the primary remote path (see research). No external image registry (FR-016). No new stored long-lived secret.
+**Constraints**: Rootless target container (no runtime apt, sshd as `dev` on 2222 — unchanged). Secrets never baked, never on argv (Constitution III). Podman-compatible locally; docker-context is the primary remote path (see research). No external image registry (FR-016). **Provisioned hosts introduce one tool-managed stored secret**: a per-host file-based **automation private key** under the state dir (0600), authorized on the server's root for the tool's unattended docker socket-forward. It is host-scoped, never on argv, and destroyed with the host — consistent with Least Exposure (III), but it does mean this feature is not strictly "zero stored secrets" as first assumed.
 
 **Scale/Scope**: Single operator; N containers across ≥2 hosts without collision (SC-004). First provider: Hetzner only. Legacy `hosts.conf` read for a deprecation window.
 
@@ -76,7 +76,7 @@ bin/agent-container            # extended: driver seam, compose gen, host regist
   ├─ (new) host registry        # load/save hosts.json; Host record; supersede hosts.conf (read legacy)
   ├─ (new) driver               # DockerContextDriver (primary), PodmanConnectionDriver (local parity)
   ├─ (new) compose generation   # emit <name>.compose.yaml (JSON) with volumes + secrets/configs
-  ├─ (new) provisioner          # HetznerProvisioner via urllib + cloud-init
+  ├─ (new) provisioner          # Hetzner via urllib + cloud-init; automation key + ssh -L socket-forward (unix:// ctx)
   ├─ (changed) do_up/down       # generate compose → `<rt> --context H compose up -d/down`
   └─ (changed) attach           # host-address-aware ssh target
 bin/tests/

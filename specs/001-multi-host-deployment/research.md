@@ -34,7 +34,12 @@ Decisions that resolve the plan's technical unknowns. Each: **Decision → Ratio
 
 ## R4 — Hetzner provisioning via stdlib `urllib`, server bootstrap via cloud-init
 
-**Decision**: The **HetznerProvisioner** calls the Hetzner Cloud REST API with stdlib `urllib.request` (Bearer token from runtime env/file, never argv). Server creation passes **cloud-init user-data** that installs docker and authorizes the operator's SSH public key, so the server comes up as a working `ssh://` docker context. Provisioner returns the context reference + reachable address to register as a host.
+**Decision**: The **HetznerProvisioner** calls the Hetzner Cloud REST API with stdlib `urllib.request` (Bearer token from runtime env/file, never argv). Server creation passes **cloud-init user-data** that installs docker (docker-only), and authorizes root via the Hetzner **ssh_keys API**.
+
+> **Revised during US2 implementation (shipped 0.4.0) — supersedes the original "ssh:// context" bootstrap:**
+> - Cloud-init `ssh_authorized_keys` does **not** authorize root on Hetzner debian-12; root authorization must go through the Hetzner **ssh_keys API** (POST /ssh_keys, referenced in the server create), which injects into root.
+> - The tool authorizes **two** keys: a tool-generated **file-based automation key** (for the tool's own unattended docker access) and the operator key (for interactive `attach`).
+> - The tool's docker traffic runs over an **ssh `-L` local-socket-forward** presenting the automation key with every option as a CLI arg (`-i … -o IdentitiesOnly=yes -o IdentityAgent=none`), and the host's docker context targets the forwarded `unix://<sock>`. This is why a bare `ssh://` context was insufficient: it authenticates as whatever the operator's `~/.ssh/config` presents, which can be an approval-gated agent key (e.g. 1Password) that cannot sign unattended. See `contracts/provisioner.md`.
 
 **Rationale**: Zero new Python dependency (Constitution VI); token stays off argv (Constitution III). Cloud-init is the standard first-boot bootstrap and keeps runtime-install at *provision* time, not container runtime (Constitution II). Confines all provider specifics to this component (spec's driver/provisioner split).
 

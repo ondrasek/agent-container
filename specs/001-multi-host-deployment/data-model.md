@@ -10,9 +10,9 @@ The authoritative record of a place containers may run. Persisted in `hosts.json
 |-------|------|-------|
 | `name` | string | Unique key; validated like a container name (`validate_name`). |
 | `driver` | enum: `docker` \| `podman` \| `existing-ssh` | Selects the runtime driver. `existing-ssh` = legacy address-book host (attach-only, no deploy). |
-| `context` | string | Docker context name **or** `ssh://user@host`, or the podman connection name. Empty for `existing-ssh`. |
-| `address` | string | Reachable address for attach (host/IP). Local → `localhost`; remote → public IP/DNS. |
-| `provisioning` | object \| null | Null for local/existing. For provisioned cloud hosts: `{provider, server_id, server_type, location, created:bool}`. |
+| `context` | string | Docker **context name** (used as `docker --context <ctx>`) or `ssh://user@host` (user-supplied `--reuse`/`--docker-context`), or the podman connection name. For a **tool-provisioned** host it is the named context `agent-container-<name>` whose *endpoint* is a local `unix://<sock>` bridged to the remote daemon by an ssh `-L` socket-forward. Empty for `existing-ssh`. |
+| `address` | string | Reachable address for attach (host/IP). Local → `localhost`; remote → public IP/DNS. Provisioned hosts also use this as the ssh target for the socket-forward. |
+| `provisioning` | object \| null | Null for local/existing. For provisioned cloud hosts (as implemented, US2): `{provider, server_id, server_type, location, connection:"ssh-forward", ssh_key_id, automation_ssh_key_id, created:bool}`. `automation_ssh_key_id` is the tool's file-based automation key (destroyed on teardown). |
 | `created_by_tool` | bool | True only if this tool allocated the server (gates `--destroy`). |
 
 **Validation**: `name` unique + valid; `driver` in enum; `docker`/`podman` require `context`; `existing-ssh` requires `address` + a port (from legacy). **State transitions** (provisioned host): `absent → creating → reachable → registered`; failure at any step ⇒ `cleanup` (destroy if `created_by_tool`), never left `creating` silently (FR-011).
@@ -27,8 +27,9 @@ The persisted collection; single source of truth for *where* (FR-005). Stored at
   "default": "local",
   "hosts": {
     "local": { "driver": "docker", "context": "lima-docker", "address": "localhost", "provisioning": null, "created_by_tool": false },
-    "hz1":   { "driver": "docker", "context": "ssh://root@203.0.113.7", "address": "203.0.113.7",
-               "provisioning": { "provider": "hetzner", "server_id": 12345678, "server_type": "cax11", "location": "nbg1", "created": true },
+    "hz1":   { "driver": "docker", "context": "agent-container-hz1", "address": "203.0.113.7",
+               "provisioning": { "provider": "hetzner", "server_id": 12345678, "server_type": "cpx22", "location": "hel1",
+                                 "connection": "ssh-forward", "ssh_key_id": 7, "automation_ssh_key_id": 8, "created": true },
                "created_by_tool": true }
   }
 }
