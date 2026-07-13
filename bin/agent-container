@@ -932,17 +932,10 @@ def cli_host_rm(name: str, destroy: bool, yes: bool) -> None:
                 f"cannot --destroy '{name}': no deprovisioner for provider '{prov.get('provider')}'"
             )
         # FR-009 / SC-005: never destroy a server that still hosts containers.
-        # Routed through host_container_names (which ensure_tunnel()s the provisioned
-        # host first) — a raw docker ps on a not-yet-forwarded socket could falsely
-        # report empty and let a loaded server be destroyed. include_stopped: a
-        # stopped agent-container-* still occupies the server and holds its volumes.
-        names = host_container_names(h, include_stopped=True)
-        if names:
-            die(
-                f"refusing to destroy '{name}': {len(names)} container(s) still present "
-                f"({', '.join(sorted(names))}); remove them first "
-                f"(e.g. agent-container down <name> --host {name})"
-            )
+        # Fail-CLOSED (assert_host_empty): only a container listing that provably
+        # succeeded and is empty may proceed — a down tunnel or an unreachable
+        # daemon refuses rather than being read as "empty".
+        assert_host_empty(h)
         if not yes:
             if not is_tty():
                 eprint(
@@ -1202,14 +1195,19 @@ def hetzner_find_server_by_name(name: str, token: str) -> dict | None:
     return servers[0] if servers else None
 
 
-def hetzner_delete_server(server_id: int, token: str) -> None:
-    """DELETE /servers/<id>, idempotent (404 => already gone) and best-effort so a
-    failed teardown never masks the original error."""
+def hetzner_delete_server(server_id: int, token: str, *, strict: bool = False) -> None:
+    """DELETE /servers/<id>, idempotent (404 => already gone). Best-effort by
+    default so a failed *rollback* (cleanup_on_failure) never masks the original
+    error; but strict=True on the deliberate `host rm --destroy` teardown RAISES on
+    a non-404 failure, so the caller keeps the host registered for a retry rather
+    than silently orphaning a live billable server (SC-009)."""
     try:
         _hcloud_request("DELETE", f"/servers/{server_id}", token, timeout=30.0)
     except Fatal as e:
         if "not_found" in str(e):
             return
+        if strict:
+            raise
         warn(f"could not delete Hetzner server {server_id}: {e}")
 
 
@@ -1398,10 +1396,13 @@ def _start_tunnel(name: str, ip: str) -> subprocess.Popen:
     return proc
 
 
-def ensure_tunnel(host: dict) -> None:
+def ensure_tunnel(host: dict, *, required: bool = False) -> None:
     """For a provisioned (ssh-forward) host, ensure its docker socket-forward is up
     for the life of this process, waiting briefly for the socket to bind. No-op for
-    local / user-supplied-context / existing-ssh hosts."""
+    local / user-supplied-context / existing-ssh hosts. With required=True (the
+    teardown safety path), DIE if the forward cannot be established within the
+    deadline — a down tunnel must never be mistaken for a reachable-but-empty
+    daemon (SC-005)."""
     prov = host.get("provisioning") or {}
     if prov.get("connection") != "ssh-forward":
         return
@@ -1418,6 +1419,11 @@ def ensure_tunnel(host: dict) -> None:
         if proc.poll() is not None:  # tunnel died — retry (idempotent)
             proc = _start_tunnel(name, ip)
         time.sleep(0.3)
+    if required:
+        die(
+            f"could not establish the docker socket-forward to host '{name}' ({ip}); "
+            f"refusing to proceed"
+        )
 
 
 def wait_until_reachable(
@@ -1548,7 +1554,10 @@ def provisioner_destroy(host: dict, token: str) -> None:
     prov = host.get("provisioning") or {}
     server_id = prov.get("server_id")
     if isinstance(server_id, int):
-        hetzner_delete_server(server_id, token)
+        # strict: a failed server delete must propagate so the caller keeps the
+        # host registered for a retry (never orphan a live billable server). The
+        # key/context cleanup below is best-effort and re-runs idempotently.
+        hetzner_delete_server(server_id, token, strict=True)
     # Both keys we uploaded; a reused operator key (ssh_key_id is None) is left alone.
     for key_id in (prov.get("ssh_key_id"), prov.get("automation_ssh_key_id")):
         if isinstance(key_id, int):
@@ -1856,6 +1865,33 @@ def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, s
 
 def host_container_names(host: dict, include_stopped: bool = False) -> set[str]:
     return {row[0] for row in host_ps_rows(host, include_stopped)}
+
+
+def assert_host_empty(host: dict) -> None:
+    """Fail-CLOSED container check for `host rm --destroy` (FR-009 / SC-005):
+    permit deprovisioning ONLY when a container listing that PROVABLY succeeded
+    reports zero agent-container-* containers. `host_ps_rows`/`query` are
+    best-effort (fine for `list`), but on the teardown path a failed/unreachable
+    `docker ps` returns empty stdout that is indistinguishable from a genuinely
+    empty daemon — so trusting it would let a loaded (or unreachable) server be
+    destroyed. Here any enumeration failure is fatal. include_stopped: a stopped
+    agent-container-* still occupies the server and holds its volumes."""
+    ensure_tunnel(host, required=True)  # a down forward must refuse, not read empty
+    argv = driver_runtime_argv(host) + ["ps", "-a", "--format", "{{.Names}}"]
+    r = query(argv)
+    if r.returncode != 0:
+        die(
+            "refusing to destroy: could not confirm the host is empty "
+            f"(listing containers failed: {r.stderr.strip() or f'exit {r.returncode}'})"
+        )
+    names = sorted(n for n in r.stdout.splitlines() if n.startswith(CONTAINER_PREFIX))
+    if names:
+        hostname = host_name_from_context(host.get("context") or "")
+        die(
+            f"refusing to destroy: {len(names)} container(s) still present "
+            f"({', '.join(names)}); remove them first "
+            f"(e.g. agent-container down <name> --host {hostname})"
+        )
 
 
 def stage_ssh_injection(

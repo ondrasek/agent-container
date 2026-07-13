@@ -7,8 +7,14 @@ registration).
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
+
+
+def _ps(returncode, stdout="", stderr=""):
+    """A fake `query()` result standing in for a `docker ps` invocation."""
+    return lambda argv: subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
 def test_host_add_writes_registry_and_sets_default(wiz):
@@ -118,8 +124,9 @@ def test_host_rm_registration_only_removes_entry_and_warns(make_registry, monkey
 
 
 def test_host_rm_destroy_refused_when_containers_present(make_registry, monkeypatch):
+    # Drives the REAL assert_host_empty: a successful `ps` reporting a container.
     wiz = make_registry({"default": "hz1", "hosts": {"hz1": _tool_hz_host()}})
-    monkeypatch.setattr(wiz, "host_container_names", lambda *a, **k: {"agent-container-x"})
+    monkeypatch.setattr(wiz, "query", _ps(0, "agent-container-x\n"))
     monkeypatch.setattr(
         wiz,
         "provisioner_destroy",
@@ -128,6 +135,24 @@ def test_host_rm_destroy_refused_when_containers_present(make_registry, monkeypa
     with pytest.raises(wiz.Fatal, match="still present"):
         wiz.cli_host_rm("hz1", destroy=True, yes=True)
     assert wiz.get_host(wiz.load_registry(), "hz1") is not None  # not removed
+
+
+def test_host_rm_destroy_fails_closed_on_enumeration_error(make_registry, monkeypatch):
+    # THE fail-open regression (review finding #1/#2/#4): a FAILED `docker ps`
+    # (unreachable daemon / down tunnel / wrong context) must REFUSE — never be
+    # read as "empty" — even with a token present. Otherwise a loaded (or merely
+    # unreachable) server could be destroyed. SC-005: refuse 100% of the time.
+    wiz = make_registry({"hosts": {"hz1": _tool_hz_host()}})
+    monkeypatch.setenv("HCLOUD_TOKEN", "tok")
+    monkeypatch.setattr(wiz, "query", _ps(1, "", "Cannot connect to the Docker daemon"))
+    monkeypatch.setattr(
+        wiz,
+        "provisioner_destroy",
+        lambda *a, **k: pytest.fail("must NOT destroy an unverifiable host"),
+    )
+    with pytest.raises(wiz.Fatal, match="could not confirm"):
+        wiz.cli_host_rm("hz1", destroy=True, yes=True)
+    assert wiz.get_host(wiz.load_registry(), "hz1") is not None  # retained
 
 
 def test_host_rm_destroy_refused_for_non_tool_host(make_registry, monkeypatch):
@@ -142,7 +167,7 @@ def test_host_rm_destroy_refused_for_non_tool_host(make_registry, monkeypatch):
         wiz, "provisioner_destroy", lambda *a, **k: pytest.fail("must NOT deprovision")
     )
     monkeypatch.setattr(
-        wiz, "host_container_names", lambda *a, **k: pytest.fail("must NOT probe before refusing")
+        wiz, "assert_host_empty", lambda *a, **k: pytest.fail("must NOT probe before refusing")
     )
     with pytest.raises(wiz.Fatal, match="did not create"):
         wiz.cli_host_rm("r1", destroy=True, yes=True)
@@ -157,7 +182,7 @@ def test_host_rm_destroy_refused_non_hetzner_provider(make_registry):
 
 def test_host_rm_destroy_requires_token(make_registry, monkeypatch):
     wiz = make_registry({"hosts": {"hz1": _tool_hz_host()}})
-    monkeypatch.setattr(wiz, "host_container_names", lambda *a, **k: set())
+    monkeypatch.setattr(wiz, "query", _ps(0, ""))  # provably empty
     monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
     with pytest.raises(wiz.Fatal, match="HCLOUD_TOKEN"):
         wiz.cli_host_rm("hz1", destroy=True, yes=True)
@@ -166,13 +191,60 @@ def test_host_rm_destroy_requires_token(make_registry, monkeypatch):
 
 def test_host_rm_destroy_happy_path_deprovisions_then_unregisters(make_registry, monkeypatch):
     wiz = make_registry({"default": "hz1", "hosts": {"hz1": _tool_hz_host()}})
-    monkeypatch.setattr(wiz, "host_container_names", lambda *a, **k: set())
+    monkeypatch.setattr(wiz, "query", _ps(0, ""))  # provably empty
     monkeypatch.setenv("HCLOUD_TOKEN", "tok")
     calls: list = []
-    monkeypatch.setattr(wiz, "provisioner_destroy", lambda h, t: calls.append((h["context"], t)))
+
+    def _destroy(h, t):
+        # Ordering: the host is still registered at the moment we deprovision — it
+        # is unregistered ONLY AFTER a successful destroy (retryable on failure).
+        assert wiz.get_host(wiz.load_registry(), "hz1") is not None
+        calls.append((h["context"], t))
+
+    monkeypatch.setattr(wiz, "provisioner_destroy", _destroy)
     wiz.cli_host_rm("hz1", destroy=True, yes=True)
     assert calls == [("agent-container-hz1", "tok")]  # deprovision ran, with the token
     assert wiz.get_host(wiz.load_registry(), "hz1") is None  # then unregistered
+
+
+def test_host_rm_destroy_retains_registry_when_deprovision_fails(make_registry, monkeypatch):
+    # Unregister only AFTER a successful destroy: a failed provisioner_destroy must
+    # leave the host registered so the operator can retry (no orphaned billable
+    # server with no record). Ties to hetzner_delete_server(strict=True).
+    wiz = make_registry({"hosts": {"hz1": _tool_hz_host()}})
+    monkeypatch.setattr(wiz, "query", _ps(0, ""))
+    monkeypatch.setenv("HCLOUD_TOKEN", "tok")
+
+    def _boom(h, t):
+        raise wiz.Fatal("server delete failed")
+
+    monkeypatch.setattr(wiz, "provisioner_destroy", _boom)
+    with pytest.raises(wiz.Fatal, match="server delete failed"):
+        wiz.cli_host_rm("hz1", destroy=True, yes=True)
+    assert wiz.get_host(wiz.load_registry(), "hz1") is not None  # retained for retry
+
+
+def test_assert_host_empty_refuses_on_failed_enumeration(wiz, monkeypatch):
+    monkeypatch.setattr(wiz, "query", _ps(1, "", "boom"))
+    with pytest.raises(wiz.Fatal, match="could not confirm"):
+        wiz.assert_host_empty(_tool_hz_host())
+
+
+def test_assert_host_empty_passes_when_proven_empty(wiz, monkeypatch):
+    monkeypatch.setattr(wiz, "query", _ps(0, ""))
+    wiz.assert_host_empty(_tool_hz_host())  # returns without raising
+
+
+def test_assert_host_empty_requires_the_tunnel_for_ssh_forward_hosts(wiz, monkeypatch):
+    # The emptiness check must bring the socket-forward up (required=True) before
+    # `ps`, so a not-yet-forwarded socket can't falsely report empty (finding #7).
+    seen: dict = {}
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda h, **k: seen.update(k))
+    monkeypatch.setattr(wiz, "query", _ps(0, ""))
+    h = _tool_hz_host()
+    h["provisioning"]["connection"] = "ssh-forward"
+    wiz.assert_host_empty(h)
+    assert seen.get("required") is True
 
 
 def test_host_rm_default_repointed_then_nulled(make_registry):
