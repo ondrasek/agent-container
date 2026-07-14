@@ -104,10 +104,10 @@ The whole CLI is **one file**: `bin/agent-container` (PEP 723). Per the plan's S
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T020 [P] Update `README.md`: `stop`/`start`/`redeploy`/`wipe`, `list --local`, sidecar override file, live-reconcile behavior (FR-019).
-- [ ] T021 [P] Update `CLAUDE.md` Decisions (net-new verbs, live-reconcile, sidecars) within the 2000-token budget — prune before adding (FR-019).
-- [ ] T022 Run `scripts/quality-gate.sh` (ruff · ty · bandit · self-test · pytest · shell suites) and fix all findings.
-- [ ] T023 Run quickstart.md Scenarios A–G (local runtime) + the new acceptance tier; record results.
+- [X] T020 [P] Update `README.md`: `stop`/`start`/`redeploy`/`wipe`, `list --local`, sidecar override file, live-reconcile behavior (FR-019).
+- [X] T021 [P] Update `CLAUDE.md` Decisions (net-new verbs, live-reconcile, sidecars) within the 2000-token budget — prune before adding (FR-019).
+- [X] T022 Run `scripts/quality-gate.sh` (ruff · ty · bandit · self-test · pytest · shell suites) and fix all findings.
+- [X] T023 Run quickstart.md Scenarios A–G (local runtime) + the new acceptance tier; record results.
 
 ---
 

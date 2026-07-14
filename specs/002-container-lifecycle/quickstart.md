@@ -89,3 +89,13 @@ agent-container stop delta               # second op -> fails fast: "another lif
 ## Success signal
 
 All scenarios pass with state read live from the host, volumes preserved except on an explicitly-confirmed `wipe`, sidecars moving as one unit, and no stale-local-record surprises — matching SC-001…SC-009.
+
+## Validation record (T023)
+
+These scenarios are codified in the automated acceptance tier (`pytest -m acceptance bin/tests`), which drives the real CLI against real containers:
+
+- Scenarios A–D + G — `test_lifecycle_stop_start_dispose_redeploy_wipe` (stop/start, dispose→recreate host-key preservation, redeploy volume-intact, lock-refusal, wipe).
+- Scenario E — `test_list_reconcile_unreachable_host_renders_without_hanging` (live reconcile; a dead host renders `unreachable`, bounded < 30 s; `--local` skips the probe).
+- Scenario F — `test_sidecar_shares_deployment_lifecycle` (agent + helper up/stop/start/wipe as one unit; agent resolves the helper by service name).
+
+Last run (local, docker-on-Lima): **11 passed, 1 skipped** (the opt-in tokened Hetzner test) in ~71 s; quality gate green (267 hermetic tests).
