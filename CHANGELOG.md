@@ -2,6 +2,51 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-07-14)
+
+### Bug Fixes
+
+- Harden the US3 live-reconcile against dead hosts (specs/002 US3, #002)
+  ([`440bbe3`](https://github.com/ondrasek/agent-container/commit/440bbe3d2677043c986e31ace78686b2e1dd56cf))
+
+### Chores
+
+- Sync uv.lock package version to 0.5.0 ([#002](https://github.com/ondrasek/agent-container/pull/2),
+  [`15b7576`](https://github.com/ondrasek/agent-container/commit/15b7576beee91668f14b5b35e46d88d4a352ce34))
+
+### Continuous Integration
+
+- Probe ty's own resolution when validating the ty cache
+  ([`7cb7a6c`](https://github.com/ondrasek/agent-container/commit/7cb7a6c0b9c9dccb8900a2c51d34401a89eb046d))
+
+### Documentation
+
+- Document the lifecycle verbs, live-reconcile, and sidecars (specs/002 polish, #002)
+  ([`e4fd456`](https://github.com/ondrasek/agent-container/commit/e4fd45601deb6348a46ee8a7753a21115489469f))
+
+- **specs**: Plan Feature 002 container-lifecycle (net-new scope)
+  ([`28ce646`](https://github.com/ondrasek/agent-container/commit/28ce64652bcee4310afc14109fa5cc06a155ff22))
+
+- **specs**: Resolve 002 analyze finding I1 — redeploy is non-idempotent
+  ([#002](https://github.com/ondrasek/agent-container/pull/2),
+  [`fdf42cf`](https://github.com/ondrasek/agent-container/commit/fdf42cf029beafbe163241f920815198065eee71))
+
+- **specs**: Task list for Feature 002 container-lifecycle
+  ([#002](https://github.com/ondrasek/agent-container/pull/2),
+  [`9526262`](https://github.com/ondrasek/agent-container/commit/9526262056a969dace7503113260b1a52f5ffb55))
+
+### Features
+
+- Container lifecycle verbs — stop/start/redeploy/wipe + lock (specs/002 US2, #002)
+  ([`ca0fe82`](https://github.com/ondrasek/agent-container/commit/ca0fe82ec179890e4b88cdfaf5d3caa0c0dc5a9b))
+
+- Live-reconcile list against each host + fail-closed host_ps_rows (specs/002 US3, #002)
+  ([`a822ffe`](https://github.com/ondrasek/agent-container/commit/a822ffe883fd28bbd0b0bf9504294a8f51cda16f))
+
+- Sidecar helper services sharing the deployment lifecycle (specs/002 US4, #002)
+  ([`6668425`](https://github.com/ondrasek/agent-container/commit/666842546613c75a2b9ce3bd556067646cdd2d67))
+
+
 ## v0.5.0 (2026-07-13)
 
 ### Bug Fixes
