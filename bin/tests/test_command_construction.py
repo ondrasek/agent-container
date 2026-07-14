@@ -488,7 +488,7 @@ def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
     monkeypatch.setattr(
         wiz,
         "ps_agent_container",
-        lambda rt, include_stopped=False: [
+        lambda rt, include_stopped=False, strict=False: [
             (
                 "agent-container-acme",
                 "localhost/agent-container:latest",
