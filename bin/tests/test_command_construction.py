@@ -621,3 +621,106 @@ def test_driver_up_and_down_argv(wiz, tmp_path):
 def test_driver_reachable_address(wiz):
     assert wiz.driver_reachable_address({"address": "1.2.3.4"}) == "1.2.3.4"
     assert wiz.driver_reachable_address({}) == "localhost"
+
+
+# --- sidecar / helper services (Feature 002 US4, R5) -------------------------
+
+DOCKER_H = {"driver": "docker", "context": "lima"}
+VALID_SIDECAR = "services:\n  cache:\n    image: redis:7\n"
+
+
+def _write_override(path, text=VALID_SIDECAR):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_sidecar_override_discovery_prefers_project_local(wiz, monkeypatch, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    proj_local = _write_override(work / "agent-container.acme.services.yaml")
+    _write_override(wiz.CONFIG_DIR / "acme.services.yaml")  # also present, lower priority
+    assert wiz.resolve_sidecar_override("acme") == proj_local
+
+
+def test_sidecar_override_falls_back_to_user_config(wiz, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # no project-local file here
+    cfg = _write_override(wiz.CONFIG_DIR / "acme.services.yaml")
+    assert wiz.resolve_sidecar_override("acme") == cfg
+
+
+def test_sidecar_override_absent_returns_none(wiz, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert wiz.resolve_sidecar_override("acme") is None
+
+
+def test_driver_argv_builders_merge_override_as_second_f(wiz, tmp_path):
+    f = tmp_path / "acme.compose.yaml"
+    ov = tmp_path / "side.yaml"
+    for build in (wiz.driver_up_argv, wiz.driver_redeploy_argv, wiz.driver_stop_argv,
+                  wiz.driver_start_argv):  # fmt: skip
+        argv = build(DOCKER_H, "p", f, ov)
+        # exactly one extra -f, right after the generated file, before the verb
+        assert argv[6:10] == ["-f", str(f), "-f", str(ov)]
+    down = wiz.driver_down_argv(DOCKER_H, "p", f, purge=True, rmi_local=True, override=ov)
+    assert down[6:10] == ["-f", str(f), "-f", str(ov)]
+    assert down[-4:] == ["down", "--volumes", "--rmi", "local"]  # override doesn't disturb args
+
+
+def test_driver_argv_without_override_is_unchanged(wiz, tmp_path):
+    f = tmp_path / "acme.compose.yaml"
+    assert wiz.driver_stop_argv(DOCKER_H, "p", f).count("-f") == 1  # no phantom second -f
+
+
+@pytest.mark.parametrize(
+    "text, match",
+    [
+        ("", "empty"),
+        ("   \n\n", "empty"),
+        ("volumes:\n  data: {}\n", "no `services:`"),  # not a services fragment
+        ("services:\n  cache:\n    image: redis\nvolumes:\n  d: {}\n", "services-only"),
+        ("name: hijack\nservices:\n  cache:\n    image: redis\n", "services-only"),
+        ("services:\n  agent:\n    image: evil\n", "must not redefine the 'agent'"),
+    ],
+)
+def test_validate_sidecar_override_rejects(wiz, tmp_path, text, match):
+    p = _write_override(tmp_path / "bad.services.yaml", text)
+    with pytest.raises(wiz.Fatal, match=match):
+        wiz.validate_sidecar_override(p)
+
+
+def test_validate_sidecar_override_accepts_yaml_and_json(wiz, tmp_path):
+    wiz.validate_sidecar_override(_write_override(tmp_path / "a.services.yaml", VALID_SIDECAR))
+    # JSON is a YAML subset — a JSON override is validated exactly, not scanned.
+    js = json.dumps({"services": {"cache": {"image": "redis:7"}}})
+    wiz.validate_sidecar_override(_write_override(tmp_path / "b.services.yaml", js))
+    # `version:` alongside services is tolerated (compose-deprecated but harmless).
+    wiz.validate_sidecar_override(
+        _write_override(tmp_path / "c.services.yaml", "version: '3'\n" + VALID_SIDECAR)
+    )
+
+
+def test_resolve_sidecar_override_fatal_on_invalid(wiz, monkeypatch, tmp_path):
+    """A present-but-invalid override is fatal (FR-018), never silently skipped."""
+    monkeypatch.chdir(tmp_path)
+    _write_override(
+        tmp_path / "agent-container.acme.services.yaml", "services:\n  agent:\n    image: x\n"
+    )
+    with pytest.raises(wiz.Fatal, match="must not redefine"):
+        wiz.resolve_sidecar_override("acme")
+
+
+def test_compose_up_exec_merges_discovered_override(wiz, capture_compose, monkeypatch, tmp_path):
+    """End-to-end: a discovered override rides as a second -f in the real up argv."""
+    monkeypatch.setattr(wiz, "port_free", lambda p: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    ov = _write_override(work / "agent-container.acme.services.yaml")
+    env_file, _ = make_env_file(tmp_path)
+    wiz.compose_up_exec("local", dict(LOCAL_HOST), "acme", env_file, [], None, [])
+    argv = capture_compose[-1]
+    assert argv.count("-f") == 2 and str(ov) in argv
+    assert argv[argv.index(str(ov)) - 1] == "-f"

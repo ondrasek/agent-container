@@ -94,9 +94,9 @@ The whole CLI is **one file**: `bin/agent-container` (PEP 723). Per the plan's S
 
 **Independent Test**: declare `agent-container.gamma.services.yaml` with a `cache` helper; `up gamma` starts both; `stop`/`start`/`wipe` act on both; the agent reaches the helper. Quickstart Scenario F.
 
-- [ ] T017 [P] [US4] Write failing tests in `bin/tests/test_command_construction.py`: an override file is discovered (`./agent-container.<name>.services.yaml` → `~/.config/agent-container/<name>.services.yaml`), passed as a second `-f` after the generated compose file on every compose invocation, and rejected (Fatal) when it is not a services-only mapping or redefines the agent service's identity fields.
-- [ ] T018 [US4] Implement `resolve_sidecar_override(name)` (discovery + parse-validation) and thread the second `-f` through the shared compose-invocation path (`driver_compose_argv`) so `up`/`stop`/`start`/`redeploy`/`down`/`wipe` all include it, in `bin/agent-container`.
-- [ ] T019 [P] [US4] Acceptance in `bin/tests/test_acceptance.py`: deploy a container with a helper (e.g. a tiny public image); assert both start together, `stop`/`start`/`wipe` act on the unit (no orphaned helper), and the agent can reach the helper by service name.
+- [X] T017 [P] [US4] Write failing tests in `bin/tests/test_command_construction.py`: an override file is discovered (`./agent-container.<name>.services.yaml` → `~/.config/agent-container/<name>.services.yaml`), passed as a second `-f` after the generated compose file on every compose invocation, and rejected (Fatal) when it is not a services-only mapping or redefines the agent service's identity fields.
+- [X] T018 [US4] Implement `resolve_sidecar_override(name)` (discovery + parse-validation) and thread the second `-f` through the shared compose-invocation path (`driver_compose_argv`) so `up`/`stop`/`start`/`redeploy`/`down`/`wipe` all include it, in `bin/agent-container`.
+- [X] T019 [P] [US4] Acceptance in `bin/tests/test_acceptance.py`: deploy a container with a helper (e.g. a tiny public image); assert both start together, `stop`/`start`/`wipe` act on the unit (no orphaned helper), and the agent can reach the helper by service name.
 
 **Checkpoint**: sidecars share the deployment lifecycle; the file-based seam is in place for Feature 006 to build on.
 

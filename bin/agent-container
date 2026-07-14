@@ -1661,44 +1661,184 @@ def driver_runtime_argv(host: dict) -> list[str]:
     die(f"host driver '{driver}' is attach-only; it cannot build or run containers")
 
 
-def driver_compose_argv(host: dict, project: str, file: Path, *args: str) -> list[str]:
-    """`<runtime> --context/-connection X compose -p <project> -f <file> …`.
+# --- sidecar / helper services (Feature 002 US4, research R5) -----------------
+# A deployment may declare helper services in an operator-supplied compose
+# OVERRIDE file, discovered by convention next to the .env. When present it is
+# merged as a SECOND `-f` into every compose invocation for that deployment, so
+# the agent and its helpers share one project and one lifecycle (FR-004). This is
+# a deliberately thin, file-based seam — the richer whole-directory model is
+# Feature 006 (agent-as-code), which builds ON this primitive.
+
+# The tool owns the agent service's identity: its service key, plus the top-level
+# project name / named volumes / injected configs. An override MUST NOT redefine
+# any of these — it may only ADD helper services (services-only fragment).
+AGENT_SERVICE_KEY = "agent"
+SIDECAR_ALLOWED_TOPLEVEL = {"services", "version"}  # version: tolerated (compose-deprecated)
+
+
+def sidecar_override_candidates(name: str, cwd: Path) -> list[Path]:
+    """Discovery order, mirroring .env resolution (project-local first, then the
+    per-name user config).
+
+    >>> [p.name for p in sidecar_override_candidates("acme", Path("/w"))]
+    ['agent-container.acme.services.yaml', 'acme.services.yaml']
+    """
+    return [cwd / f"agent-container.{name}.services.yaml", CONFIG_DIR / f"{name}.services.yaml"]
+
+
+def resolve_sidecar_override(name: str) -> Path | None:
+    """The first existing sidecar override for <name>, validated, or None. A
+    present-but-invalid override is fatal (FR-018) — never silently ignored."""
+    for candidate in sidecar_override_candidates(name, Path.cwd()):
+        if candidate.is_file():
+            validate_sidecar_override(candidate)
+            return candidate
+    return None
+
+
+def _yaml_toplevel_keys(text: str) -> list[str]:
+    """Top-level mapping keys of a YAML/JSON document, best-effort. JSON is a YAML
+    subset, so a JSON override parses exactly; a YAML override is scanned for
+    column-0 `key:` lines (comments / list items / nested lines ignored). This is
+    a GUARDRAIL, not a full parser — compose does the authoritative parse when it
+    runs; the scan only catches the two footguns (non-services-only; agent redef)."""
+    try:
+        obj = json.loads(text)
+        return [str(k) for k in obj] if isinstance(obj, dict) else []
+    except json.JSONDecodeError, ValueError:
+        pass
+    keys = []
+    for line in text.splitlines():
+        if not line or line[0].isspace() or line.lstrip().startswith("#") or line.startswith("---"):
+            continue
+        m = re.match(r"([A-Za-z0-9_.-]+)\s*:", line)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def _yaml_service_keys(text: str) -> list[str]:
+    """Service keys declared under a top-level `services:` mapping, best-effort
+    (JSON parsed exactly; YAML scanned at the first indent level under services)."""
+    try:
+        obj = json.loads(text)
+        svc = obj.get("services") if isinstance(obj, dict) else None
+        return [str(k) for k in svc] if isinstance(svc, dict) else []
+    except json.JSONDecodeError, ValueError:
+        pass
+    lines = text.splitlines()
+    keys: list[str] = []
+    indent: int | None = None
+    in_services = False
+    for line in lines:
+        if re.match(r"services\s*:", line):  # column-0 services:
+            in_services = True
+            continue
+        if in_services:
+            if line and not line[0].isspace() and not line.lstrip().startswith("#"):
+                break  # dedented back to another top-level key
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            cur = len(line) - len(line.lstrip())
+            if indent is None:
+                indent = cur
+            if cur == indent:
+                m = re.match(r"([A-Za-z0-9_.-]+)\s*:", stripped)
+                if m:
+                    keys.append(m.group(1))
+    return keys
+
+
+def validate_sidecar_override(path: Path) -> None:
+    """Guardrail on an operator sidecar override (FR-004/FR-018): it must be a
+    non-empty compose `services:`-only fragment and MUST NOT redefine the agent
+    service (whose identity — name/port/the 7 volumes — the tool owns). Deeper
+    malformations are left to compose's own parse at run time; here we reject the
+    two footguns with an actionable message rather than silently merging them."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        die(f"sidecar override {path} is unreadable: {e}")
+    if not text.strip():
+        die(f"sidecar override {path} is empty (declare helper services under `services:`)")
+    toplevel = _yaml_toplevel_keys(text)
+    if "services" not in toplevel:
+        die(f"sidecar override {path} has no `services:` block (it must add helper services)")
+    extra = [k for k in toplevel if k not in SIDECAR_ALLOWED_TOPLEVEL]
+    if extra:
+        die(
+            f"sidecar override {path} may only declare `services:` (a services-only "
+            f"fragment); remove tool-owned/unsupported top-level key(s): {', '.join(sorted(extra))}"
+        )
+    if AGENT_SERVICE_KEY in _yaml_service_keys(text):
+        die(
+            f"sidecar override {path} must not redefine the '{AGENT_SERVICE_KEY}' service "
+            f"(the tool owns its name, port, and volumes); name your helper differently"
+        )
+
+
+def driver_compose_argv(
+    host: dict, project: str, file: Path, *args: str, override: Path | None = None
+) -> list[str]:
+    """`<runtime> --context/-connection X compose -p <project> -f <file> [-f <override>] …`.
+
+    When a sidecar `override` is given it rides as a SECOND `-f` right after the
+    generated compose file, so compose's native multi-file merge folds the helper
+    services into the same project (US4). Order matters: the override is layered
+    ON TOP of the generated file.
 
     >>> from pathlib import Path
     >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "agent-container-acme", Path("/s/acme.compose.yaml"), "up", "-d")
     ['docker', '--context', 'lima', 'compose', '-p', 'agent-container-acme', '-f', '/s/acme.compose.yaml', 'up', '-d']
+    >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "p", Path("/s/a.yaml"), "up", override=Path("/s/side.yaml"))
+    ['docker', '--context', 'lima', 'compose', '-p', 'p', '-f', '/s/a.yaml', '-f', '/s/side.yaml', 'up']
     """
-    return driver_runtime_argv(host) + ["compose", "-p", project, "-f", str(file), *args]
+    files = ["-f", str(file)] + (["-f", str(override)] if override else [])
+    return driver_runtime_argv(host) + ["compose", "-p", project, *files, *args]
 
 
-def driver_up_argv(host: dict, project: str, file: Path) -> list[str]:
-    return driver_compose_argv(host, project, file, "up", "-d", "--build")
+def driver_up_argv(host: dict, project: str, file: Path, override: Path | None = None) -> list[str]:
+    return driver_compose_argv(host, project, file, "up", "-d", "--build", override=override)
 
 
-def driver_redeploy_argv(host: dict, project: str, file: Path) -> list[str]:
+def driver_redeploy_argv(
+    host: dict, project: str, file: Path, override: Path | None = None
+) -> list[str]:
     """Deliberately non-idempotent (FR-010): rebuild the image and recreate the
     container even with no change. Named volumes are external-by-name so they are
     re-attached, not recreated (FR-008)."""
-    return driver_compose_argv(host, project, file, "up", "-d", "--build", "--force-recreate")
+    return driver_compose_argv(
+        host, project, file, "up", "-d", "--build", "--force-recreate", override=override
+    )
 
 
-def driver_stop_argv(host: dict, project: str, file: Path) -> list[str]:
-    return driver_compose_argv(host, project, file, "stop")
+def driver_stop_argv(
+    host: dict, project: str, file: Path, override: Path | None = None
+) -> list[str]:
+    return driver_compose_argv(host, project, file, "stop", override=override)
 
 
-def driver_start_argv(host: dict, project: str, file: Path) -> list[str]:
-    return driver_compose_argv(host, project, file, "start")
+def driver_start_argv(
+    host: dict, project: str, file: Path, override: Path | None = None
+) -> list[str]:
+    return driver_compose_argv(host, project, file, "start", override=override)
 
 
 def driver_down_argv(
-    host: dict, project: str, file: Path, purge: bool = False, rmi_local: bool = False
+    host: dict,
+    project: str,
+    file: Path,
+    purge: bool = False,
+    rmi_local: bool = False,
+    override: Path | None = None,
 ) -> list[str]:
     args = ["down"]
     if purge:
         args.append("--volumes")
     if rmi_local:  # wipe also removes the locally-built image (never a public one)
         args += ["--rmi", "local"]
-    return driver_compose_argv(host, project, file, *args)
+    return driver_compose_argv(host, project, file, *args, override=override)
 
 
 def driver_reachable_address(host: dict) -> str:
@@ -2034,10 +2174,13 @@ def compose_up_exec(
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
     log(f"compose={compose_file}")
     project = compose_project(name)
+    override = resolve_sidecar_override(name)  # validated; merged as a 2nd -f (US4)
+    if override is not None:
+        log(f"sidecar override={override}")
     argv = (
-        driver_redeploy_argv(host_rec, project, compose_file)
+        driver_redeploy_argv(host_rec, project, compose_file, override)
         if redeploy
-        else driver_up_argv(host_rec, project, compose_file)
+        else driver_up_argv(host_rec, project, compose_file, override)
     )
     rc = subprocess.run(argv).returncode  # inherited stdio: build output streams
     if rc != 0:
@@ -2115,10 +2258,23 @@ def down_container(
     if exists or compose_file.is_file():
         log(f"stopping and removing {cname} on {host_name}")
         if compose_file.is_file():
+            # Merge the sidecar override (US4) so `down`/`wipe` tear the helpers down
+            # as one unit — but a now-invalid/removed override must never BLOCK a
+            # teardown (compose down also reconciles by project label), so resolve it
+            # leniently here, unlike the fail-fast create path.
+            try:
+                override = resolve_sidecar_override(name)
+            except Fatal as e:
+                warn(f"ignoring sidecar override for teardown ({e})")
+                override = None
             # compose down removes the container (+ networks); --volumes also drops
             # the seven named volumes; --rmi local also removes the locally-built
             # image (wipe). Without those, volumes/image are preserved.
-            query(driver_down_argv(host_rec, compose_project(name), compose_file, purge, rmi_local))
+            query(
+                driver_down_argv(
+                    host_rec, compose_project(name), compose_file, purge, rmi_local, override
+                )
+            )
         else:
             # No compose file (e.g. a pre-compose container): fall back to rm and,
             # on purge, explicit volume removal.
@@ -2243,9 +2399,10 @@ def do_stop(name: str, host: str | None = None) -> None:
         die(
             f"no deployment named '{name}' on {host_name} to stop (deploy it: agent-container up {name})"
         )
+    override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
-        argv = driver_stop_argv(host_rec, compose_project(name), compose_file)
+        argv = driver_stop_argv(host_rec, compose_project(name), compose_file, override)
         if subprocess.run(argv).returncode != 0:
             die("compose stop failed")
     log(f"stopped {container_name(name)} on {host_name} (resume: agent-container start {name})")
@@ -2258,9 +2415,10 @@ def do_start(name: str, host: str | None = None) -> None:
     compose_file = compose_file_path(host_name, name)
     if not compose_file.is_file():
         die(f"no deployment named '{name}' on {host_name} (deploy it: agent-container up {name})")
+    override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
-        argv = driver_start_argv(host_rec, compose_project(name), compose_file)
+        argv = driver_start_argv(host_rec, compose_project(name), compose_file, override)
         if subprocess.run(argv).returncode != 0:
             die(
                 f"compose start failed — if the deployment was disposed, run: agent-container up {name}"

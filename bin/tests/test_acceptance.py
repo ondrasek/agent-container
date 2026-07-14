@@ -469,6 +469,108 @@ def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
     assert not any(x["status"] == "unreachable" for x in rows_local)  # --local never probes
 
 
+def _project_containers(name: str) -> list[str]:
+    """Every container in the compose project for <name> (agent + any sidecars),
+    matched by the deterministic name prefix so the assertion is independent of
+    the runtime's compose label scheme (docker vs podman)."""
+    prefix = f"agent-container-{name}"
+    out = subprocess.run(
+        [RUNTIME, "ps", "-a", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    return sorted(c for c in out if c == prefix or c.startswith((prefix + "-", prefix + "_")))
+
+
+def _container_state(cname: str) -> str:
+    return subprocess.run(
+        [RUNTIME, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.State}}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _wait_container_state(cname: str, want: str, timeout: int = 25) -> None:
+    deadline = time.time() + timeout
+    last = _container_state(cname)
+    while time.time() < deadline:
+        if last == want:
+            return
+        time.sleep(0.5)
+        last = _container_state(cname)
+    raise AssertionError(f"{cname}: state {last!r} != {want!r} after {timeout}s")
+
+
+# A sidecar override that reuses the already-built local image (no registry pull)
+# and overrides the entrypoint to a plain long-running command (the agent image's
+# real entrypoint requires env — the helper just needs to exist on the network).
+_SIDECAR_YAML = (
+    "services:\n"
+    "  cache:\n"
+    "    image: localhost/agent-container:latest\n"
+    "    pull_policy: never\n"
+    '    entrypoint: ["sleep", "infinity"]\n'
+    '    restart: "no"\n'
+)
+
+
+def test_sidecar_shares_deployment_lifecycle(acc, _image):
+    """US4 (FR-004) against REAL containers: a helper declared in the sidecar
+    override joins the deployment's compose project and shares its lifecycle —
+    up/stop/start/wipe act on the agent + helper as ONE unit (no orphaned helper),
+    and the agent reaches the helper by its compose service name."""
+    name = "accside"
+    work = acc.tmp
+    state = work / "state"
+    env_file = work / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    (work / f"agent-container.{name}.services.yaml").write_text(_SIDECAR_YAML)
+
+    def cli(*args, timeout=600):
+        # cwd=work so the project-local override is discovered (mirrors real use).
+        return subprocess.run(
+            [*AGENT_CONTAINER, *args],
+            env=_cli_env(state),
+            cwd=str(work),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+
+    try:
+        r = cli("up", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        conts = _project_containers(name)
+        assert len(conts) == 2, f"expected agent + helper, got {conts}"
+        assert f"agent-container-{name}" in conts
+        helper = next(c for c in conts if c != f"agent-container-{name}")
+        assert "cache" in helper
+
+        # the agent resolves the helper by compose service name (shared network)
+        g = subprocess.run(
+            [RUNTIME, "exec", f"agent-container-{name}", "getent", "hosts", "cache"],
+            capture_output=True,
+            text=True,
+        )
+        assert g.returncode == 0 and g.stdout.strip(), f"agent can't resolve 'cache': {g.stderr}"
+
+        # stop/start move the whole unit — no orphaned helper
+        assert cli("stop", name).returncode == 0, "stop failed"
+        _wait_container_state(f"agent-container-{name}", "exited")
+        _wait_container_state(helper, "exited")
+        assert cli("start", name).returncode == 0, "start failed"
+        _wait_container_state(f"agent-container-{name}", "running")
+        _wait_container_state(helper, "running")
+
+        # wipe removes the unit entirely — agent AND helper gone
+        assert cli("wipe", name, "-y").returncode == 0, "wipe failed"
+        _wait_container_state(f"agent-container-{name}", "")
+        assert _project_containers(name) == [], "wipe left an orphaned helper"
+    finally:
+        cli("wipe", name, "-y", timeout=120)
+
+
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
     """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
     ANY container is still present on the host, and release only once it is empty.
