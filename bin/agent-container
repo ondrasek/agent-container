@@ -27,6 +27,8 @@
 # literally (no expansion), with a one-time warning.
 
 import atexit
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -506,6 +508,27 @@ def state_file_for(host: str, name: str) -> Path:
 
 def compose_file_path(host: str, name: str) -> Path:
     return host_state_dir(host) / f"{name}.compose.yaml"
+
+
+@contextlib.contextmanager
+def deployment_lock(host: str, name: str):
+    """Serialize mutating lifecycle ops on one deployment (FR-017): a non-blocking
+    advisory flock on <state>/<host>/<name>.lock. A second concurrent op on the
+    same (host,name) fails fast rather than interleaving; independent deployments
+    never contend. Read-only ops (list/logs) do NOT take this lock."""
+    lock_dir = host_state_dir(host)
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    f = (lock_dir / f"{name}.lock").open("w")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            die(f"another lifecycle operation is in progress for {name} on {host}")
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
 
 
 # Flat state artifacts written before per-host namespacing existed. Migrated into
@@ -1641,8 +1664,30 @@ def driver_up_argv(host: dict, project: str, file: Path) -> list[str]:
     return driver_compose_argv(host, project, file, "up", "-d", "--build")
 
 
-def driver_down_argv(host: dict, project: str, file: Path, purge: bool = False) -> list[str]:
-    return driver_compose_argv(host, project, file, "down", *(["--volumes"] if purge else []))
+def driver_redeploy_argv(host: dict, project: str, file: Path) -> list[str]:
+    """Deliberately non-idempotent (FR-010): rebuild the image and recreate the
+    container even with no change. Named volumes are external-by-name so they are
+    re-attached, not recreated (FR-008)."""
+    return driver_compose_argv(host, project, file, "up", "-d", "--build", "--force-recreate")
+
+
+def driver_stop_argv(host: dict, project: str, file: Path) -> list[str]:
+    return driver_compose_argv(host, project, file, "stop")
+
+
+def driver_start_argv(host: dict, project: str, file: Path) -> list[str]:
+    return driver_compose_argv(host, project, file, "start")
+
+
+def driver_down_argv(
+    host: dict, project: str, file: Path, purge: bool = False, rmi_local: bool = False
+) -> list[str]:
+    args = ["down"]
+    if purge:
+        args.append("--volumes")
+    if rmi_local:  # wipe also removes the locally-built image (never a public one)
+        args += ["--rmi", "local"]
+    return driver_compose_argv(host, project, file, *args)
 
 
 def driver_reachable_address(host: dict) -> str:
@@ -1945,11 +1990,14 @@ def compose_up_exec(
     mounts: list[str],
     host_key: Path | None,
     authorized_keys: list[Path],
+    redeploy: bool = False,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
-    the host). Replaces the imperative `<rt> run` path."""
+    the host). With redeploy=True it force-recreates (US2, deliberately
+    non-idempotent) — the container already holds its port, so the port-free
+    guard is skipped and its named volumes are preserved across the recreate."""
     port = port_for_name(name)
-    if host_is_local(host_rec) and not port_free(port):
+    if not redeploy and host_is_local(host_rec) and not port_free(port):
         die(
             f"port {port} is already in use (port = 2200 + name hash; "
             f"collisions are possible). Stop whatever holds it (agent-container list) "
@@ -1961,14 +2009,20 @@ def compose_up_exec(
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
     log(f"compose={compose_file}")
-    argv = driver_up_argv(host_rec, compose_project(name), compose_file)
+    project = compose_project(name)
+    argv = (
+        driver_redeploy_argv(host_rec, project, compose_file)
+        if redeploy
+        else driver_up_argv(host_rec, project, compose_file)
+    )
     rc = subprocess.run(argv).returncode  # inherited stdio: build output streams
     if rc != 0:
-        die(f"compose up failed (exit {rc})")
+        die(f"compose {'redeploy' if redeploy else 'up'} failed (exit {rc})")
     write_state(host_name, name, port)
     addr = driver_reachable_address(host_rec)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
-    log(f"started {container_name(name)}; attach with: agent-container attach {name}{hflag}")
+    verb = "redeployed" if redeploy else "started"
+    log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
     log(f"or directly: ssh dev@{addr} -p {port} -t tmux attach -t main")
 
 
@@ -2009,13 +2063,16 @@ def do_up(
         die(f"no .env found. Looked in: {cands}")
 
     # The image builds on the host via compose (`up --build`) — no pre-built
-    # image or registry needed.
-    compose_up_exec(
-        host_name, host_rec, name, env_file, resolved_mounts, host_key, authorized_keys or []
-    )
+    # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
+    with deployment_lock(host_name, name):
+        compose_up_exec(
+            host_name, host_rec, name, env_file, resolved_mounts, host_key, authorized_keys or []
+        )
 
 
-def down_container(host_name: str, host_rec: dict, name: str, purge: bool) -> None:
+def down_container(
+    host_name: str, host_rec: dict, name: str, purge: bool, rmi_local: bool = False
+) -> None:
     ensure_tunnel(host_rec)
     cname = container_name(name)
     compose_file = compose_file_path(host_name, name)
@@ -2026,8 +2083,9 @@ def down_container(host_name: str, host_rec: dict, name: str, purge: bool) -> No
         log(f"stopping and removing {cname} on {host_name}")
         if compose_file.is_file():
             # compose down removes the container (+ networks); --volumes also drops
-            # the seven named volumes. Without --volumes they are preserved.
-            query(driver_down_argv(host_rec, compose_project(name), compose_file, purge))
+            # the seven named volumes; --rmi local also removes the locally-built
+            # image (wipe). Without those, volumes/image are preserved.
+            query(driver_down_argv(host_rec, compose_project(name), compose_file, purge, rmi_local))
         else:
             # No compose file (e.g. a pre-compose container): fall back to rm and,
             # on purge, explicit volume removal.
@@ -2138,7 +2196,103 @@ def cli_down(name: str, purge: bool, yes: bool, host: str | None = None) -> None
             log("aborted")
             return
 
-    down_container(host_name, host_rec, name, purge)
+    with deployment_lock(host_name, name):  # serialize vs concurrent lifecycle ops (FR-017)
+        down_container(host_name, host_rec, name, purge)
+
+
+def do_stop(name: str, host: str | None = None) -> None:
+    """Pause/reclaim (FR-006): halt the deployment (all services) keeping the
+    container and its volumes; `start` resumes it without recreation."""
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    compose_file = compose_file_path(host_name, name)
+    if not compose_file.is_file():
+        die(
+            f"no deployment named '{name}' on {host_name} to stop (deploy it: agent-container up {name})"
+        )
+    with deployment_lock(host_name, name):
+        ensure_tunnel(host_rec)
+        argv = driver_stop_argv(host_rec, compose_project(name), compose_file)
+        if subprocess.run(argv).returncode != 0:
+            die("compose stop failed")
+    log(f"stopped {container_name(name)} on {host_name} (resume: agent-container start {name})")
+
+
+def do_start(name: str, host: str | None = None) -> None:
+    """Resume a stopped deployment (FR-006): no recreation, no rebuild."""
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    compose_file = compose_file_path(host_name, name)
+    if not compose_file.is_file():
+        die(f"no deployment named '{name}' on {host_name} (deploy it: agent-container up {name})")
+    with deployment_lock(host_name, name):
+        ensure_tunnel(host_rec)
+        argv = driver_start_argv(host_rec, compose_project(name), compose_file)
+        if subprocess.run(argv).returncode != 0:
+            die(
+                f"compose start failed — if the deployment was disposed, run: agent-container up {name}"
+            )
+    hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
+    log(
+        f"started {container_name(name)} on {host_name}; attach with: agent-container attach {name}{hflag}"
+    )
+
+
+def do_redeploy(
+    name: str,
+    host: str | None = None,
+    env_file_override: Path | None = None,
+    mounts: list[str] | None = None,
+    host_key: Path | None = None,
+    authorized_keys: list[Path] | None = None,
+) -> None:
+    """Redeploy (FR-008/FR-010): rebuild the image on the host and recreate the
+    container, preserving its volumes. Deliberately NON-idempotent — always
+    recreates even with no change, since the operator explicitly asked to rebuild."""
+    validate_name(name)
+    migrate_flat_state()
+    resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
+    host_name, host_rec = resolve_deploy_host(host)
+    ensure_tunnel(host_rec)
+    if container_name(name) not in host_container_names(host_rec, include_stopped=True):
+        warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
+    env_file = env_file_override or resolve_env_file(name)
+    if env_file is None:
+        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
+        die(f"no .env found. Looked in: {cands}")
+    with deployment_lock(host_name, name):
+        compose_up_exec(
+            host_name,
+            host_rec,
+            name,
+            env_file,
+            resolved_mounts,
+            host_key,
+            authorized_keys or [],
+            redeploy=True,
+        )
+
+
+def do_wipe(name: str, yes: bool, host: str | None = None) -> None:
+    """Wipe (FR-009): remove the container, its persistent volumes, AND its
+    locally-built image. Requires explicit confirmation (destroys durable state)."""
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    if not yes:
+        if not is_tty():
+            eprint("[agent-container] refusing destructive 'wipe' without -y/--yes on a non-TTY")
+            raise typer.Exit(2)
+        vols = ", ".join(per_container_volumes(name))
+        prompt = (
+            f"WIPE {container_name(name)} on {host_name} — delete the container, its "
+            f"volumes ({vols}), and its locally-built image?"
+        )
+        if not questionary.confirm(prompt, default=False).ask():
+            log("aborted")
+            return
+    with deployment_lock(host_name, name):
+        down_container(host_name, host_rec, name, purge=True, rmi_local=True)
+    log(f"wiped {container_name(name)} on {host_name}")
 
 
 def gather_rows(rt: str) -> list[dict[str, object]]:
@@ -2421,7 +2575,8 @@ def wiz_up(rt: str) -> None:
     if not questionary.confirm(f"start {cname}?", default=True).ask():
         return
     # Compose build + up (port pre-check + actionable abort inside).
-    compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, None, [])
+    with deployment_lock(DEFAULT_HOST, name):
+        compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, None, [])
     hint(f"agent-container up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
@@ -2535,7 +2690,8 @@ def wiz_down(rt: str) -> None:
             purge = True
         else:
             log("name mismatch — volumes will be preserved")
-    down_container(DEFAULT_HOST, implicit_local_host(rt), sel, purge)  # reports + clears state
+    with deployment_lock(DEFAULT_HOST, sel):  # serialize vs concurrent lifecycle ops (FR-017)
+        down_container(DEFAULT_HOST, implicit_local_host(rt), sel, purge)  # reports + clears state
     hint(f"agent-container down {sel}" + (" --purge" if purge else ""))
 
 
@@ -2764,8 +2920,60 @@ def down(
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
-    """Stop and remove container agent-container-NAME."""
+    """Stop and remove container agent-container-NAME (dispose; volumes kept unless --purge)."""
     cli_down(name, purge, yes, host)
+
+
+@app.command()
+def stop(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+) -> None:
+    """Stop (pause/reclaim) agent-container-NAME — retained with its volumes; `start` resumes it."""
+    do_stop(name, host)
+
+
+@app.command()
+def start(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+) -> None:
+    """Start a stopped agent-container-NAME (no rebuild, no recreate)."""
+    do_start(name, host)
+
+
+@app.command()
+def redeploy(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+    env_file: Path | None = typer.Option(
+        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    ),
+    mount: list[str] = typer.Option(
+        None, "--mount", help="Bind-mount a host dir (repeatable), as for `up`."
+    ),
+    host_key: Path | None = typer.Option(
+        None, "--host-key", help="Inject an ed25519 PRIVATE host key (as for `up`)."
+    ),
+    authorized_key: list[Path] = typer.Option(
+        None, "--authorized-key", help="Inject an SSH public key (repeatable)."
+    ),
+) -> None:
+    """Rebuild the image and recreate agent-container-NAME, preserving its volumes.
+    Deliberately non-idempotent: always rebuilds + recreates, even with no change."""
+    if env_file is not None and not env_file.is_file():
+        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    do_redeploy(name, host, env_file, mount or [], host_key, authorized_key or [])
+
+
+@app.command()
+def wipe(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+) -> None:
+    """WIPE agent-container-NAME: remove the container, its volumes, AND its built image (confirmed)."""
+    do_wipe(name, yes, host)
 
 
 @app.command()

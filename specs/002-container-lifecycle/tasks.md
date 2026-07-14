@@ -20,7 +20,7 @@ The whole CLI is **one file**: `bin/agent-container` (PEP 723). Per the plan's S
 
 ## Phase 1: Setup
 
-- [ ] T001 [P] Add `bin/tests/test_lifecycle.py` (new module) with hermetic fixtures for the deployment lock and the reconcile helper (reuse the `wiz`/`make_registry` fixtures from `bin/tests/conftest.py`; no live runtime).
+- [X] T001 [P] Add `bin/tests/test_lifecycle.py` (new module) with hermetic fixtures for the deployment lock and the reconcile helper (reuse the `wiz`/`make_registry` fixtures from `bin/tests/conftest.py`; no live runtime).
 
 **Checkpoint**: a place for lock + reconcile unit tests exists.
 
@@ -32,13 +32,13 @@ The whole CLI is **one file**: `bin/agent-container` (PEP 723). Per the plan's S
 
 ### Deployment lock (data-model: Deployment lock; R6)
 
-- [ ] T002 [P] Write failing tests for the deployment lock in `bin/tests/test_lifecycle.py`: a held `(host,name)` lock refuses a second acquire with a clear message (`fcntl.LOCK_NB`), independent `(host,name)` pairs do not contend, and the lock releases on context exit.
-- [ ] T003 Implement `deployment_lock(host, name)` — a context manager over `fcntl.flock(LOCK_EX|LOCK_NB)` on `$XDG_STATE_HOME/agent-container/<host>/<name>.lock`, failing fast (Fatal) on contention — in `bin/agent-container`.
+- [X] T002 [P] Write failing tests for the deployment lock in `bin/tests/test_lifecycle.py`: a held `(host,name)` lock refuses a second acquire with a clear message (`fcntl.LOCK_NB`), independent `(host,name)` pairs do not contend, and the lock releases on context exit.
+- [X] T003 Implement `deployment_lock(host, name)` — a context manager over `fcntl.flock(LOCK_EX|LOCK_NB)` on `$XDG_STATE_HOME/agent-container/<host>/<name>.lock`, failing fast (Fatal) on contention — in `bin/agent-container`.
 
 ### Driver argv for the new verbs (contracts/cli-commands.md; R1/R2/R3)
 
-- [ ] T004 [P] Write failing argv tests in `bin/tests/test_command_construction.py`: `driver_stop_argv`/`driver_start_argv` emit `<rt> --context H compose -p … -f … stop|start`; `driver_redeploy_argv` emits `… up -d --build --force-recreate`; `driver_down_argv(..., rmi_local=True)` adds `--rmi local` to the existing down argv.
-- [ ] T005 Implement `driver_stop_argv`, `driver_start_argv`, `driver_redeploy_argv`, and extend `driver_down_argv` with an `rmi_local: bool` parameter, in `bin/agent-container` (alongside the existing `driver_up_argv`/`driver_down_argv`).
+- [X] T004 [P] Write failing argv tests in `bin/tests/test_command_construction.py`: `driver_stop_argv`/`driver_start_argv` emit `<rt> --context H compose -p … -f … stop|start`; `driver_redeploy_argv` emits `… up -d --build --force-recreate`; `driver_down_argv(..., rmi_local=True)` adds `--rmi local` to the existing down argv.
+- [X] T005 Implement `driver_stop_argv`, `driver_start_argv`, `driver_redeploy_argv`, and extend `driver_down_argv` with an `rmi_local: bool` parameter, in `bin/agent-container` (alongside the existing `driver_up_argv`/`driver_down_argv`).
 
 **Checkpoint**: lock + driver argv builders exist and are unit-tested. User stories can begin.
 
@@ -50,12 +50,12 @@ The whole CLI is **one file**: `bin/agent-container` (PEP 723). Per the plan's S
 
 **Independent Test**: on a reachable host, `up alpha` → `stop alpha` (Exited, volumes intact) → `start alpha` (running, no recreate) → rebuild image → `redeploy alpha` (new image, same volumes) → `wipe alpha` (prompts; on confirm container+volumes+image gone). Quickstart Scenarios A, C, D.
 
-- [ ] T006 [P] [US2] Write failing tests in `bin/tests/test_command_construction.py` / `test_lifecycle.py`: `do_stop`/`do_start` build the compose stop/start argv; `do_redeploy` regenerates the compose file and builds the force-recreate argv; `do_wipe` requires TTY/`-y` confirmation (non-TTY without `-y` → exit 2) and issues `down --volumes --rmi local`.
-- [ ] T007 [US2] Implement `do_stop` and `do_start` (compose stop/start under `deployment_lock`; no-op-safe; `start` on a disposed deployment errors actionably → suggest `up`) + Typer `stop`/`start` commands, in `bin/agent-container`.
-- [ ] T008 [US2] Implement `do_redeploy` — regenerate the compose file from current inputs, run `driver_redeploy_argv` (up -d --build --force-recreate, volumes preserved), report the reattach address/port — + Typer `redeploy` command (accepts `--env-file`/`--mount` like `up`), in `bin/agent-container`. `redeploy` is **deliberately non-idempotent** (I1): it always rebuilds + recreates even with no change, and MAY log a "no change detected — rebuilding anyway" warning; the idempotent no-op path stays `up` (FR-010).
-- [ ] T009 [US2] Implement `do_wipe` — TTY/`-y` confirmation idiom (mirroring `cli_down`/`host rm --destroy`), `driver_down_argv(..., rmi_local=True)`, clear per-`(host,name)` state — + Typer `wipe` command, in `bin/agent-container`.
-- [ ] T010 [US2] Take `deployment_lock` in every mutating verb (`do_up`, `down_container`/`cli_down`, `do_stop`, `do_start`, `do_redeploy`, `do_wipe`); read-only `list`/`logs` MUST NOT lock, in `bin/agent-container`.
-- [ ] T011 [P] [US2] Acceptance in `bin/tests/test_acceptance.py`: `up`→`stop`→`start`→ (**SC-003**) `down` (dispose) then `up` restores prior config from the retained volumes →`redeploy` (change the image; assert the 7 volumes are the SAME ones and the new image runs)→`wipe -y` (assert container + volumes + built image gone); plus a concurrency check (a second mutating op while one holds the lock is refused, **FR-017**).
+- [X] T006 [P] [US2] Write failing tests in `bin/tests/test_command_construction.py` / `test_lifecycle.py`: `do_stop`/`do_start` build the compose stop/start argv; `do_redeploy` regenerates the compose file and builds the force-recreate argv; `do_wipe` requires TTY/`-y` confirmation (non-TTY without `-y` → exit 2) and issues `down --volumes --rmi local`.
+- [X] T007 [US2] Implement `do_stop` and `do_start` (compose stop/start under `deployment_lock`; no-op-safe; `start` on a disposed deployment errors actionably → suggest `up`) + Typer `stop`/`start` commands, in `bin/agent-container`.
+- [X] T008 [US2] Implement `do_redeploy` — regenerate the compose file from current inputs, run `driver_redeploy_argv` (up -d --build --force-recreate, volumes preserved), report the reattach address/port — + Typer `redeploy` command (accepts `--env-file`/`--mount` like `up`), in `bin/agent-container`. `redeploy` is **deliberately non-idempotent** (I1): it always rebuilds + recreates even with no change, and MAY log a "no change detected — rebuilding anyway" warning; the idempotent no-op path stays `up` (FR-010).
+- [X] T009 [US2] Implement `do_wipe` — TTY/`-y` confirmation idiom (mirroring `cli_down`/`host rm --destroy`), `driver_down_argv(..., rmi_local=True)`, clear per-`(host,name)` state — + Typer `wipe` command, in `bin/agent-container`.
+- [X] T010 [US2] Take `deployment_lock` in every mutating verb (`do_up`, `down_container`/`cli_down`, `do_stop`, `do_start`, `do_redeploy`, `do_wipe`); read-only `list`/`logs` MUST NOT lock, in `bin/agent-container`.
+- [X] T011 [P] [US2] Acceptance in `bin/tests/test_acceptance.py`: `up`→`stop`→`start`→ (**SC-003**) `down` (dispose) then `up` restores prior config from the retained volumes →`redeploy` (change the image; assert the 7 volumes are the SAME ones and the new image runs)→`wipe -y` (assert container + volumes + built image gone); plus a concurrency check (a second mutating op while one holds the lock is refused, **FR-017**).
 
 **Checkpoint**: the three persistence levels work end-to-end — the shippable net-new increment.
 
@@ -67,8 +67,8 @@ The whole CLI is **one file**: `bin/agent-container` (PEP 723). Per the plan's S
 
 **Independent Test**: `up alpha`; `up alpha` again unchanged → idempotent no-op; `up beta` on the same host → both run isolated. Quickstart Scenario B (dispose→recreate non-event, inherited).
 
-- [ ] T012 [P] [US1] Add a regression test (extend `bin/tests/test_command_construction.py`): a second `up` of an unchanged deployment is an idempotent no-op (no `--force-recreate`), and two distinct names produce non-colliding project/port/volume argv — guarding that the new verbs did not perturb inherited deploy.
-- [ ] T013 [US1] Verify `do_up`'s inherited idempotent-reconcile path and ensure it now acquires `deployment_lock` (T010) without changing the no-op semantics, in `bin/agent-container`.
+- [X] T012 [P] [US1] Add a regression test (extend `bin/tests/test_command_construction.py`): a second `up` of an unchanged deployment is an idempotent no-op (no `--force-recreate`), and two distinct names produce non-colliding project/port/volume argv — guarding that the new verbs did not perturb inherited deploy.
+- [X] T013 [US1] Verify `do_up`'s inherited idempotent-reconcile path and ensure it now acquires `deployment_lock` (T010) without changing the no-op semantics, in `bin/agent-container`.
 
 **Checkpoint**: inherited deploy + idempotency intact under the new lock; distinct containers isolated.
 

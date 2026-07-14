@@ -349,6 +349,78 @@ def test_distinct_containers_get_distinct_identities(acc):
     assert _container_hostkey_fp("accdist1") != _container_hostkey_fp("accdist2")
 
 
+def _state_of(name: str) -> str:
+    """'running' / 'exited' / '' (absent) for agent-container-<name> on the local daemon."""
+    cname = f"agent-container-{name}"
+    return subprocess.run(
+        [RUNTIME, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.State}}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _wait_state(name: str, want: str, timeout: int = 25) -> None:
+    """Poll until agent-container-<name> reaches `want` — docker states are
+    eventually-consistent (a just-recreated container flaps through 'restarting'
+    before settling to 'running'), so assert on the settled state, not an instant."""
+    deadline = time.time() + timeout
+    last = _state_of(name)
+    while time.time() < deadline:
+        if last == want:
+            return
+        time.sleep(0.5)
+        last = _state_of(name)
+    raise AssertionError(f"{name}: state {last!r} != {want!r} after {timeout}s")
+
+
+def test_lifecycle_stop_start_dispose_redeploy_wipe(acc):
+    """US2 end-to-end (FR-006/007/008/009/017, SC-003): the three persistence
+    levels + concurrency, against REAL containers."""
+    import fcntl
+
+    state = acc.tmp / "state"
+
+    def cli(*args, timeout=600):
+        return _run_cli([*AGENT_CONTAINER, *args], state, timeout=timeout)
+
+    port = acc.up("acclc")
+    fp1 = _container_hostkey_fp("acclc")  # host key persisted on the ~/.ssh volume
+
+    # pause / reclaim (FR-006): stop retains, start resumes without recreation
+    assert cli("stop", "acclc").returncode == 0
+    _wait_state("acclc", "exited")
+    assert cli("start", "acclc").returncode == 0
+    _wait_sshd(port)
+    _wait_state("acclc", "running")
+
+    # SC-003 / FR-007: dispose then recreate restores prior config from volumes
+    acc.down("acclc")  # dispose — container gone, volumes kept
+    _wait_state("acclc", "")
+    acc.up("acclc")
+    assert _container_hostkey_fp("acclc") == fp1  # same host key => volume restored
+
+    # redeploy (FR-008): rebuild + recreate, volumes preserved. Pass the same
+    # env file the acc harness used for `up` (redeploy re-resolves inputs).
+    assert cli("redeploy", "acclc", "--env-file", str(acc.tmp / "acclc.env")).returncode == 0
+    _wait_sshd(port)
+    _wait_state("acclc", "running")
+    assert _container_hostkey_fp("acclc") == fp1  # volumes intact through the recreate
+
+    # FR-017: a concurrent lifecycle op while the lock is held is refused
+    lock = state / "agent-container" / "local" / "acclc.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("w") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = cli("stop", "acclc", timeout=60)
+        assert r.returncode != 0 and "another lifecycle operation" in r.stderr, r.stderr
+
+    # wipe (FR-009): container + volumes + built image gone (confirmed via -y)
+    assert acc.volumes_of("acclc")  # had its seven volumes
+    assert cli("wipe", "acclc", "-y").returncode == 0
+    _wait_state("acclc", "")  # container gone
+    assert acc.volumes_of("acclc") == []  # volumes wiped
+
+
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
     """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
     ANY container is still present on the host, and release only once it is empty.
