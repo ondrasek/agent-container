@@ -27,6 +27,8 @@
 # literally (no expansion), with a one-time warning.
 
 import atexit
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -508,6 +510,27 @@ def compose_file_path(host: str, name: str) -> Path:
     return host_state_dir(host) / f"{name}.compose.yaml"
 
 
+@contextlib.contextmanager
+def deployment_lock(host: str, name: str):
+    """Serialize mutating lifecycle ops on one deployment (FR-017): a non-blocking
+    advisory flock on <state>/<host>/<name>.lock. A second concurrent op on the
+    same (host,name) fails fast rather than interleaving; independent deployments
+    never contend. Read-only ops (list/logs) do NOT take this lock."""
+    lock_dir = host_state_dir(host)
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    f = (lock_dir / f"{name}.lock").open("w")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            die(f"another lifecycle operation is in progress for {name} on {host}")
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+
 # Flat state artifacts written before per-host namespacing existed. Migrated into
 # STATE_DIR/local/ on first host-aware access.
 _FLAT_STATE_SUFFIXES = (".port", ".host_key", ".authorized_keys")
@@ -564,8 +587,8 @@ def detect_runtime() -> str:
     die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_CONTAINER_RUNTIME)")
 
 
-def query(argv: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True)
+def query(argv: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
 def container_running(rt: str, cname: str) -> bool:
@@ -578,16 +601,24 @@ def container_exists(rt: str, cname: str) -> bool:
     return cname in r.stdout.splitlines()
 
 
-def ps_agent_container(rt: str, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
+def ps_agent_container(
+    rt: str, include_stopped: bool = False, strict: bool = False
+) -> list[tuple[str, str, str, str]]:
     """(cname, image, status, uptime) rows for agent-container-* containers.
 
     Go-template + tab split, not --format json: podman and docker JSON
-    shapes are incompatible, the template output is not.
+    shapes are incompatible, the template output is not. With strict=True (the
+    `list` reconcile path) the call is bounded by a timeout and DIES on a nonzero
+    exit — a failed local `ps` must not read as 'zero containers' (fail-closed,
+    001-US3 lesson). Default (best-effort) behavior is unchanged for other callers.
     """
     argv = [rt, "ps"] + (["-a"] if include_stopped else [])
     argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
+    r = query(argv, timeout=15 if strict else None)
+    if strict and r.returncode != 0:
+        die(f"could not list local containers: {r.stderr.strip() or f'exit {r.returncode}'}")
     rows = []
-    for line in query(argv).stdout.splitlines():
+    for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) == 4 and parts[0].startswith(CONTAINER_PREFIX):
             rows.append((parts[0], parts[1], parts[2], parts[3]))
@@ -631,9 +662,12 @@ def write_state(host: str, name: str, port: int) -> None:
 
 def read_state_port(host: str, name: str) -> str | None:
     f = state_file_for(host, name)
-    if not f.is_file():
+    try:
+        if not f.is_file():
+            return None
+        return f.read_text().strip() or None
+    except OSError:  # unreadable / TOCTOU delete — degrade to unknown, never abort a listing
         return None
-    return f.read_text().strip() or None
 
 
 def clear_state(host: str, name: str) -> None:
@@ -1627,22 +1661,184 @@ def driver_runtime_argv(host: dict) -> list[str]:
     die(f"host driver '{driver}' is attach-only; it cannot build or run containers")
 
 
-def driver_compose_argv(host: dict, project: str, file: Path, *args: str) -> list[str]:
-    """`<runtime> --context/-connection X compose -p <project> -f <file> …`.
+# --- sidecar / helper services (Feature 002 US4, research R5) -----------------
+# A deployment may declare helper services in an operator-supplied compose
+# OVERRIDE file, discovered by convention next to the .env. When present it is
+# merged as a SECOND `-f` into every compose invocation for that deployment, so
+# the agent and its helpers share one project and one lifecycle (FR-004). This is
+# a deliberately thin, file-based seam — the richer whole-directory model is
+# Feature 006 (agent-as-code), which builds ON this primitive.
+
+# The tool owns the agent service's identity: its service key, plus the top-level
+# project name / named volumes / injected configs. An override MUST NOT redefine
+# any of these — it may only ADD helper services (services-only fragment).
+AGENT_SERVICE_KEY = "agent"
+SIDECAR_ALLOWED_TOPLEVEL = {"services", "version"}  # version: tolerated (compose-deprecated)
+
+
+def sidecar_override_candidates(name: str, cwd: Path) -> list[Path]:
+    """Discovery order, mirroring .env resolution (project-local first, then the
+    per-name user config).
+
+    >>> [p.name for p in sidecar_override_candidates("acme", Path("/w"))]
+    ['agent-container.acme.services.yaml', 'acme.services.yaml']
+    """
+    return [cwd / f"agent-container.{name}.services.yaml", CONFIG_DIR / f"{name}.services.yaml"]
+
+
+def resolve_sidecar_override(name: str) -> Path | None:
+    """The first existing sidecar override for <name>, validated, or None. A
+    present-but-invalid override is fatal (FR-018) — never silently ignored."""
+    for candidate in sidecar_override_candidates(name, Path.cwd()):
+        if candidate.is_file():
+            validate_sidecar_override(candidate)
+            return candidate
+    return None
+
+
+def _yaml_toplevel_keys(text: str) -> list[str]:
+    """Top-level mapping keys of a YAML/JSON document, best-effort. JSON is a YAML
+    subset, so a JSON override parses exactly; a YAML override is scanned for
+    column-0 `key:` lines (comments / list items / nested lines ignored). This is
+    a GUARDRAIL, not a full parser — compose does the authoritative parse when it
+    runs; the scan only catches the two footguns (non-services-only; agent redef)."""
+    try:
+        obj = json.loads(text)
+        return [str(k) for k in obj] if isinstance(obj, dict) else []
+    except json.JSONDecodeError, ValueError:
+        pass
+    keys = []
+    for line in text.splitlines():
+        if not line or line[0].isspace() or line.lstrip().startswith("#") or line.startswith("---"):
+            continue
+        m = re.match(r"([A-Za-z0-9_.-]+)\s*:", line)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def _yaml_service_keys(text: str) -> list[str]:
+    """Service keys declared under a top-level `services:` mapping, best-effort
+    (JSON parsed exactly; YAML scanned at the first indent level under services)."""
+    try:
+        obj = json.loads(text)
+        svc = obj.get("services") if isinstance(obj, dict) else None
+        return [str(k) for k in svc] if isinstance(svc, dict) else []
+    except json.JSONDecodeError, ValueError:
+        pass
+    lines = text.splitlines()
+    keys: list[str] = []
+    indent: int | None = None
+    in_services = False
+    for line in lines:
+        if re.match(r"services\s*:", line):  # column-0 services:
+            in_services = True
+            continue
+        if in_services:
+            if line and not line[0].isspace() and not line.lstrip().startswith("#"):
+                break  # dedented back to another top-level key
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            cur = len(line) - len(line.lstrip())
+            if indent is None:
+                indent = cur
+            if cur == indent:
+                m = re.match(r"([A-Za-z0-9_.-]+)\s*:", stripped)
+                if m:
+                    keys.append(m.group(1))
+    return keys
+
+
+def validate_sidecar_override(path: Path) -> None:
+    """Guardrail on an operator sidecar override (FR-004/FR-018): it must be a
+    non-empty compose `services:`-only fragment and MUST NOT redefine the agent
+    service (whose identity — name/port/the 7 volumes — the tool owns). Deeper
+    malformations are left to compose's own parse at run time; here we reject the
+    two footguns with an actionable message rather than silently merging them."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        die(f"sidecar override {path} is unreadable: {e}")
+    if not text.strip():
+        die(f"sidecar override {path} is empty (declare helper services under `services:`)")
+    toplevel = _yaml_toplevel_keys(text)
+    if "services" not in toplevel:
+        die(f"sidecar override {path} has no `services:` block (it must add helper services)")
+    extra = [k for k in toplevel if k not in SIDECAR_ALLOWED_TOPLEVEL]
+    if extra:
+        die(
+            f"sidecar override {path} may only declare `services:` (a services-only "
+            f"fragment); remove tool-owned/unsupported top-level key(s): {', '.join(sorted(extra))}"
+        )
+    if AGENT_SERVICE_KEY in _yaml_service_keys(text):
+        die(
+            f"sidecar override {path} must not redefine the '{AGENT_SERVICE_KEY}' service "
+            f"(the tool owns its name, port, and volumes); name your helper differently"
+        )
+
+
+def driver_compose_argv(
+    host: dict, project: str, file: Path, *args: str, override: Path | None = None
+) -> list[str]:
+    """`<runtime> --context/-connection X compose -p <project> -f <file> [-f <override>] …`.
+
+    When a sidecar `override` is given it rides as a SECOND `-f` right after the
+    generated compose file, so compose's native multi-file merge folds the helper
+    services into the same project (US4). Order matters: the override is layered
+    ON TOP of the generated file.
 
     >>> from pathlib import Path
     >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "agent-container-acme", Path("/s/acme.compose.yaml"), "up", "-d")
     ['docker', '--context', 'lima', 'compose', '-p', 'agent-container-acme', '-f', '/s/acme.compose.yaml', 'up', '-d']
+    >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "p", Path("/s/a.yaml"), "up", override=Path("/s/side.yaml"))
+    ['docker', '--context', 'lima', 'compose', '-p', 'p', '-f', '/s/a.yaml', '-f', '/s/side.yaml', 'up']
     """
-    return driver_runtime_argv(host) + ["compose", "-p", project, "-f", str(file), *args]
+    files = ["-f", str(file)] + (["-f", str(override)] if override else [])
+    return driver_runtime_argv(host) + ["compose", "-p", project, *files, *args]
 
 
-def driver_up_argv(host: dict, project: str, file: Path) -> list[str]:
-    return driver_compose_argv(host, project, file, "up", "-d", "--build")
+def driver_up_argv(host: dict, project: str, file: Path, override: Path | None = None) -> list[str]:
+    return driver_compose_argv(host, project, file, "up", "-d", "--build", override=override)
 
 
-def driver_down_argv(host: dict, project: str, file: Path, purge: bool = False) -> list[str]:
-    return driver_compose_argv(host, project, file, "down", *(["--volumes"] if purge else []))
+def driver_redeploy_argv(
+    host: dict, project: str, file: Path, override: Path | None = None
+) -> list[str]:
+    """Deliberately non-idempotent (FR-010): rebuild the image and recreate the
+    container even with no change. Named volumes are external-by-name so they are
+    re-attached, not recreated (FR-008)."""
+    return driver_compose_argv(
+        host, project, file, "up", "-d", "--build", "--force-recreate", override=override
+    )
+
+
+def driver_stop_argv(
+    host: dict, project: str, file: Path, override: Path | None = None
+) -> list[str]:
+    return driver_compose_argv(host, project, file, "stop", override=override)
+
+
+def driver_start_argv(
+    host: dict, project: str, file: Path, override: Path | None = None
+) -> list[str]:
+    return driver_compose_argv(host, project, file, "start", override=override)
+
+
+def driver_down_argv(
+    host: dict,
+    project: str,
+    file: Path,
+    purge: bool = False,
+    rmi_local: bool = False,
+    override: Path | None = None,
+) -> list[str]:
+    args = ["down"]
+    if purge:
+        args.append("--volumes")
+    if rmi_local:  # wipe also removes the locally-built image (never a public one)
+        args += ["--rmi", "local"]
+    return driver_compose_argv(host, project, file, *args, override=override)
 
 
 def driver_reachable_address(host: dict) -> str:
@@ -1851,12 +2047,25 @@ def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
 
 
 def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
-    """(cname, image, status, uptime) rows for agent-container-* on a host's daemon."""
-    ensure_tunnel(host)
+    """(cname, image, status, uptime) rows for agent-container-* on a host's daemon.
+    Fail-CLOSED (001-US3 lesson): an unreachable/timed-out/errored `ps` RAISES
+    (Fatal via ensure_tunnel(required)/returncode, or subprocess.TimeoutExpired)
+    rather than returning [] — a down daemon must never read as 'no containers'.
+    A reachable host returns 0, so lifecycle existence-checks are unaffected."""
+    ensure_tunnel(host, required=True)
     argv = driver_runtime_argv(host) + ["ps"] + (["-a"] if include_stopped else [])
     argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
+    try:
+        r = query(argv, timeout=20)  # bounded so a wedged forward can't hang the caller
+    except (subprocess.SubprocessError, OSError) as e:
+        # A wedged-but-bound forward times out here; a spawn failure raises OSError.
+        # Convert to Fatal so lifecycle callers (do_up/down/redeploy) fail-closed
+        # via the normal die() path instead of an uncaught TimeoutExpired traceback.
+        die(f"could not list containers on the host: {e}")
+    if r.returncode != 0:
+        die(f"could not list containers on the host: {r.stderr.strip() or f'exit {r.returncode}'}")
     rows = []
-    for line in query(argv).stdout.splitlines():
+    for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) == 4 and parts[0].startswith(CONTAINER_PREFIX):
             rows.append((parts[0], parts[1], parts[2], parts[3]))
@@ -1945,11 +2154,14 @@ def compose_up_exec(
     mounts: list[str],
     host_key: Path | None,
     authorized_keys: list[Path],
+    redeploy: bool = False,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
-    the host). Replaces the imperative `<rt> run` path."""
+    the host). With redeploy=True it force-recreates (US2, deliberately
+    non-idempotent) — the container already holds its port, so the port-free
+    guard is skipped and its named volumes are preserved across the recreate."""
     port = port_for_name(name)
-    if host_is_local(host_rec) and not port_free(port):
+    if not redeploy and host_is_local(host_rec) and not port_free(port):
         die(
             f"port {port} is already in use (port = 2200 + name hash; "
             f"collisions are possible). Stop whatever holds it (agent-container list) "
@@ -1961,14 +2173,23 @@ def compose_up_exec(
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
     log(f"compose={compose_file}")
-    argv = driver_up_argv(host_rec, compose_project(name), compose_file)
+    project = compose_project(name)
+    override = resolve_sidecar_override(name)  # validated; merged as a 2nd -f (US4)
+    if override is not None:
+        log(f"sidecar override={override}")
+    argv = (
+        driver_redeploy_argv(host_rec, project, compose_file, override)
+        if redeploy
+        else driver_up_argv(host_rec, project, compose_file, override)
+    )
     rc = subprocess.run(argv).returncode  # inherited stdio: build output streams
     if rc != 0:
-        die(f"compose up failed (exit {rc})")
+        die(f"compose {'redeploy' if redeploy else 'up'} failed (exit {rc})")
     write_state(host_name, name, port)
     addr = driver_reachable_address(host_rec)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
-    log(f"started {container_name(name)}; attach with: agent-container attach {name}{hflag}")
+    verb = "redeployed" if redeploy else "started"
+    log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
     log(f"or directly: ssh dev@{addr} -p {port} -t tmux attach -t main")
 
 
@@ -2009,25 +2230,51 @@ def do_up(
         die(f"no .env found. Looked in: {cands}")
 
     # The image builds on the host via compose (`up --build`) — no pre-built
-    # image or registry needed.
-    compose_up_exec(
-        host_name, host_rec, name, env_file, resolved_mounts, host_key, authorized_keys or []
-    )
+    # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
+    with deployment_lock(host_name, name):
+        compose_up_exec(
+            host_name, host_rec, name, env_file, resolved_mounts, host_key, authorized_keys or []
+        )
 
 
-def down_container(host_name: str, host_rec: dict, name: str, purge: bool) -> None:
+def down_container(
+    host_name: str, host_rec: dict, name: str, purge: bool, rmi_local: bool = False
+) -> None:
     ensure_tunnel(host_rec)
     cname = container_name(name)
     compose_file = compose_file_path(host_name, name)
-    exists = cname in host_container_names(host_rec, include_stopped=True)
+    # host_container_names is fail-closed (it dies on an unreachable daemon). On
+    # the teardown path that would strand the local state: down/wipe must still
+    # clear the per-host state (and drop the derived compose artifact on purge)
+    # even when the host is gone, so re-adding it later starts clean. Degrade a
+    # failed enumeration to 'unknown' and fall through to the compose-file path.
+    try:
+        exists = cname in host_container_names(host_rec, include_stopped=True)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        warn(f"could not confirm container state on {host_name} ({e}); clearing local state anyway")
+        exists = False
     vols = per_container_volumes(name)
 
     if exists or compose_file.is_file():
         log(f"stopping and removing {cname} on {host_name}")
         if compose_file.is_file():
+            # Merge the sidecar override (US4) so `down`/`wipe` tear the helpers down
+            # as one unit — but a now-invalid/removed override must never BLOCK a
+            # teardown (compose down also reconciles by project label), so resolve it
+            # leniently here, unlike the fail-fast create path.
+            try:
+                override = resolve_sidecar_override(name)
+            except Fatal as e:
+                warn(f"ignoring sidecar override for teardown ({e})")
+                override = None
             # compose down removes the container (+ networks); --volumes also drops
-            # the seven named volumes. Without --volumes they are preserved.
-            query(driver_down_argv(host_rec, compose_project(name), compose_file, purge))
+            # the seven named volumes; --rmi local also removes the locally-built
+            # image (wipe). Without those, volumes/image are preserved.
+            query(
+                driver_down_argv(
+                    host_rec, compose_project(name), compose_file, purge, rmi_local, override
+                )
+            )
         else:
             # No compose file (e.g. a pre-compose container): fall back to rm and,
             # on purge, explicit volume removal.
@@ -2138,18 +2385,137 @@ def cli_down(name: str, purge: bool, yes: bool, host: str | None = None) -> None
             log("aborted")
             return
 
-    down_container(host_name, host_rec, name, purge)
+    with deployment_lock(host_name, name):  # serialize vs concurrent lifecycle ops (FR-017)
+        down_container(host_name, host_rec, name, purge)
 
 
-def gather_rows(rt: str) -> list[dict[str, object]]:
-    """Rows for `list`. Live status comes from the LOCAL runtime; containers on
-    other hosts are surfaced from their per-host state files (querying every
-    remote daemon on each `list` is deferred to the lifecycle feature)."""
+def do_stop(name: str, host: str | None = None) -> None:
+    """Pause/reclaim (FR-006): halt the deployment (all services) keeping the
+    container and its volumes; `start` resumes it without recreation."""
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    compose_file = compose_file_path(host_name, name)
+    if not compose_file.is_file():
+        die(
+            f"no deployment named '{name}' on {host_name} to stop (deploy it: agent-container up {name})"
+        )
+    override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
+    with deployment_lock(host_name, name):
+        ensure_tunnel(host_rec)
+        argv = driver_stop_argv(host_rec, compose_project(name), compose_file, override)
+        if subprocess.run(argv).returncode != 0:
+            die("compose stop failed")
+    log(f"stopped {container_name(name)} on {host_name} (resume: agent-container start {name})")
+
+
+def do_start(name: str, host: str | None = None) -> None:
+    """Resume a stopped deployment (FR-006): no recreation, no rebuild."""
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    compose_file = compose_file_path(host_name, name)
+    if not compose_file.is_file():
+        die(f"no deployment named '{name}' on {host_name} (deploy it: agent-container up {name})")
+    override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
+    with deployment_lock(host_name, name):
+        ensure_tunnel(host_rec)
+        argv = driver_start_argv(host_rec, compose_project(name), compose_file, override)
+        if subprocess.run(argv).returncode != 0:
+            die(
+                f"compose start failed — if the deployment was disposed, run: agent-container up {name}"
+            )
+    hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
+    log(
+        f"started {container_name(name)} on {host_name}; attach with: agent-container attach {name}{hflag}"
+    )
+
+
+def do_redeploy(
+    name: str,
+    host: str | None = None,
+    env_file_override: Path | None = None,
+    mounts: list[str] | None = None,
+    host_key: Path | None = None,
+    authorized_keys: list[Path] | None = None,
+) -> None:
+    """Redeploy (FR-008/FR-010): rebuild the image on the host and recreate the
+    container, preserving its volumes. Deliberately NON-idempotent — always
+    recreates even with no change, since the operator explicitly asked to rebuild."""
+    validate_name(name)
+    migrate_flat_state()
+    resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
+    host_name, host_rec = resolve_deploy_host(host)
+    ensure_tunnel(host_rec)
+    if container_name(name) not in host_container_names(host_rec, include_stopped=True):
+        warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
+    env_file = env_file_override or resolve_env_file(name)
+    if env_file is None:
+        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
+        die(f"no .env found. Looked in: {cands}")
+    with deployment_lock(host_name, name):
+        compose_up_exec(
+            host_name,
+            host_rec,
+            name,
+            env_file,
+            resolved_mounts,
+            host_key,
+            authorized_keys or [],
+            redeploy=True,
+        )
+
+
+def do_wipe(name: str, yes: bool, host: str | None = None) -> None:
+    """Wipe (FR-009): remove the container, its persistent volumes, AND its
+    locally-built image. Requires explicit confirmation (destroys durable state)."""
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    if not yes:
+        if not is_tty():
+            eprint("[agent-container] refusing destructive 'wipe' without -y/--yes on a non-TTY")
+            raise typer.Exit(2)
+        vols = ", ".join(per_container_volumes(name))
+        prompt = (
+            f"WIPE {container_name(name)} on {host_name} — delete the container, its "
+            f"volumes ({vols}), and its locally-built image?"
+        )
+        if not questionary.confirm(prompt, default=False).ask():
+            log("aborted")
+            return
+    with deployment_lock(host_name, name):
+        down_container(host_name, host_rec, name, purge=True, rmi_local=True)
+    log(f"wiped {container_name(name)} on {host_name}")
+
+
+def gather_rows(rt: str, local_only: bool = False) -> list[dict[str, object]]:
+    """Rows for `list`, reconciled against LIVE host state (Feature 002 US3,
+    FR-011/012). Local status comes from the local runtime; each REGISTERED remote
+    host is queried live via host_ps_rows so status is truthful after an
+    out-of-band change (SC-004). A host whose enumeration fails is rendered
+    'unreachable' (kept, never shown running, never hangs — bounded + caught), not
+    dropped. `local_only` skips all remote round-trips for a fast local-only view."""
     rows: list[dict[str, object]] = []
-    local_running: set[str] = set()
-    for cname, image, status, uptime in ps_agent_container(rt):
+    seen: set[tuple[str, str]] = set()  # (host, short) — a live row supersedes its placeholder
+    reconciled: set[str] = set()  # hosts whose live ps PROVABLY succeeded (orphans -> stale)
+    unreachable: set[str] = set()  # hosts whose live ps failed (kept, shown 'unreachable')
+    hosts = registry_hosts(load_registry())  # one read; reused for the alias computation below
+    # A registered host that actually points at the local daemon (host_is_local) shares
+    # the local runtime, so its containers already appear in the local ps below. Query it
+    # once (as local), not again as a remote, and skip its state dir so it doesn't render
+    # a duplicate 'on remote host' placeholder for a container that is really live locally.
+    local_aliases = {h for h, hr in hosts.items() if h != DEFAULT_HOST and host_is_local(hr)}
+
+    # Local host: FAIL-CLOSED (001-US3 lesson) — a failed local `ps` must not read as
+    # 'zero containers'; render the local host 'unreachable' instead. include_stopped so a
+    # locally stopped container reports its real Exited status, matching the remote path.
+    try:
+        local_ps = ps_agent_container(rt, include_stopped=True, strict=True)
+        reconciled.add(DEFAULT_HOST)
+    except Fatal, OSError, subprocess.SubprocessError:
+        local_ps = []
+        unreachable.add(DEFAULT_HOST)
+    for cname, image, status, uptime in local_ps:
         short = cname[len(CONTAINER_PREFIX) :]
-        local_running.add(short)
+        seen.add((DEFAULT_HOST, short))
         rows.append(
             {
                 "name": cname,
@@ -2159,35 +2525,92 @@ def gather_rows(rt: str) -> list[dict[str, object]]:
                 "status": status,
                 "uptime": uptime,
                 "stale": False,
-            }
+            }  # fmt: skip
         )
-    # Per-host state files (local orphans + containers on other hosts).
+    # Live-reconcile every registered REMOTE host (the local host is already covered
+    # by ps above). One dead host must never abort or stall the whole listing.
+    if not local_only:
+        for hname, hrec in sorted(hosts.items()):
+            if hname == DEFAULT_HOST or hname in local_aliases:
+                continue
+            if hrec.get("driver") not in ("docker", "podman"):
+                continue  # attach-only/existing-ssh: reachable via ssh, not queryable
+            try:
+                live = host_ps_rows(
+                    hrec, include_stopped=True
+                )  # incl. stopped -> real Exited (SC-004)
+                reconciled.add(hname)
+            except Fatal, OSError, subprocess.SubprocessError:
+                unreachable.add(hname)
+                continue
+            for cname, image, status, uptime in live:
+                short = cname[len(CONTAINER_PREFIX) :]
+                seen.add((hname, short))
+                rows.append(
+                    {
+                        "name": container_name(short),
+                        "host": hname,
+                        "port": read_state_port(hname, short) or "?",
+                        "image": image,
+                        "status": status,
+                        "uptime": uptime,
+                        "stale": False,
+                    }  # fmt: skip
+                )
+    # Per-host state files (orphans + placeholders for hosts not live-reconciled).
+    listed_hosts: set[str] = set()
     if STATE_DIR.is_dir():
         for host_dir in sorted(p for p in STATE_DIR.iterdir() if p.is_dir()):
             hname = host_dir.name
+            if hname in local_aliases:
+                continue  # its live state is already shown under the local host
             for f in sorted(host_dir.glob("*.port")):
                 short = f.stem
-                if hname == DEFAULT_HOST and short in local_running:
+                if (hname, short) in seen:  # a live row already supersedes this placeholder
                     continue
-                is_local = hname == DEFAULT_HOST
+                # A state file with no live match on a host we PROVABLY queried means the
+                # container is gone (stale); on an unreachable host we can't tell (keep,
+                # 'unreachable'); on a host we never queried (--local, attach-only) it's a
+                # static 'on remote host' placeholder.
+                if hname in unreachable:
+                    status, stale = "unreachable", False
+                elif hname in reconciled:
+                    status, stale = "stale", True
+                else:
+                    status, stale = "on remote host", False
+                listed_hosts.add(hname)
                 rows.append(
                     {
                         "name": container_name(short),
                         "host": hname,
                         "port": read_state_port(hname, short) or "?",
                         "image": "-",
-                        "status": "stale" if is_local else "on remote host",
+                        "status": status,
                         "uptime": "-",
-                        "stale": is_local,
-                    }
+                        "stale": stale,
+                    }  # fmt: skip
                 )
+    # Never let an unreachable host silently vanish: a host that errored but had no
+    # state files still gets one marker row.
+    for hname in sorted(unreachable - listed_hosts):
+        rows.append(
+            {
+                "name": "-",
+                "host": hname,
+                "port": "-",
+                "image": "-",
+                "status": "unreachable",
+                "uptime": "-",
+                "stale": False,
+            }  # fmt: skip
+        )
     return rows
 
 
-def do_list(as_json: bool) -> None:
+def do_list(as_json: bool, local_only: bool = False) -> None:
     migrate_flat_state()
     rt = detect_runtime()
-    rows = gather_rows(rt)
+    rows = gather_rows(rt, local_only)
     if as_json:
         print(json.dumps(rows, indent=2))
         return
@@ -2421,7 +2844,8 @@ def wiz_up(rt: str) -> None:
     if not questionary.confirm(f"start {cname}?", default=True).ask():
         return
     # Compose build + up (port pre-check + actionable abort inside).
-    compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, None, [])
+    with deployment_lock(DEFAULT_HOST, name):
+        compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, None, [])
     hint(f"agent-container up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
@@ -2535,7 +2959,8 @@ def wiz_down(rt: str) -> None:
             purge = True
         else:
             log("name mismatch — volumes will be preserved")
-    down_container(DEFAULT_HOST, implicit_local_host(rt), sel, purge)  # reports + clears state
+    with deployment_lock(DEFAULT_HOST, sel):  # serialize vs concurrent lifecycle ops (FR-017)
+        down_container(DEFAULT_HOST, implicit_local_host(rt), sel, purge)  # reports + clears state
     hint(f"agent-container down {sel}" + (" --purge" if purge else ""))
 
 
@@ -2764,8 +3189,60 @@ def down(
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
-    """Stop and remove container agent-container-NAME."""
+    """Stop and remove container agent-container-NAME (dispose; volumes kept unless --purge)."""
     cli_down(name, purge, yes, host)
+
+
+@app.command()
+def stop(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+) -> None:
+    """Stop (pause/reclaim) agent-container-NAME — retained with its volumes; `start` resumes it."""
+    do_stop(name, host)
+
+
+@app.command()
+def start(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+) -> None:
+    """Start a stopped agent-container-NAME (no rebuild, no recreate)."""
+    do_start(name, host)
+
+
+@app.command()
+def redeploy(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+    env_file: Path | None = typer.Option(
+        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    ),
+    mount: list[str] = typer.Option(
+        None, "--mount", help="Bind-mount a host dir (repeatable), as for `up`."
+    ),
+    host_key: Path | None = typer.Option(
+        None, "--host-key", help="Inject an ed25519 PRIVATE host key (as for `up`)."
+    ),
+    authorized_key: list[Path] = typer.Option(
+        None, "--authorized-key", help="Inject an SSH public key (repeatable)."
+    ),
+) -> None:
+    """Rebuild the image and recreate agent-container-NAME, preserving its volumes.
+    Deliberately non-idempotent: always rebuilds + recreates, even with no change."""
+    if env_file is not None and not env_file.is_file():
+        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    do_redeploy(name, host, env_file, mount or [], host_key, authorized_key or [])
+
+
+@app.command()
+def wipe(
+    name: str = typer.Argument(..., help="Container short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+) -> None:
+    """WIPE agent-container-NAME: remove the container, its volumes, AND its built image (confirmed)."""
+    do_wipe(name, yes, host)
 
 
 @app.command()
@@ -2780,9 +3257,15 @@ def purge(
 @app.command(name="list")
 def list_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    local_only: bool = typer.Option(
+        False,
+        "--local",
+        help="Skip remote round-trips: list only the local runtime + per-host state files (fast).",
+    ),
 ) -> None:
-    """List running agent-container containers (plus stale state files)."""
-    do_list(as_json)
+    """List agent-container containers, reconciled live against each registered
+    host (a --local view skips remote queries)."""
+    do_list(as_json, local_only)
 
 
 # The `host` group manages WHERE containers run (registered targets). Container

@@ -215,7 +215,7 @@ Behind the scenes: `ssh dev@<host> -p <port> -t tmux attach -t main`. The `-t` a
 ### The `agent-container` CLI
 
 `agent-container` is the single command for the whole lifecycle — build, start, attach,
-logs, stop, purge — plus an interactive wizard when run with no arguments. It is a
+logs, stop/start, redeploy, down/wipe — plus an interactive wizard when run with no arguments. It is a
 PEP 723 single-file script (`bin/agent-container`) and needs nothing but
 [uv](https://docs.astral.sh/uv/) installed:
 
@@ -227,10 +227,39 @@ agent-container host show hz1 --json   # one host's full record (driver/context/
 agent-container host rm hz1            # remove the registration only (server left untouched)
 agent-container host rm hz1 --destroy  # also deprovision — refused if it still hosts containers
 agent-container up acme        # deploy to the default host; --host NAME picks another
-agent-container list --json    # machine-readable state (merges runtime ps + state files)
+agent-container list           # live state: queries each host's daemon + reconciles state files
+agent-container list --local --json  # fast local-only view (skips remote round-trips), machine-readable
+agent-container stop acme      # pause/reclaim: halt the container, keep it + its volumes
+agent-container start acme     # resume a stopped deployment (no rebuild, no recreate)
+agent-container redeploy acme  # rebuild the image on the host + recreate, preserving volumes
+agent-container down acme      # dispose the container (volumes kept); --purge also drops volumes
+agent-container wipe acme      # remove container + volumes + the locally-built image (confirmed)
 agent-container attach acme    # hosts.conf -> remote, else local state file; execs ssh
 agent-container --self-test    # doctests + port-hash corpus (port hash, key derivation)
 ```
+
+**Lifecycle verbs and persistence levels.** The deployment moves through three
+levels of reclaim: `stop`/`start` (pause — keep everything, just free the
+running process), `down` (dispose the container, keep the volumes; `down --purge`
+also removes the volumes), and `wipe` (remove the container, its volumes, **and**
+the image built for it). `redeploy` rebuilds the image and recreates the
+container while preserving the volumes — it is deliberately **non-idempotent**
+(always rebuilds; the idempotent no-op path stays `up`). Every mutating verb
+takes a per-`(host, name)` lock, so a second lifecycle op on the same deployment
+fails fast rather than interleaving. `list` reads **live** host state (querying
+each registered host's daemon and reconciling it against the on-disk state
+files), so status is truthful after a reboot or an out-of-band change; a dead
+host renders `unreachable` (never hangs, never dropped), and `--local` skips the
+remote round-trips for the fast local view.
+
+**Sidecar / helper services.** A deployment may declare helper services in an
+operator-supplied compose override file, discovered next to the `.env`
+(`./agent-container.<name>.services.yaml`, then
+`~/.config/agent-container/<name>.services.yaml`). When present it is merged as a
+second `-f` into every compose invocation, so the agent and its helpers share one
+project and one lifecycle — `up`/`stop`/`start`/`redeploy`/`down`/`wipe` all act
+on the unit. The override must be a `services:`-only fragment and must not
+redefine the tool-owned `agent` service.
 
 **Hosts and the run mechanism.** A *host* is a named target where containers run — a
 local or remote container-runtime context, registered with `host add` and stored in

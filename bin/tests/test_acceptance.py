@@ -349,6 +349,228 @@ def test_distinct_containers_get_distinct_identities(acc):
     assert _container_hostkey_fp("accdist1") != _container_hostkey_fp("accdist2")
 
 
+def _state_of(name: str) -> str:
+    """'running' / 'exited' / '' (absent) for agent-container-<name> on the local daemon."""
+    cname = f"agent-container-{name}"
+    return subprocess.run(
+        [RUNTIME, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.State}}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _wait_state(name: str, want: str, timeout: int = 25) -> None:
+    """Poll until agent-container-<name> reaches `want` — docker states are
+    eventually-consistent (a just-recreated container flaps through 'restarting'
+    before settling to 'running'), so assert on the settled state, not an instant."""
+    deadline = time.time() + timeout
+    last = _state_of(name)
+    while time.time() < deadline:
+        if last == want:
+            return
+        time.sleep(0.5)
+        last = _state_of(name)
+    raise AssertionError(f"{name}: state {last!r} != {want!r} after {timeout}s")
+
+
+def test_lifecycle_stop_start_dispose_redeploy_wipe(acc):
+    """US2 end-to-end (FR-006/007/008/009/017, SC-003): the three persistence
+    levels + concurrency, against REAL containers."""
+    import fcntl
+
+    state = acc.tmp / "state"
+
+    def cli(*args, timeout=600):
+        return _run_cli([*AGENT_CONTAINER, *args], state, timeout=timeout)
+
+    port = acc.up("acclc")
+    fp1 = _container_hostkey_fp("acclc")  # host key persisted on the ~/.ssh volume
+
+    # pause / reclaim (FR-006): stop retains, start resumes without recreation
+    assert cli("stop", "acclc").returncode == 0
+    _wait_state("acclc", "exited")
+    assert cli("start", "acclc").returncode == 0
+    _wait_sshd(port)
+    _wait_state("acclc", "running")
+
+    # SC-003 / FR-007: dispose then recreate restores prior config from volumes
+    acc.down("acclc")  # dispose — container gone, volumes kept
+    _wait_state("acclc", "")
+    acc.up("acclc")
+    assert _container_hostkey_fp("acclc") == fp1  # same host key => volume restored
+
+    # redeploy (FR-008): rebuild + recreate, volumes preserved. Pass the same
+    # env file the acc harness used for `up` (redeploy re-resolves inputs).
+    assert cli("redeploy", "acclc", "--env-file", str(acc.tmp / "acclc.env")).returncode == 0
+    _wait_sshd(port)
+    _wait_state("acclc", "running")
+    assert _container_hostkey_fp("acclc") == fp1  # volumes intact through the recreate
+
+    # FR-017: a concurrent lifecycle op while the lock is held is refused
+    lock = state / "agent-container" / "local" / "acclc.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("w") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = cli("stop", "acclc", timeout=60)
+        assert r.returncode != 0 and "another lifecycle operation" in r.stderr, r.stderr
+
+    # wipe (FR-009): container + volumes + built image gone (confirmed via -y)
+    assert acc.volumes_of("acclc")  # had its seven volumes
+    assert cli("wipe", "acclc", "-y").returncode == 0
+    _wait_state("acclc", "")  # container gone
+    assert acc.volumes_of("acclc") == []  # volumes wiped
+
+
+def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
+    """US3 / SC-004 at the real CLI: `list` reconciles live — a registered host
+    with a dead context renders 'unreachable' (never 'Up', never dropped) and does
+    NOT hang the listing; `--local` skips the probe entirely."""
+    acc.up("acclist")  # a real running container on the local host
+    config = tmp_path / "config" / "agent-container"
+    config.mkdir(parents=True)
+    driver = "podman" if "podman" in RUNTIME else "docker"
+    reg = {
+        "version": 1,
+        "default": None,
+        "hosts": {
+            "dead": {
+                "driver": driver,
+                "context": "agent-container-nonexistent-xyz",  # no such context -> ps fails fast
+                "address": "203.0.113.201",  # non-local -> reconciled
+                "provisioning": None,
+                "created_by_tool": False,
+            }
+        },
+    }
+    (config / "hosts.json").write_text(json.dumps(reg))
+
+    def run_list(*extra):
+        env = _cli_env(acc.tmp / "state")
+        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env.pop("HCLOUD_TOKEN", None)
+        return subprocess.run(
+            [*AGENT_CONTAINER, "list", "--json", *extra],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+
+    t0 = time.time()
+    r = run_list()
+    assert r.returncode == 0, r.stderr
+    assert time.time() - t0 < 30, "list hung on the unreachable host"
+    rows = json.loads(r.stdout)
+    dead = [x for x in rows if x["host"] == "dead"]
+    assert dead and all(x["status"] == "unreachable" for x in dead)  # never 'Up', never dropped
+    assert any(x["name"] == "agent-container-acclist" for x in rows)  # local still listed
+
+    rows_local = json.loads(run_list("--local").stdout)
+    assert not any(x["status"] == "unreachable" for x in rows_local)  # --local never probes
+
+
+def _project_containers(name: str) -> list[str]:
+    """Every container in the compose project for <name> (agent + any sidecars),
+    matched by the deterministic name prefix so the assertion is independent of
+    the runtime's compose label scheme (docker vs podman)."""
+    prefix = f"agent-container-{name}"
+    out = subprocess.run(
+        [RUNTIME, "ps", "-a", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    return sorted(c for c in out if c == prefix or c.startswith((prefix + "-", prefix + "_")))
+
+
+def _container_state(cname: str) -> str:
+    return subprocess.run(
+        [RUNTIME, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.State}}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _wait_container_state(cname: str, want: str, timeout: int = 25) -> None:
+    deadline = time.time() + timeout
+    last = _container_state(cname)
+    while time.time() < deadline:
+        if last == want:
+            return
+        time.sleep(0.5)
+        last = _container_state(cname)
+    raise AssertionError(f"{cname}: state {last!r} != {want!r} after {timeout}s")
+
+
+# A sidecar override that reuses the already-built local image (no registry pull)
+# and overrides the entrypoint to a plain long-running command (the agent image's
+# real entrypoint requires env — the helper just needs to exist on the network).
+_SIDECAR_YAML = (
+    "services:\n"
+    "  cache:\n"
+    "    image: localhost/agent-container:latest\n"
+    "    pull_policy: never\n"
+    '    entrypoint: ["sleep", "infinity"]\n'
+    '    restart: "no"\n'
+)
+
+
+def test_sidecar_shares_deployment_lifecycle(acc, _image):
+    """US4 (FR-004) against REAL containers: a helper declared in the sidecar
+    override joins the deployment's compose project and shares its lifecycle —
+    up/stop/start/wipe act on the agent + helper as ONE unit (no orphaned helper),
+    and the agent reaches the helper by its compose service name."""
+    name = "accside"
+    work = acc.tmp
+    state = work / "state"
+    env_file = work / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    (work / f"agent-container.{name}.services.yaml").write_text(_SIDECAR_YAML)
+
+    def cli(*args, timeout=600):
+        # cwd=work so the project-local override is discovered (mirrors real use).
+        return subprocess.run(
+            [*AGENT_CONTAINER, *args],
+            env=_cli_env(state),
+            cwd=str(work),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+
+    try:
+        r = cli("up", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        conts = _project_containers(name)
+        assert len(conts) == 2, f"expected agent + helper, got {conts}"
+        assert f"agent-container-{name}" in conts
+        helper = next(c for c in conts if c != f"agent-container-{name}")
+        assert "cache" in helper
+
+        # the agent resolves the helper by compose service name (shared network)
+        g = subprocess.run(
+            [RUNTIME, "exec", f"agent-container-{name}", "getent", "hosts", "cache"],
+            capture_output=True,
+            text=True,
+        )
+        assert g.returncode == 0 and g.stdout.strip(), f"agent can't resolve 'cache': {g.stderr}"
+
+        # stop/start move the whole unit — no orphaned helper
+        assert cli("stop", name).returncode == 0, "stop failed"
+        _wait_container_state(f"agent-container-{name}", "exited")
+        _wait_container_state(helper, "exited")
+        assert cli("start", name).returncode == 0, "start failed"
+        _wait_container_state(f"agent-container-{name}", "running")
+        _wait_container_state(helper, "running")
+
+        # wipe removes the unit entirely — agent AND helper gone
+        assert cli("wipe", name, "-y").returncode == 0, "wipe failed"
+        _wait_container_state(f"agent-container-{name}", "")
+        assert _project_containers(name) == [], "wipe left an orphaned helper"
+    finally:
+        cli("wipe", name, "-y", timeout=120)
+
+
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
     """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
     ANY container is still present on the host, and release only once it is empty.

@@ -83,7 +83,7 @@ A single container deployment may include one or more helper services (for examp
 ### Edge Cases
 
 - **Unreachable / incapable host**: deploying to a host that is unreachable or lacks the required compose-capable runtime fails fast with a clear diagnostic and leaves no partial deployment.
-- **Redeploy with no change**: redeploying unchanged inputs is a no-op; only a changed image or parameters cause a recreate.
+- **Deploy vs redeploy with no change**: a `up` with unchanged inputs is an idempotent no-op (only a changed image/parameters causes a recreate). A `redeploy`, by contrast, is the deliberate "rebuild and recreate now" verb — it always recreates even with no change, optionally warning that no change was detected.
 - **Recreate after dispose**: recreating a disposed container by the same name reuses its persistent volumes, restoring prior configuration (recreation is a non-event).
 - **Stale local picture**: after a host reboot, a crash, or out-of-band `docker`/compose action, status reflects the host's real state, not the tool's last local record.
 - **Port-release race**: tearing a container down releases its published port before returning, so an immediate recreate of the same name on the same host does not fail on a stale port (inherited from Feature 001).
@@ -110,7 +110,7 @@ A single container deployment may include one or more helper services (for examp
 - **FR-007**: The system MUST provide **dispose** — remove a container while **keeping its persistent configuration volumes**, so a later recreation by the same name restores prior configuration (recreation is a non-event).
 - **FR-008**: The system MUST provide **redeploy** — apply a changed runtime image to an existing container, recreating it while **preserving its persistent volumes**.
 - **FR-009**: The system MUST provide **wipe** — remove a container together with its persistent volumes and its locally-built image; wipe MUST require **explicit confirmation** because it destroys durable state.
-- **FR-010**: A redeploy MUST pick up a rebuilt image; a deploy or redeploy with unchanged inputs MUST be an **idempotent no-op** (or reconcile only the changed parts).
+- **FR-010**: A **deploy** (`up`) with unchanged inputs MUST be an **idempotent no-op** (or reconcile only the changed parts). A **redeploy** MUST pick up a rebuilt image and is **deliberately non-idempotent** — it always rebuilds the image and recreates the container (preserving volumes, FR-008) even when inputs are unchanged, because the operator explicitly asked to rebuild. A redeploy MAY warn when it detects no change, but still performs the rebuild.
 
 **Observability & source of truth**
 
