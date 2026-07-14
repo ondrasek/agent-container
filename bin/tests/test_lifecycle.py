@@ -128,6 +128,159 @@ def test_distinct_names_have_noncolliding_identity(wiz):
     assert set(wiz.per_container_volumes("a")).isdisjoint(wiz.per_container_volumes("b"))
 
 
+# --- US3 live reconcile in `list` (FR-011/012, SC-004) ------------------------
+
+REMOTE = {
+    "driver": "docker",
+    "context": "ssh://root@1.2.3.4",
+    "address": "1.2.3.4",
+    "provisioning": None,
+    "created_by_tool": False,
+}
+
+
+def _reconcile(make_registry, monkeypatch, hosts, ps_by_context):
+    """Seed a registry + isolate gather_rows: no local ps, no real tunnel, and
+    host_ps_rows dispatched by the host's context to a caller-supplied fn."""
+    w = make_registry({"default": None, "hosts": hosts})
+    monkeypatch.setattr(w, "ps_agent_container", lambda rt, include_stopped=False: [])
+    monkeypatch.setattr(w, "ensure_tunnel", lambda *a, **k: None)
+
+    def _host_ps(hrec, include_stopped=False):
+        return ps_by_context[hrec.get("context")](include_stopped)
+
+    monkeypatch.setattr(w, "host_ps_rows", _host_ps)
+    return w
+
+
+def _rows_for(rows, host, name):
+    return [r for r in rows if r["host"] == host and r["name"] == name]
+
+
+def test_gather_rows_reconciles_reachable_remote_host(make_registry, monkeypatch):
+    w = _reconcile(
+        make_registry, monkeypatch, {"vps": dict(REMOTE)},
+        {"ssh://root@1.2.3.4": lambda inc: [("agent-container-acme", "img:latest", "Up 3 minutes", "3 minutes ago")]},
+    )  # fmt: skip
+    w.write_state("vps", "acme", 2250)
+    r = _rows_for(w.gather_rows("docker"), "vps", "agent-container-acme")
+    assert len(r) == 1
+    assert r[0]["status"] == "Up 3 minutes"
+    assert str(r[0]["port"]) == "2250" and r[0]["image"] == "img:latest" and r[0]["stale"] is False
+
+
+def test_gather_rows_dedups_live_over_placeholder(make_registry, monkeypatch):
+    w = _reconcile(
+        make_registry, monkeypatch, {"vps": dict(REMOTE)},
+        {"ssh://root@1.2.3.4": lambda inc: [("agent-container-acme", "img", "Up 1m", "1m")]},
+    )  # fmt: skip
+    w.write_state("vps", "acme", 2250)  # has a live row -> deduped
+    w.write_state("vps", "ghost", 2251)  # only a placeholder -> stays 'on remote host'
+    rows = w.gather_rows("docker")
+    acme = _rows_for(rows, "vps", "agent-container-acme")
+    ghost = _rows_for(rows, "vps", "agent-container-ghost")
+    assert len(acme) == 1 and acme[0]["status"] == "Up 1m"
+    assert len(ghost) == 1 and ghost[0]["status"] == "on remote host"
+
+
+@pytest.mark.parametrize("kind", ["fatal", "oserror", "subproc"])
+def test_gather_rows_marks_unreachable_kept_not_running(make_registry, monkeypatch, kind):
+    import subprocess as _sp
+
+    w = make_registry({"hosts": {"down": dict(REMOTE)}})
+    exc = {"fatal": w.Fatal("down"), "oserror": OSError("x"), "subproc": _sp.SubprocessError("b")}[
+        kind
+    ]
+    monkeypatch.setattr(w, "ps_agent_container", lambda rt, include_stopped=False: [])
+    monkeypatch.setattr(w, "ensure_tunnel", lambda *a, **k: None)
+
+    def _raise(h, include_stopped=False):
+        raise exc
+
+    monkeypatch.setattr(w, "host_ps_rows", _raise)
+    w.write_state("down", "ghost", 2260)
+    r = _rows_for(w.gather_rows("docker"), "down", "agent-container-ghost")
+    assert len(r) == 1 and r[0]["status"] == "unreachable" and r[0]["stale"] is False
+
+
+def test_gather_rows_unreachable_host_with_no_state_still_listed(make_registry, monkeypatch):
+    w = _reconcile(
+        make_registry, monkeypatch, {"down": dict(REMOTE)},
+        {"ssh://root@1.2.3.4": lambda inc: (_ for _ in ()).throw(RuntimeError)},  # placeholder, overridden below
+    )  # fmt: skip
+
+    def _raise(h, include_stopped=False):
+        raise w.Fatal("down")
+
+    monkeypatch.setattr(w, "host_ps_rows", _raise)
+    r = [x for x in w.gather_rows("docker") if x["host"] == "down"]
+    assert r and r[0]["status"] == "unreachable"  # synthetic marker; never vanishes
+
+
+def test_gather_rows_local_only_makes_no_remote_call(make_registry, monkeypatch):
+    w = make_registry({"hosts": {"vps": dict(REMOTE)}})
+    monkeypatch.setattr(w, "ps_agent_container", lambda rt, include_stopped=False: [])
+    monkeypatch.setattr(
+        w, "host_ps_rows", lambda *a, **k: pytest.fail("--local must not query remote")
+    )
+    monkeypatch.setattr(w, "ensure_tunnel", lambda *a, **k: pytest.fail("--local must not tunnel"))
+    w.write_state("vps", "acme", 2250)
+    r = _rows_for(w.gather_rows("docker", local_only=True), "vps", "agent-container-acme")
+    assert len(r) == 1 and r[0]["status"] == "on remote host"  # static 0.5.0 view
+
+
+def test_gather_rows_skips_attach_only_driver(make_registry, monkeypatch):
+    legacy = {
+        "driver": "existing-ssh",
+        "context": "",
+        "address": "198.51.100.9",
+        "created_by_tool": False,
+    }
+    w = make_registry({"hosts": {"legacy": legacy}})
+    monkeypatch.setattr(w, "ps_agent_container", lambda rt, include_stopped=False: [])
+    calls: list = []
+    monkeypatch.setattr(w, "host_ps_rows", lambda h, include_stopped=False: calls.append(h) or [])
+    w.write_state("legacy", "x", 2270)
+    r = _rows_for(w.gather_rows("docker"), "legacy", "agent-container-x")
+    assert calls == []  # attach-only never queried
+    assert r and r[0]["status"] == "on remote host"  # not mislabeled 'unreachable'
+
+
+def test_gather_rows_reconcile_uses_include_stopped(make_registry, monkeypatch):
+    seen: dict = {}
+
+    def _ps(h, include_stopped=False):
+        seen["inc"] = include_stopped
+        return [("agent-container-acme", "img", "Exited (0) 1 minute ago", "1 minute ago")]
+
+    w = make_registry({"hosts": {"vps": dict(REMOTE)}})
+    monkeypatch.setattr(w, "ps_agent_container", lambda rt, include_stopped=False: [])
+    monkeypatch.setattr(w, "ensure_tunnel", lambda *a, **k: None)
+    monkeypatch.setattr(w, "host_ps_rows", _ps)
+    r = _rows_for(w.gather_rows("docker"), "vps", "agent-container-acme")
+    assert seen["inc"] is True  # out-of-band stop must be visible (SC-004)
+    assert r and "Exited" in r[0]["status"]
+
+
+def test_host_ps_rows_fail_closed_on_nonzero_and_parses_on_zero(wiz, monkeypatch):
+    import subprocess as _sp
+
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda *a, **k: None)
+    monkeypatch.setattr(
+        wiz, "query", lambda a, timeout=None: _sp.CompletedProcess(a, 1, "", "cannot connect")
+    )
+    with pytest.raises(wiz.Fatal, match="could not list containers"):
+        wiz.host_ps_rows({"driver": "docker", "context": "ssh://root@x"})
+    monkeypatch.setattr(
+        wiz,
+        "query",
+        lambda a, timeout=None: _sp.CompletedProcess(a, 0, "agent-container-z\timg\tUp\t1m\n", ""),
+    )
+    assert wiz.host_ps_rows({"driver": "docker", "context": "c"}) == [
+        ("agent-container-z", "img", "Up", "1m")
+    ]
+
+
 def test_do_redeploy_warns_when_container_absent(wiz, monkeypatch):
     _fix_host(wiz, monkeypatch)
     monkeypatch.setattr(wiz, "host_container_names", lambda *a, **k: set())

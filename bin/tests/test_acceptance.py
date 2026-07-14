@@ -421,6 +421,54 @@ def test_lifecycle_stop_start_dispose_redeploy_wipe(acc):
     assert acc.volumes_of("acclc") == []  # volumes wiped
 
 
+def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
+    """US3 / SC-004 at the real CLI: `list` reconciles live — a registered host
+    with a dead context renders 'unreachable' (never 'Up', never dropped) and does
+    NOT hang the listing; `--local` skips the probe entirely."""
+    acc.up("acclist")  # a real running container on the local host
+    config = tmp_path / "config" / "agent-container"
+    config.mkdir(parents=True)
+    driver = "podman" if "podman" in RUNTIME else "docker"
+    reg = {
+        "version": 1,
+        "default": None,
+        "hosts": {
+            "dead": {
+                "driver": driver,
+                "context": "agent-container-nonexistent-xyz",  # no such context -> ps fails fast
+                "address": "203.0.113.201",  # non-local -> reconciled
+                "provisioning": None,
+                "created_by_tool": False,
+            }
+        },
+    }
+    (config / "hosts.json").write_text(json.dumps(reg))
+
+    def run_list(*extra):
+        env = _cli_env(acc.tmp / "state")
+        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env.pop("HCLOUD_TOKEN", None)
+        return subprocess.run(
+            [*AGENT_CONTAINER, "list", "--json", *extra],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+
+    t0 = time.time()
+    r = run_list()
+    assert r.returncode == 0, r.stderr
+    assert time.time() - t0 < 30, "list hung on the unreachable host"
+    rows = json.loads(r.stdout)
+    dead = [x for x in rows if x["host"] == "dead"]
+    assert dead and all(x["status"] == "unreachable" for x in dead)  # never 'Up', never dropped
+    assert any(x["name"] == "agent-container-acclist" for x in rows)  # local still listed
+
+    rows_local = json.loads(run_list("--local").stdout)
+    assert not any(x["status"] == "unreachable" for x in rows_local)  # --local never probes
+
+
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
     """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
     ANY container is still present on the host, and release only once it is empty.

@@ -587,8 +587,8 @@ def detect_runtime() -> str:
     die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_CONTAINER_RUNTIME)")
 
 
-def query(argv: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True)
+def query(argv: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
 def container_running(rt: str, cname: str) -> bool:
@@ -1896,12 +1896,19 @@ def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
 
 
 def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, str, str, str]]:
-    """(cname, image, status, uptime) rows for agent-container-* on a host's daemon."""
-    ensure_tunnel(host)
+    """(cname, image, status, uptime) rows for agent-container-* on a host's daemon.
+    Fail-CLOSED (001-US3 lesson): an unreachable/timed-out/errored `ps` RAISES
+    (Fatal via ensure_tunnel(required)/returncode, or subprocess.TimeoutExpired)
+    rather than returning [] — a down daemon must never read as 'no containers'.
+    A reachable host returns 0, so lifecycle existence-checks are unaffected."""
+    ensure_tunnel(host, required=True)
     argv = driver_runtime_argv(host) + ["ps"] + (["-a"] if include_stopped else [])
     argv += ["--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"]
+    r = query(argv, timeout=20)  # bounded so a wedged forward can't hang the caller
+    if r.returncode != 0:
+        die(f"could not list containers on the host: {r.stderr.strip() or f'exit {r.returncode}'}")
     rows = []
-    for line in query(argv).stdout.splitlines():
+    for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) == 4 and parts[0].startswith(CONTAINER_PREFIX):
             rows.append((parts[0], parts[1], parts[2], parts[3]))
@@ -2295,15 +2302,19 @@ def do_wipe(name: str, yes: bool, host: str | None = None) -> None:
     log(f"wiped {container_name(name)} on {host_name}")
 
 
-def gather_rows(rt: str) -> list[dict[str, object]]:
-    """Rows for `list`. Live status comes from the LOCAL runtime; containers on
-    other hosts are surfaced from their per-host state files (querying every
-    remote daemon on each `list` is deferred to the lifecycle feature)."""
+def gather_rows(rt: str, local_only: bool = False) -> list[dict[str, object]]:
+    """Rows for `list`, reconciled against LIVE host state (Feature 002 US3,
+    FR-011/012). Local status comes from the local runtime; each REGISTERED remote
+    host is queried live via host_ps_rows so status is truthful after an
+    out-of-band change (SC-004). A host whose enumeration fails is rendered
+    'unreachable' (kept, never shown running, never hangs — bounded + caught), not
+    dropped. `local_only` skips all remote round-trips for a fast local-only view."""
     rows: list[dict[str, object]] = []
-    local_running: set[str] = set()
+    seen: set[tuple[str, str]] = set()  # (host, short) — a live row supersedes its placeholder
+    unreachable: set[str] = set()
     for cname, image, status, uptime in ps_agent_container(rt):
         short = cname[len(CONTAINER_PREFIX) :]
-        local_running.add(short)
+        seen.add((DEFAULT_HOST, short))
         rows.append(
             {
                 "name": cname,
@@ -2313,35 +2324,86 @@ def gather_rows(rt: str) -> list[dict[str, object]]:
                 "status": status,
                 "uptime": uptime,
                 "stale": False,
-            }
+            }  # fmt: skip
         )
-    # Per-host state files (local orphans + containers on other hosts).
+    # Live-reconcile every registered REMOTE host (the local host is already covered
+    # by ps above). One dead host must never abort or stall the whole listing.
+    if not local_only:
+        for hname, hrec in sorted(registry_hosts(load_registry()).items()):
+            if hname == DEFAULT_HOST or host_is_local(hrec):
+                continue
+            if hrec.get("driver") not in ("docker", "podman"):
+                continue  # attach-only/existing-ssh: reachable via ssh, not queryable
+            try:
+                live = host_ps_rows(
+                    hrec, include_stopped=True
+                )  # incl. stopped -> real Exited (SC-004)
+            except Fatal, OSError, subprocess.SubprocessError:
+                unreachable.add(hname)
+                continue
+            for cname, image, status, uptime in live:
+                short = cname[len(CONTAINER_PREFIX) :]
+                seen.add((hname, short))
+                rows.append(
+                    {
+                        "name": container_name(short),
+                        "host": hname,
+                        "port": read_state_port(hname, short) or "?",
+                        "image": image,
+                        "status": status,
+                        "uptime": uptime,
+                        "stale": False,
+                    }  # fmt: skip
+                )
+    # Per-host state files (local orphans + placeholders for hosts not live-reconciled).
+    listed_hosts: set[str] = set()
     if STATE_DIR.is_dir():
         for host_dir in sorted(p for p in STATE_DIR.iterdir() if p.is_dir()):
             hname = host_dir.name
             for f in sorted(host_dir.glob("*.port")):
                 short = f.stem
-                if hname == DEFAULT_HOST and short in local_running:
+                if (hname, short) in seen:  # a live row already supersedes this placeholder
                     continue
                 is_local = hname == DEFAULT_HOST
+                listed_hosts.add(hname)
                 rows.append(
                     {
                         "name": container_name(short),
                         "host": hname,
                         "port": read_state_port(hname, short) or "?",
                         "image": "-",
-                        "status": "stale" if is_local else "on remote host",
+                        "status": (
+                            "stale"
+                            if is_local
+                            else "unreachable"
+                            if hname in unreachable
+                            else "on remote host"
+                        ),
                         "uptime": "-",
                         "stale": is_local,
-                    }
+                    }  # fmt: skip
                 )
+    # Never let an unreachable host silently vanish: a host that errored but had no
+    # state files still gets one marker row.
+    for hname in sorted(unreachable - listed_hosts):
+        rows.append(
+            {
+                "name": "-",
+                "host": hname,
+                "port": "-",
+                "image": "-",
+                "status": "unreachable",
+                "uptime": "-",
+                "stale": False,
+            }  # fmt: skip
+        )
     return rows
 
 
-def do_list(as_json: bool) -> None:
+def do_list(as_json: bool, local_only: bool = False) -> None:
     migrate_flat_state()
     rt = detect_runtime()
-    rows = gather_rows(rt)
+    rows = gather_rows(rt, local_only)
     if as_json:
         print(json.dumps(rows, indent=2))
         return
@@ -2988,9 +3050,15 @@ def purge(
 @app.command(name="list")
 def list_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    local_only: bool = typer.Option(
+        False,
+        "--local",
+        help="Skip remote round-trips: list only the local runtime + per-host state files (fast).",
+    ),
 ) -> None:
-    """List running agent-container containers (plus stale state files)."""
-    do_list(as_json)
+    """List agent-container containers, reconciled live against each registered
+    host (a --local view skips remote queries)."""
+    do_list(as_json, local_only)
 
 
 # The `host` group manages WHERE containers run (registered targets). Container
