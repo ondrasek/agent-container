@@ -88,14 +88,20 @@ PYT=(uv run --no-project "${DEPS[@]}" --with pytest
 # once. The cache lives in a VOLATILE temp dir, so its packages can vanish
 # (TMPDIR reaping, a partial clean) while the .deps marker still matches — that
 # yields phantom `unresolved-import` errors on unchanged code. So validate the
-# cache is actually USABLE (pin set matches AND the deps still import) and
-# rebuild if not — self-healing rather than failing the gate.
+# cache is actually USABLE and rebuild if not — self-healing rather than failing
+# the gate. The probe runs `ty` ITSELF (not just a python import): a venv whose
+# python can import the deps but whose `ty --python <venv>` resolution cannot is
+# a real observed corruption mode, so python-import alone is an insufficient check.
 TY_DEPS="typer>=0.12,<1 questionary>=2.0,<3 rich>=13,<15 ty"
 TYVENV="${TMPDIR:-/tmp}/agent-container-tyvenv"
 ty_env_usable() {
-    [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" = "$TY_DEPS" ] \
-        && [ -x "$TYVENV/bin/ty" ] \
-        && "$TYVENV/bin/python" -c "import typer, questionary, rich" 2>/dev/null
+    [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" = "$TY_DEPS" ] || return 1
+    [ -x "$TYVENV/bin/ty" ] || return 1
+    # Probe ty's OWN module resolution against this venv (not python's): if ty
+    # can't resolve the deps here, the cache is corrupt regardless of python.
+    local probe="${TYVENV}.probe.py"
+    printf 'import typer, questionary, rich\n' >"$probe" 2>/dev/null || return 1
+    "$TYVENV/bin/ty" check --python "$TYVENV" "$probe" >/dev/null 2>&1
 }
 build_ty_env() {
     rm -rf "$TYVENV"
