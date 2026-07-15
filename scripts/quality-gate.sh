@@ -71,14 +71,21 @@ run_check() {
 }
 
 # Like run_check, but for tools whose "clean" is EMPTY output (they may exit 0
-# even when reporting findings — e.g. vulture, refurb). Fails when there is any
-# output at all.
+# even when reporting findings — e.g. vulture, refurb). Their findings go to
+# STDOUT; uv's "Installed N packages" progress (emitted on a fresh runner, e.g.
+# CI) and any tool crash go to STDERR. So test STDOUT ONLY for findings — else a
+# first-run uv install line reads as a phantom finding — while still failing on a
+# nonzero exit (a real tool error), re-running to surface stderr for the message.
 run_check_nonempty() {
     local name="$1"; shift
-    local cmd="$*" out
+    local cmd="$*" out rc
     debuglog "running $name..."
-    out=$("$@" 2>&1)
-    [ -n "$out" ] && fail "$name" "$cmd" "$out"
+    out=$("$@" 2>/dev/null); rc=$?
+    if [ -n "$out" ]; then
+        fail "$name" "$cmd" "$out"
+    elif [ "$rc" -ne 0 ]; then
+        fail "$name" "$cmd" "$("$@" 2>&1)"  # empty stdout but errored — capture stderr
+    fi
 }
 
 # App runtime deps (mirrors the PEP 723 block); pytest runs inside this uv env.
