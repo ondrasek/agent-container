@@ -42,6 +42,9 @@ TOOL_HINTS=(
     [shell-entrypoint]="bin/tests/test_entrypoint.sh failed — entrypoint tmux-layout / git-credential / host-key logic. Read entrypoint.sh and the failing assertion label."
     [shell-completions]="bin/tests/test_completions.sh failed — bash/zsh completion parity or an injection guard. Read completions/agent-container.{bash,zsh}."
     [shell-tmux-layout]="bin/tests/test_entrypoint_tmux_layout.sh failed — real-tmux window layout. Read the tmux section of entrypoint.sh."
+    [vulture]="Dead code in bin/agent-container flagged by vulture (>=80% confidence). Read the reported line; if truly unused, delete it. If it is used dynamically (a Typer command, a doctest-only helper, a dynamic attribute) it is a false positive — raise the confidence or add a vulture whitelist entry with a rationale."
+    [xenon]="A function in bin/agent-container exceeds cyclomatic-complexity rank B (CC>10). Read the reported function and extract helpers to cut branching (each if/elif/for/while/and/or/except/ternary/comprehension-if is +1). Target rank B or better."
+    [refurb]="A modernization refurb suggests for bin/agent-container. Run 'uv run --no-project --with refurb refurb --explain FURBxxx' to see it, then apply the one-line change. If it is a false positive, add the code to [tool.refurb] ignore in pyproject.toml with a rationale (see FURB143)."
 )
 
 fail() {
@@ -67,10 +70,34 @@ run_check() {
     out=$("$@" 2>&1) || fail "$name" "$cmd" "$out"
 }
 
+# Like run_check, but for tools whose "clean" is EMPTY output (they may exit 0
+# even when reporting findings — e.g. vulture, refurb). Their findings go to
+# STDOUT; uv's "Installed N packages" progress (emitted on a fresh runner, e.g.
+# CI) and any tool crash go to STDERR. So test STDOUT ONLY for findings — else a
+# first-run uv install line reads as a phantom finding — while still failing on a
+# nonzero exit (a real tool error), re-running to surface stderr for the message.
+run_check_nonempty() {
+    local name="$1"; shift
+    local cmd="$*" out rc
+    debuglog "running $name..."
+    out=$("$@" 2>/dev/null); rc=$?
+    if [ -n "$out" ]; then
+        fail "$name" "$cmd" "$out"
+    elif [ "$rc" -ne 0 ]; then
+        fail "$name" "$cmd" "$("$@" 2>&1)"  # empty stdout but errored — capture stderr
+    fi
+}
+
 # App runtime deps (mirrors the PEP 723 block); pytest runs inside this uv env.
 DEPS=(--with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15')
 RUFF=(uv run --no-project --with ruff ruff)
 BANDIT=(uv run --no-project --with bandit bandit)
+# Universal static checks adopted from the canonical quality hook, adapted to the
+# single-file --no-project layout: vulture (dead code), xenon (cyclomatic
+# complexity), refurb (modernizations; reads [tool.refurb] ignores from pyproject).
+VULTURE=(uv run --no-project --with vulture vulture)
+XENON=(uv run --no-project --with xenon xenon)
+REFURB=(uv run --no-project --with refurb refurb)
 # pytest-github-actions-annotate-failures turns failures into inline GitHub
 # annotations (file:line) under Actions; it auto-detects GITHUB_ACTIONS and is a
 # no-op locally, so it rides in the one shared pytest env without changing local
@@ -85,24 +112,9 @@ PYT=(uv run --no-project "${DEPS[@]}" --with pytest
 # EXPLICITLY with `--python` below; without that flag ty ignores this venv and
 # reports unresolved-import on a clean checkout. Cache it in a temp dir: first
 # build ~3s, cached runs instant; CI's temp dir is fresh each run so it builds
-# once. The cache lives in a VOLATILE temp dir, so its packages can vanish
-# (TMPDIR reaping, a partial clean) while the .deps marker still matches — that
-# yields phantom `unresolved-import` errors on unchanged code. So validate the
-# cache is actually USABLE and rebuild if not — self-healing rather than failing
-# the gate. The probe runs `ty` ITSELF (not just a python import): a venv whose
-# python can import the deps but whose `ty --python <venv>` resolution cannot is
-# a real observed corruption mode, so python-import alone is an insufficient check.
+# once.
 TY_DEPS="typer>=0.12,<1 questionary>=2.0,<3 rich>=13,<15 ty"
 TYVENV="${TMPDIR:-/tmp}/agent-container-tyvenv"
-ty_env_usable() {
-    [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" = "$TY_DEPS" ] || return 1
-    [ -x "$TYVENV/bin/ty" ] || return 1
-    # Probe ty's OWN module resolution against this venv (not python's): if ty
-    # can't resolve the deps here, the cache is corrupt regardless of python.
-    local probe="${TYVENV}.probe.py"
-    printf 'import typer, questionary, rich\n' >"$probe" 2>/dev/null || return 1
-    "$TYVENV/bin/ty" check --python "$TYVENV" "$probe" >/dev/null 2>&1
-}
 build_ty_env() {
     rm -rf "$TYVENV"
     # shellcheck disable=SC2086 # deliberate word-splitting of the pin list
@@ -110,10 +122,18 @@ build_ty_env() {
         && uv pip install --python "$TYVENV" -q $TY_DEPS \
         && echo "$TY_DEPS" >"$TYVENV/.deps"
 }
-if ! ty_env_usable; then
-    debuglog "ty env missing/stale — (re)building $TYVENV"
+# STRUCTURAL (re)build only: when the venv is absent or its pinned deps changed.
+# CORRUPTION of an existing venv is NOT detected here — the cache lives in a
+# VOLATILE temp dir, so its packages can vanish (TMPDIR reaping, a partial clean)
+# while the .deps marker still matches, yielding phantom `unresolved-import` on
+# unchanged code. That is caught at CHECK time by the phantom-import signature
+# (see the ty check below), which self-heals with one rebuild+retry. A prior
+# probe type-checked a one-line file OUTSIDE the repo — a different first-party
+# root than bin/agent-container — so it could pass while the real in-repo check
+# failed; the check below IS the real target, so the probe can no longer diverge.
+if [ "$(cat "$TYVENV/.deps" 2>/dev/null || true)" != "$TY_DEPS" ] || [ ! -x "$TYVENV/bin/ty" ]; then
+    debuglog "ty env missing/stale — building $TYVENV"
     build_ty_env || { echo "quality-gate: failed to build the ty environment" >&2; exit 1; }
-    ty_env_usable || { echo "quality-gate: ty environment unusable after rebuild" >&2; exit 1; }
 fi
 
 # Ordered fastest / most-likely-to-fail first: static checks (lint, types,
@@ -121,8 +141,27 @@ fi
 # bandit `-ll` = MEDIUM+ only; the CLI's legitimate subprocess calls are all LOW.
 run_check "ruff-check"        "${RUFF[@]}" check
 run_check "ruff-format"       "${RUFF[@]}" format --check
-run_check "ty"                "$TYVENV/bin/ty" check --python "$TYVENV" bin/agent-container
+
+# ty (inline, with phantom-import self-heal). A corrupted volatile-TMPDIR venv
+# yields PHANTOM `unresolved-import` on the third-party deps (typer/questionary/
+# rich) rather than a real type error; detect exactly that signature against the
+# REAL target's output and rebuild+retry once. Any other failure is genuine.
+debuglog "running ty..."
+_ty_cmd="$TYVENV/bin/ty check --python $TYVENV bin/agent-container"
+ty_out=$("$TYVENV/bin/ty" check --python "$TYVENV" bin/agent-container 2>&1) && ty_rc=0 || ty_rc=$?
+if [ "$ty_rc" -ne 0 ] \
+    && grep -q 'unresolved-import' <<<"$ty_out" \
+    && grep -qE '\b(typer|questionary|rich)\b' <<<"$ty_out"; then
+    debuglog "ty phantom unresolved-import — rebuilding $TYVENV and retrying"
+    build_ty_env || { echo "quality-gate: failed to rebuild the ty environment" >&2; exit 1; }
+    ty_out=$("$TYVENV/bin/ty" check --python "$TYVENV" bin/agent-container 2>&1) && ty_rc=0 || ty_rc=$?
+fi
+[ "$ty_rc" -eq 0 ] || fail "ty" "$_ty_cmd" "$ty_out"
+
 run_check "bandit"            "${BANDIT[@]}" -q -ll bin/agent-container
+run_check_nonempty "vulture"  "${VULTURE[@]}" bin/agent-container --min-confidence 80
+run_check "xenon"             "${XENON[@]}" --max-absolute B --max-modules A --max-average A bin/agent-container
+run_check_nonempty "refurb"   "${REFURB[@]}" bin/agent-container --quiet
 run_check "self-test"         ./bin/agent-container --self-test
 run_check "pytest"            "${PYT[@]}" bin/tests -x -q
 run_check "shell-entrypoint"      bash bin/tests/test_entrypoint.sh

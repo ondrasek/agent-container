@@ -99,6 +99,13 @@ ignore = ["E501"]
 # the B008 mutable-default footgun.
 extend-immutable-calls = ["typer.Option", "typer.Argument"]
 
+[tool.refurb]
+# FURB143 (`x or []` is redundant) is a FALSE POSITIVE for our Typer list
+# options: they are declared `list[str] = typer.Option(None, ...)`, so at runtime
+# an omitted flag is None, not []. `x or []` is a real None-guard, not dead code
+# — refurb infers list-ness from the annotation and misses the None default.
+ignore = ["FURB143"]
+
 # python-semantic-release — Continuous Deployment (every substantive merge to
 # main cuts a release). Strict semver from Conventional Commits: feat -> minor,
 # fix -> patch, breaking -> minor while pre-1.0 (major_on_zero = false); docs/
