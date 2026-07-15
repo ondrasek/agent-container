@@ -122,9 +122,10 @@ reset_session() { rm -f "${STATE}/exists"; }
 # reset_ssh: clean SSH state so a run starts from "no persisted key, no
 # injection". SSH-specific tests call this, then set the TEST_ENV_* globals
 # and/or drop files in INJECTDIR before run_entrypoint.
-reset_ssh() { rm -rf "${HOMEDIR}/.ssh"; rm -f "${INJECTDIR}"/*; TEST_ENV_AUTHKEYS=""; TEST_ENV_HKB64=""; }
+reset_ssh() { rm -rf "${HOMEDIR}/.ssh"; rm -f "${INJECTDIR}"/*; TEST_ENV_AUTHKEYS=""; TEST_ENV_HKB64=""; TEST_PUSH_RUNTIME=""; }
 TEST_ENV_AUTHKEYS=""
 TEST_ENV_HKB64=""
+TEST_PUSH_RUNTIME=""
 
 # Shared runtime env for the entrypoint under test (stubs + testability hooks).
 _export_env() {
@@ -138,6 +139,7 @@ _export_env() {
     unset AGENT_CONTAINER_TMUX_WINDOWS
     [[ -n "${TEST_ENV_AUTHKEYS}" ]] && export SSH_AUTHORIZED_KEYS="${TEST_ENV_AUTHKEYS}" || unset SSH_AUTHORIZED_KEYS
     [[ -n "${TEST_ENV_HKB64}" ]] && export SSH_HOST_ED25519_KEY_B64="${TEST_ENV_HKB64}" || unset SSH_HOST_ED25519_KEY_B64
+    [[ -n "${TEST_PUSH_RUNTIME}" ]] && export AGENT_CONTAINER_PUSH_RUNTIME="${TEST_PUSH_RUNTIME}" || unset AGENT_CONTAINER_PUSH_RUNTIME
 }
 
 # run_entrypoint <mode>; mode is __unset__ | __empty__ | any literal value.
@@ -293,6 +295,35 @@ TEST_ENV_AUTHKEYS="$(printf '%s\n%s\n%s' "${PUB1}" "${PUB1}" "${PUB2}")"  # dup 
 run_entrypoint __unset__
 check_eq "ssh: authorized_keys deduped union has 2 keys" "2" "$(grep -c . "${AK}")"
 if grep -qxF "${PUB1}" "${AK}" && grep -qxF "${PUB2}" "${AK}"; then ok; else bad "ssh: both unique keys present"; fi
+
+# --- 8. Outbound SSH push key (Feature 003 US1) ------------------------------
+# The push key is injected via INJECT_DIR, delivered EPHEMERALLY: copied 0600 to
+# an ephemeral runtime dir (never the ~/.ssh volume, FR-012), git's core.sshCommand
+# points at it with IdentitiesOnly, and the inbound host-key path is untouched
+# (SC-008).
+reset_session; reset_ssh
+PUSHRT="${SB}/pushrt"; rm -rf "${PUSHRT}"; TEST_PUSH_RUNTIME="${PUSHRT}"
+PKSRC="${SB}/agent_push_key"; ssh-keygen -q -t ed25519 -f "${PKSRC}" -N '' <<<y >/dev/null 2>&1
+cp "${PKSRC}" "${INJECTDIR}/push_ed25519_key"
+printf 'github.com ssh-ed25519 AAAAKH\n' > "${INJECTDIR}/known_hosts"
+run_entrypoint __unset__
+# core.sshCommand configured with the ephemeral key + IdentitiesOnly (no prompt)
+if git_has 'core.sshCommand'; then ok; else bad "push: core.sshCommand configured"; fi
+if git_has "IdentitiesOnly=yes"; then ok; else bad "push: IdentitiesOnly set"; fi
+if git_has "${PUSHRT}/push_key"; then ok; else bad "push: sshCommand points at the ephemeral key"; fi
+# the ephemeral key exists 0600 in the runtime dir, byte-identical to the source
+check_eq "push: ephemeral key mode 0600" "600" "$(stat -c '%a' "${PUSHRT}/push_key" 2>/dev/null || stat -f '%Lp' "${PUSHRT}/push_key")"
+if cmp -s "${PKSRC}" "${PUSHRT}/push_key"; then ok; else bad "push: ephemeral key matches source"; fi
+# FR-012: the push key is NOT written onto the persisted ~/.ssh volume
+if [[ ! -e "${HOMEDIR}/.ssh/push_ed25519_key" && ! -e "${HOMEDIR}/.ssh/push_key" ]]; then ok; else bad "push: key must NOT land on the ~/.ssh volume"; fi
+# SC-008: the inbound host key still lives on its own path, untouched/unconflated
+if [[ -f "${HK}" ]]; then ok; else bad "push: inbound host key path untouched"; fi
+if ! cmp -s "${PUSHRT}/push_key" "${HK}"; then ok; else bad "push: push key and host key are distinct"; fi
+
+# 8b. no push key injected -> no core.sshCommand (HTTPS path is unaffected)
+reset_session; reset_ssh; PUSHRT2="${SB}/pushrt2"; rm -rf "${PUSHRT2}"; TEST_PUSH_RUNTIME="${PUSHRT2}"
+run_entrypoint __unset__
+if git_has 'core.sshCommand'; then bad "push: no key -> core.sshCommand must NOT be set"; else ok; fi
 
 note ""
 note "entrypoint tmux tests: ${pass} passed, ${fail} failed"

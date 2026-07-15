@@ -211,7 +211,9 @@ def acc(_image):
     state_dir.mkdir()
     started: list[str] = []
 
-    def up(name, *, authorized_key=None, host_key=None, env_extra=None) -> int:
+    def up(
+        name, *, authorized_key=None, host_key=None, env_extra=None, push_key=None, known_hosts=None
+    ) -> int:  # noqa: E501
         env_file = work / f"{name}.env"
         lines = ["GH_TOKEN=x", "GIT_USER_NAME=Test", "GIT_USER_EMAIL=t@example.com"]
         lines += list(env_extra or [])
@@ -221,6 +223,10 @@ def acc(_image):
             argv += ["--host-key", str(host_key)]
         for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
+        if push_key is not None:
+            argv += ["--push-key", str(push_key)]
+        if known_hosts is not None:
+            argv += ["--known-hosts", str(known_hosts)]
         r = _run_cli(argv, state_dir)
         assert r.returncode == 0, f"up {name} failed:\n{r.stderr}"
         started.append(name)
@@ -569,6 +575,39 @@ def test_sidecar_shares_deployment_lifecycle(acc, _image):
         assert _project_containers(name) == [], "wipe left an orphaned helper"
     finally:
         cli("wipe", name, "-y", timeout=120)
+
+
+def test_push_credential_ephemeral_and_distinct(acc):
+    """US1 (FR-012 / SC-004 / SC-008) against a REAL container: the injected
+    outbound push key is wired for non-interactive push (IdentitiesOnly), lives
+    ONLY in an ephemeral runtime dir (never on the persisted ~/.ssh volume), and
+    is a DISTINCT credential from the inbound host key. (A full zero-prompt push
+    to a real remote is the opt-in tokened extension, not run here.)"""
+    push = _gen_keypair(acc.tmp / "agent_push")  # ed25519 private key
+    kh = acc.tmp / "known_hosts"
+    kh.write_text("github.com ssh-ed25519 AAAAKH\n")
+    acc.up("accpush", push_key=push, known_hosts=kh)
+
+    def _exec(*cmd):
+        return subprocess.run(
+            [RUNTIME, "exec", "agent-container-accpush", *cmd], capture_output=True, text=True
+        )
+
+    # core.sshCommand wires the push key with IdentitiesOnly (no key-guessing prompt)
+    ssh_cmd = _exec("git", "config", "--global", "--get", "core.sshCommand").stdout.strip()
+    assert "IdentitiesOnly=yes" in ssh_cmd, ssh_cmd
+    parts = ssh_cmd.split()
+    keypath = parts[parts.index("-i") + 1]
+    # the ephemeral key is 0600 and NOT under the persisted ~/.ssh volume (FR-012/SC-004)
+    assert "/.ssh/" not in keypath, keypath
+    assert _exec("stat", "-c", "%a", keypath).stdout.strip() == "600"
+    assert _exec("test", "!", "-e", "/home/dev/.ssh/push_ed25519_key").returncode == 0
+    # SC-008: distinct from the inbound host key
+    push_fp = _exec("ssh-keygen", "-lf", keypath).stdout.split()[1]
+    host_fp = _exec(
+        "ssh-keygen", "-lf", "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key"
+    ).stdout.split()[1]
+    assert push_fp != host_fp
 
 
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):

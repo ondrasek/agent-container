@@ -175,6 +175,46 @@ git config --global credential.https://github.com.helper \
 
 log "Configured git identity for ${GIT_USER_NAME}"
 
+# --- 3b. Outbound SSH push key (Feature 003, US1) ---------------------------
+# The agent PUSHES with a key DISTINCT from the inbound sshd host key. It is
+# injected EPHEMERALLY (INJECT_DIR is a /run compose config) and MUST NOT be
+# copied onto the persisted ~/.ssh volume (FR-012) — the operator's local copy is
+# the sole durable copy. ssh refuses a group/world-readable private key and the
+# injected file is 0644, so copy it to a 0600 file in an EPHEMERAL, container-
+# private dir (under /tmp — vanishes with the container, never a named volume) and
+# point git's ssh command at it. Layered alongside the HTTPS+GH_TOKEN helper
+# above: the operator selects per remote (git@github.com vs https://github.com).
+PUSH_RUNTIME="${AGENT_CONTAINER_PUSH_RUNTIME:-/tmp/agent-container-push.$(id -u)}"
+_push_src=""
+if [[ -f "${INJECT_DIR}/push_ed25519_key" ]]; then
+    _push_src="${INJECT_DIR}/push_ed25519_key"
+elif [[ -n "${SSH_PUSH_KEY_B64:-}" ]]; then
+    mkdir -p "${PUSH_RUNTIME}" && chmod 700 "${PUSH_RUNTIME}"
+    if printf '%s' "${SSH_PUSH_KEY_B64}" | base64 -d > "${PUSH_RUNTIME}/.b64" 2>/dev/null; then
+        _push_src="${PUSH_RUNTIME}/.b64"
+    fi
+fi
+if [[ -n "${_push_src}" ]]; then
+    mkdir -p "${PUSH_RUNTIME}" && chmod 700 "${PUSH_RUNTIME}"
+    install -m 0600 "${_push_src}" "${PUSH_RUNTIME}/push_key"
+    rm -f "${PUSH_RUNTIME}/.b64"
+    # A WRITABLE known_hosts (empty or pre-seeded from the injected file / env) so
+    # accept-new never prompts: a pre-seeded entry means the remote is already
+    # trusted; otherwise it is trusted-on-first-use and appended here.
+    : > "${PUSH_RUNTIME}/known_hosts"
+    if [[ -f "${INJECT_DIR}/known_hosts" ]]; then
+        cat "${INJECT_DIR}/known_hosts" > "${PUSH_RUNTIME}/known_hosts"
+    elif [[ -n "${PUSH_KNOWN_HOSTS:-}" ]]; then
+        printf '%s\n' "${PUSH_KNOWN_HOSTS}" > "${PUSH_RUNTIME}/known_hosts"
+    fi
+    # core.sshCommand (in the ephemeral ~/.gitconfig) applies to every git push —
+    # more robust than GIT_SSH_COMMAND, which would need env propagation into each
+    # tmux/ssh session. IdentitiesOnly=yes so only this key is offered (no prompt).
+    git config --global core.sshCommand \
+        "ssh -i ${PUSH_RUNTIME}/push_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${PUSH_RUNTIME}/known_hosts -o StrictHostKeyChecking=accept-new"
+    log "Configured outbound git push over SSH (ephemeral key; IdentitiesOnly)"
+fi
+
 # --- 4. sshd ----------------------------------------------------------------
 # Daemonize (no -D) so the entrypoint can continue to start tmux and tail.
 # Started as the dev user (rootless) — sshd listens on the unprivileged port

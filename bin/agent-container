@@ -305,6 +305,15 @@ def resolve_bind_mount(spec: str) -> str:
 # mounts). Kept in sync with INJECT_DIR in entrypoint.sh.
 INJECT_HOST_KEY_PATH = "/run/agent-container/ssh_host_ed25519_key"
 INJECT_AUTHORIZED_KEYS_PATH = "/run/agent-container/authorized_keys"
+# Feature 003 — outbound push credential + model/API keys + canonical config,
+# delivered EPHEMERALLY: these targets live under /run (a compose config, not a
+# named volume) so the material vanishes with the container (FR-012) — the
+# deliberate opposite of the inbound host key above, which persists for identity.
+# The entrypoint reads them here; kept in sync with INJECT_DIR in entrypoint.sh.
+INJECT_PUSH_KEY_PATH = "/run/agent-container/push_ed25519_key"
+INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
+INJECT_APIKEY_DIR = "/run/agent-container/apikeys"
+INJECT_CONFIG_DIR = "/run/agent-container/config"
 
 
 def validate_private_key(path: Path) -> None:
@@ -1871,12 +1880,19 @@ def build_compose_model(
     authorized_keys_file: Path | None = None,
     env_file: Path | None = None,
     extra_mounts: list[str] | None = None,
+    injected_configs: list[tuple[str, Path, str]] | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
     files referenced via compose secrets/configs (never inlined). env_file is
     read client-side by compose and merged into the service environment;
     extra_mounts are already-resolved '<abs-host>:<container>' bind specs.
+    injected_configs (Feature 003) is the generic extension point: each
+    (config-name, local staged file, in-container target) is emitted as a compose
+    config the same portable way as the SSH material — the credentialing stories
+    (push key + known_hosts, model/API keys, canonical config) all feed it, so no
+    per-material param proliferates. Ephemeral-secret targets live under /run
+    (never a persistent volume, FR-012); canonical config targets INJECT_CONFIG_DIR.
 
     NOTE: the exact in-container mount path for compose secrets vs configs (an
     absolute `target`) is validated in the acceptance tier (research R5); the
@@ -1916,6 +1932,10 @@ def build_compose_model(
     if authorized_keys_file is not None:
         svc_configs.append({"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH})
         model_configs["ssh_authorized_keys"] = {"file": str(authorized_keys_file)}
+    # Feature 003 runtime-injected material — same portable compose-config channel.
+    for cfg_name, local_file, target in injected_configs or []:
+        svc_configs.append({"source": cfg_name, "target": target})
+        model_configs[cfg_name] = {"file": str(local_file)}
     if svc_configs:
         service["configs"] = svc_configs
         model["configs"] = model_configs
@@ -2146,6 +2166,43 @@ def stage_ssh_injection(
     return hk_file, ak_file
 
 
+def stage_push_injection(
+    host: str, name: str, push_key: Path | None, known_hosts: Path | None
+) -> list[tuple[str, Path, str]]:
+    """Stage the outbound push credential (US1) as LOCAL files under the per-host
+    state dir and return the (config-name, staged file, in-container target)
+    entries for build_compose_model's `injected_configs`. EPHEMERAL by design: the
+    targets live under /run (FR-012), so the entrypoint reads the key there and
+    NEVER copies it onto the persisted ~/.ssh volume — the deliberate opposite of
+    the inbound host key. Fails fast if a referenced file is absent (FR-016). 0644
+    for the same uid-mismatch reason as stage_ssh_injection (the state dir is
+    0700). The push key is a DISTINCT credential from the inbound host key (SC-008)."""
+    entries: list[tuple[str, Path, str]] = []
+    if push_key is None and known_hosts is None:
+        return entries
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    if push_key is not None:
+        pk = push_key.expanduser()
+        if not pk.is_file():
+            die(f"--push-key: {push_key} does not exist or is not a file")
+        validate_private_key(pk)  # reject encrypted — a passphrase would block push
+        f = d / f"{name}.push_key"
+        f.write_bytes(pk.read_bytes())
+        f.chmod(0o644)
+        entries.append(("push_key", f, INJECT_PUSH_KEY_PATH))
+    if known_hosts is not None:
+        kh = known_hosts.expanduser()
+        if not kh.is_file():
+            die(f"--known-hosts: {known_hosts} does not exist or is not a file")
+        f = d / f"{name}.known_hosts"
+        f.write_bytes(kh.read_bytes())
+        f.chmod(0o644)
+        entries.append(("known_hosts", f, INJECT_KNOWN_HOSTS_PATH))
+    return entries
+
+
 def compose_up_exec(
     host_name: str,
     host_rec: dict,
@@ -2155,11 +2212,17 @@ def compose_up_exec(
     host_key: Path | None,
     authorized_keys: list[Path],
     redeploy: bool = False,
+    push_key: Path | None = None,
+    known_hosts: Path | None = None,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
     the host). With redeploy=True it force-recreates (US2, deliberately
     non-idempotent) — the container already holds its port, so the port-free
-    guard is skipped and its named volumes are preserved across the recreate."""
+    guard is skipped and its named volumes are preserved across the recreate.
+
+    ALL injected material is staged + validated HERE, before the compose call, so
+    a missing/invalid item aborts before the container is created — the fail-fast /
+    no-partial-provisioning guard every credential story inherits (FR-016/FR-017)."""
     port = port_for_name(name)
     if not redeploy and host_is_local(host_rec) and not port_free(port):
         die(
@@ -2168,8 +2231,11 @@ def compose_up_exec(
             f"or pick a different name."
         )
     hk_file, ak_file = stage_ssh_injection(host_name, name, host_key, authorized_keys)
+    injected = stage_push_injection(host_name, name, push_key, known_hosts)  # US1, ephemeral
     build_ctx = resolve_build_context()
-    model = build_compose_model(name, build_ctx, hk_file, ak_file, env_file, mounts)
+    model = build_compose_model(
+        name, build_ctx, hk_file, ak_file, env_file, mounts, injected_configs=injected
+    )
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
     log(f"compose={compose_file}")
@@ -2200,6 +2266,8 @@ def do_up(
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
+    push_key: Path | None = None,
+    known_hosts: Path | None = None,
 ) -> None:
     validate_name(name)
     migrate_flat_state()
@@ -2233,7 +2301,15 @@ def do_up(
     # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
     with deployment_lock(host_name, name):
         compose_up_exec(
-            host_name, host_rec, name, env_file, resolved_mounts, host_key, authorized_keys or []
+            host_name,
+            host_rec,
+            name,
+            env_file,
+            resolved_mounts,
+            host_key,
+            authorized_keys or [],
+            push_key=push_key,
+            known_hosts=known_hosts,
         )
 
 
@@ -2436,6 +2512,8 @@ def do_redeploy(
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
+    push_key: Path | None = None,
+    known_hosts: Path | None = None,
 ) -> None:
     """Redeploy (FR-008/FR-010): rebuild the image on the host and recreate the
     container, preserving its volumes. Deliberately NON-idempotent — always
@@ -2461,6 +2539,8 @@ def do_redeploy(
             host_key,
             authorized_keys or [],
             redeploy=True,
+            push_key=push_key,
+            known_hosts=known_hosts,
         )
 
 
@@ -3149,11 +3229,24 @@ def up(
         help="Inject an SSH public key into authorized_keys (repeatable), so you "
         "can attach without a manual exec. Persisted on the ~/.ssh volume.",
     ),
+    push_key: Path | None = typer.Option(
+        None,
+        "--push-key",
+        help="Inject an OpenSSH PRIVATE key the agent PUSHES with (distinct from "
+        "--host-key). Delivered EPHEMERALLY — never written to the ~/.ssh volume. "
+        "Must be unencrypted (a passphrase would block non-interactive push).",
+    ),
+    known_hosts: Path | None = typer.Option(
+        None,
+        "--known-hosts",
+        help="Inject a known_hosts file for the push remote so the first push does "
+        "not stall on host-key verification. Ephemeral.",
+    ),
 ) -> None:
     """Start container agent-container-NAME (detached)."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_up(name, host, env_file, mount or [], host_key, authorized_key or [])
+    do_up(name, host, env_file, mount or [], host_key, authorized_key or [], push_key, known_hosts)
 
 
 @app.command()
@@ -3227,12 +3320,20 @@ def redeploy(
     authorized_key: list[Path] = typer.Option(
         None, "--authorized-key", help="Inject an SSH public key (repeatable)."
     ),
+    push_key: Path | None = typer.Option(
+        None, "--push-key", help="Inject the outbound push key (ephemeral; as for `up`)."
+    ),
+    known_hosts: Path | None = typer.Option(
+        None, "--known-hosts", help="Inject known_hosts for the push remote (as for `up`)."
+    ),
 ) -> None:
     """Rebuild the image and recreate agent-container-NAME, preserving its volumes.
     Deliberately non-idempotent: always rebuilds + recreates, even with no change."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_redeploy(name, host, env_file, mount or [], host_key, authorized_key or [])
+    do_redeploy(
+        name, host, env_file, mount or [], host_key, authorized_key or [], push_key, known_hosts
+    )
 
 
 @app.command()
