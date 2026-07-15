@@ -17,6 +17,16 @@ no new required flags, so the common `up <name>` path is unchanged. All new flag
 carry secret hygiene: the CLI passes **paths, never values**, and never reads a
 secret's contents (existence/format checks only).
 
+### Convention-discovered sources (mirrors `.env` resolution — project-local first)
+
+| Material | Resolution order (first match wins) |
+|----------|-------------------------------------|
+| **model/API key file** (per provider) | `./agent-container.<name>.<provider>.key` → `~/.config/agent-container/<name>.<provider>.key` — `<provider>` ∈ {`anthropic`, `openai`, `<provider>`} (lower-case); one file per provider, each staged to `INJECT_APIKEY_DIR/<provider>` |
+| **canonical config dir** | `./agent-container.<name>.config/…` → `~/.config/agent-container/<name>.config/…` — mirrored into `INJECT_CONFIG_DIR` per the per-agent canonical manifest |
+
+Both are optional: absent → the env/`.env` (keys) and default-config (config)
+paths still apply, so `up <name>` with no files is unchanged.
+
 ## Env-file channel (parity with the shipped `SSH_*` envs)
 
 | Variable | Consumed by | Purpose |
@@ -48,11 +58,21 @@ files — the portable choice established in 001 (an absolute-target compose
    The key is read **in place** from the ephemeral path and **not** copied to the
    `~/.ssh` volume (FR-012). The inbound host-key install step is untouched and
    never conflated with this (SC-008). HTTPS helper block retained.
-2. **API creds (US2)**: for each agent, prefer the file mechanism —
-   Claude `apiKeyHelper` → the injected key file; Codex `codex login --with-api-key`
-   reading the injected file on stdin; pi `auth.json`/provider. Where a file is
-   not consumable, export the key into the **in-container** environment (never the
-   host launch, never argv). Absent injected keys → the shipped env/`.env` and
+2. **API creds (US2)**: the tool-injected credential is ALWAYS **ephemeral**
+   (FR-012, H1). Per agent:
+   - **Claude** — write an `apiKeyHelper` into the fresh canonical `settings.json`
+     that `cat`s the injected key at `INJECT_APIKEY_DIR/anthropic`; the `~/.claude`
+     volume never receives the key.
+   - **Codex** — redirect `CODEX_HOME` to an **ephemeral** `/run/agent-container/codex-home`
+     and run `codex login --with-api-key` reading the injected file on **stdin**
+     (or export `OPENAI_API_KEY` into the in-container env if honored). The auth
+     lands in the ephemeral dir; the `-codex` volume is **never** written.
+   - **pi** — redirect `PI_CODING_AGENT_DIR` to an **ephemeral** `/run` dir (auth
+     there), or export the provider key into the in-container env; the `-pi`
+     volume is never written.
+   A non-interactive `login` that writes the **persistent** per-agent volume is
+   NOT permitted (SC-004). On-volume `auth.json` arises only from an operator's
+   **interactive** login. Absent injected keys → the shipped env/`.env` and
    interactive-login paths still work (NOTE, not `die`).
 3. **Canonical config (US3)**: for each path in the per-agent canonical manifest,
    copy the file from `INJECT_CONFIG_DIR` onto its volume path (overwrite),

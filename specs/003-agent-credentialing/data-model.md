@@ -33,7 +33,7 @@ marks such paths.
 | **known_hosts (push)** | config | ephemeral | ✅ | ✅ | ✅ |
 | **model/API key (injected)** | secret | ephemeral | ✅ | ✅ | ✅ |
 | **canonical agent config** | config | ephemeral → copied fresh onto volume each boot | ✅ | ✅ | n/a (non-secret) |
-| stored-auth `auth.json` | secret | **volume** (operator-chosen) | ✅ | ✅ | ⚠️ operator-initiated exception |
+| stored-auth `auth.json` | secret | **volume** (operator-chosen) | ✅ | ✅ | ⚠️ **operator interactive login only** — never tool-injected (H1) |
 | agent runtime state | — | volume | — | — | n/a (non-secret) |
 
 ## Push credential (US1)
@@ -57,16 +57,21 @@ carry SSH, HTTPS, or both.
 The authorization an agent needs to reach its backend. Delivered file-by-default
 (`class=secret`, ephemeral), consumed per agent:
 
-| Agent | Default (file) | Fallback (env, in-container) | Stored-auth (volume, operator-chosen) |
-|-------|----------------|------------------------------|----------------------------------------|
-| Claude Code | `apiKeyHelper` → `cat` the injected key file | `ANTHROPIC_API_KEY` | `/login` OAuth on `~/.claude` |
-| Codex | `codex login --with-api-key` reads the injected file on **stdin** → `~/.codex/auth.json` | `OPENAI_API_KEY` exported into the in-container env | `codex login` on `~/.codex` |
-| pi-coding-agent | `~/.pi/agent/auth.json` (per provider) | provider key in the in-container env | `/login` on `~/.pi` |
+| Agent | Tool-injected default (**always ephemeral**, FR-012) | Operator stored-auth (volume, **interactive only**) |
+|-------|-------------------------------------------------------|------------------------------------------------------|
+| Claude Code | `apiKeyHelper` (in the fresh canonical `settings.json`) → `cat` the injected key at `INJECT_APIKEY_DIR`; the `~/.claude` volume never receives the key | interactive `/login` OAuth persists on `~/.claude` |
+| Codex | `CODEX_HOME` redirected to an **ephemeral** `/run` dir + `codex login --with-api-key` reading the injected file on **stdin** → `auth.json` in that ephemeral dir (or `OPENAI_API_KEY` in the in-container env if honored); the `-codex` volume is never written | interactive `codex login` persists on `~/.codex` |
+| pi-coding-agent | `PI_CODING_AGENT_DIR` redirected to an **ephemeral** `/run` dir (per-provider `auth.json` there), or the provider key in the in-container env; the `-pi` volume is never written | interactive `/login` persists on `~/.pi` |
 
-**FR-006**: file is the default; the credential is placed into the **in-container**
-environment (never the host-side launch, never argv) only where an agent cannot
-consume a file (Codex is the nuance case — its durable form is a file, populated
-via stdin). Env/`.env` delivery of these keys remains supported (layered).
+**FR-006 / FR-012 (the H1 rule)**: the **tool-injected** credential is ALWAYS
+ephemeral. For agents whose auth form is a file on the per-agent volume
+(Codex/pi `auth.json`), the tool redirects that agent's home
+(`CODEX_HOME` / `PI_CODING_AGENT_DIR`) to an ephemeral `/run` dir for the injected
+mode, so the credential vanishes with the container (FR-012, SC-004). A
+non-interactive `login` that writes the **persistent** per-agent volume is NOT a
+permitted default. On-volume `auth.json` arises **only** from an operator's
+**interactive** login (stored authorization) — the operator's own action, outside
+FR-012. Env/`.env` delivery of these keys remains supported (layered).
 
 ## Canonical config vs runtime state (US3)
 
