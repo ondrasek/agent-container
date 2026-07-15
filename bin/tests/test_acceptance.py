@@ -75,7 +75,24 @@ def _cli_env(state_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
     env["AGENT_CONTAINER_RUNTIME"] = RUNTIME  # deterministic runtime in CI
     env["XDG_STATE_HOME"] = str(state_dir)  # isolate the .port state files
+    # Isolate CONFIG_DIR too so the suite never reads the developer's real
+    # ~/.config/agent-container (hosts.json) AND so a test can seed a
+    # convention-discovered canonical config under it (US3).
+    env["XDG_CONFIG_HOME"] = str(state_dir / "xdgconfig")
     return env
+
+
+def _config_dir_of(state_dir: Path) -> Path:
+    """CONFIG_DIR the CLI resolves under the isolated XDG_CONFIG_HOME (see _cli_env)."""
+    return state_dir / "xdgconfig" / "agent-container"
+
+
+def _exec(name: str, argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [RUNTIME, "exec", f"agent-container-{name}", *argv],
+        capture_output=True,
+        text=True,
+    )
 
 
 def _run_cli(argv: list[str], state_dir: Path, timeout: int = 600):
@@ -608,6 +625,277 @@ def test_push_credential_ephemeral_and_distinct(acc):
         "ssh-keygen", "-lf", "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key"
     ).stdout.split()[1]
     assert push_fp != host_fp
+
+
+def test_apikey_injection_ephemeral_and_off_volume(acc, _image):
+    """US2 (FR-006/FR-012 / SC-003/SC-004, H1) against a REAL container: a
+    convention-discovered provider key FILE is delivered EPHEMERALLY to the
+    injected /run path and is NEVER copied onto the -claude/-codex/-pi volumes;
+    Codex and pi have their home dirs redirected to an ephemeral location. (A real
+    backend-reaching call, SC-002, is the opt-in tokened extension, not run here.)"""
+    name = "accapi"
+    work = acc.tmp
+    state = work / "state"
+    env_file = work / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    # Project-local convention files (discovered relative to the CLI's cwd).
+    ant_val = "sk-ant-ACCEPTANCE-SECRET"
+    oai_val = "sk-oai-ACCEPTANCE-SECRET"
+    (work / f"agent-container.{name}.anthropic.key").write_text(ant_val + "\n")
+    (work / f"agent-container.{name}.openai.key").write_text(oai_val + "\n")
+
+    def cli(*args, timeout=600):
+        return subprocess.run(
+            [*AGENT_CONTAINER, *args],
+            env=_cli_env(state),
+            cwd=str(work),  # so the project-local key files are discovered
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+
+    def _exec(*cmd):
+        return subprocess.run(
+            [RUNTIME, "exec", f"agent-container-{name}", *cmd], capture_output=True, text=True
+        )
+
+    try:
+        r = cli("up", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        port = int((state / "agent-container" / "local" / f"{name}.port").read_text().strip())
+        try:
+            _wait_sshd(port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{_container_diag(name)}") from None
+
+        # The injected keys are delivered to the EPHEMERAL /run path (a compose config).
+        assert _exec("test", "-f", "/run/agent-container/apikeys/anthropic").returncode == 0
+        assert _exec("test", "-f", "/run/agent-container/apikeys/openai").returncode == 0
+
+        # H1/FR-012/SC-004: the key VALUES are NEVER written onto a per-agent volume.
+        for vol in ("/home/dev/.claude", "/home/dev/.codex", "/home/dev/.pi"):
+            g = _exec("grep", "-rF", ant_val, vol)
+            assert g.returncode != 0, f"anthropic key leaked onto {vol}:\n{g.stdout}"
+            g = _exec("grep", "-rF", oai_val, vol)
+            assert g.returncode != 0, f"openai key leaked onto {vol}:\n{g.stdout}"
+
+        # Claude apiKeyHelper wired: settings.json references a helper that cats the
+        # EPHEMERAL injected path (the command, not the secret, lives on the volume).
+        s = _exec("cat", "/home/dev/.claude/settings.json")
+        assert s.returncode == 0 and "apiKeyHelper" in s.stdout, s.stdout
+
+        # Codex + pi: their homes are redirected to an ephemeral dir (off the volume).
+        assert (
+            _exec("sh", "-c", "test -d /tmp/agent-container-apikeys.$(id -u)/codex-home").returncode
+            == 0
+        ), "CODEX_HOME not redirected to an ephemeral dir"
+        assert (
+            _exec("sh", "-c", "test -d /tmp/agent-container-apikeys.$(id -u)/pi-home").returncode
+            == 0
+        ), "PI_CODING_AGENT_DIR not redirected to an ephemeral dir"
+
+        # SC-003: the key value is not literal in the generated compose file either.
+        compose = (state / "agent-container" / "local" / f"{name}.compose.yaml").read_text()
+        assert ant_val not in compose and oai_val not in compose
+    finally:
+        cli("wipe", name, "-y", timeout=120)
+
+
+def test_injected_key_preserves_canonical_codex_config(acc, _image):
+    """US2+US3 interaction regression (FR-007/SC-005): when a provider key is
+    injected, Codex's home is redirected to an ephemeral dir — but the operator's
+    canonical config (delivered fresh to ~/.codex) MUST be seeded into that
+    redirected home, or the canonical config would be silently inert. Proves the
+    ephemeral home carries config.toml while auth stays off the -codex volume."""
+    name = "acccodexcfg"
+    work = acc.tmp
+    state = work / "state"
+    env_file = work / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    (work / f"agent-container.{name}.openai.key").write_text("sk-oai-SECRET\n")
+    cfg = work / f"agent-container.{name}.config" / "codex"
+    cfg.mkdir(parents=True)
+    marker = "model = 'CANONICAL-MARKER'"
+    (cfg / "config.toml").write_text(marker + "\n")
+
+    def cli(*args, timeout=600):
+        return subprocess.run(
+            [*AGENT_CONTAINER, *args], env=_cli_env(state), cwd=str(work),
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout,
+        )  # fmt: skip
+
+    def _exec(*cmd):
+        return subprocess.run(
+            [RUNTIME, "exec", f"agent-container-{name}", *cmd], capture_output=True, text=True
+        )
+
+    try:
+        r = cli("up", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        _wait_sshd(int((state / "agent-container" / "local" / f"{name}.port").read_text().strip()))
+        # canonical config delivered to the volume home (FR-007) ...
+        vol = _exec("cat", "/home/dev/.codex/config.toml")
+        assert vol.returncode == 0 and marker in vol.stdout, vol.stdout
+        # ... AND seeded into the redirected ephemeral CODEX_HOME so codex actually reads it
+        eph = _exec(
+            "sh", "-c", 'cat "/tmp/agent-container-apikeys.$(id -u)/codex-home/config.toml"'
+        )
+        assert eph.returncode == 0 and marker in eph.stdout, (
+            f"canonical config not seeded: {eph.stdout}{eph.stderr}"
+        )
+    finally:
+        cli("wipe", name, "-y", timeout=120)
+
+
+def test_canonical_config_fresh_redeploy_runtime_state_persists(acc, _image):
+    """US3 (FR-007/FR-008 / SC-005) against a REAL container: operator-canonical
+    config is delivered FRESH each deploy — a local edit propagates on `redeploy` —
+    while the agent's mutable runtime state under the same home SURVIVES the
+    container recreation from the per-agent volume (neither clobbers the other)."""
+    name = "acccfg"
+    work = acc.tmp
+    state = work / "state"
+    env_file = work / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    # Project-local convention dir (discovered relative to the CLI's cwd): a
+    # canonical file (in the manifest) plus a name that is NOT a manifest path.
+    cfg = work / f"agent-container.{name}.config" / "claude"
+    cfg.mkdir(parents=True)
+    (cfg / "CLAUDE.md").write_text("VERSION-ONE\n")
+
+    def cli(*args, timeout=600):
+        return subprocess.run(
+            [*AGENT_CONTAINER, *args],
+            env=_cli_env(state),
+            cwd=str(work),  # so the project-local canonical config dir is discovered
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+
+    try:
+        r = cli("up", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        port = int((state / "agent-container" / "local" / f"{name}.port").read_text().strip())
+        try:
+            _wait_sshd(port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{_container_diag(name)}") from None
+
+        # FR-007: canonical config was delivered onto the ~/.claude volume.
+        c = _exec(name, ["cat", "/home/dev/.claude/CLAUDE.md"])
+        assert c.returncode == 0 and "VERSION-ONE" in c.stdout, c.stdout
+
+        # The agent writes RUNTIME STATE under the same home (not a manifest path).
+        w = _exec(
+            name,
+            ["sh", "-c", "printf 'RUNTIME-STATE\\n' > /home/dev/.claude/history.jsonl"],
+        )
+        assert w.returncode == 0, w.stderr
+
+        # Operator edits the canonical file locally, then redeploys.
+        (cfg / "CLAUDE.md").write_text("VERSION-TWO\n")
+        r = cli("redeploy", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        try:
+            _wait_sshd(port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{_container_diag(name)}") from None
+
+        # FR-007/SC-005: the edit propagated (canonical delivered fresh each deploy).
+        c = _exec(name, ["cat", "/home/dev/.claude/CLAUDE.md"])
+        assert c.returncode == 0 and "VERSION-TWO" in c.stdout, c.stdout
+        # FR-008/SC-005: the runtime state survived the recreate (from the volume).
+        h = _exec(name, ["cat", "/home/dev/.claude/history.jsonl"])
+        assert h.returncode == 0 and "RUNTIME-STATE" in h.stdout, h.stdout
+    finally:
+        cli("wipe", name, "-y", timeout=120)
+
+
+def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
+    """US4 (FR-015 / SC-006) against a REAL container: rotating a tool-injected
+    secret is only a LOCAL edit + `redeploy` — the new value is in effect at the
+    ephemeral inject path afterward, and NO baked or persisted copy of the OLD
+    value survives on the host (not on a per-agent volume, not in the compose file,
+    and the host-side staged copy is overwritten with the new value).
+
+    Scope note (opt-in/tokened, NOT run here): confirming a narrowly-scoped
+    per-repo deploy key grants ONLY the intended repository access (FR-004) needs a
+    real remote git host and a scoped key — that is the opt-in tokened extension,
+    outside the CI cost boundary. The unit tier proves the deploy key rides the
+    same `--push-key` plumbing (test_per_repo_deploy_key_is_just_a_narrower_push_key)."""
+    name = "accrot"
+    work = acc.tmp
+    state = work / "state"
+    env_file = work / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    old_val = "sk-ant-ROTATE-OLD-SECRET"
+    new_val = "sk-ant-ROTATE-NEW-SECRET"
+    key_file = work / f"agent-container.{name}.anthropic.key"
+    key_file.write_text(old_val + "\n")
+    inject_path = "/run/agent-container/apikeys/anthropic"
+    compose_path = state / "agent-container" / "local" / f"{name}.compose.yaml"
+    staged_path = state / "agent-container" / "local" / f"{name}.apikey.anthropic"
+
+    def cli(*args, timeout=600):
+        return subprocess.run(
+            [*AGENT_CONTAINER, *args],
+            env=_cli_env(state),
+            cwd=str(work),  # so the project-local key file is discovered
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+
+    def _exec(*cmd):
+        return subprocess.run(
+            [RUNTIME, "exec", f"agent-container-{name}", *cmd], capture_output=True, text=True
+        )
+
+    try:
+        r = cli("up", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        port = int((state / "agent-container" / "local" / f"{name}.port").read_text().strip())
+        try:
+            _wait_sshd(port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{_container_diag(name)}") from None
+
+        # Before rotation: the OLD value is what the ephemeral inject path serves.
+        c = _exec("cat", inject_path)
+        assert c.returncode == 0 and old_val in c.stdout, c.stdout
+
+        # Operator rotates: edit the LOCAL file, then redeploy (no image/volume change).
+        key_file.write_text(new_val + "\n")
+        r = cli("redeploy", name, "--env-file", str(env_file))
+        assert r.returncode == 0, r.stderr
+        try:
+            _wait_sshd(port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{_container_diag(name)}") from None
+
+        # SC-006: the NEW value is in effect at the ephemeral inject path...
+        c = _exec("cat", inject_path)
+        assert c.returncode == 0 and new_val in c.stdout, c.stdout
+        assert old_val not in c.stdout  # ...and the old value no longer served
+        # ...no OLD (or new) value persisted onto any per-agent volume (FR-012)...
+        for vol in ("/home/dev/.claude", "/home/dev/.codex", "/home/dev/.pi"):
+            g = _exec("grep", "-rF", old_val, vol)
+            assert g.returncode != 0, f"old secret survived rotation on {vol}:\n{g.stdout}"
+            g = _exec("grep", "-rF", new_val, vol)
+            assert g.returncode != 0, f"new secret leaked onto {vol}:\n{g.stdout}"
+        # ...the compose file never inlines either value (referenced by path)...
+        compose = compose_path.read_text()
+        assert old_val not in compose and new_val not in compose
+        # ...and the host-side staged copy was OVERWRITTEN with the new value (no
+        # stale old copy left on the operator's machine either).
+        staged = staged_path.read_text()
+        assert new_val in staged and old_val not in staged
+    finally:
+        cli("wipe", name, "-y", timeout=120)
 
 
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):

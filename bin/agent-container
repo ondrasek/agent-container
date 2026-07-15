@@ -493,6 +493,104 @@ def resolve_env_file(name: str) -> Path | None:
     return None
 
 
+# Model/API key FILE discovery (Feature 003, US2). A per-provider key file is
+# discovered by convention — project-local first, then the per-name user config —
+# exactly like `.env`/sidecar resolution, so the common `up <name>` path needs no
+# new flags. `<provider>` is lower-cased and restricted to a safe charset so it is
+# a valid compose config source and a clean /run target segment.
+APIKEY_PROVIDER_RE = re.compile(r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$")
+
+
+def discover_apikey_files(name: str, cwd: Path | None = None) -> dict[str, Path]:
+    """Discover per-provider model/API key FILES by convention (US2, T012).
+
+    Globs `agent-container.<name>.<provider>.key` (project-local, WINS) then
+    `<name>.<provider>.key` under the user config dir — one file per provider,
+    <provider> lower-cased (e.g. anthropic, openai). Returns {provider: source
+    path}, providers sorted for a deterministic order. Secret hygiene: existence
+    only — the file's CONTENTS are never read here. Absent → {} so the env/`.env`
+    delivery remains the layered fallback (`up <name>` with no key file unchanged).
+    """
+    cwd = Path.cwd() if cwd is None else cwd
+    found: dict[str, Path] = {}
+    for base, prefix in ((cwd, f"agent-container.{name}."), (CONFIG_DIR, f"{name}.")):
+        if not base.is_dir():
+            continue
+        for f in sorted(base.glob(f"{prefix}*.key")):
+            if not f.is_file():
+                continue
+            provider = f.name[len(prefix) : -len(".key")].lower()
+            if APIKEY_PROVIDER_RE.fullmatch(provider) and provider not in found:
+                found[provider] = f
+    return dict(sorted(found.items()))
+
+
+# Canonical agent configuration (Feature 003, US3). Per data-model.md, one agent
+# home is split at FILE granularity: a small set of operator-owned CANONICAL
+# files is delivered FRESH each deploy (edits propagate — FR-007), while every
+# OTHER file under the home is the agent's mutable runtime state and persists on
+# the per-agent volume (FR-008). This manifest is the authoritative canonical set;
+# it is single-sourced HERE (the entrypoint stays manifest-agnostic — it just
+# mirrors whatever the CLI staged). Keyed by agent LABEL (the operator's source
+# subdir name); value = (home, config_globs). `home` is the container home-relative
+# dir the files mirror onto; `config_globs` select the canonical files.
+#
+# Canonical config is NON-SECRET by definition (FR-007: "settings, project
+# guidance, tool/MCP definitions WITHOUT embedded secrets"), so MCP definitions
+# are canonical config here — delivered to the volume and consumed by the agent.
+# The operator externalizes any real secret through the dedicated key-file channel
+# (US2), which is ephemeral. FR-009 (a config file that DOES carry a token) can't
+# be detected content-free without reading the file (a hygiene violation), so
+# richer auto-classification of secret-bearing config is deferred to Feature 006
+# (agent-as-code); this feature keeps canonical config and secrets on separate,
+# well-defined channels.
+CANONICAL_MANIFEST: dict[str, tuple[str, tuple[str, ...]]] = {
+    "claude": (".claude", ("settings.json", "CLAUDE.md", "*.mcp.json", "mcp.json")),
+    "codex": (".codex", ("config.toml", "AGENTS.md")),
+    "pi": (".pi", ("config.json", "config.toml", "config.yaml", "config.yml")),
+}
+
+
+def canonical_config_dir(name: str, cwd: Path) -> Path | None:
+    """Resolve the operator-canonical config SOURCE dir by convention (US3),
+    project-local first — mirrors `.env`/sidecar/key-file discovery.
+
+    >>> canonical_config_dir("acme", Path("/nonexistent-xyz")) is None
+    True
+    """
+    for c in (cwd / f"agent-container.{name}.config", CONFIG_DIR / f"{name}.config"):
+        if c.is_dir():
+            return c
+    return None
+
+
+def discover_canonical_config(name: str, cwd: Path | None = None) -> list[tuple[str, Path]]:
+    """Discover the per-agent CANONICAL config files (US3, T016) from the
+    `agent-container.<name>.config/<agent>/…` convention.
+
+    Returns (home_relative_target, source_path) for each source file that matches
+    the per-agent manifest — `home_relative_target` e.g. ".claude/settings.json".
+    A file matching NO manifest glob is the agent's runtime state and is NOT
+    returned (never delivered, FR-008). Secret hygiene: existence/name checks only
+    — CONTENTS are never read here. Absent source dir → [] so `up <name>` with no
+    config dir is unchanged.
+    """
+    cwd = Path.cwd() if cwd is None else cwd
+    src = canonical_config_dir(name, cwd)
+    found: list[tuple[str, Path]] = []
+    if src is None:
+        return found
+    for label, (home, config_globs) in CANONICAL_MANIFEST.items():
+        adir = src / label
+        if not adir.is_dir():
+            continue
+        for f in sorted(adir.iterdir()):
+            if f.is_file() and any(f.match(g) for g in config_globs):
+                found.append((f"{home}/{f.name}", f))
+            # else: runtime state / unrecognized → NOT delivered (FR-008)
+    return found
+
+
 def state_file(name: str) -> Path:
     return STATE_DIR / f"{name}.port"
 
@@ -2203,6 +2301,75 @@ def stage_push_injection(
     return entries
 
 
+def stage_apikey_injection(
+    host: str, name: str, cwd: Path | None = None
+) -> list[tuple[str, Path, str]]:
+    """Stage convention-discovered model/API key FILES (US2, T012) as LOCAL files
+    under the per-host state dir and return the (config-name, staged file,
+    in-container target) entries for build_compose_model's `injected_configs`.
+
+    EPHEMERAL by construction (H1, FR-012): every provider key targets
+    INJECT_APIKEY_DIR/<provider> under /run, so the entrypoint reads it there and
+    it is NEVER copied onto a per-agent volume — the tool-injected model credential
+    is ALWAYS ephemeral (the deliberate opposite of an operator's interactive,
+    on-volume login). Byte-copied without inspecting contents (secret hygiene),
+    0644 for the same uid-mismatch reason as stage_push_injection (the state dir is
+    0700). Discovery is automatic; absent → [] so env/`.env` delivery stays the
+    layered fallback."""
+    discovered = discover_apikey_files(name, cwd)
+    entries: list[tuple[str, Path, str]] = []
+    if not discovered:
+        return entries
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    for provider, src in discovered.items():
+        if not src.is_file():  # discovered then vanished/unreadable — fail fast (FR-016)
+            die(f"model/API key file for '{provider}' disappeared before staging: {src}")
+        f = d / f"{name}.apikey.{provider}"
+        f.write_bytes(src.read_bytes())
+        f.chmod(0o644)
+        entries.append((f"apikey_{provider}", f, f"{INJECT_APIKEY_DIR}/{provider}"))
+    return entries
+
+
+def stage_config_injection(
+    host: str, name: str, cwd: Path | None = None
+) -> list[tuple[str, Path, str]]:
+    """Stage the convention-discovered CANONICAL agent config (US3, T016) as LOCAL
+    files under the per-host state dir and return the (config-name, staged file,
+    in-container target) entries for build_compose_model's `injected_configs`.
+
+    Canonical files target INJECT_CONFIG_DIR/<home-relative-path> — the entrypoint
+    mirrors that tree onto the per-agent volume FRESH each boot, so a local edit
+    propagates on the next up/redeploy (FR-007) while the agent's other runtime-
+    state files under the home are left untouched (FR-008). Canonical config is
+    non-secret by definition (FR-007); real secrets travel the dedicated ephemeral
+    key-file channel (US2). Byte-copied without inspecting contents (secret
+    hygiene), 0644 for the same uid-mismatch reason as stage_push_injection (the
+    state dir is 0700). Discovery is automatic; absent → [] so the default-config
+    path is unchanged."""
+    discovered = discover_canonical_config(name, cwd)
+    entries: list[tuple[str, Path, str]] = []
+    if not discovered:
+        return entries
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    for relpath, src in discovered:
+        if not src.is_file():  # discovered then vanished/unreadable — fail fast (FR-016)
+            die(f"canonical config file disappeared before staging: {src}")
+        # Flatten the home-relative path into a single unique local staged filename
+        # and a compose-safe config resource name (no leading dot, no slash).
+        flat = relpath.replace("/", "__")
+        f = d / f"{name}.config.{flat}"
+        f.write_bytes(src.read_bytes())
+        f.chmod(0o644)
+        token = re.sub(r"[^a-z0-9]+", "_", flat.lower()).strip("_")
+        entries.append((f"config_{token}", f, f"{INJECT_CONFIG_DIR}/{relpath}"))
+    return entries
+
+
 def compose_up_exec(
     host_name: str,
     host_rec: dict,
@@ -2232,6 +2399,13 @@ def compose_up_exec(
         )
     hk_file, ak_file = stage_ssh_injection(host_name, name, host_key, authorized_keys)
     injected = stage_push_injection(host_name, name, push_key, known_hosts)  # US1, ephemeral
+    # US2 (T012): convention-discovered model/API key files, staged ephemerally to
+    # INJECT_APIKEY_DIR/<provider> (H1/FR-012). Automatic — no flags; env/.env still works.
+    injected += stage_apikey_injection(host_name, name)
+    # US3 (T016): convention-discovered CANONICAL agent config (non-secret, FR-007),
+    # staged fresh each deploy to INJECT_CONFIG_DIR. Automatic — no flags; the
+    # entrypoint mirrors it onto the volume each boot (secrets travel the key channel).
+    injected += stage_config_injection(host_name, name)
     build_ctx = resolve_build_context()
     model = build_compose_model(
         name, build_ctx, hk_file, ak_file, env_file, mounts, injected_configs=injected

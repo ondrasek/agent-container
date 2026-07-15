@@ -175,6 +175,33 @@ git config --global credential.https://github.com.helper \
 
 log "Configured git identity for ${GIT_USER_NAME}"
 
+# --- 3a. Canonical agent config (Feature 003, US3) --------------------------
+# Operator-canonical agent config is delivered FRESH each boot as ephemeral
+# compose configs mirrored under ${INJECT_DIR}/config/<home-relative-path> (e.g.
+# .claude/settings.json). Overlay that tree onto the agent home so the canonical
+# files (settings.json, CLAUDE.md, config.toml, AGENTS.md, …) are OVERWRITTEN with
+# the operator's current copy on every up/redeploy (FR-007), while every OTHER
+# file under the home — the agent's mutable runtime state (history, caches, auth)
+# — is left untouched and persists on the per-agent volume (FR-008). Idempotent:
+# re-running just re-overlays the same files. Runs BEFORE the Claude apiKeyHelper
+# patch (3c) so the helper merges into the freshly delivered settings.json rather
+# than being clobbered by it, and BEFORE the codex/pi home seeding (3c) so those
+# ephemeral homes pick up the fresh canonical config. Canonical config is non-secret
+# by definition (FR-007); real secrets travel the ephemeral key-file channel (US2).
+CONFIG_INJECT_DIR="${INJECT_DIR}/config"
+if [[ -d "${CONFIG_INJECT_DIR}" ]]; then
+    # `cp -R "<dir>/."` overlays the CONTENTS (including the dot-named agent homes)
+    # onto HOME, creating subdirs as needed and overwriting only the delivered
+    # canonical files. Plain -R (NOT -a/-p) so the unprivileged dev user never
+    # fails trying to preserve the /run source ownership; the staged files are
+    # 0644 (readable).
+    if cp -RL "${CONFIG_INJECT_DIR}/." "${AGENT_CONTAINER_HOME}/" 2>/dev/null; then
+        log "Delivered operator-canonical agent config fresh (runtime state under the home preserved)"
+    else
+        log "NOTE: failed to overlay canonical agent config from ${CONFIG_INJECT_DIR}"
+    fi
+fi
+
 # --- 3b. Outbound SSH push key (Feature 003, US1) ---------------------------
 # The agent PUSHES with a key DISTINCT from the inbound sshd host key. It is
 # injected EPHEMERALLY (INJECT_DIR is a /run compose config) and MUST NOT be
@@ -213,6 +240,128 @@ if [[ -n "${_push_src}" ]]; then
     git config --global core.sshCommand \
         "ssh -i ${PUSH_RUNTIME}/push_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${PUSH_RUNTIME}/known_hosts -o StrictHostKeyChecking=accept-new"
     log "Configured outbound git push over SSH (ephemeral key; IdentitiesOnly)"
+fi
+
+# --- 3c. Model/API credentials (Feature 003, US2) ---------------------------
+# The TOOL-INJECTED model/API credential is ALWAYS ephemeral (H1, FR-012/SC-004):
+# each provider key arrives as a compose config at ${INJECT_DIR}/apikeys/<provider>
+# (a /run path that vanishes with the container) and is delivered to each agent
+# WITHOUT ever landing on that agent's persistent volume — the deliberate opposite
+# of an operator's own INTERACTIVE `login`, whose session persists on the volume and
+# is the ONLY on-volume auth. Absent injected keys → the shipped env/.env +
+# interactive-login paths still apply (a NOTE, never a die).
+# AGENT_CONTAINER_APIKEY_RUNTIME lets the off-container test harness redirect the
+# ephemeral home dirs; production leaves it unset so the default is a container-
+# private /tmp path (vanishes with the container, never a named volume). Exports
+# here reach the tmux server this entrypoint launches below — where the agents run.
+APIKEY_INJECT_DIR="${INJECT_DIR}/apikeys"
+APIKEY_RUNTIME="${AGENT_CONTAINER_APIKEY_RUNTIME:-/tmp/agent-container-apikeys.$(id -u)}"
+_anthropic_key="${APIKEY_INJECT_DIR}/anthropic"
+_openai_key="${APIKEY_INJECT_DIR}/openai"
+
+# Claude Code — file-first via apiKeyHelper. The helper is a NON-secret command in
+# ~/.claude/settings.json that CATS the ephemeral injected key at Claude's request
+# time; the key bytes themselves NEVER touch the ~/.claude volume (H1). Self-healing:
+# if the key is absent on a later boot the helper emits nothing and Claude falls back
+# to ANTHROPIC_API_KEY / interactive login.
+if [[ -f "${_anthropic_key}" ]]; then
+    CLAUDE_DIR="${AGENT_CONTAINER_HOME}/.claude"
+    mkdir -p "${CLAUDE_DIR}"
+    _helper="${CLAUDE_DIR}/apikey-helper.sh"
+    printf '#!/bin/sh\ncat "%s" 2>/dev/null || true\n' "${_anthropic_key}" > "${_helper}"
+    chmod 0755 "${_helper}"
+    _settings="${CLAUDE_DIR}/settings.json"
+    if [[ -f "${_settings}" ]]; then
+        # Merge (preserve the operator's other settings). The US3 canonical copy
+        # (section 3a above) has already delivered any fresh settings.json, so this
+        # patch merges the apiKeyHelper INTO the operator's current file.
+        if command -v jq >/dev/null 2>&1; then
+            _tmp="$(mktemp)"
+            if jq --arg h "${_helper}" '.apiKeyHelper = $h' "${_settings}" > "${_tmp}" 2>/dev/null; then
+                mv "${_tmp}" "${_settings}"
+                log "Claude apiKeyHelper merged into ~/.claude/settings.json (ephemeral injected Anthropic key; never on the volume)"
+            else
+                rm -f "${_tmp}"
+                log "NOTE: ~/.claude/settings.json is not valid JSON; leaving it unchanged (apiKeyHelper not wired — use ANTHROPIC_API_KEY or interactive login)"
+            fi
+        else
+            log "NOTE: jq unavailable; cannot merge apiKeyHelper into the existing ~/.claude/settings.json"
+        fi
+    else
+        printf '{\n  "apiKeyHelper": "%s"\n}\n' "${_helper}" > "${_settings}"
+        chmod 0600 "${_settings}"
+        log "Claude apiKeyHelper wired to the ephemeral injected Anthropic key (never written to the ~/.claude volume)"
+    fi
+fi
+
+# Codex — redirect CODEX_HOME to an EPHEMERAL dir so an api-key login writes
+# auth.json THERE, never onto the -codex volume (H1). Try the non-interactive
+# api-key login reading the injected file on STDIN; if that codex build lacks it,
+# fall back to OPENAI_API_KEY in the in-container env (FR-006 fallback — never on
+# argv, never on a volume). CODEX_HOME is only redirected when a key is injected, so
+# without one an operator's interactive `codex login` still persists on the volume.
+if [[ -f "${_openai_key}" ]]; then
+    export CODEX_HOME="${APIKEY_RUNTIME}/codex-home"
+    mkdir -p "${CODEX_HOME}"
+    chmod 0700 "${CODEX_HOME}"
+    # Seed the ephemeral home from the on-volume ~/.codex — its canonical config
+    # (config.toml/AGENTS.md, delivered FRESH by section 3a) and prior state — so
+    # the redirect does not hide the operator's config (FR-007/SC-005). The
+    # injected auth written below stays ONLY in this ephemeral dir (FR-012). (New
+    # session state written here is ephemeral in injected-key mode; use interactive
+    # stored-auth for persistent codex state.)
+    if [[ -d "${AGENT_CONTAINER_HOME}/.codex" ]]; then
+        cp -RL "${AGENT_CONTAINER_HOME}/.codex/." "${CODEX_HOME}/" 2>/dev/null || true
+    fi
+    _codex_ok=0
+    if command -v codex >/dev/null 2>&1; then
+        if timeout 30 codex login --with-api-key < "${_openai_key}" >/dev/null 2>&1; then
+            _codex_ok=1
+        fi
+    fi
+    if [[ "${_codex_ok}" -eq 1 ]]; then
+        log "Codex authenticated from the ephemeral injected OpenAI key (CODEX_HOME redirected off the -codex volume)"
+    else
+        OPENAI_API_KEY="$(cat "${_openai_key}")"
+        export OPENAI_API_KEY
+        log "Codex: exported OPENAI_API_KEY into the in-container env (ephemeral CODEX_HOME; the -codex volume is never written)"
+    fi
+fi
+
+# pi-coding-agent — if ANY provider key is injected, redirect PI_CODING_AGENT_DIR
+# to an EPHEMERAL dir so nothing pi writes lands on the -pi volume (H1). pi has no
+# documented non-interactive file login, so its injected-key delivery is the
+# in-container env (exported just below); the -pi volume is never written. Only
+# redirected when a key is injected, so interactive `pi login` otherwise persists.
+_any_apikey=0
+if [[ -d "${APIKEY_INJECT_DIR}" ]]; then
+    for _k in "${APIKEY_INJECT_DIR}"/*; do
+        [[ -f "${_k}" ]] && { _any_apikey=1; break; }
+    done
+fi
+if [[ "${_any_apikey}" -eq 1 ]]; then
+    export PI_CODING_AGENT_DIR="${APIKEY_RUNTIME}/pi-home"
+    mkdir -p "${PI_CODING_AGENT_DIR}"
+    chmod 0700 "${PI_CODING_AGENT_DIR}"
+    # Seed from the on-volume ~/.pi so the redirect keeps the operator's canonical
+    # config visible (FR-007/SC-005); anything pi writes here stays ephemeral (FR-012).
+    if [[ -d "${AGENT_CONTAINER_HOME}/.pi" ]]; then
+        cp -RL "${AGENT_CONTAINER_HOME}/.pi/." "${PI_CODING_AGENT_DIR}/" 2>/dev/null || true
+    fi
+    log "pi: PI_CODING_AGENT_DIR redirected to an ephemeral dir (the -pi volume is never written)"
+fi
+
+# In-container env delivery (FR-006 fallback) for agents without a non-interactive
+# file-auth path (pi; codex if its api-key login was unavailable). Read from the
+# ephemeral injected file into the env — never argv, never a volume, never baked.
+# Do NOT clobber a value the operator already set via .env (that layer wins).
+if [[ -f "${_anthropic_key}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    ANTHROPIC_API_KEY="$(cat "${_anthropic_key}")"
+    export ANTHROPIC_API_KEY
+fi
+if [[ -f "${_openai_key}" && -z "${OPENAI_API_KEY:-}" ]]; then
+    OPENAI_API_KEY="$(cat "${_openai_key}")"
+    export OPENAI_API_KEY
 fi
 
 # --- 4. sshd ----------------------------------------------------------------

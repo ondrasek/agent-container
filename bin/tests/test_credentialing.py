@@ -141,3 +141,396 @@ def test_do_up_threads_push_material(wiz, monkeypatch, tmp_path):
     kh.write_text("h\n")
     wiz.do_up("acme", push_key=pk, known_hosts=kh)
     assert seen == {"push_key": pk, "known_hosts": kh}
+
+
+# --- US2: model/API credential FILE discovery + ephemeral staging (T011) ------
+
+
+def test_discover_apikey_files_project_local_wins(wiz, tmp_path):
+    """Discovery order (M2): `./agent-container.<name>.<provider>.key` (project-local)
+    wins over `~/.config/agent-container/<name>.<provider>.key`."""
+    proj = tmp_path / "agent-container.acme.anthropic.key"
+    proj.write_text("PROJECT")
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.anthropic.key").write_text("USERCONF")
+    found = wiz.discover_apikey_files("acme", cwd=tmp_path)
+    assert found == {"anthropic": proj}  # project-local path wins
+
+
+def test_discover_apikey_files_multiple_providers_lowercased(wiz, tmp_path):
+    (tmp_path / "agent-container.acme.anthropic.key").write_text("A")
+    (tmp_path / "agent-container.acme.OpenAI.key").write_text("O")  # mixed case -> lowered
+    found = wiz.discover_apikey_files("acme", cwd=tmp_path)
+    assert set(found) == {"anthropic", "openai"}
+
+
+def test_discover_apikey_files_absent_returns_empty(wiz, tmp_path):
+    assert wiz.discover_apikey_files("acme", cwd=tmp_path) == {}
+
+
+def test_discover_apikey_files_ignores_other_names(wiz, tmp_path):
+    """Only <name>'s keys are discovered — a sibling deployment's file is ignored,
+    and non-.key files (e.g. the .env / sidecar) never match."""
+    (tmp_path / "agent-container.other.anthropic.key").write_text("X")
+    (tmp_path / "agent-container.acme.services.yaml").write_text("services: {}")
+    (tmp_path / ".env").write_text("GH_TOKEN=x")
+    assert wiz.discover_apikey_files("acme", cwd=tmp_path) == {}
+
+
+def test_stage_apikey_injection_ephemeral_target(wiz, tmp_path):
+    """Each provider key is staged to the EPHEMERAL INJECT_APIKEY_DIR/<provider>
+    (a /run path — never a per-agent volume, H1/FR-012), byte-identical, 0644,
+    under the 0700 per-host state dir."""
+    src = tmp_path / "agent-container.acme.anthropic.key"
+    src.write_bytes(b"sk-ant-SECRET")
+    entries = wiz.stage_apikey_injection("local", "acme", cwd=tmp_path)
+    by_name = {e[0]: e for e in entries}
+    name, staged, target = by_name["apikey_anthropic"]
+    assert target == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
+    assert target.startswith("/run/")  # ephemeral, not a volume mount
+    assert "/home/dev/" not in target  # never a per-agent volume path
+    assert staged == wiz.host_state_dir("local") / "acme.apikey.anthropic"
+    assert staged.read_bytes() == src.read_bytes()
+    assert (staged.stat().st_mode & 0o777) == 0o644
+    assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
+
+
+def test_stage_apikey_injection_none_returns_empty(wiz, tmp_path):
+    assert wiz.stage_apikey_injection("local", "acme", cwd=tmp_path) == []
+
+
+def test_apikey_value_never_inlined_in_compose_model(wiz, tmp_path):
+    """FR-011: the compose model references the staged key by FILE path — the secret
+    bytes are never inlined, and the target stays under /run (ephemeral)."""
+    src = tmp_path / "agent-container.acme.openai.key"
+    src.write_bytes(b"sk-oai-SUPERSECRET")
+    entries = wiz.stage_apikey_injection("local", "acme", cwd=tmp_path)
+    model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=entries)
+    dumped = json.dumps(model)
+    assert "sk-oai-SUPERSECRET" not in dumped  # never inlined (FR-011)
+    targets = {c["source"]: c["target"] for c in model["services"]["agent"]["configs"]}
+    assert targets["apikey_openai"] == f"{wiz.INJECT_APIKEY_DIR}/openai"
+
+
+def test_apikey_env_delivery_unaffected(wiz, tmp_path):
+    """The env/`.env` delivery remains the layered fallback: with no key FILE the
+    staging is empty, and a `.env` value rides via env_file (referenced by path,
+    never inlined into the compose model / argv)."""
+    assert wiz.stage_apikey_injection("local", "acme", cwd=tmp_path) == []
+    env_file = tmp_path / "acme.env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-ant-ENVSECRET\n")
+    model = wiz.build_compose_model("acme", tmp_path / "repo", env_file=env_file)
+    assert model["services"]["agent"]["env_file"] == [str(env_file)]
+    assert "sk-ant-ENVSECRET" not in json.dumps(model)  # value not inlined; only the path
+
+
+def test_compose_up_exec_threads_discovered_apikeys(wiz, monkeypatch, tmp_path):
+    """compose_up_exec auto-discovers + stages provider key files and threads them
+    into build_compose_model's injected_configs (no new flags — discovery is
+    automatic), alongside the push material."""
+    captured: dict = {}
+
+    def _fake_build(name, build_ctx, *a, **k):
+        captured["injected"] = k.get("injected_configs")
+        return {"name": name, "services": {"agent": {}}, "volumes": {}}
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "agent-container.acme.anthropic.key").write_bytes(b"K")
+    monkeypatch.setattr(wiz, "build_compose_model", _fake_build)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
+    monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
+    monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["true"])
+    monkeypatch.setattr(wiz, "port_free", lambda p: True)
+    monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
+    host_rec = {"driver": "docker", "context": ""}
+    wiz.compose_up_exec("local", host_rec, "acme", tmp_path / "acme.env", [], None, [])
+    sources = {e[0] for e in (captured["injected"] or [])}
+    assert "apikey_anthropic" in sources
+
+
+# --- US3: canonical config fresh each deploy; runtime state persists (T015) ----
+
+
+def _config_src(tmp_path: Path, name: str = "acme") -> Path:
+    """Build a project-local canonical-config source dir with canonical files
+    (settings, guidance, an MCP def — all non-secret per FR-007) plus a
+    runtime-state file that is NOT in the manifest (must not be delivered)."""
+    root = tmp_path / f"agent-container.{name}.config"
+    claude = root / "claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text('{"theme":"dark"}\n')
+    (claude / "CLAUDE.md").write_text("# guidance\n")
+    (claude / "history.jsonl").write_text('{"runtime":"state"}\n')  # runtime state
+    (claude / "servers.mcp.json").write_text('{"url":"MCPMARKER"}\n')  # canonical MCP def
+    codex = root / "codex"
+    codex.mkdir(parents=True)
+    (codex / "config.toml").write_text("model = 'o1'\n")
+    (codex / "auth.json").write_text('{"runtime":"auth"}\n')  # runtime state
+    return root
+
+
+def test_discover_canonical_config_filters_by_manifest(wiz, tmp_path):
+    """Only manifest-matched CANONICAL files are discovered; runtime-state files
+    (not in the manifest) are NOT delivered (FR-008)."""
+    _config_src(tmp_path)
+    found = wiz.discover_canonical_config("acme", cwd=tmp_path)
+    targets = {t for t, _src in found}
+    assert ".claude/settings.json" in targets
+    assert ".claude/CLAUDE.md" in targets
+    assert ".codex/config.toml" in targets
+    # runtime state is NOT delivered
+    assert ".claude/history.jsonl" not in targets
+    assert ".codex/auth.json" not in targets
+
+
+def test_discover_canonical_config_includes_mcp_defs(wiz, tmp_path):
+    """MCP definitions are non-secret canonical config (FR-007) — delivered like
+    any other canonical file, not shunted to an unconsumed secret channel."""
+    _config_src(tmp_path)
+    targets = {t for t, _src in wiz.discover_canonical_config("acme", cwd=tmp_path)}
+    assert ".claude/servers.mcp.json" in targets
+
+
+def test_discover_canonical_config_absent_returns_empty(wiz, tmp_path):
+    assert wiz.discover_canonical_config("acme", cwd=tmp_path) == []
+
+
+def test_canonical_config_dir_project_local_wins(wiz, tmp_path):
+    proj = tmp_path / "agent-container.acme.config"
+    (proj / "claude").mkdir(parents=True)
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.config" / "claude").mkdir(parents=True)
+    assert wiz.canonical_config_dir("acme", tmp_path) == proj
+
+
+def test_stage_config_injection_targets(wiz, tmp_path):
+    """Canonical files (incl. MCP defs) stage to INJECT_CONFIG_DIR/<home-relative>,
+    all under /run (delivered fresh each boot), 0644 under the 0700 state dir."""
+    _config_src(tmp_path)
+    entries = wiz.stage_config_injection("local", "acme", cwd=tmp_path)
+    targets = {e[0]: e[2] for e in entries}
+    assert (
+        targets["config_claude_settings_json"] == f"{wiz.INJECT_CONFIG_DIR}/.claude/settings.json"
+    )
+    assert targets["config_codex_config_toml"] == f"{wiz.INJECT_CONFIG_DIR}/.codex/config.toml"
+    # MCP def is canonical config — delivered under INJECT_CONFIG_DIR, consumed by the entrypoint
+    assert (
+        targets["config_claude_servers_mcp_json"]
+        == f"{wiz.INJECT_CONFIG_DIR}/.claude/servers.mcp.json"
+    )
+    for _n, staged, target in entries:
+        assert target.startswith(wiz.INJECT_CONFIG_DIR + "/")
+        assert (staged.stat().st_mode & 0o777) == 0o644
+    assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
+
+
+def test_stage_config_injection_absent_returns_empty(wiz, tmp_path):
+    assert wiz.stage_config_injection("local", "acme", cwd=tmp_path) == []
+
+
+def test_canonical_config_value_never_inlined(wiz, tmp_path):
+    """FR-011: canonical config is referenced by FILE path — its contents are never
+    inlined into the compose model."""
+    _config_src(tmp_path)
+    entries = wiz.stage_config_injection("local", "acme", cwd=tmp_path)
+    model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=entries)
+    assert "MCPMARKER" not in json.dumps(model)
+
+
+def test_compose_up_exec_threads_canonical_config(wiz, monkeypatch, tmp_path):
+    """compose_up_exec auto-discovers + stages canonical config and threads it into
+    build_compose_model's injected_configs (no new flags — discovery is automatic)."""
+    captured: dict = {}
+
+    def _fake_build(name, build_ctx, *a, **k):
+        captured["injected"] = k.get("injected_configs")
+        return {"name": name, "services": {"agent": {}}, "volumes": {}}
+
+    monkeypatch.chdir(tmp_path)
+    _config_src(tmp_path)
+    monkeypatch.setattr(wiz, "build_compose_model", _fake_build)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
+    monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
+    monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["true"])
+    monkeypatch.setattr(wiz, "port_free", lambda p: True)
+    monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
+    host_rec = {"driver": "docker", "context": ""}
+    wiz.compose_up_exec("local", host_rec, "acme", tmp_path / "acme.env", [], None, [])
+    sources = {e[0] for e in (captured["injected"] or [])}
+    assert "config_claude_settings_json" in sources
+    assert "config_claude_servers_mcp_json" in sources
+
+
+# --- US4: rotation, scoping, fail-fast robustness (T019) ----------------------
+#
+# US4 does not add new material — it VERIFIES the emergent guarantees end-to-end:
+# a deploy that references ANY missing/invalid injected item (of ANY kind) dies
+# BEFORE any compose call, and every kind is staged locally before `compose up`
+# so a later failure leaves nothing running (FR-016/FR-017/SC-007). Scoping the
+# push credential narrowly is confirmed to be just a narrower `--push-key`
+# (FR-004) — no separate plumbing.
+
+
+def _compose_tripwires(wiz, monkeypatch, tmp_path) -> list[str]:
+    """Arm every downstream stage of compose_up_exec as a tripwire so a test can
+    assert the deploy died in the LOCAL staging phase, before ANY compose call
+    (build_compose_model → write_compose_file → driver_up_argv → the compose
+    subprocess). Returns the ordered list of stages that were reached."""
+    tripped: list[str] = []
+    monkeypatch.setattr(wiz, "port_free", lambda p: True)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+
+    def _build(*a, **k):
+        tripped.append("build_compose_model")
+        return {"name": "x", "services": {"agent": {}}, "volumes": {}}
+
+    monkeypatch.setattr(wiz, "build_compose_model", _build)
+
+    def _write(*a, **k):
+        tripped.append("write_compose_file")
+        return tmp_path / "c.yaml"
+
+    monkeypatch.setattr(wiz, "write_compose_file", _write)
+    monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
+
+    def _up(*a, **k):
+        tripped.append("driver_up_argv")
+        return ["true"]
+
+    monkeypatch.setattr(wiz, "driver_up_argv", _up)
+
+    def _run(*a, **k):
+        tripped.append("compose-subprocess")
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(wiz.subprocess, "run", _run)
+    monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
+    return tripped
+
+
+_HOST_REC = {"driver": "docker", "context": ""}
+
+
+def test_missing_push_key_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
+    """FR-016/SC-007: a referenced but missing --push-key aborts in staging — no
+    compose model is built and no compose command is invoked."""
+    tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
+    with pytest.raises(wiz.Fatal, match="--push-key"):
+        wiz.compose_up_exec(
+            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [],
+            push_key=tmp_path / "nope",
+        )  # fmt: skip
+    assert tripped == []  # nothing downstream of staging ran
+
+
+def test_missing_known_hosts_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
+    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
+    with pytest.raises(wiz.Fatal, match="--known-hosts"):
+        wiz.compose_up_exec(
+            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [],
+            push_key=_key(tmp_path), known_hosts=tmp_path / "nope",
+        )  # fmt: skip
+    assert tripped == []
+
+
+def test_missing_host_key_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
+    """The inbound host-key material shares the same all-staging-before-compose
+    guard — a missing --host-key aborts before any compose call, too."""
+    tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
+    with pytest.raises(wiz.Fatal, match="--host-key"):
+        wiz.compose_up_exec(
+            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], tmp_path / "nope", [],
+        )  # fmt: skip
+    assert tripped == []
+
+
+def test_missing_discovered_apikey_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
+    """A convention-discovered model/API key file that is referenced (discovered)
+    but has vanished/become unreadable dies with a clear diagnostic BEFORE any
+    compose call (FR-016) — never a raw traceback, never a partial deploy."""
+    tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        wiz, "discover_apikey_files", lambda name, cwd=None: {"anthropic": tmp_path / "gone.key"}
+    )
+    with pytest.raises(wiz.Fatal, match="anthropic"):
+        wiz.compose_up_exec("local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [])
+    assert tripped == []
+
+
+def test_missing_discovered_canonical_config_dies_before_any_compose_call(
+    wiz, monkeypatch, tmp_path
+):
+    """A discovered canonical-config file that has vanished before staging dies with
+    a clear diagnostic BEFORE any compose call (FR-016)."""
+    tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
+    monkeypatch.setattr(wiz, "discover_apikey_files", lambda name, cwd=None: {})
+    monkeypatch.setattr(
+        wiz,
+        "discover_canonical_config",
+        lambda name, cwd=None: [(".claude/settings.json", tmp_path / "gone.json")],
+    )
+    with pytest.raises(wiz.Fatal, match="disappeared"):
+        wiz.compose_up_exec("local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [])
+    assert tripped == []
+
+
+def test_all_material_staged_locally_before_compose_up(wiz, monkeypatch, tmp_path):
+    """FR-017: every kind of injected material (push key, known_hosts, discovered
+    API key, discovered canonical config) is staged to a LOCAL file that already
+    exists on disk by the time the compose model is built — so when the compose
+    call itself later fails, nothing was half-provisioned into a running agent."""
+    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    monkeypatch.chdir(tmp_path)
+    pk = _key(tmp_path)
+    kh = tmp_path / "kh"
+    kh.write_text("github.com ssh-ed25519 AAAA\n")
+    (tmp_path / "agent-container.acme.anthropic.key").write_bytes(b"sk-ant-SECRET")
+    _config_src(tmp_path)
+    captured: dict = {}
+
+    def _build(name, build_ctx, *a, **k):
+        captured["injected"] = k.get("injected_configs")
+        return {"name": name, "services": {"agent": {}}, "volumes": {}}
+
+    monkeypatch.setattr(wiz, "build_compose_model", _build)
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
+    monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
+    monkeypatch.setattr(wiz, "port_free", lambda p: True)
+    monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["false"])  # compose FAILS
+    monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
+    with pytest.raises(wiz.Fatal, match="compose"):
+        wiz.compose_up_exec(
+            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [],
+            push_key=pk, known_hosts=kh,
+        )  # fmt: skip
+    injected = captured["injected"]
+    assert injected  # build_compose_model was reached with the full staged set
+    sources = {e[0] for e in injected}
+    assert {"push_key", "known_hosts", "apikey_anthropic"} <= sources
+    assert any(s.startswith("config_") for s in sources)  # canonical config too
+    for _n, staged, _t in injected:
+        assert staged.is_file()  # staged to a real LOCAL file before compose ran
+
+
+def test_per_repo_deploy_key_is_just_a_narrower_push_key(wiz, monkeypatch, tmp_path):
+    """FR-004: a narrowly-scoped per-repository deploy key is provisioned through the
+    SAME --push-key mechanism to the SAME ephemeral target — the narrower scope is a
+    property of the KEY, not of the plumbing (no separate flag, no separate path)."""
+    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    deploy_key = _key(tmp_path, "repo_deploy_key")
+    entries = wiz.stage_push_injection("local", "acme", deploy_key, None)
+    by_name = {e[0]: e for e in entries}
+    assert by_name["push_key"][2] == wiz.INJECT_PUSH_KEY_PATH  # identical ephemeral target
+    assert by_name["push_key"][1].read_bytes() == deploy_key.read_bytes()
