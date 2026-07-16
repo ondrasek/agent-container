@@ -95,9 +95,13 @@ BANDIT=(uv run --no-project --with bandit bandit)
 # Universal static checks adopted from the canonical quality hook, adapted to the
 # single-file --no-project layout: vulture (dead code), xenon (cyclomatic
 # complexity), refurb (modernizations; reads [tool.refurb] ignores from pyproject).
-VULTURE=(uv run --no-project --with vulture vulture)
-XENON=(uv run --no-project --with xenon xenon)
-REFURB=(uv run --no-project --with refurb refurb)
+# PIN the versions (like the runtime DEPS above): an unpinned `--with <tool>`
+# resolves the NEWEST release, so a stale local cache and a fresh CI runner can
+# land on different versions and disagree — a newer refurb/vulture adds a rule and
+# only CI fails. Bump these deliberately, in lockstep, when adopting new rules.
+VULTURE=(uv run --no-project --with 'vulture>=2.16,<2.17' vulture)
+XENON=(uv run --no-project --with 'xenon>=0.9.3,<0.10' xenon)
+REFURB=(uv run --no-project --with 'refurb>=2.3,<2.4' refurb)
 # pytest-github-actions-annotate-failures turns failures into inline GitHub
 # annotations (file:line) under Actions; it auto-detects GITHUB_ACTIONS and is a
 # no-op locally, so it rides in the one shared pytest env without changing local
