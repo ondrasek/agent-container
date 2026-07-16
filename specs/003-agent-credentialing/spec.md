@@ -107,7 +107,7 @@ Because every secret is injected at runtime from the operator's machine and neve
 **Model/API credentials**
 
 - **FR-005**: The system MUST provision the **model/API credential** an agent needs to reach its backend, delivered as runtime-injected material, such that the agent can operate.
-- **FR-006**: Model/API credentials MUST be delivered **as files by default** and placed into the agent's environment **inside the container** only where an agent cannot consume a file; the credential MUST NOT be placed on any process command line nor written literally into the deployment description.
+- **FR-006**: Model/API credentials MUST be delivered **as files by default** and placed into the agent's environment **inside the container** only where an agent cannot consume a file; the credential MUST NOT be placed on any process command line nor written literally into the deployment description. **Tool-injected** delivery (file or in-container env) MUST be **ephemeral** — the injected credential is not written to a persistent per-agent volume by the tool (FR-012). Delivering it into an agent's own on-volume auth store on the tool's behalf (e.g. a non-interactive `login`) is therefore NOT a permitted default; that on-volume form is only the operator-initiated stored authorization below.
 
 **Configuration (non-secret)**
 
@@ -119,7 +119,7 @@ Because every secret is injected at runtime from the operator's machine and neve
 
 - **FR-010**: No secret MUST ever be **baked into an image layer**.
 - **FR-011**: No secret MUST ever appear on a **process command line**.
-- **FR-012**: No secret MUST **rest in a host persistent volume**; secrets are delivered read-only and vanish with the container, leaving the operator's local copy as the sole durable copy.
+- **FR-012**: No **tool-injected** secret MUST **rest in a host persistent volume**; injected secrets are delivered read-only and vanish with the container, leaving the operator's local copy as the sole durable copy. *Exception — operator-initiated stored authorization:* an operator may interactively authenticate an agent **inside** the container (e.g. its `login` flow), caching a session on the per-agent volume; this is the operator's own action on their own credential, not tool-injected material, and is explicitly outside this invariant (see the Model/API credential entity). The tool MUST NOT perform such persistence on the operator's behalf as a delivery default.
 - **FR-013**: Each secret MUST be delivered **only to the deployment that needs it** (no broader distribution).
 - **FR-014**: All injected material MUST be delivered to the target host **over the runtime context** so a remote deployment receives it (never a local-only reference that resolves empty remotely) — inherited from Feature 001.
 - **FR-015**: **Rotating** any secret MUST require only changing it on the operator's machine and redeploying; no baked or persisted copy may survive the rotation.

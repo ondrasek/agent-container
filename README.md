@@ -545,6 +545,48 @@ optional. `GH_TOKEN` and git identity remain required.)
 > on macOS). That's an accepted trade-off — see [`docs/credentials.md`](docs/credentials.md).
 > `down --purge` deletes it.
 
+### Credential model (push key, API keys, canonical config)
+
+Beyond interactive login, `up`/`redeploy` inject an agent's credentials and
+config at runtime under a strict **least-exposure** discipline — a tool-injected
+secret lands under `/run/agent-container/…` (ephemeral) and is **never** copied
+onto a persistent volume (it vanishes with the container; your local copy is the
+sole durable copy). Full contract: [`docs/credentials.md`](docs/credentials.md).
+
+- **Outbound SSH push key (the default push channel).** So agents push
+  autonomously with **zero prompts**:
+
+  ```bash
+  agent-container up acme --push-key ~/.ssh/agent_push_ed25519 \
+                          --known-hosts ~/.ssh/known_hosts.github
+  ```
+
+  The entrypoint wires `core.sshCommand` with `IdentitiesOnly=yes` + the seeded
+  `known_hosts`. This key is **distinct** from the inbound sshd host key and is
+  never written to `~/.ssh`. HTTPS + `GH_TOKEN` remains the alternative; a
+  per-repository deploy key is just a narrower `--push-key`. Env-file parity:
+  `SSH_PUSH_KEY_B64` / `PUSH_KNOWN_HOSTS`.
+
+- **File-first API keys.** Drop a per-provider key file next to your `.env` and
+  it is discovered and injected **ephemerally** (Claude gets an `apiKeyHelper`;
+  Codex/pi get an ephemeral `$HOME` redirect so their `auth.json` never touches
+  the volume):
+
+  ```
+  ./agent-container.acme.anthropic.key      # or .openai.key, ...
+  ```
+
+- **Canonical config, fresh each deploy.** Operator-owned, non-secret settings /
+  guidance / tool defs delivered fresh on every deploy (local edits propagate on
+  `redeploy`) while the agent's mutable runtime state persists on its volume:
+
+  ```
+  ./agent-container.acme.config/.claude/settings.json   # + CLAUDE.md, MCP defs, ...
+  ```
+
+  A config file that embeds a secret is treated **as a secret** (ephemeral), not
+  persisted. Rotating any secret is just a local edit + `redeploy`.
+
 ### Persistent shell environment
 
 Each container mounts a `~/.agent-container` volume holding an `env` file that is sourced

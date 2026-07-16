@@ -122,9 +122,11 @@ reset_session() { rm -f "${STATE}/exists"; }
 # reset_ssh: clean SSH state so a run starts from "no persisted key, no
 # injection". SSH-specific tests call this, then set the TEST_ENV_* globals
 # and/or drop files in INJECTDIR before run_entrypoint.
-reset_ssh() { rm -rf "${HOMEDIR}/.ssh"; rm -f "${INJECTDIR}"/*; TEST_ENV_AUTHKEYS=""; TEST_ENV_HKB64=""; }
+reset_ssh() { rm -rf "${HOMEDIR}/.ssh"; rm -rf "${INJECTDIR:?}"/*; TEST_ENV_AUTHKEYS=""; TEST_ENV_HKB64=""; TEST_PUSH_RUNTIME=""; TEST_APIKEY_RUNTIME=""; }
 TEST_ENV_AUTHKEYS=""
 TEST_ENV_HKB64=""
+TEST_PUSH_RUNTIME=""
+TEST_APIKEY_RUNTIME=""
 
 # Shared runtime env for the entrypoint under test (stubs + testability hooks).
 _export_env() {
@@ -138,6 +140,10 @@ _export_env() {
     unset AGENT_CONTAINER_TMUX_WINDOWS
     [[ -n "${TEST_ENV_AUTHKEYS}" ]] && export SSH_AUTHORIZED_KEYS="${TEST_ENV_AUTHKEYS}" || unset SSH_AUTHORIZED_KEYS
     [[ -n "${TEST_ENV_HKB64}" ]] && export SSH_HOST_ED25519_KEY_B64="${TEST_ENV_HKB64}" || unset SSH_HOST_ED25519_KEY_B64
+    [[ -n "${TEST_PUSH_RUNTIME}" ]] && export AGENT_CONTAINER_PUSH_RUNTIME="${TEST_PUSH_RUNTIME}" || unset AGENT_CONTAINER_PUSH_RUNTIME
+    [[ -n "${TEST_APIKEY_RUNTIME}" ]] && export AGENT_CONTAINER_APIKEY_RUNTIME="${TEST_APIKEY_RUNTIME}" || unset AGENT_CONTAINER_APIKEY_RUNTIME
+    # A leaked provider key env must never steer the US2 file-injection tests.
+    unset ANTHROPIC_API_KEY OPENAI_API_KEY
 }
 
 # run_entrypoint <mode>; mode is __unset__ | __empty__ | any literal value.
@@ -293,6 +299,77 @@ TEST_ENV_AUTHKEYS="$(printf '%s\n%s\n%s' "${PUB1}" "${PUB1}" "${PUB2}")"  # dup 
 run_entrypoint __unset__
 check_eq "ssh: authorized_keys deduped union has 2 keys" "2" "$(grep -c . "${AK}")"
 if grep -qxF "${PUB1}" "${AK}" && grep -qxF "${PUB2}" "${AK}"; then ok; else bad "ssh: both unique keys present"; fi
+
+# --- 8. Outbound SSH push key (Feature 003 US1) ------------------------------
+# The push key is injected via INJECT_DIR, delivered EPHEMERALLY: copied 0600 to
+# an ephemeral runtime dir (never the ~/.ssh volume, FR-012), git's core.sshCommand
+# points at it with IdentitiesOnly, and the inbound host-key path is untouched
+# (SC-008).
+reset_session; reset_ssh
+PUSHRT="${SB}/pushrt"; rm -rf "${PUSHRT}"; TEST_PUSH_RUNTIME="${PUSHRT}"
+PKSRC="${SB}/agent_push_key"; ssh-keygen -q -t ed25519 -f "${PKSRC}" -N '' <<<y >/dev/null 2>&1
+cp "${PKSRC}" "${INJECTDIR}/push_ed25519_key"
+printf 'github.com ssh-ed25519 AAAAKH\n' > "${INJECTDIR}/known_hosts"
+run_entrypoint __unset__
+# core.sshCommand configured with the ephemeral key + IdentitiesOnly (no prompt)
+if git_has 'core.sshCommand'; then ok; else bad "push: core.sshCommand configured"; fi
+if git_has "IdentitiesOnly=yes"; then ok; else bad "push: IdentitiesOnly set"; fi
+if git_has "${PUSHRT}/push_key"; then ok; else bad "push: sshCommand points at the ephemeral key"; fi
+# the ephemeral key exists 0600 in the runtime dir, byte-identical to the source
+check_eq "push: ephemeral key mode 0600" "600" "$(stat -c '%a' "${PUSHRT}/push_key" 2>/dev/null || stat -f '%Lp' "${PUSHRT}/push_key")"
+if cmp -s "${PKSRC}" "${PUSHRT}/push_key"; then ok; else bad "push: ephemeral key matches source"; fi
+# FR-012: the push key is NOT written onto the persisted ~/.ssh volume
+if [[ ! -e "${HOMEDIR}/.ssh/push_ed25519_key" && ! -e "${HOMEDIR}/.ssh/push_key" ]]; then ok; else bad "push: key must NOT land on the ~/.ssh volume"; fi
+# SC-008: the inbound host key still lives on its own path, untouched/unconflated
+if [[ -f "${HK}" ]]; then ok; else bad "push: inbound host key path untouched"; fi
+if ! cmp -s "${PUSHRT}/push_key" "${HK}"; then ok; else bad "push: push key and host key are distinct"; fi
+
+# 8b. no push key injected -> no core.sshCommand (HTTPS path is unaffected)
+reset_session; reset_ssh; PUSHRT2="${SB}/pushrt2"; rm -rf "${PUSHRT2}"; TEST_PUSH_RUNTIME="${PUSHRT2}"
+run_entrypoint __unset__
+if git_has 'core.sshCommand'; then bad "push: no key -> core.sshCommand must NOT be set"; else ok; fi
+
+# --- 9. Model/API credentials (Feature 003 US2) ------------------------------
+# Provider keys are injected as FILES under ${INJECT_DIR}/apikeys/<provider>,
+# delivered EPHEMERALLY (H1/FR-012): Claude gets an apiKeyHelper that CATS the
+# injected key (the key value never lands on the ~/.claude volume); Codex/pi get
+# their homes REDIRECTED to an ephemeral dir so nothing they write hits the
+# -codex/-pi volume. Absent injected keys -> no wiring at all.
+CLAUDE_SETTINGS="${HOMEDIR}/.claude/settings.json"
+CLAUDE_HELPER="${HOMEDIR}/.claude/apikey-helper.sh"
+
+reset_session; reset_ssh
+APIRT="${SB}/apirt"; rm -rf "${APIRT}"; TEST_APIKEY_RUNTIME="${APIRT}"
+rm -rf "${HOMEDIR}/.claude" "${HOMEDIR}/.codex" "${HOMEDIR}/.pi"
+mkdir -p "${INJECTDIR}/apikeys"
+printf 'sk-ant-SECRETVALUE\n' > "${INJECTDIR}/apikeys/anthropic"
+printf 'sk-oai-SECRETVALUE\n'  > "${INJECTDIR}/apikeys/openai"
+run_entrypoint __unset__
+
+# Claude: settings.json carries an apiKeyHelper pointing at a helper script that
+# cats the EPHEMERAL injected key — never the key value itself.
+if [[ -f "${CLAUDE_SETTINGS}" ]] && grep -qF 'apiKeyHelper' "${CLAUDE_SETTINGS}"; then ok; else bad "apikey: Claude settings.json gets apiKeyHelper"; fi
+if [[ -x "${CLAUDE_HELPER}" ]] && grep -qF "${INJECTDIR}/apikeys/anthropic" "${CLAUDE_HELPER}"; then ok; else bad "apikey: helper cats the injected anthropic path"; fi
+# H1/FR-012: the anthropic key VALUE must not be written onto the ~/.claude volume.
+if grep -rqF 'sk-ant-SECRETVALUE' "${HOMEDIR}/.claude" 2>/dev/null; then bad "apikey: anthropic key value must NOT land on the ~/.claude volume"; else ok; fi
+
+# Codex: CODEX_HOME redirected to the ephemeral runtime dir (off the -codex volume);
+# the key value is never written under ~/.codex.
+if [[ -d "${APIRT}/codex-home" ]]; then ok; else bad "apikey: Codex home redirected to the ephemeral dir"; fi
+if grep -rqF 'sk-oai-SECRETVALUE' "${HOMEDIR}/.codex" 2>/dev/null; then bad "apikey: openai key value must NOT land on the ~/.codex volume"; else ok; fi
+if log_has 'CODEX_HOME'; then ok; else bad "apikey: Codex redirect is logged"; fi
+
+# pi: PI_CODING_AGENT_DIR redirected to the ephemeral runtime dir (off the -pi volume).
+if [[ -d "${APIRT}/pi-home" ]]; then ok; else bad "apikey: pi home redirected to the ephemeral dir"; fi
+if grep -rqF 'sk-ant-SECRETVALUE' "${HOMEDIR}/.pi" 2>/dev/null; then bad "apikey: key value must NOT land on the ~/.pi volume"; else ok; fi
+
+# 9b. no injected key -> no apiKeyHelper, no ephemeral homes (env/.env path intact)
+reset_session; reset_ssh
+APIRT2="${SB}/apirt2"; rm -rf "${APIRT2}"; TEST_APIKEY_RUNTIME="${APIRT2}"
+rm -rf "${HOMEDIR}/.claude" "${HOMEDIR}/.codex" "${HOMEDIR}/.pi"
+run_entrypoint __unset__
+if [[ -e "${HOMEDIR}/.claude/settings.json" ]]; then bad "apikey: no key -> no apiKeyHelper settings written"; else ok; fi
+if [[ -d "${APIRT2}/codex-home" || -d "${APIRT2}/pi-home" ]]; then bad "apikey: no key -> no ephemeral homes created"; else ok; fi
 
 note ""
 note "entrypoint tmux tests: ${pass} passed, ${fail} failed"
