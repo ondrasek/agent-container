@@ -1446,7 +1446,7 @@ _TUNNELS: dict[str, subprocess.Popen] = {}
 
 
 def host_name_from_context(ctx: str) -> str:
-    return ctx[len(CONTAINER_PREFIX) :] if ctx.startswith(CONTAINER_PREFIX) else ctx
+    return ctx.removeprefix(CONTAINER_PREFIX)
 
 
 def automation_key_path(name: str) -> Path:
@@ -2002,7 +2002,7 @@ def build_compose_model(
         "build": {"context": str(build_context)},
         "restart": "unless-stopped",
         "ports": [f"{port}:2222"],
-        "volumes": list(all_volume_mounts(name)) + list(extra_mounts or []),
+        "volumes": all_volume_mounts(name) + list(extra_mounts or []),
     }
     if env_file is not None:
         service["env_file"] = [str(env_file)]
@@ -2996,10 +2996,8 @@ def wizard_handover(
     finally:
         signal.signal(signal.SIGINT, old_int)
         if _ORIG_TERMIOS is not None:
-            try:
+            with contextlib.suppress(Exception):
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _ORIG_TERMIOS)
-            except Exception:
-                pass
     if rc == 0:
         console.print(
             f"Detached — tmux session 'main' is still running on {target}; agents keep working."
@@ -3033,7 +3031,7 @@ def _validate_wiz_name(text: str):  # questionary validator: True or error strin
 
 
 def _short(cname: str) -> str:
-    return cname[len(CONTAINER_PREFIX) :]
+    return cname.removeprefix(CONTAINER_PREFIX)
 
 
 def wiz_build(rt: str) -> None:
@@ -3697,14 +3695,14 @@ def _completion_script(shell: str) -> str:
         p = REPO_ROOT / "completions" / f"agent-container.{shell}"
         if p.is_file():
             return p.read_text()
-    try:
+    with contextlib.suppress(
+        ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError
+    ):
         import importlib.resources as ir
 
         res = ir.files("agent_container").joinpath(f"completions/agent-container.{shell}")
         if res.is_file():
             return res.read_text()
-    except ModuleNotFoundError, ImportError, FileNotFoundError, TypeError, AttributeError:
-        pass
     die(f"completion script for '{shell}' not found (need a checkout or an installed package)")
 
 
@@ -3725,20 +3723,16 @@ def _resolve_version() -> str:
     (wheel), it is read from package metadata; when run via `uv run --script`
     from a checkout, it is read from pyproject directly — no hardcoded constant
     to drift from the release version release-please bumps."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version
+    from importlib.metadata import PackageNotFoundError, version
 
+    with contextlib.suppress(PackageNotFoundError):
         return version("agent-container")
-    except PackageNotFoundError:
-        pass
     if REPO_ROOT is not None:
-        try:
+        with contextlib.suppress(Exception):
             import tomllib
 
             with (REPO_ROOT / "pyproject.toml").open("rb") as f:
                 return tomllib.load(f)["project"]["version"]
-        except Exception:
-            pass
     return "0.0.0+unknown"
 
 
