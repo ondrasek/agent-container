@@ -2,6 +2,57 @@
 
 <!-- version list -->
 
+## v0.7.0 (2026-07-16)
+
+### Chores
+
+- Sync uv.lock package version to 0.6.0 ([#003](https://github.com/ondrasek/agent-container/pull/3),
+  [`599512a`](https://github.com/ondrasek/agent-container/commit/599512aae5fdb2317a638fcb998bb7f8287220ed))
+
+### Continuous Integration
+
+- Add vulture/xenon/refurb to the quality gate + self-healing ty cache
+  ([`a07e721`](https://github.com/ondrasek/agent-container/commit/a07e72165623e118eff96114dc155f543133c6c0))
+
+- Pin vulture/xenon/refurb versions to stop local↔CI drift
+  ([#003](https://github.com/ondrasek/agent-container/pull/3),
+  [`a844ea8`](https://github.com/ondrasek/agent-container/commit/a844ea875345f8d4f496cb4c6809ee68eeec3781))
+
+- Test stdout only in run_check_nonempty so uv's install line isn't a finding
+  ([`e0c6c40`](https://github.com/ondrasek/agent-container/commit/e0c6c40fb5b411d1cc708bff77ffd5b031a70f54))
+
+### Documentation
+
+- Credentialing model + 003 polish (specs/003, #003)
+  ([`b83391f`](https://github.com/ondrasek/agent-container/commit/b83391fe8bd1bdb833a01c807aac55896b047085))
+
+- **specs**: Address 003 analyze findings — ephemeral API creds + coverage/convention
+  ([#003](https://github.com/ondrasek/agent-container/pull/3),
+  [`00d2832`](https://github.com/ondrasek/agent-container/commit/00d28323dc591f71a09290351cd0189da0f4a419))
+
+- **specs**: Plan Feature 003 agent-credentialing
+  ([#003](https://github.com/ondrasek/agent-container/pull/3),
+  [`e4121d2`](https://github.com/ondrasek/agent-container/commit/e4121d2c08f37d7bfa396ca60bcdf666ec1b9a7a))
+
+- **specs**: Task list for Feature 003 agent-credentialing
+  ([#003](https://github.com/ondrasek/agent-container/pull/3),
+  [`8b53468`](https://github.com/ondrasek/agent-container/commit/8b5346808465e55000da223131ee4b3a6a138cac))
+
+### Features
+
+- Model/API creds, canonical config, rotation (specs/003 US2/US3/US4, #003)
+  ([`68c1c0f`](https://github.com/ondrasek/agent-container/commit/68c1c0f726f2387c43df0fb17494525565f5bc04))
+
+- Outbound SSH push credential, ephemeral (specs/003 US1 MVP, #003)
+  ([`82325e9`](https://github.com/ondrasek/agent-container/commit/82325e9c0520b2668573c6dbeab163ba28803012))
+
+### Refactoring
+
+- Simplify chained None-identity check per refurb FURB124
+  ([#003](https://github.com/ondrasek/agent-container/pull/3),
+  [`225cab0`](https://github.com/ondrasek/agent-container/commit/225cab00323876e1c47272e94fa36caf9af40dbe))
+
+
 ## v0.6.0 (2026-07-14)
 
 ### Bug Fixes
