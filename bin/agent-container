@@ -2276,7 +2276,7 @@ def stage_push_injection(
     for the same uid-mismatch reason as stage_ssh_injection (the state dir is
     0700). The push key is a DISTINCT credential from the inbound host key (SC-008)."""
     entries: list[tuple[str, Path, str]] = []
-    if push_key is None and known_hosts is None:
+    if push_key is known_hosts is None:
         return entries
     d = host_state_dir(host)
     d.mkdir(parents=True, exist_ok=True)
