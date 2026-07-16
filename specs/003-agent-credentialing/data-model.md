@@ -20,9 +20,16 @@ compose `config` so it transfers over the runtime context (FR-014).
 | `target` | absolute in-container path (the compose `config` target) |
 | `scope` | exactly one `(host, name)` deployment (FR-013) |
 
-**Classification rule (FR-009)**: material that *carries* a secret (e.g. an MCP
-definition embedding a token) is `class = secret`, never `config` — the manifest
-marks such paths.
+**Classification rule (FR-009)**: secrets and canonical config travel *separate,
+well-defined channels* — the ephemeral **key-file** channel (US2) carries every
+tool-injected secret, while **canonical config** is non-secret *by definition*
+(FR-007: "settings, project guidance, tool/MCP definitions **without embedded
+secrets**"), so MCP definitions are canonical config (delivered and consumed).
+A config file that nonetheless *carries* a token cannot be detected content-free
+without reading it (a secret-hygiene violation), and consuming a secret-bearing
+config would contradict FR-012 (agents read config from the persistent volume);
+so richer auto-classification is deferred to **Feature 006** (agent-as-code). The
+operator externalizes real secrets through the key-file channel.
 
 **Invariant matrix (FR-010…FR-015)** — enforced by construction:
 

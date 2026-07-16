@@ -110,3 +110,26 @@ All scenarios pass with every secret injected at runtime, ephemeral where
 FR-012 applies, absent from argv / image / deployment description / persistent
 volumes, delivered only to the one deployment that needs it, and rotatable by a
 local edit + redeploy — matching SC-001…SC-008.
+
+## Validation record (T026)
+
+Each scenario above is codified across three automated tiers — hermetic unit
+tests (`bin/tests/test_credentialing.py`, no runtime), the entrypoint shell
+harness (`bin/tests/test_entrypoint.sh`), and the real-container acceptance tier
+(`pytest -m acceptance bin/tests/test_acceptance.py`). The acceptance tests run
+in CI with **dummy** credentials (they exercise delivery/wiring/ephemerality, not
+a real backend or remote); the parts that need a **real** git remote or model
+backend are the **opt-in/tokened** extensions, outside the CI cost boundary.
+
+| Scenario | Hermetic unit | Shell harness | Acceptance (real container) | Opt-in/tokened extension |
+|----------|---------------|---------------|-----------------------------|--------------------------|
+| **A** — non-interactive push (SC-001) | `test_stage_push_injection_stages_ephemeral_entries`, `test_do_up_threads_push_material` | push section (`core.sshCommand` + `IdentitiesOnly`) | `test_push_credential_ephemeral_and_distinct` (wiring) | **zero-prompt push to a real remote** |
+| **B** — two keys distinct (SC-008) | `test_push_key_distinct_from_host_key` | push key ≠ host key, not on volume | `test_push_credential_ephemeral_and_distinct` (distinct fingerprints) | — |
+| **C** — push key leaves no durable copy (FR-012/SC-004) | `test_no_secret_value_inlined_in_compose_model` | key **not** written to `~/.ssh` volume | `test_push_credential_ephemeral_and_distinct` (only under `/run`) | — |
+| **D** — API cred reaches backend (SC-002) | `test_discover_apikey_files_*`, `test_stage_apikey_injection_ephemeral_target` | apikey section (Claude helper, Codex/pi `$HOME` redirect) | `test_apikey_injection_ephemeral_and_off_volume` (delivery) | **real backend-reaching call** |
+| **E** — off every surface (SC-003) | `test_apikey_value_never_inlined_in_compose_model`, `test_apikey_env_delivery_unaffected` | value not on the `~/.claude`/`~/.codex` volume | `test_apikey_injection_ephemeral_and_off_volume` (argv/compose/volume) | — |
+| **F** — canonical fresh; runtime persists (SC-005) | `test_discover_canonical_config_*`, `test_stage_config_injection_targets`, `test_compose_up_exec_threads_canonical_config` | canonical-copy on boot | `test_canonical_config_fresh_redeploy_runtime_state_persists` | — |
+| **G** — rotation + fail-fast (SC-006/007) | `test_missing_*_dies_before_any_compose_call`, `test_all_material_staged_locally_before_compose_up`, `test_per_repo_deploy_key_is_just_a_narrower_push_key` | — | `test_secret_rotation_new_value_in_effect_old_gone` | **per-repo deploy key scope** against a real remote (FR-004) |
+
+Secret-bearing config classification (FR-009, the Scenario-F secret sub-case) is
+pinned by `test_discover_canonical_config_marks_secret_bearing`.
