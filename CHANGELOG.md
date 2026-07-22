@@ -2,6 +2,63 @@
 
 <!-- version list -->
 
+## v0.10.0 (2026-07-22)
+
+### Bug Fixes
+
+- **aac**: Address adversarial-verification findings
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`5cc457e`](https://github.com/ondrasek/agent-container/commit/5cc457e4aaf7d3ac300ba0866b468fee5f267f69))
+
+### Chores
+
+- **deps**: Lock PyYAML for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`38956d1`](https://github.com/ondrasek/agent-container/commit/38956d19e01c5b410055e9ec01bc166543572aae))
+
+### Continuous Integration
+
+- Add pyyaml pin to the pytest jobs for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`baad2ca`](https://github.com/ondrasek/agent-container/commit/baad2ca838a318fbf82632ead38c1304cc13b775))
+
+### Documentation
+
+- **aac**: Document the declarative agent-as-code model
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`90ad959`](https://github.com/ondrasek/agent-container/commit/90ad9598d11c2348db141f20825f764d33f5751a))
+
+- **specs**: Address analyze findings for Feature 006
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`5eaefa1`](https://github.com/ondrasek/agent-container/commit/5eaefa1e3bd36ce4d4f74f3d8fed3469d3116ddc))
+
+- **specs**: Clarify Feature 006 agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`1db95eb`](https://github.com/ondrasek/agent-container/commit/1db95eb688709c2f2701c990305881847659fc39))
+
+- **specs**: Mark 006 clarification checklist item complete
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`fe41e58`](https://github.com/ondrasek/agent-container/commit/fe41e58fb7a010aca2fafe175ab142d57293add9))
+
+- **specs**: Pin Feature 006 spec format to YAML/PyYAML
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`7c05bb9`](https://github.com/ondrasek/agent-container/commit/7c05bb9b0035ce8ccf0e95d69b30b2c90c97c14b))
+
+- **specs**: Plan Feature 006 agent-as-code + spec-integrity FR-020
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`7a49e9a`](https://github.com/ondrasek/agent-container/commit/7a49e9a45ca86053ec6fbd224128badd0b9573b8))
+
+- **specs**: Task list for Feature 006 agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`3393961`](https://github.com/ondrasek/agent-container/commit/339396166a50b65f166d85d62ea0939eda60df9f))
+
+### Features
+
+- **aac**: Declarative .agent-container project — apply/plan/status/destroy
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`fd09368`](https://github.com/ondrasek/agent-container/commit/fd09368b4c27e67ca458c710528a446a9aa882e5))
+
+
 ## v0.9.0 (2026-07-22)
 
 ### Bug Fixes
