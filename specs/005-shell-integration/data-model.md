@@ -72,7 +72,7 @@ or wrong-dialect emit).
 | **attach command** | `attach <name> --print` | one command line = the `ssh … -t tmux attach -t main` argv (parity with execute) |
 | **SSH-config stanza** | `attach <name> --ssh-config` | a `Host <name>` block (HostName/User/Port/RequestTTY/RemoteCommand) — printed, not eval-shaped |
 | **host env (set)** | `host env <name>` | env op: set `DOCKER_CONTEXT`/`CONTAINER_CONNECTION` (default) or `DOCKER_HOST`/`CONTAINER_HOST` (`--endpoint`) |
-| **host env (unset)** | `host env --unset` | env op(s): plain `unset` of the same var(s); no snapshot/restore |
+| **host env (unset)** | `host env --unset` (no name) | env ops: plain `unset` of **all four** candidate vars (`DOCKER_CONTEXT`/`DOCKER_HOST`/`CONTAINER_CONNECTION`/`CONTAINER_HOST`); no snapshot/restore |
 
 ## Emit result & exit discipline
 
@@ -82,7 +82,7 @@ or wrong-dialect emit).
 | **unknown target** | name not registered / no state / (attach) no container | **empty stdout**, clear stderr message, **non-zero** exit (`eval` runs nothing) |
 | **bad dialect** | `--shell` value unrecognized | empty stdout, stderr message, non-zero |
 | **resolution failure** | any error before the block is complete | nothing written to stdout (buffer discarded), stderr message, non-zero |
-| **unset with nothing set** | `host env --unset` | harmless — emits the `unset` line(s); a no-op when the vars are unset |
+| **unset with nothing set** | `host env --unset` | harmless — emits the name-free `unset` of all four vars; a no-op when they are already unset |
 
 **No side effects (FR-005)**: producing any of the above reads only local
 registry/state; it creates, starts, connects, or mutates nothing, and two

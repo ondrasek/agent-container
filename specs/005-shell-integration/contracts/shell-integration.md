@@ -14,7 +14,8 @@ this feature *exposes* them.
 | `attach <name> --shell posix\|fish\|pwsh` | Dialect for `--print` (default `posix`). |
 | `host env <name>` | Emit env assignments that retarget the operator's `docker`/`podman` at host `<name>` (prints by default — it exists to be `eval`'d). |
 | `host env <name> --endpoint` | Emit the **raw endpoint** form (`DOCKER_HOST`/`CONTAINER_HOST=ssh://…`) instead of the default context reference. |
-| `host env --unset` | Emit a **plain unset** of the vars `host env` sets (reverts to the shell/daemon default; no snapshot/restore). |
+| `host env --unset` | Takes **no name**. Emit a **plain unset** of **all** vars `host env` can set (`DOCKER_CONTEXT`, `DOCKER_HOST`, `CONTAINER_CONNECTION`, `CONTAINER_HOST`) — reverts to the shell/daemon default regardless of driver/form; no snapshot/restore. |
+| (`host env` has **no execute mode**) | Emit-only by nature — a child process cannot set the parent shell's env; that is why it exists to be `eval`'d. Only operations with an execute path (e.g. `attach`) offer print-vs-execute (FR-009). |
 | `host env <name> --shell posix\|fish\|pwsh` | Dialect for the emitted assignments (default `posix`). |
 
 ## Emitted formats
@@ -64,16 +65,22 @@ unset: `set -e DOCKER_CONTEXT`.
 
 ```powershell
 $env:DOCKER_CONTEXT = 'agent-container-hz1'
-# --unset:
-Remove-Item Env:DOCKER_CONTEXT -ErrorAction SilentlyContinue
+# host env --unset (name-free) clears all four candidate vars:
+Remove-Item Env:DOCKER_CONTEXT,Env:DOCKER_HOST,Env:CONTAINER_CONNECTION,Env:CONTAINER_HOST -ErrorAction SilentlyContinue
 ```
 
 **attach — pwsh** (`attach acme --print --shell pwsh`): the same `ssh … -t tmux
 attach -t main` command line, pwsh-quoted (single quotes, `''` doubling on a literal
 quote).
 
-**host env — `--unset` (posix)**: `unset DOCKER_CONTEXT` (and/or `DOCKER_HOST` if the
-endpoint form was used — the unset covers the vars this feature sets for the driver).
+**host env — `--unset` (posix)**, name-free, clears all four candidate vars:
+
+```sh
+unset DOCKER_CONTEXT DOCKER_HOST CONTAINER_CONNECTION CONTAINER_HOST
+```
+
+(fish: `set -e DOCKER_CONTEXT DOCKER_HOST CONTAINER_CONNECTION CONTAINER_HOST`; pwsh:
+`Remove-Item Env:DOCKER_CONTEXT,Env:DOCKER_HOST,Env:CONTAINER_CONNECTION,Env:CONTAINER_HOST -ErrorAction SilentlyContinue`.)
 
 ## Stream & exit contract (the eval invariant)
 
