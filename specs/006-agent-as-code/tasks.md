@@ -99,9 +99,9 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T020 [P] Update `README.md`: the declarative model (`apply`/`plan`/`status`/`destroy`), the `.agent-container/` YAML schema, credential references, and the **spec-integrity** (read-only in-container) guarantee.
-- [ ] T021 [P] Update `CLAUDE.md` Decisions (agent-as-code: `.agent-container/` desired-state, reconcile-as-orchestrator, ownership-via-identity/no-state-file, credential references + decrypt-command, FR-020 RO spec, PyYAML dep) within the 2000-token budget — prune before adding.
-- [ ] T022 [P] Add `docs/agent-as-code.md`: the schema, the apply/status/destroy contract, the credential sources (incl. the decrypt command), precedence, the read-only-spec integrity guarantee (host-side-only read + read-only compose-`configs` delivery, remote-context-safe), and the **documented boundary of the plaintext-secret detection** — what it can and cannot catch (FR-015, L1).
+- [X] T020 [P] Update `README.md`: the declarative model (`apply`/`plan`/`status`/`destroy`), the `.agent-container/` YAML schema, credential references, and the **spec-integrity** (read-only in-container) guarantee.
+- [X] T021 [P] Update `CLAUDE.md` Decisions (agent-as-code: `.agent-container/` desired-state, reconcile-as-orchestrator, ownership-via-identity/no-state-file, credential references + decrypt-command, FR-020 RO spec, PyYAML dep) within the 2000-token budget — prune before adding.
+- [X] T022 [P] Add `docs/agent-as-code.md`: the schema, the apply/status/destroy contract, the credential sources (incl. the decrypt command), precedence, the read-only-spec integrity guarantee (host-side-only read + read-only compose-`configs` delivery, remote-context-safe), and the **documented boundary of the plaintext-secret detection** — what it can and cannot catch (FR-015, L1).
 - [ ] T023 Run `scripts/quality-gate.sh` (ruff · ty · bandit · vulture · xenon · refurb · self-test · pytest · shell) and fix all findings; ensure the **PyYAML** pin is threaded into the gate's hermetic `--with` invocation and that bandit is clean (no `yaml.load`).
 - [ ] T024 Run quickstart.md Scenarios A–H (local; the provisioned-host + real-agent ones are opt-in/tokened) and record the results in quickstart.md.
 
