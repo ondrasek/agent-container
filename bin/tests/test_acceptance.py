@@ -1036,6 +1036,61 @@ def test_clone_on_start_ssh_without_key_fails_fast(acc):
     assert "push key" in r.stderr.lower() or "fr-014" in r.stderr.lower()
 
 
+# --- Feature 005: shell integration (real containers) ------------------------
+
+
+def test_attach_print_matches_the_live_target(acc):
+    """US1/SC-001: `attach --print` emits the runnable ssh+tmux command with the
+    LIVE deployment's coordinates (byte-for-byte what execute runs — parity is
+    unit-proven — so running it verbatim reaches the same session). We assert the
+    coordinates match the live port without tripping the test host's key verification."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("acc5print", authorized_key=[laptop.with_suffix(".pub")])
+    state = acc.tmp / "state"
+    r = _run_cli([*AGENT_CONTAINER, "attach", "acc5print", "--local", "--print"], state)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == f"ssh dev@localhost -p {port} -t tmux attach -t main"
+    r2 = _run_cli([*AGENT_CONTAINER, "attach", "acc5print", "--local", "--ssh-config"], state)
+    assert f"Port {port}" in r2.stdout and "RemoteCommand tmux attach -t main" in r2.stdout
+
+
+@pytest.mark.skipif(
+    RUNTIME != "docker", reason="host env DOCKER_CONTEXT eval test is docker-specific"
+)
+def test_host_env_eval_retargets_docker(acc):
+    """US2/SC-002: `eval $(agent-container host env NAME)` sets DOCKER_CONTEXT so the
+    operator's own docker lists that host's containers — with no tool wrapper."""
+    acc.up("acc5env")
+    state = acc.tmp / "state"
+    ctx = subprocess.run(
+        ["docker", "context", "show"], capture_output=True, text=True
+    ).stdout.strip()
+    cfg = _config_dir_of(state)
+    cfg.mkdir(parents=True, exist_ok=True)
+    cfg.joinpath("hosts.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default": None,
+                "hosts": {
+                    "acc5envhost": {"driver": "docker", "context": ctx, "address": "localhost"}
+                },
+            }
+        )
+    )
+    r = _run_cli([*AGENT_CONTAINER, "host", "env", "acc5envhost"], state)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == f"export DOCKER_CONTEXT={ctx}"
+    # eval the EMITTED text in a real sh, then confirm docker targets that context.
+    ps = subprocess.run(
+        ["sh", "-c", 'eval "$1"; docker ps --format "{{.Names}}"', "_", r.stdout],
+        env=_cli_env(state),
+        capture_output=True,
+        text=True,
+    )
+    assert "agent-container-acc5env" in ps.stdout
+
+
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
     """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
     ANY container is still present on the host, and release only once it is empty.
