@@ -90,7 +90,7 @@ run_check_nonempty() {
 }
 
 # App runtime deps (mirrors the PEP 723 block); pytest runs inside this uv env.
-DEPS=(--with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15')
+DEPS=(--with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' --with 'pyyaml>=6,<7')
 RUFF=(uv run --no-project --with ruff ruff)
 BANDIT=(uv run --no-project --with bandit bandit)
 # Universal static checks adopted from the canonical quality hook, adapted to the
@@ -118,7 +118,7 @@ PYT=(uv run --no-project "${DEPS[@]}" --with pytest
 # reports unresolved-import on a clean checkout. Cache it in a temp dir: first
 # build ~3s, cached runs instant; CI's temp dir is fresh each run so it builds
 # once.
-TY_DEPS="typer>=0.12,<1 questionary>=2.0,<3 rich>=13,<15 ty"
+TY_DEPS="typer>=0.12,<1 questionary>=2.0,<3 rich>=13,<15 pyyaml>=6,<7 ty"
 TYVENV="${TMPDIR:-/tmp}/agent-container-tyvenv"
 build_ty_env() {
     rm -rf "$TYVENV"

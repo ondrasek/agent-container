@@ -7,6 +7,7 @@ hermetic (the root pyproject.toml otherwise puts uv in project mode) and the
 
     uv run --no-project --with pytest \
            --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' \
+           --with 'pyyaml>=6,<7' \
            pytest bin/tests
 
 Every loaded module instance is isolated: HOME and the XDG dirs point into
