@@ -1,7 +1,7 @@
 # Data Model: Agent-as-Code (Feature 006)
 
 The model is the **`.agent-container/` project spec** (the desired state, on disk,
-parsed with `tomllib`) plus the **reconcile entities** (plan, ownership) the tool
+parsed with `yaml.safe_load`) plus the **reconcile entities** (plan, ownership) the tool
 computes at runtime. **No new persistent state** is stored — ownership/drift derive
 from the deterministic identity (Constitution IV). Inherited: host/registry (001),
 lifecycle (002), credential inject channels (003), execution/workspace (004).
@@ -9,42 +9,41 @@ lifecycle (002), credential inject channels (003), execution/workspace (004).
 ## Project specification (on disk)
 
 Rooted at the **`.agent-container/` marker directory** (nearest ancestor of the
-working dir, FR-001). One or more declarative TOML files collectively define the
-desired environment(s). Portable, optionally git-tracked. **Read only from the
-operator's host-side copy** — never a container's copy (FR-020).
+working dir, FR-001). One or more declarative **YAML** files (parsed with
+`yaml.safe_load`) collectively define the desired environment(s). Portable,
+optionally git-tracked. **Read only from the operator's host-side copy** — never a
+container's copy (FR-020).
 
-### Schema (TOML — illustrative; the schema, not the loader, is the contract)
+### Schema (YAML — illustrative; the schema, not the loader, is the contract)
 
-```toml
-# .agent-container/project.toml
-[[environment]]                 # one or more; each is an apply/status/destroy unit
-name = "acme"                   # -> the deterministic identity (container/volumes/port)
-host = "hz1"                    # host binding: a registered/known host name (US1/US4)
-# host = { provision = "hetzner", server_type = "cax11", location = "nbg1" }  # US4
-
-[environment.container]         # the up-surface (Features 002/004)
-mode = "interactive"            # interactive | headless
-agent = "claude"                # claude | codex | pi
-task = "@task.md"               # optional
-workspace = "persistent"        # persistent | bind | ephemeral
-repo = "https://github.com/you/acme"   # clone-on-start (004)
-env_file = "./acme.env"         # non-secret env
-
-[[environment.credential]]      # US2 — a reference, never a value
-name = "ANTHROPIC_API_KEY"
-source = "env"                  # env | file | keychain | encrypted
-var = "ANTHROPIC_API_KEY"       # for source=env
-# source="file",     path = "~/secrets/anthropic.key"          (outside the tracked dir)
-# source="keychain", service = "anthropic", account = "acme"   (OS secret store)
-# source="encrypted", path = ".agent-container/anthropic.age", decrypt = "age -d -i ~/.age/key"
+```yaml
+# .agent-container/project.yaml
+environments:
+  - name: acme                  # -> the deterministic identity (container/volumes/port)
+    host: hz1                   # host binding: a registered/known host name (US1)
+    # host: { provision: hetzner, server_type: cax11, location: nbg1 }   # US4
+    container:                  # the up-surface (Features 002/004)
+      mode: interactive         # interactive | headless
+      agent: claude             # claude | codex | pi
+      task: "@task.md"          # optional
+      workspace: persistent     # persistent | bind | ephemeral
+      repo: https://github.com/you/acme   # clone-on-start (004)
+      env_file: ./acme.env      # non-secret env
+    credentials:                # US2 — references, never values
+      - name: ANTHROPIC_API_KEY
+        source: env             # env | file | keychain | encrypted
+        var: ANTHROPIC_API_KEY
+      # - { name: OPENAI, source: file, path: ~/secrets/openai.key }        # outside the tracked dir
+      # - { name: X, source: keychain, service: anthropic, account: acme }  # OS secret store
+      # - { name: Y, source: encrypted, path: .agent-container/y.age, decrypt: "age -d -i ~/.age/key" }
 ```
 
-| Block | Meaning | Maps to |
-|-------|---------|---------|
-| `[[environment]]` | one desired agent setup; the unit of apply/status/destroy | a deterministic identity (name → container/volumes/port) |
+| Key | Meaning | Maps to |
+|-----|---------|---------|
+| `environments[]` | one desired agent setup; the unit of apply/status/destroy | a deterministic identity (name → container/volumes/port) |
 | `host` | host binding — a **referenced** (externally owned) or **provisioned** (spec-owned) host | 001 registry / provisioner (FR-017) |
-| `[environment.container]` | the deploy surface | `up` flags (002/004): mode/agent/task/workspace/repo/env |
-| `[[environment.credential]]` | a named credential **reference + source** — never the value | 003 inject channels (FR-011/012) |
+| `container` | the deploy surface | `up` flags (002/004): mode/agent/task/workspace/repo/env |
+| `credentials[]` | a named credential **reference + source** — never the value | 003 inject channels (FR-011/012) |
 
 ## Credential reference
 
@@ -85,7 +84,7 @@ name (Constitution IV) — no state file. `destroy` acts only on owned identitie
 
 ```text
 discover(.agent-container/)  → report root  (absent → today's imperative behavior, FR-004)
-      → parse+validate (tomllib)             (error → offending file/field, NO partial change, FR-003)
+      → parse+validate (yaml.safe_load)             (error → offending file/field, NO partial change, FR-003)
       → resolve host binding + precedence    (spec wins for its scope, reported, FR-018)
       → compute_plan(declared, live)         (absent/matching/drifted per resource)
       → apply:   preview + confirm → drive do_up / provisioner ; integrity: RO .agent-container bind (FR-020)

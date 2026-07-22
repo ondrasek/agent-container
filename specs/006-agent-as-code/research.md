@@ -15,29 +15,34 @@ exist and are the internals the reconcile layer drives.
 
 ---
 
-## R1 — Spec format: TOML (stdlib) recommended; YAML is a flagged dependency
+## R1 — Spec format: YAML via PyYAML (the recorded Constitution-VI exception)
 
-**Decision**: parse the `.agent-container/` declarative files with the **stdlib
-`tomllib`** (TOML). Zero new dependency (Constitution VI), already used in-project
-(pyproject, agent `config.toml`), human-authorable. **Flagged for operator
-confirmation**: the original description said "YAML"; YAML would require a
-third-party parser (PyYAML) the project has deliberately avoided (the whole
-compose-as-JSON design exists to dodge a YAML dep). If the operator insists on YAML,
-it is a Constitution-VI deviation recorded in Complexity Tracking (PyYAML is one
-mature, ubiquitous dep that *could* earn its place for human-authored config) —
-swapping the parser later is a localized change (the schema/validator is
-format-agnostic above the loader).
+**Decision** (operator's choice): the `.agent-container/` declarative files are
+**YAML**, parsed with **PyYAML** using **`yaml.safe_load` only** (never `yaml.load`,
+which can construct arbitrary objects — eval-safety). PyYAML is **the one new
+third-party dependency**, added to the PEP 723 inline metadata, `pyproject.toml`,
+and the test `--with` pins. This is a deliberate Constitution-VI deviation recorded
+in the plan's Complexity Tracking.
 
-**Rationale**: Constitution VI is load-bearing for this project; TOML keeps the
-gate clean and is sufficient for the schema (array-of-tables for multiple
-environments, nested tables for host/container/credential blocks).
+**Rationale**: YAML is the format operators expect for "as-code" declarative config
+(Compose/k8s/Terraform-adjacent) and is far more comfortable than TOML for the
+deeply-nested, list-heavy environment schema (multiple environments, nested
+host/container/credential blocks). The operator chose it explicitly. PyYAML is a
+single, mature, ubiquitous parser that earns its place; the schema/validator sits
+**above** the loader, so the parser is swappable if ever needed.
 
-**Alternatives rejected**: YAML+PyYAML (a new dep against a deliberate project
-stance); JSON (valid but hostile to hand-author); a bespoke parser (reinvents a
-wheel, Constitution VI).
+**Alternatives rejected**: TOML via stdlib `tomllib` (dependency-free and already
+in-project, but awkward for the nested/list schema and not the expected format — the
+operator chose YAML, so the one dep is justified); JSON (valid YAML but hostile to
+hand-author); a bespoke parser (reinvents a wheel, worse than a vetted dep).
 
-**Validation**: unit — a valid TOML spec parses to the model; an invalid one reports
-the offending file + field with no partial change.
+**Security note**: `yaml.safe_load` is mandatory — the spec is operator-authored but
+may be committed in a repo, so the loader must never construct arbitrary Python
+objects. Asserted in tests.
+
+**Validation**: unit — a valid YAML spec parses to the model; an invalid one reports
+the offending file + field with no partial change; `yaml.load` (unsafe) is never
+used.
 
 ---
 

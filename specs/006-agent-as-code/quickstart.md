@@ -10,15 +10,15 @@ agent.
 
 ```bash
 mkdir -p acme/.agent-container && cd acme
-cat > .agent-container/project.toml <<'TOML'
-[[environment]]
-name = "acme"
-host = "local"
-[environment.container]
-mode = "interactive"
-agent = "claude"
-workspace = "persistent"
-TOML
+cat > .agent-container/project.yaml <<'YAML'
+environments:
+  - name: acme
+    host: local
+    container:
+      mode: interactive
+      agent: claude
+      workspace: persistent
+YAML
 agent-container apply          # discover -> validate -> plan -> confirm -> up
 ```
 
@@ -36,7 +36,7 @@ agent-container apply          # against the already-satisfied spec
 ## Scenario C — Invalid spec is refused with no partial change (US1)
 
 ```bash
-echo 'this = is = not = toml' >> .agent-container/project.toml
+printf '\n  bad: [unterminated\n' >> .agent-container/project.yaml
 agent-container apply
 ```
 
@@ -54,8 +54,9 @@ cd /tmp && agent-container list        # no .agent-container up the tree
 
 ```bash
 # reference an API key via env + an encrypted-at-rest key via a decrypt command:
-#   [[environment.credential]] name="ANTHROPIC_API_KEY" source="env" var="ANTHROPIC_API_KEY"
-#   [[environment.credential]] name="OPENAI"  source="encrypted" path=".agent-container/openai.age" decrypt="age -d -i ~/.age/key"
+#   credentials:
+#     - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+#     - { name: OPENAI, source: encrypted, path: .agent-container/openai.age, decrypt: "age -d -i ~/.age/key" }
 export ANTHROPIC_API_KEY=sk-...
 agent-container apply
 grep -rIl "sk-" .agent-container/ ; echo "exit=$?"    # no plaintext secret in the dir
@@ -85,7 +86,7 @@ containers and referenced hosts untouched.
 # a repo whose workspace carries .agent-container/ is deployed; inside the container:
 agent-container attach acme
 # in the container:
-echo x >> /workspace/.agent-container/project.toml    # -> Read-only file system
+echo x >> /workspace/.agent-container/project.yaml    # -> Read-only file system
 ```
 
 **Expected**: the write **fails** (read-only, kernel-enforced) — the agent cannot

@@ -18,9 +18,10 @@ exactly as it does today (FR-004).
 Technical approach (see [research.md](./research.md)):
 - **Discovery** walks upward to the nearest `.agent-container/` marker and reports
   the root (FR-001).
-- **Format**: the declarative files are parsed with the **stdlib `tomllib`** (TOML)
-  — zero new dependency (Constitution VI); YAML would require a third-party parser
-  the project has deliberately avoided (flagged in R1 for confirmation).
+- **Format**: the declarative files are **YAML** (operator's choice), parsed with
+  **PyYAML** — the one new third-party dependency, a deliberate Constitution-VI
+  exception recorded in Complexity Tracking (YAML is the expected format for
+  human-authored "as-code" config; PyYAML is a single mature, ubiquitous parser).
 - **Reconcile** derives a **plan** (declared vs live) and converges by driving the
   existing internals (`do_up`/`compose_up_exec`, host registry/provisioner), so the
   declarative layer is an orchestrator, not a second implementation.
@@ -39,14 +40,15 @@ Technical approach (see [research.md](./research.md)):
 ## Technical Context
 
 **Language/Version**: Python ≥ 3.14 (single-file CLI `bin/agent-container`, PEP
-723). `tomllib` (stdlib, read-only TOML) parses the spec. `entrypoint.sh` gains no
-new logic; the read-only `.agent-container/` mount is a compose bind the CLI adds.
+723). **PyYAML** (`yaml.safe_load`) parses the spec. `entrypoint.sh` gains no new
+logic; the read-only `.agent-container/` mount is a compose bind the CLI adds.
 
-**Primary Dependencies**: **none new** (recommended, R1) — `tomllib` is stdlib;
-reconcile/credential/host machinery is all existing (001–005). *Decision to confirm*:
-using **YAML** instead would add a third-party parser (PyYAML) the project has
-deliberately avoided — a Constitution VI deviation recorded in Complexity Tracking
-if chosen.
+**Primary Dependencies**: **one new — PyYAML** (`yaml.safe_load`), the spec parser
+(operator chose YAML; the project otherwise has no YAML reader). It is added to the
+PEP 723 inline metadata + `pyproject.toml` + the test `--with` pins. Everything else
+(reconcile/credential/host machinery) is existing (001–005). This is the recorded
+Constitution-VI deviation (Complexity Tracking) — `yaml.safe_load` only (never
+`yaml.load`), for eval-safety.
 
 **Storage**: **no new persistent state** — ownership/drift derive from the
 deterministic identity (Constitution IV), so there is no Terraform-style state/lock
@@ -55,11 +57,11 @@ file. The `.agent-container/` directory itself is the operator's source of truth
 ephemeral 003 inject channels.
 
 **Testing**: hermetic unit (`bin/tests/`) — discovery (upward walk, report root,
-ambiguity/none → clear result), TOML parse + validation (offending file/field, no
+ambiguity/none → clear result), YAML parse + validation (offending file/field, no
 partial change), the plan computation (absent/matching/drifted), ownership→identity
 mapping, credential-reference resolution incl. the decrypt-command (in memory,
 never to disk) + the missing-source and git-tracked-plaintext refusals, precedence
-(spec wins, reported), and the RO-mount wiring in the compose model. Acceptance
+(spec wins, reported), and the RO-mount wiring in the compose model; YAML parse errors are reported cleanly. Acceptance
 (real containers): `apply` reaches the declared environment and a second `apply` is
 a no-op (idempotent); `destroy` removes only owned resources; the in-container
 `.agent-container/` is **read-only** (a write fails). Real-agent/model calls stay
@@ -77,7 +79,7 @@ reads; apply cost is the underlying deploy.
 idempotent apply (FR-006); **no secret to disk/log/registry/argv** (FR-013/014,
 Constitution III); **spec immutable from the container** (FR-020); ownership never
 removes unowned resources (FR-009); every operation reports the root + host chosen
-(FR-019). Zero new deps (Constitution VI, via TOML).
+(FR-019). One new dep — PyYAML `safe_load` (Constitution VI deviation, justified).
 
 **Scale/Scope**: single operator; one project dir → one or more declared
 environments. **MVP = US1** (declare + validate + idempotent apply against an
@@ -95,13 +97,12 @@ existing host). US2 (credential references), US3 (drift/status/scoped destroy), 
 | **III. Least Exposure** | ✅ **Load-bearing.** Credentials are references, never embedded; the decrypt command runs in memory; no plaintext to disk/log/registry/argv; git-tracked-plaintext is refused. The spec is read only from the trusted host-side copy. |
 | **IV. Deterministic Identity** | ✅ Reinforced. Ownership/drift/teardown all derive from the one deterministic identity — no second source of truth, no state file to desync. |
 | **V. Durable Spec, Disposable Code** | ✅ The feature *is* this principle at the product level — a directory as the durable, reviewable source of truth reconciled into disposable containers. Verification is acceptance-weighted (apply converges, idempotent, destroy scoped). |
-| **VI. Least Dependencies** | ✅ *with TOML* — zero new deps (stdlib `tomllib`), reusing all existing machinery. ⚠️ *if YAML* — adds PyYAML (Complexity Tracking). R1 recommends TOML. |
+| **VI. Least Dependencies** | ⚠️→✅ **One new dep: PyYAML** (operator chose YAML for the spec format). Justified + recorded in Complexity Tracking — a single mature, ubiquitous parser that earns its place for human-authored declarative config; `yaml.safe_load` only. All other machinery is reused. |
 | **VII. Continuous Deployment** | ✅ Ships incrementally as `feat` minors (US1 first); docs updated in-change. |
 
-**Result: PASS** on the TOML path — Complexity Tracking is empty. The format
-choice is the single Constitution-VI-sensitive decision; the recommended TOML keeps
-the gate clean. FR-020 makes Least Privilege/Immutable Runtime a first-class, tested
-gate rather than an afterthought.
+**Result: PASS** — the one deviation (PyYAML) is justified and recorded in
+Complexity Tracking; every other principle is reinforced. FR-020 makes Least
+Privilege/Immutable Runtime a first-class, tested gate rather than an afterthought.
 
 ## Project Structure
 
@@ -123,7 +124,7 @@ specs/006-agent-as-code/
 ```text
 bin/agent-container          # single-file CLI — the primary file edited:
                              #   • discovery: find_project_root() walks upward to .agent-container/, reports it
-                             #   • parse+validate: tomllib load + a schema validator (offending file/field; no partial change)
+                             #   • parse+validate: yaml.safe_load + a schema validator (offending file/field; no partial change)
                              #   • reconcile: compute_plan(declared, live) -> per-resource absent|matching|drifted;
                              #     do_apply()/do_plan()/do_destroy()/do_status() driving the EXISTING do_up/host/registry internals
                              #   • ownership: declared name -> deterministic identity (container_name/volumes/host); no state file
@@ -144,23 +145,20 @@ is a **read-only bind** the compose model adds for `/workspace/.agent-container`
 
 ## Complexity Tracking
 
-> Empty on the recommended TOML path (no Constitution violation). If the operator
-> chooses **YAML** for the spec format, record here: *Deviation* — a third-party
-> YAML parser (PyYAML); *Why* — the operator prefers YAML for human-authored config;
-> *Simpler alternative rejected because* — TOML via stdlib `tomllib` is dependency-
-> free and already used in-project, so YAML must justify the dep against Constitution VI.
+| Deviation | Why needed | Simpler alternative rejected because |
+|-----------|-----------|--------------------------------------|
+| **PyYAML** (one new third-party dependency) — the `.agent-container/` spec files are **YAML** | YAML is the expected, human-authored format for "as-code" declarative config (Compose/k8s/Terraform-adjacent); the operator chose it. PyYAML is a single, mature, ubiquitous parser. Used as `yaml.safe_load` only (never `yaml.load`) for eval-safety. | Stdlib `tomllib` (TOML) is dependency-free and already used in-project, but TOML is awkward for the deeply-nested/list-heavy environment schema and is not the format operators expect here; the operator explicitly chose YAML, so the one dep earns its place against Constitution VI. |
 
 ## Phase 0 — Outline & Research
 
-Complete. See [research.md](./research.md): R1 (spec format — TOML/stdlib
-recommended, YAML flagged), R2 (discovery — upward walk to `.agent-container/`), R3
+Complete. See [research.md](./research.md): R1 (spec format — YAML via PyYAML,
+the recorded Constitution-VI exception), R2 (discovery — upward walk to `.agent-container/`), R3
 (reconcile model — plan/apply/status/destroy over existing internals), R4
 (ownership via deterministic identity, no state file), R5 (credential resolution +
 the decrypt-command + keychain per-OS + git-plaintext refusal), R6 (**spec
 integrity** — read-only host-side-only spec, RO bind mount, FR-020), R7 (CLI
 surface + precedence). All four clarifications + the FR-020 integrity decision are
-folded in; no NEEDS CLARIFICATION remain (R1's format is a recommendation open to
-operator override).
+folded in; no NEEDS CLARIFICATION remain (R1's format is decided: YAML/PyYAML).
 
 ## Phase 1 — Design & Contracts
 
@@ -178,7 +176,7 @@ this repo — skipped, as in prior features.)
 Tasks will be organized by user story: **US1 discover→validate→apply (MVP)** → US2
 credential references (incl. the decrypt-command + refusals) → US3 status/diff +
 scoped destroy → US4 declarative host binding/provisioning, on a foundational layer
-(discovery + TOML parse/validate + the reconcile/ownership core + the FR-020
+(discovery + YAML parse/validate + the reconcile/ownership core + the FR-020
 read-only mount). All `bin/agent-container` edits are single-file-sequential; test
 modules + docs are `[P]`. The real-container acceptance (apply converges +
 idempotent; in-container spec read-only; destroy scoped) is the authoritative tier.

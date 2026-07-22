@@ -27,9 +27,9 @@ printed.
 
 ## Validation contract (FR-003)
 
-The spec is parsed (`tomllib`) and validated **before any action**. On a syntactic
-or semantic error the tool **refuses to act**, names the **offending file and
-field**, and makes **no partial change**.
+The spec is parsed (**`yaml.safe_load`** — never `yaml.load`) and validated **before
+any action**. On a syntactic or semantic error the tool **refuses to act**, names
+the **offending file and field**, and makes **no partial change**.
 
 ## Precedence contract (FR-018)
 
