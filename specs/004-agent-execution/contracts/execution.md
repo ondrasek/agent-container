@@ -14,7 +14,7 @@ non-workspace volumes, attach transport, and the 003 credentials are inherited.
 | `--workspace persistent\|bind\|ephemeral` | Workspace mode (default `persistent`). `bind` requires `--workspace-dir` (or reuses `--mount` semantics) and a **local** host. |
 | `--workspace-dir <local-abs-dir>` | The host directory for a `bind` workspace (local hosts only). |
 | `--repo <url>` | Clone-on-start source for persistent/ephemeral workspaces. |
-| `--foreground` | Headless only: stream the run attached and return control on completion (default headless is detached). |
+| `--foreground` | Headless only: stream the run attached and return control on completion (default headless is detached). The attached `compose up` uses `--abort-on-container-exit --exit-code-from agent` so the CLI exit status mirrors the agent container's exit code (FR-002). |
 
 Non-secret settings (`mode`/`agent`/`repo`/`workspace`) are delivered as compose
 **environment**; the task rides an injected **config** file. `redeploy` accepts the
@@ -26,7 +26,7 @@ same flags (a redeploy may change mode/agent/workspace/repo).
 |------|----------|---------|
 | `AGENT_CONTAINER_MODE` | env (`interactive`\|`headless`) | entrypoint mode branch |
 | `AGENT_CONTAINER_AGENT` | env (`claude`\|`codex`\|`pi`) | entrypoint invocation map |
-| `AGENT_CONTAINER_REPO` | env (clone-on-start URL) | entrypoint clone step |
+| `AGENT_CONTAINER_CLONE_URL` | env (clone-on-start URL) | entrypoint clone step |
 | initial task | injected file at `/run/agent-container/task` (ephemeral, 003 channel) | entrypoint (seeds the agent) |
 
 ## Entrypoint mode contract (`entrypoint.sh`)
@@ -39,7 +39,7 @@ same flags (a redeploy may change mode/agent/workspace/repo).
      workload; the container **exits with the agent's exit code** (FR-002). sshd/
      tmux are not required for a headless run (output is via compose `logs`).
 2. **Clone-on-start** (before the agent runs, for persistent/ephemeral with
-   `AGENT_CONTAINER_REPO` set and `/workspace` empty): clone by URL scheme —
+   `AGENT_CONTAINER_CLONE_URL` set and `/workspace` empty): clone by URL scheme —
    `git@…` uses the injected push key (`core.sshCommand`, 003), `https://…` uses
    `GH_TOKEN` (003). A `git@…` repo with no push key → **die** (FR-014). Idempotent
    (skip if a working copy exists). A **bind** workspace is never cloned.
@@ -53,7 +53,7 @@ same flags (a redeploy may change mode/agent/workspace/repo).
 | `restart` | parameter, set per mode (`unless-stopped` interactive / `on-failure` headless) — no longer a hardcoded literal |
 | workspace mount | persistent → the named workspace volume; bind → `<local-abs>:/workspace`; ephemeral → **omit** the `/workspace` mount |
 | workspace volume | declared in the model's `volumes:` **only** in persistent mode; `per_container_volumes` (purge) tolerates its absence |
-| env | `AGENT_CONTAINER_MODE`/`AGENT_CONTAINER_AGENT`/`AGENT_CONTAINER_REPO` added to the service environment (non-secret) |
+| env | `AGENT_CONTAINER_MODE`/`AGENT_CONTAINER_AGENT`/`AGENT_CONTAINER_CLONE_URL` added to the service environment (non-secret) |
 | task | delivered via the existing `injected_configs` channel (ephemeral `/run` target) |
 
 ## Attach contract (`bin/agent-container`)
