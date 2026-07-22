@@ -70,6 +70,14 @@ The tool **refuses to deploy** a configuration that would expose the spec writab
 (e.g. a `bind` workspace over the project directory) — use `persistent`/`ephemeral`
 for a self-hosting repo.
 
+> **Scope of the in-container guarantee.** The read-only delivery protects the
+> *declared spec files* (the agent cannot modify them). The containing
+> `/workspace/.agent-container/` directory itself lives on the writable workspace,
+> so the agent could create unrelated sibling files there — but that changes
+> nothing, because the tool reconciles **only** the operator's host-side copy and
+> never reads the container's. The host-side-only read is the load-bearing gate;
+> the read-only delivery is defense-in-depth.
+
 ## Roadmap (this feature ships incrementally)
 
 The **US1 MVP** (declare → validate → idempotent `apply`/`plan`/`status`/`destroy`

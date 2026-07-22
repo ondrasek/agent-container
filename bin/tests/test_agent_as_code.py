@@ -75,7 +75,7 @@ def test_load_spec_safe_load_refuses_object_construction(wiz, tmp_path, monkeypa
 
 
 def test_load_spec_missing_environments_dies(wiz, tmp_path):
-    root = _project(tmp_path, "other: 1\n")
+    root = _project(tmp_path, "{}\n")  # a mapping with no keys → missing 'environments'
     with pytest.raises(wiz.Fatal, match="missing required key 'environments'"):
         wiz.load_project_spec(root)
 
@@ -196,7 +196,7 @@ def test_verify_refuses_bind_workspace(wiz, tmp_path):
 @pytest.fixture
 def aac_env(wiz, monkeypatch):
     """Stub host resolution + live state + effects so apply/status are hermetic."""
-    monkeypatch.setattr(wiz, "resolve_deploy_host", lambda h: ("local", LOCAL_HOST))
+    monkeypatch.setattr(wiz, "resolve_deploy_host", lambda h: (h or "local", LOCAL_HOST))
     monkeypatch.setattr(wiz, "ensure_tunnel", lambda host: None)
     calls: dict = {"up": [], "down": []}
     monkeypatch.setattr(wiz, "do_up", lambda name, **kw: calls["up"].append((name, kw)))
@@ -243,3 +243,74 @@ def test_status_reports_plan_without_mutation(wiz, aac_env, tmp_path, monkeypatc
     assert aac_env["up"] == [] and aac_env["down"] == []  # no mutation
     err = capsys.readouterr().err
     assert "acme" in err and "absent" in err and "project root" in err  # reports root + state
+
+
+def test_apply_host_override_deploys_to_override(wiz, aac_env, tmp_path, monkeypatch):
+    # Regression (verification HIGH): --host must deploy to the override, not the
+    # spec's declared host, matching the previewed plan.
+    root = _project(tmp_path, MINIMAL)  # spec host: local
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    wiz.do_aac_apply(host_override="staging", yes=True)
+    _name, kw = aac_env["up"][0]
+    assert kw["host"] == "staging"  # NOT "local"
+
+
+def test_precheck_rejects_bind_upfront_no_partial_apply(wiz, aac_env, tmp_path, monkeypatch):
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: a\n    host: local\n  - name: b\n    host: local\n"
+        "    container:\n      workspace: bind\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="workspace=bind"):
+        wiz.do_aac_apply(yes=True)
+    assert aac_env["up"] == []  # FR-003: no env deployed before the later bind env is rejected
+
+
+def test_precheck_rejects_provision_table_upfront_even_with_host_override(
+    wiz, aac_env, tmp_path, monkeypatch
+):
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: a\n    host: local\n  - name: b\n    host: { provision: hetzner }\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="not yet supported"):
+        wiz.do_aac_apply(host_override="x", yes=True)  # override must not bypass the guard
+    assert aac_env["up"] == []
+
+
+def test_unknown_top_level_key_dies(wiz, tmp_path):
+    root = _project(tmp_path, "version: 1\nenvironments:\n  - name: acme\n    host: local\n")
+    with pytest.raises(wiz.Fatal, match="unknown top-level key 'version'"):
+        wiz.load_project_spec(root)
+
+
+def test_credential_unknown_key_dies(wiz):
+    with pytest.raises(wiz.Fatal, match="unknown credential key 'extra'"):
+        wiz.validate_credential({"name": "K", "source": "env", "var": "V", "extra": 1}, "w")
+
+
+def test_non_utf8_spec_dies_cleanly(wiz, tmp_path):
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    (root / ".agent-container" / "bad.yaml").write_bytes(b"environments:\n  - name: \x80\n")
+    with pytest.raises(wiz.Fatal, match="cannot read spec file"):
+        wiz.load_project_spec(root)
+
+
+def test_config_tokens_and_staged_files_injective(wiz, tmp_path):
+    root = _project(tmp_path, MINIMAL)
+    # two paths that a lossy flattener could collide
+    (root / ".agent-container" / "a-b.yaml").write_text("environments: []\n")
+    (root / ".agent-container" / "a_b.yaml").write_text("environments: []\n")
+    entries = wiz.stage_agent_container_spec("local", "acme", root)
+    tokens = [t for t, _f, _tg in entries]
+    staged = [str(f) for _t, f, _tg in entries]
+    targets = [tg for _t, _f, tg in entries]
+    assert len(tokens) == len(set(tokens))  # unique config resource names
+    assert len(staged) == len(set(staged))  # unique staged files
+    assert len(targets) == len(set(targets))  # unique in-container targets

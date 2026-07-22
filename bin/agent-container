@@ -3912,9 +3912,14 @@ def validate_credential(cred: object, where: str) -> None:
         "keychain": ("service", "account"),
         "encrypted": ("path", "decrypt"),
     }
-    for k in required_by_source.get(src, ()):
+    detail = required_by_source.get(src, ())
+    for k in detail:
         if not cred.get(k):
             die(f"{where}: source={src} requires '{k}'")
+    allowed = {"name", "source", *detail}
+    for k in cred:
+        if k not in allowed:
+            die(f"{where}: unknown credential key {k!r}")
 
 
 def validate_environment(env: object, where: str) -> None:
@@ -3965,13 +3970,18 @@ def load_project_spec(root: Path) -> list[dict]:
     environments: list[dict] = []
     for f in files:
         try:
-            data = yaml.safe_load(f.read_text())
+            data = yaml.safe_load(f.read_text(encoding="utf-8"))
         except yaml.YAMLError as e:
             die(f"{f}: invalid YAML ({str(e).splitlines()[0]})")
+        except (UnicodeDecodeError, OSError) as e:
+            die(f"{f}: cannot read spec file ({e})")
         if data is None:
             continue
         if not isinstance(data, dict):
             die(f"{f}: top-level must be a mapping")
+        for k in data:
+            if k != "environments":
+                die(f"{f}: unknown top-level key {k!r} (only 'environments' is allowed)")
         envs = data.get("environments")
         if envs is None:
             die(f"{f}: missing required key 'environments'")
@@ -4034,14 +4044,15 @@ def stage_agent_container_spec(
     sd.mkdir(parents=True, exist_ok=True)
     sd.chmod(0o700)
     entries: list[tuple[str, Path, str]] = []
-    for src in sorted(p for p in d.rglob("*") if p.is_file()):
+    # Use the enumeration INDEX for the staged filename and the compose-config
+    # resource name so both are injective — a lossy path-flattening could otherwise
+    # collide two distinct spec files onto one config (and one would silently win).
+    for i, src in enumerate(sorted(p for p in d.rglob("*") if p.is_file())):
         rel = src.relative_to(d).as_posix()
-        flat = rel.replace("/", "__")
-        staged = sd / f"{name}.aac.{flat}"
+        staged = sd / f"{name}.aac.{i}"
         staged.write_bytes(src.read_bytes())
         staged.chmod(0o644)
-        token = re.sub(r"[^a-z0-9]+", "_", f"aac_{flat}".lower()).strip("_")
-        entries.append((token, staged, f"{INJECT_AAC_DIR}/{rel}"))
+        entries.append((f"aac_{name}_{i}", staged, f"{INJECT_AAC_DIR}/{rel}"))
     return entries
 
 
@@ -4061,6 +4072,22 @@ def _verify_ro_spec_delivery(aac_configs: list[tuple[str, Path, str]], spec: Exe
             "writable to the agent. Use --workspace persistent|ephemeral for a self-hosting "
             "project, so the spec is delivered read-only."
         )
+
+
+def _precheck_environments(environments: list[dict]) -> None:
+    """Reject unsupported/unsafe environments UP FRONT — before any deploy — so a
+    later environment's problem never leaves earlier ones partially applied (FR-003,
+    even on the `--host` override path where the per-env host guard is short-circuited)."""
+    for env in environments:
+        name = env["name"]
+        if isinstance(env.get("host"), dict):
+            die(f"environment {name}: declarative host provisioning is not yet supported (US4)")
+        c = env.get("container") or {}
+        if c.get("workspace") == "bind":
+            die(
+                f"environment {name}: workspace=bind would expose /workspace/.agent-container "
+                f"writable to the agent (FR-020). Use persistent|ephemeral for a self-hosting project."
+            )
 
 
 def _reconcile_plan(environments: list[dict], host_override: str | None):
@@ -4086,7 +4113,9 @@ def do_aac_status(host_override: str | None = None) -> None:
             "inert here (use the imperative commands, or create a .agent-container/ spec)"
         )
     log(f"project root: {root}")
-    _reconcile_plan(load_project_spec(root), host_override)
+    environments = load_project_spec(root)
+    _precheck_environments(environments)
+    _reconcile_plan(environments, host_override)
 
 
 def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
@@ -4101,6 +4130,9 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
         )
     log(f"project root: {root}")
     environments = load_project_spec(root)
+    _precheck_environments(
+        environments
+    )  # reject unsupported/unsafe envs before ANY deploy (FR-003)
     plans = _reconcile_plan(environments, host_override)
     todo = [p for p in plans if p[4] != "matching"]
     if not todo:
@@ -4111,19 +4143,23 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
         if not questionary.confirm(f"apply {len(todo)} change(s): {what}?", default=False).ask():
             log("aborted")
             return
-    for env, name, host_name, _host_rec, state in todo:
+    for env, name, host_name, host_rec, state in todo:
         spec = env_exec_spec(env)
         aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
         _verify_ro_spec_delivery(aac, spec)
         c = env.get("container") or {}
         env_file = (root / c["env_file"]).resolve() if c.get("env_file") else None
         if state == "drifted":
-            # present-but-stopped → recreate to converge (announced).
+            # present-but-stopped → recreate to converge (announced). Use the plan's
+            # resolved (host_name, host_rec) so the pair is always consistent.
             log(f"{name}: drifted (present, stopped) — recreating to converge")
-            down_container(host_name, resolve_deploy_host(env_host_name(env))[1], name, purge=False)
+            down_container(host_name, host_rec, name, purge=False)
+        # Deploy to the SAME host the plan/preview resolved (honoring --host), not the
+        # raw spec host — else the container would land on a host the operator never
+        # confirmed. `host_name` is the resolved name; do_up re-resolves it identically.
         do_up(
             name,
-            host=env_host_name(env),
+            host=host_name,
             env_file_override=env_file,
             spec=spec,
             extra_injected_configs=aac,

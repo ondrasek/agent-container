@@ -43,6 +43,7 @@ partial change**.
 | `…container.mode` | no | `interactive` \| `headless` (default `interactive`) |
 | `…container.agent` | no | `claude` \| `codex` \| `pi` (default `claude`) |
 | `…container.workspace` | no | `persistent` \| `bind` \| `ephemeral` (default `persistent`) |
+| `…container.workspace_dir` | no | host directory for a `bind` workspace (local hosts only) — but a `bind` workspace over the project is **refused** for a self-hosting spec (FR-020) |
 | `…container.task` | no | string (`@file` allowed) |
 | `…container.repo` | no | URL string (clone-on-start) |
 | `…container.env_file` | no | path string (non-secret env) |
