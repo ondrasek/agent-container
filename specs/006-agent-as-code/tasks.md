@@ -12,7 +12,7 @@ description: "Task list for Agent-as-Code (specs/006)"
 
 ## ⚠️ Single-file constraint (read before using [P])
 
-Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; the only container-image touch is a **read-only compose bind** for `/workspace/.agent-container` (FR-020) — no `entrypoint.sh` logic. Tasks that edit `bin/agent-container` are mutually **SEQUENTIAL** — never `[P]` with each other. `[P]` is ONLY for genuinely separate files: distinct test modules (`test_agent_as_code.py`, `test_command_construction.py`, `test_acceptance.py`), docs, and `pyproject.toml`.
+Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; the only container-image touch is a set of **read-only compose `configs`** for `/workspace/.agent-container` (FR-020) — no `entrypoint.sh` logic. Tasks that edit `bin/agent-container` are mutually **SEQUENTIAL** — never `[P]` with each other. `[P]` is ONLY for genuinely separate files: distinct test modules (`test_agent_as_code.py`, `test_command_construction.py`, `test_acceptance.py`), docs, and `pyproject.toml`.
 
 ## Format: `[ID] [P?] [Story] Description with file path`
 
@@ -29,15 +29,15 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 
-**Purpose**: the shared declarative core every story consumes — discovery, YAML parse + validation, the reconcile/ownership computation, and the FR-020 read-only spec bind. **No user story can begin until this phase is complete.** All `bin/agent-container` tasks here are sequential (same file); test tasks are `[P]`.
+**Purpose**: the shared declarative core every story consumes — discovery, YAML parse + validation, the reconcile/ownership computation, and the FR-020 read-only spec delivery (compose configs). **No user story can begin until this phase is complete.** All `bin/agent-container` tasks here are sequential (same file); test tasks are `[P]`.
 
-- [ ] T003 [P] Write failing tests in `bin/tests/test_agent_as_code.py` / `bin/tests/test_command_construction.py`: `find_project_root` walks upward to a `.agent-container/` dir (same root from nested subdirs; **None** when absent); `load_project_spec` uses `yaml.safe_load` (a `!!python/object` payload does NOT construct an object) and a schema validator **dies naming the offending file+field with no partial change** on a bad spec; a declared `name` maps to the tool's deterministic identity (`container_name`/`volume_name`); `compute_plan` classifies absent/matching/drifted; `build_compose_model` adds a **read-only** `.agent-container` bind when the workspace carries one (FR-020).
+- [ ] T003 [P] Write failing tests in `bin/tests/test_agent_as_code.py` / `bin/tests/test_command_construction.py`: `find_project_root` walks upward to a `.agent-container/` dir (same root from nested subdirs; **None** when absent); `load_project_spec` uses `yaml.safe_load` (a `!!python/object` payload does NOT construct an object) and a schema validator **dies naming the offending file+field with no partial change** on a bad spec; a declared `name` maps to the tool's deterministic identity (`container_name`/`volume_name`); `compute_plan` classifies absent/matching/drifted; `build_compose_model` delivers each `.agent-container/` file as a **read-only compose `config`** (never a host bind — remote-context-safe) targeting `/workspace/.agent-container/<rel>` when the workspace carries one, and the verify step **refuses** if any spec file would be agent-writable (FR-020).
 - [ ] T004 Add `import yaml` and `find_project_root(start=cwd)` — walk upward to the nearest ancestor containing a `.agent-container/` directory, return it (or None → declarative model inert, FR-004); every declarative op reports the selected root (FR-019); in `bin/agent-container`.
-- [ ] T005 Add `load_project_spec(root)` — read the `.agent-container/` YAML file(s) with **`yaml.safe_load`** and **validate** against the schema (data-model.md): on any syntactic/semantic error `die` naming the **offending file and field**, making **no partial change** (FR-003); in `bin/agent-container`.
+- [ ] T005 Add `load_project_spec(root)` — read the `.agent-container/` YAML file(s) with **`yaml.safe_load`** and **validate** against the **pinned schema** (the required/optional fields, types, and enums in contracts/agent-as-code.md §Schema — `environments[].name/host` required; `mode`/`agent`/`workspace`/`source` enums; unknown keys rejected): on any syntactic/semantic error `die` naming the **offending file and field**, making **no partial change** (FR-003); in `bin/agent-container`.
 - [ ] T006 Add the reconcile core: a declared-name→deterministic-identity map (ownership, Constitution IV — **no state file**) and `compute_plan(declared, live)` returning per-declared-resource **absent | matching | drifted** (+ a human-readable delta), driving the existing live-state queries; in `bin/agent-container`.
-- [ ] T007 Add the **FR-020 spec-integrity** wiring: `build_compose_model` mounts the operator's host-side `.agent-container/` **read-only** over `/workspace/.agent-container` when the workspace carries it, and the deploy path **refuses if that subtree would be agent-writable**; the tool reads the spec ONLY host-side (never a container copy); in `bin/agent-container`.
+- [ ] T007 Add the **FR-020 spec-integrity** wiring: (1) the tool reads the spec ONLY host-side (never a container copy — load-bearing); (2) deliver each host-side `.agent-container/` file **read-only** via the existing `injected_configs` channel (compose `configs`, remote-context-safe — **not** a host bind) targeting `/workspace/.agent-container/<rel>`; (3) a **verify** step asserts every declared spec file is delivered via a read-only channel and no writable `/workspace` mount exposes it, **refusing to deploy** otherwise (M3); in `bin/agent-container`.
 
-**Checkpoint**: a spec can be discovered, parsed+validated, planned, and its identity/ownership computed; the RO spec bind is in the model. User stories can begin.
+**Checkpoint**: a spec can be discovered, parsed+validated, planned, and its identity/ownership computed; the RO spec `configs` are in the model. User stories can begin.
 
 ---
 
@@ -62,7 +62,7 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 **Independent Test**: a spec referencing an API key via env + a git identity via an external key path applies; the secret reaches the container, no plaintext appears in the dir, and a would-be-committed plaintext secret is rejected (quickstart E).
 
 - [ ] T011 [P] [US2] Write failing tests in `bin/tests/test_agent_as_code.py`: `resolve_credential_ref` resolves **env / file(external) / keychain / encrypted** sources — the `encrypted` source runs the operator **decrypt command** and holds plaintext **in memory only (never written to disk)**; a **missing/unavailable** source `die`s **before any change** naming it (FR-016); a **git-tracked plaintext** secret in the project is **refused** with remediation (FR-015); the resolved value reaches the 003 inject channel and never appears in the compose model / argv / logs (FR-013/014).
-- [ ] T012 [US2] Add `resolve_credential_ref(ref)` and wire it into the apply path: env (read var) / file (external path) / keychain (`security find-generic-password -w` | `secret-tool lookup`) / encrypted (run the operator `decrypt` command, in memory) → the **Feature 003** inject channels (apikeys / push key); the missing-source + git-tracked-plaintext refusals; in `bin/agent-container`.
+- [ ] T012 [US2] Add `resolve_credential_ref(ref)` and wire it into the apply path: env (read var) / file (external path) / keychain (`security find-generic-password -w` | `secret-tool lookup`) / encrypted (run the operator `decrypt` command, in memory) → the appropriate **Feature 003** inject channel by target — agent **API keys** → apikeys channel, **git push identity** → `--push-key`, **host SSH identity** → `--host-key`/`--authorized-key` (SSH-key references reuse the existing ssh-injection paths, not a new mechanism — L2); the missing-source + git-tracked-plaintext refusals; in `bin/agent-container`.
 - [ ] T013 [P] [US2] Acceptance in `bin/tests/test_acceptance.py`: `apply` with an env-referenced key injects it into the running container (verifiable in-container) while **no plaintext value appears in the project dir / captured output** (SC-004); a missing source fails before any change and names it (SC-005).
 
 **Checkpoint**: credentialed environments apply with secrets injected at runtime and never on disk.
@@ -75,7 +75,7 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 
 **Independent Test**: bring an environment up; out-of-band change it; `status` reports the drift; `apply` converges; `destroy` removes only the declared resources (quickstart F).
 
-- [ ] T014 [P] [US3] Write failing tests in `bin/tests/test_agent_as_code.py`: `status` prints the per-resource plan (matching/drifted with a delta) and **mutates nothing**; `destroy` targets **only owned identities** (an identically-shaped but unrelated container is untouched, SC-007); a drift requiring recreate is **announced before** doing it; partial failure reports exactly what changed/did not (FR-010).
+- [ ] T014 [P] [US3] Write failing tests in `bin/tests/test_agent_as_code.py`: `status` prints the per-resource plan (matching/drifted with a delta) and **mutates nothing**; `destroy` targets **only owned identities** (an identically-shaped but unrelated container is untouched, SC-007); a drift requiring recreate is **announced before** doing it; partial failure reports exactly what changed/did not (FR-010); **portability (FR-005/SC-003)** — the same spec parsed from a **fresh checkout at a different path** (same external secret sources) yields **identical `status`/plan output** (ownership is identity-derived, so location does not affect the plan).
 - [ ] T015 [US3] Add the `destroy` verb (scoped to owned deterministic identities — reuse `down_container`/`per_container_volumes`; a **referenced** host is never deprovisioned) and complete `status`/diff deltas + the partial-failure reporting (FR-010); in `bin/agent-container`.
 - [ ] T016 [P] [US3] Acceptance in `bin/tests/test_acceptance.py`: bring up via `apply`; out-of-band change → `status` reports drift; `apply` converges; `destroy` removes **only** the declared resources and leaves an unrelated container/host untouched (SC-006/007).
 
@@ -101,7 +101,7 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 
 - [ ] T020 [P] Update `README.md`: the declarative model (`apply`/`plan`/`status`/`destroy`), the `.agent-container/` YAML schema, credential references, and the **spec-integrity** (read-only in-container) guarantee.
 - [ ] T021 [P] Update `CLAUDE.md` Decisions (agent-as-code: `.agent-container/` desired-state, reconcile-as-orchestrator, ownership-via-identity/no-state-file, credential references + decrypt-command, FR-020 RO spec, PyYAML dep) within the 2000-token budget — prune before adding.
-- [ ] T022 [P] Add `docs/agent-as-code.md`: the schema, the apply/status/destroy contract, the credential sources (incl. the decrypt command), precedence, and the read-only-spec integrity guarantee.
+- [ ] T022 [P] Add `docs/agent-as-code.md`: the schema, the apply/status/destroy contract, the credential sources (incl. the decrypt command), precedence, the read-only-spec integrity guarantee (host-side-only read + read-only compose-`configs` delivery, remote-context-safe), and the **documented boundary of the plaintext-secret detection** — what it can and cannot catch (FR-015, L1).
 - [ ] T023 Run `scripts/quality-gate.sh` (ruff · ty · bandit · vulture · xenon · refurb · self-test · pytest · shell) and fix all findings; ensure the **PyYAML** pin is threaded into the gate's hermetic `--with` invocation and that bandit is clean (no `yaml.load`).
 - [ ] T024 Run quickstart.md Scenarios A–H (local; the provisioned-host + real-agent ones are opt-in/tokened) and record the results in quickstart.md.
 
@@ -112,7 +112,7 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 ### Phase dependencies
 
 - **Setup (P1)** → PyYAML dep + the test module. Blocks parsing.
-- **Foundational (P2)** → depends on Setup; **blocks all user stories** (discovery + parse/validate + reconcile/ownership + the FR-020 RO bind).
+- **Foundational (P2)** → depends on Setup; **blocks all user stories** (discovery + parse/validate + reconcile/ownership + the FR-020 RO spec `configs`).
 - **US1 (P3)** → depends on Foundational. **The MVP** (apply/plan/status).
 - **US2 (P4)** → depends on Foundational + US1's apply path (credential resolution feeds apply).
 - **US3 (P5)** → depends on US1 (a running environment to diff/destroy); reuses the reconcile core.
@@ -137,7 +137,7 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 
 ### MVP first (US1 — declare + apply)
 
-1. Phase 1 Setup → 2. Phase 2 Foundational (discovery + YAML parse/validate + reconcile + RO spec bind) → 3. Phase 3 US1 (`apply`/`plan`/`status`) → **STOP & VALIDATE** a directory reconciles to a running environment idempotently (quickstart A/B) and the in-container spec is read-only (FR-020) → ship. This alone delivers the headline "as code" value.
+1. Phase 1 Setup → 2. Phase 2 Foundational (discovery + YAML parse/validate + reconcile + RO spec `configs`) → 3. Phase 3 US1 (`apply`/`plan`/`status`) → **STOP & VALIDATE** a directory reconciles to a running environment idempotently (quickstart A/B) and the in-container spec is read-only (FR-020) → ship. This alone delivers the headline "as code" value.
 
 ### Incremental delivery
 
@@ -145,7 +145,7 @@ Almost all implementation is in the one PEP 723 file **`bin/agent-container`**; 
 
 ## Notes
 
-- `[P]` = distinct files only; every `bin/agent-container` edit is sequential. The only image touch is the RO `.agent-container` compose bind (FR-020) — no `entrypoint.sh` change.
+- `[P]` = distinct files only; every `bin/agent-container` edit is sequential. The only image touch is the RO `.agent-container` compose `configs` (FR-020) — no `entrypoint.sh` change.
 - **One new dependency — PyYAML** (`yaml.safe_load` ONLY, never `yaml.load` — bandit/security, asserted in T003). Recorded Constitution-VI deviation.
 - **Load-bearing invariants** (asserted across tiers, not standalone tasks): validate-before-act / no partial change (FR-003, T003/T005); **no secret to disk/log/registry/argv** (Constitution III, T011/T012); **spec immutable from the container** (FR-020, T003/T007/T010); ownership-scoped teardown (SC-007, T014/T015); every op reports root+host (FR-019, T008/T009).
 - **Ownership derives from the deterministic identity** (Constitution IV) — **no state/lock file** is created (assert in T006/T014).

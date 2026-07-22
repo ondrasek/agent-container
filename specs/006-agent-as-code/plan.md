@@ -32,16 +32,18 @@ Technical approach (see [research.md](./research.md)):
   rest + an operator **decrypt command** run in memory) resolved at apply and
   injected via Feature 003's runtime channels — never to disk/log/registry (FR-011..016).
 - **Spec integrity (FR-020)** — the governing spec is **immutable from inside the
-  container**: the tool reads it only from the operator's host-side `.agent-container/`,
-  and bind-mounts that authoritative subtree **read-only** over the container's
-  `/workspace/.agent-container` (kernel-enforced, uid-independent), so an untrusted
-  agent cannot re-govern itself or smuggle a spec change via `git push`.
+  container**: the tool reads it **only** from the operator's host-side `.agent-container/`
+  (load-bearing — a container copy is never trusted) and delivers the declared spec
+  files **read-only** via the Feature 003 injection channel (compose `configs`, which
+  mount read-only and — unlike a host bind — work over a **remote context**),
+  kernel-enforced and uid-independent, so an untrusted agent cannot re-govern itself
+  or smuggle a spec change via `git push`.
 
 ## Technical Context
 
 **Language/Version**: Python ≥ 3.14 (single-file CLI `bin/agent-container`, PEP
 723). **PyYAML** (`yaml.safe_load`) parses the spec. `entrypoint.sh` gains no new
-logic; the read-only `.agent-container/` mount is a compose bind the CLI adds.
+logic; the read-only `.agent-container/` delivery reuses the 003 compose-`configs` channel the CLI already emits.
 
 **Primary Dependencies**: **one new — PyYAML** (`yaml.safe_load`), the spec parser
 (operator chose YAML; the project otherwise has no YAML reader). It is added to the
@@ -61,16 +63,16 @@ ambiguity/none → clear result), YAML parse + validation (offending file/field,
 partial change), the plan computation (absent/matching/drifted), ownership→identity
 mapping, credential-reference resolution incl. the decrypt-command (in memory,
 never to disk) + the missing-source and git-tracked-plaintext refusals, precedence
-(spec wins, reported), and the RO-mount wiring in the compose model; YAML parse errors are reported cleanly. Acceptance
+(spec wins, reported), and the read-only `.agent-container` compose-`configs` delivery (remote-context-safe) + the refuse-if-writable verify; YAML parse errors are reported cleanly. Acceptance
 (real containers): `apply` reaches the declared environment and a second `apply` is
 a no-op (idempotent); `destroy` removes only owned resources; the in-container
-`.agent-container/` is **read-only** (a write fails). Real-agent/model calls stay
+`.agent-container/` is **read-only** (a write fails), incl. over a remote context. Real-agent/model calls stay
 opt-in/tokened.
 
 **Target Platform**: host CLI (macOS/Linux). OS keychain sources are per-OS
 (macOS `security`, Linux `secret-tool`) — see R5.
 
-**Project Type**: single-file CLI + the container image (only a compose bind added).
+**Project Type**: single-file CLI + the container image (only a read-only compose-`configs` set added).
 
 **Performance Goals**: none — discovery + parse + plan are local file/registry
 reads; apply cost is the underlying deploy.
@@ -93,7 +95,7 @@ existing host). US2 (credential references), US3 (drift/status/scoped destroy), 
 | Principle | Assessment |
 |-----------|------------|
 | **I. Ephemerality** | ✅ Strengthened. The `.agent-container/` directory is durable state *outside* any container (portable, git-trackable, reproducible-from-checkout); the tool stores no new state; environments remain disposable and reconstructable from the spec. |
-| **II. Least Privilege, Immutable Runtime** | ✅ **Load-bearing (FR-020).** The governing spec is immutable from inside the container — a read-only, kernel-enforced bind mount; the untrusted agent cannot re-govern itself. The runtime is otherwise unchanged (a bind, not a reshape). |
+| **II. Least Privilege, Immutable Runtime** | ✅ **Load-bearing (FR-020).** The governing spec is immutable from inside the container — read from the host-side copy only, and the declared files delivered **read-only via the 003 compose-`configs` channel** (remote-context-safe, kernel-enforced); the untrusted agent cannot re-govern itself. The runtime is otherwise unchanged. |
 | **III. Least Exposure** | ✅ **Load-bearing.** Credentials are references, never embedded; the decrypt command runs in memory; no plaintext to disk/log/registry/argv; git-tracked-plaintext is refused. The spec is read only from the trusted host-side copy. |
 | **IV. Deterministic Identity** | ✅ Reinforced. Ownership/drift/teardown all derive from the one deterministic identity — no second source of truth, no state file to desync. |
 | **V. Durable Spec, Disposable Code** | ✅ The feature *is* this principle at the product level — a directory as the durable, reviewable source of truth reconciled into disposable containers. Verification is acceptance-weighted (apply converges, idempotent, destroy scoped). |
@@ -131,16 +133,16 @@ bin/agent-container          # single-file CLI — the primary file edited:
                              #   • credentials: resolve_credential_ref() (env|file|keychain|encrypted+decrypt-cmd, in memory)
                              #     -> the Feature 003 inject channels; missing-source + git-tracked-plaintext refusals
                              #   • precedence: spec wins for its scope, reported (FR-018)
-                             #   • spec integrity: add the READ-ONLY .agent-container bind to the compose model (FR-020)
+                             #   • spec integrity: deliver .agent-container READ-ONLY via the 003 compose-configs channel; verify RO + refuse if writable (FR-020)
 docs/…, README.md, CLAUDE.md # the declarative model + the .agent-container schema + the integrity guarantee
 bin/tests/
 ├── test_agent_as_code.py (new)  # discovery, parse/validate, plan, ownership, credential resolution, precedence, RO-mount
-├── test_command_construction.py # the compose model carries the read-only .agent-container bind
+├── test_command_construction.py # the compose model carries the read-only .agent-container configs
 └── test_acceptance.py           # apply reaches declared state + idempotent; destroy scoped; in-container spec is read-only
 ```
 
 **Structure Decision**: unchanged single-file CLI. The only container-image touch
-is a **read-only bind** the compose model adds for `/workspace/.agent-container`
+is the **read-only compose-`configs`** the model adds for `/workspace/.agent-container`
 (FR-020) — no `entrypoint.sh` logic. All CLI edits are single-file-sequential.
 
 ## Complexity Tracking
@@ -156,7 +158,7 @@ the recorded Constitution-VI exception), R2 (discovery — upward walk to `.agen
 (reconcile model — plan/apply/status/destroy over existing internals), R4
 (ownership via deterministic identity, no state file), R5 (credential resolution +
 the decrypt-command + keychain per-OS + git-plaintext refusal), R6 (**spec
-integrity** — read-only host-side-only spec, RO bind mount, FR-020), R7 (CLI
+integrity** — host-side-only read + read-only compose-`configs` delivery, FR-020), R7 (CLI
 surface + precedence). All four clarifications + the FR-020 integrity decision are
 folded in; no NEEDS CLARIFICATION remain (R1's format is decided: YAML/PyYAML).
 
@@ -167,7 +169,7 @@ Complete. [data-model.md](./data-model.md) defines the `.agent-container/` schem
 reconcile state machine. [contracts/agent-as-code.md](./contracts/agent-as-code.md)
 pins the CLI surface (`apply`/`plan`/`status`/`destroy`), the discovery + precedence
 + validation + credential + **integrity (read-only spec)** contracts, and the
-compose-model RO bind. [quickstart.md](./quickstart.md) gives scenarios A–H mapped
+compose-model RO `configs` delivery. [quickstart.md](./quickstart.md) gives scenarios A–H mapped
 to SC-001…SC-007 + the integrity guarantee. (No `update-agent-context` script in
 this repo — skipped, as in prior features.)
 

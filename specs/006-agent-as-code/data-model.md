@@ -49,7 +49,8 @@ environments:
 
 | Field | Meaning |
 |-------|---------|
-| `name` | the credential the environment needs (agent API key / git push identity / SSH key) |
+| `name` | the credential the environment needs |
+| `kind` (by `name`/target) | which 003 channel the resolved value feeds — an **agent API key** (apikeys channel), the **git push identity** (`--push-key`), or the **host SSH identity** (`--host-key`/`--authorized-key`) — so SSH-key references reuse the existing ssh-injection paths, not a new mechanism (L2) |
 | `source` | `env` \| `file` (external, outside the dir) \| `keychain` (OS store) \| `encrypted` (committable file + `decrypt` command) |
 | source detail | `var` / `path` / `service`+`account` / `path`+`decrypt` |
 
@@ -87,7 +88,7 @@ discover(.agent-container/)  → report root  (absent → today's imperative beh
       → parse+validate (yaml.safe_load)             (error → offending file/field, NO partial change, FR-003)
       → resolve host binding + precedence    (spec wins for its scope, reported, FR-018)
       → compute_plan(declared, live)         (absent/matching/drifted per resource)
-      → apply:   preview + confirm → drive do_up / provisioner ; integrity: RO .agent-container bind (FR-020)
+      → apply:   preview + confirm → drive do_up / provisioner ; integrity: RO .agent-container via compose configs + verify (FR-020)
         status:  print plan, mutate nothing
         destroy: remove owned identities only (referenced host untouched; provisioned host on intent)
       → on partial failure: report exactly what changed / did not (FR-010)
@@ -95,8 +96,12 @@ discover(.agent-container/)  → report root  (absent → today's imperative beh
 
 ## Spec-integrity invariant (FR-020)
 
-The `.agent-container/` subtree, when present in a deployed container's `/workspace`,
-is bind-mounted **read-only** (compose bind `<host-side .agent-container>:/workspace/.agent-container:ro`),
-kernel-enforced for every uid. The tool reads the spec **only** host-side and
-**refuses to deploy** if the subtree would be agent-writable. This is the model's
+The tool reads the spec **only** from the operator's host-side `.agent-container/`
+(load-bearing). As defense-in-depth, when a deployed container's `/workspace` carries
+`.agent-container/`, the declared spec files are delivered **read-only** via the
+Feature 003 injection channel — each file a compose **`config`** targeting
+`/workspace/.agent-container/<rel>`. Compose configs mount **read-only** and, **unlike
+a host bind, work over a remote context** (the 001/003 lesson) — kernel-enforced for
+every uid. Before deploy the tool **verifies** the files are delivered read-only (no
+writable mount exposes them) and **refuses** otherwise. This is the model's
 Least-Privilege gate: the untrusted agent cannot re-govern itself.

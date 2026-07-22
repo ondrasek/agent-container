@@ -28,8 +28,31 @@ printed.
 ## Validation contract (FR-003)
 
 The spec is parsed (**`yaml.safe_load`** — never `yaml.load`) and validated **before
-any action**. On a syntactic or semantic error the tool **refuses to act**, names
-the **offending file and field**, and makes **no partial change**.
+any action** against the pinned schema below. On a syntactic or semantic error the
+tool **refuses to act**, names the **offending file and field**, and makes **no
+partial change**.
+
+### Schema (pinned — the validator enforces this)
+
+| Path | Required | Type / allowed values |
+|------|----------|-----------------------|
+| `environments` | **yes** | non-empty list |
+| `environments[].name` | **yes** | string, matches the existing container-name charset (`validate_name`) — unique within the project |
+| `environments[].host` | **yes** | a host name (string), **or** a table `{ provision: "hetzner", server_type, location, … }` (US4) |
+| `environments[].container` | no | table (below); absent → tool defaults |
+| `…container.mode` | no | `interactive` \| `headless` (default `interactive`) |
+| `…container.agent` | no | `claude` \| `codex` \| `pi` (default `claude`) |
+| `…container.workspace` | no | `persistent` \| `bind` \| `ephemeral` (default `persistent`) |
+| `…container.task` | no | string (`@file` allowed) |
+| `…container.repo` | no | URL string (clone-on-start) |
+| `…container.env_file` | no | path string (non-secret env) |
+| `environments[].credentials` | no | list of references (below) |
+| `credentials[].name` | **yes** | string |
+| `credentials[].source` | **yes** | `env` \| `file` \| `keychain` \| `encrypted` |
+| source detail | **yes** (per source) | `env`→`var`; `file`→`path` (outside the tracked dir); `keychain`→`service`+`account`; `encrypted`→`path`+`decrypt` |
+
+Unknown top-level or unknown per-block keys are a validation error (named), not
+silently ignored. Enum violations name the field and the allowed set.
 
 ## Precedence contract (FR-018)
 
@@ -57,16 +80,16 @@ merge.
 
 | Guarantee | Contract |
 |-----------|----------|
-| host-side-only read | The spec is read **only** from the operator's host-side `.agent-container/`; a container's copy is never trusted. A spec change is a host-side git edit the operator reviews. |
-| read-only in-container | When a deployed container's `/workspace` contains `.agent-container/`, the compose model adds a bind `<host-side .agent-container>:/workspace/.agent-container:ro` — **kernel-enforced read-only for every uid** (the rootless agent cannot escalate past it). |
-| refuse-if-writable | The tool **refuses to deploy** if that subtree would be agent-writable. |
+| host-side-only read (load-bearing) | The spec is read **only** from the operator's host-side `.agent-container/`; a container's copy is **never** trusted. A spec change is a host-side git edit the operator reviews — an agent edit / `git push` cannot re-govern. |
+| read-only in-container (defense-in-depth) | The declared spec files are delivered **read-only** via the **Feature 003 compose-`configs` channel** (each file a `config` targeting `/workspace/.agent-container/<rel>`) — compose configs mount **read-only** and, **unlike a host bind, work over a remote context** (the 001/003 lesson). Kernel-enforced for every uid. |
+| refuse-if-writable (M3) | Before deploy, the tool **verifies** every declared `.agent-container/` file is delivered via a **read-only** channel and that no writable `/workspace` mount exposes it RW; it **refuses to deploy** otherwise. |
 
 ## Compose-model contract
 
 | Aspect | Contract |
 |--------|----------|
 | workspace | as Feature 004 (persistent/bind/ephemeral); clone-on-start populates a repo that may carry `.agent-container/` |
-| `.agent-container` bind | when present, added as a **read-only** bind over `/workspace/.agent-container` (FR-020) |
+| `.agent-container` delivery | when the workspace carries it, the declared spec files ride the existing `injected_configs` channel as **read-only** compose `configs` targeting `/workspace/.agent-container/<rel>` (FR-020) — remote-context-safe, never a host bind |
 | env / credentials / restart / mode | threaded from the declared `[environment.container]` via the existing `ExecSpec` + 003 inject channels — no new inject mechanism |
 
 ## Idempotence & scope contract

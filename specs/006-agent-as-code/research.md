@@ -156,27 +156,35 @@ it. Two guarantees:
 1. **Host-side-only read** — the tool reads the spec **only** from the operator's
    host-side `.agent-container/`, never from a container's copy. A spec change is a
    host-side git edit the operator reviews; an agent's `git push` cannot re-govern.
-2. **Read-only bind mount** — when a deployed container's `/workspace` contains
-   `.agent-container/`, the tool bind-mounts the authoritative host-side subtree
-   **read-only** over `/workspace/.agent-container` (a compose bind with `:ro`).
-   The kernel enforces it for **every uid** — the rootless `dev` agent cannot
-   escalate past it (Constitution II). The tool **refuses to deploy** if that
-   subtree would be agent-writable.
+2. **Read-only delivery via compose `configs`** (defense-in-depth) — when a deployed
+   container's `/workspace` carries `.agent-container/`, the tool delivers the
+   declared spec files **read-only** through the **Feature 003 `injected_configs`
+   channel**: each file rides as a compose **`config`** targeting
+   `/workspace/.agent-container/<rel>`. Compose configs mount **read-only** and —
+   critically — **work over a remote docker context**, which a host **bind does
+   not** (the exact reason 001/003 chose configs over binds for injected material).
+   Kernel-enforced for every uid; the rootless agent cannot escalate past it. Before
+   deploy the tool **verifies** every declared file is delivered via a read-only
+   channel (no writable `/workspace` mount exposes it) and **refuses** otherwise.
 
-**Rationale**: this extends Constitution II (immutable runtime) and IV (identity is
-the operator's, not the agent's) to the desired-state itself — deterministic
-(kernel-level), not heuristic. It closes the self-governance / supply-chain hole the
-operator flagged: the agent operates on the repo but cannot alter its own host
-binding, credentials, or container config.
+**Rationale**: guarantee (1) is load-bearing — since the tool never reads the
+container copy, even a rogue in-container file is inert. Guarantee (2) makes the
+agent's view consistent and tamper-resistant using the **already-proven,
+remote-safe** injection channel rather than a bind that would silently fail on a
+remote host. Together they extend Constitution II (immutable runtime) and IV
+(identity is the operator's) to the desired-state itself — deterministic, not
+heuristic — closing the self-governance / supply-chain hole the operator flagged.
 
-**Alternatives rejected**: chowning the subtree to root (the runtime is rootless —
-no root at runtime, and it would not survive a fresh clone); trusting the container
-copy and diffing on push (reactive, not deterministic; a race window); excluding
-`.agent-container/` from `/workspace` (breaks the repo's git working tree).
+**Alternatives rejected**: a **host bind** `…:/workspace/.agent-container:ro` — the
+obvious first idea, but a local bind **resolves empty / fails over a remote context**
+(001/003 codified compose-configs for exactly this); chowning to root (the runtime
+is rootless — no root, and it would not survive a fresh clone); trusting the
+container copy and diffing on push (reactive, not deterministic; a race window).
 
-**Validation**: unit — the compose model carries the `:ro` `.agent-container` bind;
-acceptance — a write to `/workspace/.agent-container` inside the container **fails**;
-the tool refuses to deploy a writable spec subtree.
+**Validation**: unit — the compose model delivers each `.agent-container/` file as a
+read-only `config` (never a bind), and the verify step refuses a writable-spec
+deploy; acceptance — a write to `/workspace/.agent-container` inside the container
+**fails**, including over a remote context.
 
 ---
 
