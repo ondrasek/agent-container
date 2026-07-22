@@ -24,6 +24,7 @@ The declarative model is **additive**: it does not remove the imperative CLI or 
 - Q: What marks a "project root" for deterministic discovery (FR-001)? → A: **A `.agent-container/` directory** holding the declarative spec file(s) marks the root; the tool walks **upward** from the working directory to the nearest such marker and **reports** which root it selected. Git-independent.
 - Q: How does the tool know which resources it "owns" (scoped teardown SC-007, drift FR-008)? → A: **Derive ownership from the deterministic identity** (Constitution IV) — a declared resource's name maps to the same deterministic container/volume/host identity the tool already computes; "owned" = a resource exists with that identity, and drift = declared-vs-live for those identities. **No separate state/lock file** is stored (nothing new to persist, desync, or leak — consistent with the ephemerality ethos).
 - Q: Precedence when a project spec and the global registry name the same host with different settings (FR-018)? → A: **The project spec wins for its scope** — inside a spec directory the spec is authoritative and overrides a same-named global-registry host, and the **override is reported** (never a silent merge).
+- Q: A repo can carry its own `.agent-container/` and *become* the agent's workspace — how is the untrusted agent prevented from modifying the spec that governs it (and pushing that back)? → A: **The governing spec is immutable from inside the container.** The tool (1) reads the spec **only** from the operator's host-side `.agent-container/`, never a container's copy, and (2) bind-mounts that authoritative `.agent-container/` **read-only** over the container's `/workspace/.agent-container` — kernel-enforced for every uid, so the rootless agent cannot escalate past it (Constitution II/IV). The agent works on the repo freely but cannot alter its own host binding, credential references, or container config; a spec change is a **host-side git edit the operator reviews**, taking effect only on the next `apply`.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -102,6 +103,7 @@ The spec can declare not only the container and agent but the **target host** �
 - **Secret source changes between plan and apply**: a referenced secret becomes unavailable after the plan is shown but before apply completes — the tool MUST fail safe rather than deploy a half-credentialed environment.
 - **Committed-plaintext detection false-negative risk**: a plaintext secret placed in a directory the tool does not scan. The tool MUST document the boundary of what it can and cannot detect rather than imply a guarantee.
 - **Drift in a field the tool cannot change in place**: some drift may require recreate rather than update; the tool MUST say so before doing it.
+- **Agent self-modification of the spec**: a repo that is the agent's workspace carries its own `.agent-container/`. The in-container agent MUST NOT be able to modify it — the tool presents that subtree read-only (kernel-enforced) and never reads the spec from the container's copy, so the agent cannot re-govern itself or smuggle a spec change via `git push`; an operator-intended change is a host-side git edit applied on the next reconcile (FR-020).
 
 ## Requirements *(mandatory)*
 
@@ -137,6 +139,10 @@ The spec can declare not only the container and agent but the **target host** �
 - **FR-017**: The specification MUST be able to bind an environment to a host, either an existing runtime context or a host to be provisioned; a host the spec merely references MUST be treated as externally owned and never deprovisioned, while a host the spec provisioned MAY be deprovisioned on teardown when the operator intends it.
 - **FR-018**: When a project spec and the global registry describe the same-named host with different settings, **the project spec wins for its scope** (the invocation running inside it) — the tool applies the spec's definition, overriding the registry entry, and **reports** the override; it MUST NOT silently merge conflicting definitions.
 - **FR-019**: The tool MUST report which project root and which host it selected for every operation, so the operator is never guessing which spec is in effect.
+
+**Spec integrity (agent cannot re-govern itself)**
+
+- **FR-020**: When a repo carrying its own `.agent-container/` becomes an agent's workspace, the tool MUST make that governing spec **immutable from inside the container**: (1) it reads the spec **only** from the operator's host-side `.agent-container/`, never from a container's copy; and (2) when a deployed container's workspace contains `.agent-container/`, that subtree MUST be presented **read-only, kernel-enforced and uid-independent**, so the in-container agent (which is untrusted, Constitution II) cannot modify the host binding, credential references, or container config that govern it. A change to the spec is an operator action on the host (reviewable in git), never an agent action; the tool MUST refuse to deploy if that subtree would be agent-writable.
 
 ### Key Entities *(include if feature involves data)*
 
