@@ -382,8 +382,17 @@ if [[ -n "${CLONE_URL}" ]]; then
         log "clone-on-start: ${WORKSPACE_DIR} is non-empty (no .git) — skipping clone"
     else
         case "${CLONE_URL}" in
+            https://github.com/*)
+                # The git credential helper (section 3) is scoped to https://github.com,
+                # so GH_TOKEN authenticates ONLY github.com HTTPS clones.
+                log "clone-on-start: cloning via HTTPS (github.com → GH_TOKEN)"
+                git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
+                ;;
             https://*)
-                log "clone-on-start: cloning via HTTPS (GH_TOKEN)"
+                # A non-github.com HTTPS remote: GH_TOKEN does NOT apply (the helper is
+                # github.com-scoped for least exposure). Works only if the repo is public
+                # or git already has ambient credentials for that host.
+                log "clone-on-start: cloning via HTTPS (non-github.com host — GH_TOKEN does NOT apply; repo must be public or have its own git credentials)"
                 git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
                 ;;
             *)  # ssh:// or scp-like git@host:path — needs the injected push key
