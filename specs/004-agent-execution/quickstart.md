@@ -108,3 +108,25 @@ All scenarios pass: interactive sessions attach/detach/reattach (incl. dead-sess
 clarity), headless runs report a result and are not resurrected on success, the
 three workspace modes behave per their durability, bind is local-only, and
 clone-on-start populates (or fails fast) by URL scheme — matching SC-001…SC-008.
+
+## Validation status
+
+The mechanisms are covered at three tiers, all green:
+
+- **Hermetic unit** (`bin/tests/test_execution.py`, `test_compose.py`,
+  `test_command_construction.py`): the compose model (per-mode restart, workspace
+  mount + conditional volume, mode/agent/clone env, task inject), `ExecSpec`
+  validation incl. the `--foreground` guard, `resolve_workspace` (bind-on-remote
+  refusal), clone-credential fail-fast, the foreground exit-code argv, the
+  dead-session probe mapping, and the FR-016 mode×workspace independence matrix.
+- **Entrypoint shell** (`bin/tests/test_entrypoint_execution.sh`): the mode branch
+  (interactive agent-in-window seeded with the task / headless workload + exit
+  code / no sshd in headless) and clone-on-start (HTTPS clone, SSH-no-key
+  fail-fast, idempotent skip).
+- **Acceptance, real Lima containers** (`bin/tests/test_acceptance.py`,
+  `-m acceptance`): interactive agent launch (Scenario A), detach/reattach +
+  dead-session signal (B/C), headless foreground exit code (D), workspace
+  persistent/ephemeral (F), bind reflects the local dir (G), and clone-on-start
+  SSH fail-fast (H). The agent actually **responding** (SC-001) and the
+  headless-**success**-not-resurrected path need a real model key and remain the
+  opt-in/tokened extension (never run in CI).

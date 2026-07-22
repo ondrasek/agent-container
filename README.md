@@ -261,6 +261,43 @@ project and one lifecycle — `up`/`stop`/`start`/`redeploy`/`down`/`wipe` all a
 on the unit. The override must be a `services:`-only fragment and must not
 redefine the tool-owned `agent` service.
 
+**Execution modes, sessions & workspaces (Feature 004).** `up`/`redeploy` choose
+what runs inside and how you interact with it:
+
+```bash
+# Interactive (default): the agent in a persistent tmux session you attach to.
+agent-container up acme --agent claude --task "triage the failing CI"
+agent-container attach acme            # lands on the agent's window
+
+# Headless: the agent runs the task as the container's workload and EXITS with
+# its result — a disposable one-shot job (a success is not resurrected).
+agent-container up job --mode headless --agent claude --task @task.md            # detached
+agent-container up job --mode headless --task "run the tests" --foreground       # stream + exit code
+agent-container logs job               # retrieve the output afterward
+```
+
+- **`--mode interactive|headless`** (default `interactive`) — interactive keeps
+  the container alive (`restart: unless-stopped`) with the agent in a tmux window;
+  headless runs the agent non-interactively as PID 1 and the **container's exit
+  code is the result** (`restart: on-failure` — a success exits and is not
+  restarted; a failure follows the restart policy). Headless `--foreground`
+  streams the run and returns that exit code as the CLI's own (it is headless-only).
+- **`--agent claude|codex|pi`** (default `claude`) — the primary agent; **`--task
+  <text|@file>`** seeds it (interactive) or is the job (headless), delivered as an
+  injected file (never on argv/env).
+- **`--workspace persistent|bind|ephemeral`** (default `persistent`) — what mounts
+  at `/workspace`: a named volume that survives recreation; a local directory
+  (**`--workspace-dir`**, local hosts only — a remote host refuses it); or nothing
+  (the container layer, **gone on teardown** — commit-and-push or lose it).
+- **`--repo <url>`** — clone-on-start for a persistent/ephemeral workspace, credential
+  by URL scheme: `git@…`/`ssh://…` uses the injected push key (`--push-key`; **an
+  SSH URL with no key fails fast**), `https://…` uses `GH_TOKEN`.
+
+Detach/reattach is unchanged (tmux survives disconnect; reattach from any machine).
+`attach` now probes the live session first, so a session that has ended is reported
+clearly (**"nothing running"**, redeploy to start fresh) instead of a silent empty
+shell. Execution mode and workspace mode are independently selectable.
+
 **Hosts and the run mechanism.** A *host* is a named target where containers run — a
 local or remote container-runtime context, registered with `host add` and stored in
 `~/.config/agent-container/hosts.json` (the registry supersedes the older `hosts.conf`
