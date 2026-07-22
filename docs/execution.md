@@ -41,9 +41,12 @@ deployment has already **exited**, a re-`up` reports the prior exit status/code
 
 One primary agent per deployment. `--task <text|@file>` seeds it at launch
 (interactive) or is the job to run (headless); it is delivered as an **injected
-file** (Feature 003's ephemeral `/run` channel), never on argv or in the
-environment, so it has no size cap and does not leak into the process table. You
-can still start additional processes by hand inside an interactive session.
+file** (Feature 003's ephemeral `/run` channel), so it never rides the host-side
+compose model (the CLI's argv/environment) and has no size cap. The entrypoint
+reads that file and passes the task to the agent in-container (so it does appear
+in the *container's* process table for the agent invocation, e.g. `claude -p
+"<task>"`). You can still start additional processes by hand inside an
+interactive session.
 
 ## Sessions — detach / reattach / dead-session
 

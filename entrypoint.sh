@@ -415,9 +415,11 @@ AGENT_CONTAINER_MODE="${AGENT_CONTAINER_MODE:-interactive}"
 AGENT_CONTAINER_AGENT="${AGENT_CONTAINER_AGENT:-}"
 TASK_FILE="${INJECT_DIR}/task"
 
-# Interactive launch command for the tmux window: the agent, seeded with the task
-# (read from the injected file at runtime, so nothing rides argv here). Returns an
-# empty string for an unknown/blank agent so the caller can skip the launch.
+# Interactive launch command for the tmux window: the agent, seeded with the task.
+# The task text is kept out of the host-side compose model and read from the
+# injected file at runtime — it is then passed to the agent as its argument (so it
+# appears in the agent's in-container process argv, the same as any prompt would).
+# Returns an empty string for an unknown/blank agent so the caller can skip the launch.
 build_interactive_cmd() {
     local a="$1"
     case "${a}" in

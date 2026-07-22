@@ -284,7 +284,8 @@ agent-container logs job               # retrieve the output afterward
   streams the run and returns that exit code as the CLI's own (it is headless-only).
 - **`--agent claude|codex|pi`** (default `claude`) — the primary agent; **`--task
   <text|@file>`** seeds it (interactive) or is the job (headless), delivered as an
-  injected file (never on argv/env).
+  injected file so it never rides the host-side compose model (the CLI's argv/env);
+  the entrypoint reads that file and passes it to the agent in-container.
 - **`--workspace persistent|bind|ephemeral`** (default `persistent`) — what mounts
   at `/workspace`: a named volume that survives recreation; a local directory
   (**`--workspace-dir`**, local hosts only — a remote host refuses it); or nothing
