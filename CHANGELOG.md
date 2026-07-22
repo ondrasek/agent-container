@@ -2,6 +2,47 @@
 
 <!-- version list -->
 
+## v0.8.0 (2026-07-22)
+
+### Bug Fixes
+
+- **execution**: Clarify clone-on-start HTTPS credential log
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`889ebb7`](https://github.com/ondrasek/agent-container/commit/889ebb77dbba4e891d8727dc0858de4b1af5619a))
+
+### Documentation
+
+- **execution**: Correct the task-delivery guarantee wording
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`8a64683`](https://github.com/ondrasek/agent-container/commit/8a646837e0bf707d32b8518440a2ea60b5f7bc2f))
+
+- **specs**: Apply analyze remediation H1/M1/M2/M3 for Feature 004
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`3789a07`](https://github.com/ondrasek/agent-container/commit/3789a078ecc1cbdf6847819206fd204dabe648f1))
+
+- **specs**: Fold in --foreground guard and headless re-up semantics
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`33ee5cd`](https://github.com/ondrasek/agent-container/commit/33ee5cd06d4a46bf9aaa3533dcf0edf050c49633))
+
+- **specs**: Note headless-foreground sidecar caveat for M1
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`210641d`](https://github.com/ondrasek/agent-container/commit/210641d91f3d5b630bcb2b47cf6f6d46880bb94e))
+
+- **specs**: Plan Feature 004 agent-execution
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`f0ef779`](https://github.com/ondrasek/agent-container/commit/f0ef779fc5ed3e00a2a1da9b23b5e5a0ee25bc59))
+
+- **specs**: Task list for Feature 004 agent-execution
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`b8f586b`](https://github.com/ondrasek/agent-container/commit/b8f586b9b8b6aa41602677948c03bca9759239d8))
+
+### Features
+
+- **execution**: Agent execution modes, sessions & workspaces
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`4ea731a`](https://github.com/ondrasek/agent-container/commit/4ea731a9afb2bb1284fb4769d4832327d63e2990))
+
+
 ## v0.7.0 (2026-07-16)
 
 ### Chores
