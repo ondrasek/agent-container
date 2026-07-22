@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -44,7 +45,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
@@ -3261,19 +3262,196 @@ def resolve_attach_target(
     return user, host, port, "local"
 
 
+# --- Feature 005: shell integration (print/emit seam) ------------------------
+# Every print-capable operation computes ONE structured ShellAction (env set/unset
+# ops + command lines), which is then either RENDERED for a shell dialect (→ stdout)
+# or EXECUTED — so print and execute can never drift (FR-010). Output is eval-safe
+# (per-dialect quoting), stdout-is-config-only (humans go to stderr via eprint/die),
+# registry-only (no probe), and carries NO secret (Constitution III — only
+# connection coordinates). The seam is deliberately backend-extensible (FR-012).
+
+SHELL_DIALECTS = ("posix", "fish", "pwsh")
+# Every var `host env` can set — `--unset` clears all of them, name-free (FR-008a).
+HOST_ENV_VARS = ("DOCKER_CONTEXT", "DOCKER_HOST", "CONTAINER_CONNECTION", "CONTAINER_HOST")
+
+
+@dataclass
+class ShellAction:
+    """The one definition print and execute share (Feature 005). `env_set` is
+    ordered (NAME, value) pairs; `env_unset` is NAMEs; `commands` is argv lists.
+    Carries only non-secret material by construction (Constitution III)."""
+
+    env_set: list[tuple[str, str]] = field(default_factory=list)
+    env_unset: list[str] = field(default_factory=list)
+    commands: list[list[str]] = field(default_factory=list)
+
+
+def _quote_fish(s: str) -> str:
+    """fish single-quote: only `\\` and `'` are special inside single quotes; each
+    is escaped with a backslash. (Adversarial cases are covered in
+    test_shell_integration.py, where backslash escaping is unambiguous.)
+
+    >>> _quote_fish("a b")
+    "'a b'"
+    """
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _quote_pwsh(s: str) -> str:
+    """PowerShell single-quoted literal: a literal `'` is escaped by DOUBLING it;
+    single quotes suppress `$` expansion, so this is injection/expansion-safe.
+
+    >>> _quote_pwsh("a b")
+    "'a b'"
+    >>> _quote_pwsh("a'b")
+    "'a''b'"
+    >>> _quote_pwsh("$env:x")
+    "'$env:x'"
+    """
+    return "'" + s.replace("'", "''") + "'"
+
+
+def render_action(action: ShellAction, dialect: str) -> str:
+    """Render a ShellAction to eval-safe text for `dialect` (posix|fish|pwsh),
+    ending in a single newline. An unknown dialect `die`s (empty stdout + non-zero,
+    FR-003). Every value/token is quoted for the shell (FR-004)."""
+    if dialect not in SHELL_DIALECTS:
+        die(f"--shell must be one of {', '.join(SHELL_DIALECTS)} (got '{dialect}')")
+    lines: list[str] = []
+    if dialect == "posix":
+        for name, val in action.env_set:
+            lines.append(f"export {name}={shlex.quote(val)}")
+        if action.env_unset:
+            lines.append("unset " + " ".join(action.env_unset))
+        for cmd in action.commands:
+            lines.append(shlex.join(cmd))
+    elif dialect == "fish":
+        for name, val in action.env_set:
+            lines.append(f"set -x {name} {_quote_fish(val)}")
+        if action.env_unset:
+            lines.append("set -e " + " ".join(action.env_unset))
+        for cmd in action.commands:
+            lines.append(" ".join(_quote_fish(t) for t in cmd))
+    else:  # pwsh
+        for name, val in action.env_set:
+            lines.append(f"$env:{name} = {_quote_pwsh(val)}")
+        if action.env_unset:
+            targets = ",".join(f"Env:{n}" for n in action.env_unset)
+            lines.append(f"Remove-Item {targets} -ErrorAction SilentlyContinue")
+        for cmd in action.commands:
+            # In PowerShell a quoted string at statement start is a value, not an
+            # invocation — leave the executable (cmd[0]) unquoted and quote the args.
+            head = cmd[0]
+            rest = " ".join(_quote_pwsh(t) for t in cmd[1:])
+            lines.append(f"{head} {rest}".rstrip())
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def print_shell(text: str) -> None:
+    """Write the fully-rendered block to stdout — the ONLY stdout write on the
+    print path. Callers resolve + render EVERYTHING first (any failure `die`s to
+    stderr before this), so on error stdout stays empty (eval-safe, FR-003/SC-004)."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def attach_shell_action(user: str, host: str, port: str, window: str | None = None) -> ShellAction:
+    """The attach command as a ShellAction — the SINGLE source the print path
+    renders and the execute path runs (FR-010 parity). Only connection coordinates."""
+    return ShellAction(commands=[ssh_argv(user, host, port, window)])
+
+
+def ssh_config_stanza(name: str, user: str, host: str, port: str) -> str:
+    """A `~/.ssh/config` `Host` block reproducing attach via `ssh <name>` (FR-007).
+    All fields are resolved/validated coordinates — no secret, no injection."""
+    return (
+        f"Host {name}\n"
+        f"    HostName {host}\n"
+        f"    User {user}\n"
+        f"    Port {port}\n"
+        f"    RequestTTY yes\n"
+        f"    RemoteCommand tmux attach -t main\n"
+    )
+
+
+def host_env_action(host_rec: dict, endpoint: bool) -> ShellAction:
+    """Build the `host env` set-action for a host record (registry-only, no probe).
+    Default emits the driver's context reference (DOCKER_CONTEXT / CONTAINER_CONNECTION,
+    mirroring driver_runtime_argv); --endpoint emits the raw endpoint
+    (DOCKER_HOST / CONTAINER_HOST = ssh://[user@]address). No secret is included."""
+    driver = host_rec.get("driver")
+    if driver not in ("docker", "podman"):
+        die(f"host env: host driver '{driver}' is attach-only — it has no runtime to target")
+    ctx = host_rec.get("context") or ""
+    if endpoint:
+        uri = ctx if ctx.startswith("ssh://") else None
+        if uri is None:
+            addr = host_rec.get("address") or ""
+            if not addr:
+                die("host env --endpoint: no address on record to build an endpoint URI")
+            uri = f"ssh://{addr}"
+        var = "DOCKER_HOST" if driver == "docker" else "CONTAINER_HOST"
+        return ShellAction(env_set=[(var, uri)])
+    if not ctx:
+        # Context-less (implicit local): the default daemon is already the target.
+        return ShellAction()
+    var = "DOCKER_CONTEXT" if driver == "docker" else "CONTAINER_CONNECTION"
+    return ShellAction(env_set=[(var, ctx)])
+
+
+def cli_host_env(name: str | None, endpoint: bool, unset: bool, shell: str) -> None:
+    """`host env` — emit eval-able env that retargets the operator's docker/podman
+    at a host, or a plain `--unset`. Print-only (a child cannot set the parent
+    shell's env — FR-009 exempts it). Registry-only; unknown host → empty stdout +
+    non-zero. Everything is resolved + rendered BEFORE the single stdout write."""
+    if shell not in SHELL_DIALECTS:
+        die(f"--shell must be one of {', '.join(SHELL_DIALECTS)} (got '{shell}')")
+    if unset:
+        # Name-free: clear every var host env can set (FR-008a).
+        print_shell(render_action(ShellAction(env_unset=list(HOST_ENV_VARS)), shell))
+        return
+    if not name:
+        die("host env: NAME is required (or use --unset)")
+    rec = registry_hosts(load_registry()).get(name)
+    if rec is None:
+        die(f"unknown host '{name}' — not in the registry (see: agent-container host ls)")
+    action = host_env_action(rec, endpoint)
+    if not action.env_set:
+        eprint(
+            f"[agent-container] host '{name}' targets the local daemon already; "
+            f"no environment change needed (nothing to eval)"
+        )
+        return  # nothing on stdout; harmless no-op eval; exit 0
+    print_shell(render_action(action, shell))
+
+
 def cli_attach(
     name: str,
     mode: str,
     user_override: str | None,
     host_override: str | None,
     window: str | None = None,
+    print_mode: bool = False,
+    ssh_config: bool = False,
+    shell: str = "posix",
 ) -> None:
     # Validate the window BEFORE resolving/building the command (it is embedded
     # in the remote shell string).
     if window:
         validate_window(window)
+    if (print_mode or ssh_config) and shell not in SHELL_DIALECTS:
+        die(f"--shell must be one of {', '.join(SHELL_DIALECTS)} (got '{shell}')")
     migrate_flat_state()
     user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
+    # Feature 005 print mode: emit the ssh+tmux command / ssh-config stanza to
+    # stdout and do nothing else — no probe, no connection (registry-only). The
+    # printed command is the SAME argv the execute path runs (FR-010 parity).
+    if ssh_config:
+        print_shell(ssh_config_stanza(name, user, host, port))
+        return
+    if print_mode:
+        print_shell(render_action(attach_shell_action(user, host, port, window), shell))
+        return
     # Dead-session probe (FR-008): never present a silent empty attach. If ssh can
     # reach the container but the tmux session 'main' is gone (agent/session ended),
     # report it clearly instead of dropping into an empty shell. An 'unreachable'
@@ -3291,8 +3469,10 @@ def cli_attach(
     sys.stdout.flush()
     sys.stderr.flush()
     # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
-    # and the exit code belong to ssh — identical to bash `exec ssh`.
-    os.execvp("ssh", ssh_argv(user, host, port, window))
+    # and the exit code belong to ssh — identical to bash `exec ssh`. The argv is
+    # built from the SAME ShellAction the print path renders, so `attach --print`
+    # is byte-for-byte what execute runs (FR-010 parity, single source).
+    os.execvp("ssh", attach_shell_action(user, host, port, window).commands[0])
 
 
 def _child_default_sigint() -> None:
@@ -4065,6 +4245,28 @@ def host_rm(
     cli_host_rm(name, destroy, yes)
 
 
+@host_app.command("env")
+def host_env(
+    name: str = typer.Argument(None, help="Host short name to target (omit with --unset)."),
+    endpoint: bool = typer.Option(
+        False,
+        "--endpoint",
+        help="Emit the raw endpoint (DOCKER_HOST/CONTAINER_HOST=ssh://…) instead of "
+        "the registered context reference (DOCKER_CONTEXT/CONTAINER_CONNECTION).",
+    ),
+    unset: bool = typer.Option(
+        False, "--unset", help="Emit a plain unset of all vars host env can set (no name needed)."
+    ),
+    shell: str = typer.Option("posix", "--shell", help="Dialect: posix (default), fish, or pwsh."),
+) -> None:
+    """Emit eval-able env that points the operator's own docker/podman at a host.
+
+    Prints by default (it exists to be eval'd): `eval $(agent-container host env NAME)`
+    (POSIX/fish) or `agent-container host env NAME --shell pwsh | Invoke-Expression`.
+    Registry-only — no connection is made."""
+    cli_host_env(name, endpoint, unset, shell)
+
+
 @app.command()
 def attach(
     name: str = typer.Argument(..., help="Container short name."),
@@ -4077,12 +4279,31 @@ def attach(
     window: str | None = typer.Option(
         None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
     ),
+    print_cmd: bool = typer.Option(
+        False,
+        "--print",
+        help="Print the runnable ssh+tmux command to stdout (eval/alias it) instead "
+        "of connecting. Byte-for-byte what execute runs; nothing is connected.",
+    ),
+    ssh_config: bool = typer.Option(
+        False,
+        "--ssh-config",
+        help="Print a ~/.ssh/config Host stanza to stdout (append it, then `ssh NAME`).",
+    ),
+    shell: str = typer.Option(
+        "posix", "--shell", help="Dialect for --print output: posix (default), fish, or pwsh."
+    ),
 ) -> None:
-    """ssh + tmux attach to container NAME (local state file or hosts.conf)."""
+    """ssh + tmux attach to container NAME (local state file or hosts.conf).
+
+    With --print / --ssh-config, emit the command/config to stdout instead of
+    connecting (for `eval $(…)`, aliases, or ~/.ssh/config)."""
     if local and remote:
         raise typer.BadParameter("--local and --remote are mutually exclusive")
+    if print_cmd and ssh_config:
+        raise typer.BadParameter("--print and --ssh-config are mutually exclusive")
     mode = "local" if local else ("remote" if remote else "auto")
-    cli_attach(name, mode, user, host, window)
+    cli_attach(name, mode, user, host, window, print_cmd, ssh_config, shell)
 
 
 @app.command()
