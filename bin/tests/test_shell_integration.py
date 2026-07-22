@@ -183,6 +183,14 @@ def test_host_env_action_endpoint_uses_ssh_context_verbatim(wiz):
     assert wiz.host_env_action(rec, endpoint=True).env_set == [("DOCKER_HOST", "ssh://ops@vps:22")]
 
 
+def test_host_env_endpoint_strips_password_from_ssh_uri(wiz):
+    # Constitution III: a password in an ssh:// context must NEVER reach stdout.
+    rec = {"driver": "docker", "context": "ssh://ops:hunter2@vps:22", "address": "vps"}
+    action = wiz.host_env_action(rec, endpoint=True)
+    assert action.env_set == [("DOCKER_HOST", "ssh://ops@vps:22")]
+    assert "hunter2" not in wiz.render_action(action, "posix")
+
+
 def test_host_env_action_attach_only_driver_dies(wiz):
     with pytest.raises(wiz.Fatal, match="attach-only"):
         wiz.host_env_action(

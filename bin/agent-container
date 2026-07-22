@@ -3374,6 +3374,28 @@ def ssh_config_stanza(name: str, user: str, host: str, port: str) -> str:
     )
 
 
+def _sanitize_ssh_uri(uri: str) -> str:
+    """Strip any PASSWORD from an ssh:// URI's userinfo before it can be emitted
+    (Constitution III — least exposure): keep the user, drop ':password'. A
+    docker/podman endpoint authenticates by key, so a password in the URI is both
+    unnecessary and a secret that must never reach stdout. Non-ssh:// / userinfo-
+    free URIs pass through unchanged.
+
+    >>> _sanitize_ssh_uri("ssh://user:hunter2@host:22")
+    'ssh://user@host:22'
+    >>> _sanitize_ssh_uri("ssh://dev@vps.example.com")
+    'ssh://dev@vps.example.com'
+    >>> _sanitize_ssh_uri("ssh://vps.example.com")
+    'ssh://vps.example.com'
+    """
+    m = re.match(r"^(ssh://)([^@/]+)@(.*)$", uri)
+    if not m:
+        return uri
+    scheme, userinfo, rest = m.groups()
+    user = userinfo.split(":", 1)[0]  # drop ':password' if present
+    return f"{scheme}{user}@{rest}"
+
+
 def host_env_action(host_rec: dict, endpoint: bool) -> ShellAction:
     """Build the `host env` set-action for a host record (registry-only, no probe).
     Default emits the driver's context reference (DOCKER_CONTEXT / CONTAINER_CONNECTION,
@@ -3384,8 +3406,15 @@ def host_env_action(host_rec: dict, endpoint: bool) -> ShellAction:
         die(f"host env: host driver '{driver}' is attach-only — it has no runtime to target")
     ctx = host_rec.get("context") or ""
     if endpoint:
-        uri = ctx if ctx.startswith("ssh://") else None
-        if uri is None:
+        # Best-effort raw endpoint (FR-008 portability). If the registered context
+        # is itself an ssh:// URI, use it verbatim (it carries the working user);
+        # otherwise (a named or socket-forwarded context) reconstruct address-only
+        # ssh://<address> — the operator's own ~/.ssh/config supplies the user, and
+        # this cannot reproduce a socket-forward (the default context-ref form is
+        # authoritative). Any password in the URI is stripped (Constitution III).
+        if ctx.startswith("ssh://"):
+            uri = _sanitize_ssh_uri(ctx)
+        else:
             addr = host_rec.get("address") or ""
             if not addr:
                 die("host env --endpoint: no address on record to build an endpoint URI")
@@ -3396,7 +3425,8 @@ def host_env_action(host_rec: dict, endpoint: bool) -> ShellAction:
         # Context-less (implicit local): the default daemon is already the target.
         return ShellAction()
     var = "DOCKER_CONTEXT" if driver == "docker" else "CONTAINER_CONNECTION"
-    return ShellAction(env_set=[(var, ctx)])
+    # A context NAME is not secret; sanitize defensively in case it is an ssh:// URI.
+    return ShellAction(env_set=[(var, _sanitize_ssh_uri(ctx))])
 
 
 def cli_host_env(name: str | None, endpoint: bool, unset: bool, shell: str) -> None:

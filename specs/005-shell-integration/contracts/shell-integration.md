@@ -49,14 +49,24 @@ export DOCKER_CONTEXT=agent-container-hz1
 export CONTAINER_CONNECTION=agent-container-hz1
 ```
 
-**host env — `--endpoint` (raw endpoint)**:
+**host env — `--endpoint` (raw endpoint, best-effort)**:
 
 ```sh
-# docker
-export DOCKER_HOST=ssh://dev@vps.example.com
-# podman
-export CONTAINER_HOST=ssh://dev@vps.example.com
+# registered context is itself an ssh:// URI -> used verbatim (user preserved,
+# any password stripped for least exposure):
+export DOCKER_HOST=ssh://ops@vps.example.com
+# a named / socket-forwarded context -> address-only reconstruction (the
+# operator's ~/.ssh/config supplies the user; this cannot reproduce a
+# socket-forward, so the default context-ref form remains authoritative):
+export DOCKER_HOST=ssh://vps.example.com
+# podman uses CONTAINER_HOST identically.
 ```
+
+The endpoint form is **best-effort** (clarify Q1): it faithfully reproduces a
+target only when the registered context is an `ssh://user@host` URI. For a named
+or socket-forwarded context it emits `ssh://<address>` (no user, no socket-forward)
+— use the default context-reference form there. A password in an `ssh://` context
+is **stripped** before emit (Constitution III).
 
 **host env — fish** (`--shell fish`): `set -x DOCKER_CONTEXT agent-container-hz1`;
 unset: `set -e DOCKER_CONTEXT`.

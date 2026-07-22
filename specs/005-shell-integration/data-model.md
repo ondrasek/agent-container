@@ -21,12 +21,20 @@ from registry/state; **no connection is made** to produce it.
 | `session` | canonical tmux session (`main`) | attach/session (004) |
 | `driver` | `docker` \| `podman` (\| `existing-ssh`, attach-only) | host record (001) |
 | `context_ref` | the registered context/connection name | host record `context` (001) |
-| `endpoint` | best-effort raw URI `ssh://<user>@<address>` | derived (R3) |
+| `endpoint` | best-effort raw URI `ssh://[user@]address` — user present only when the context is itself an `ssh://user@host` URI (any password **stripped**, Constitution III); otherwise address-only | derived (R3) |
 
 **Invariant (Constitution III)**: the descriptor carries **only** connection
 coordinates. It MUST NOT contain, and no renderer may emit, any secret — push key
 or its path, `GH_TOKEN`/API keys, `known_hosts` content, or auth material. Secrets
-are out of the descriptor by construction.
+are out of the descriptor by construction; an `ssh://` endpoint has any password
+**stripped** before emit.
+
+**Realization note**: the descriptor is not a distinct type — it is realized as the
+resolved arguments passed to the two builders (`attach_shell_action(user, host,
+port, window)` and `host_env_action(host_rec, endpoint)`), each of which is the
+single source both the print and (for attach) the execute path consume. That single
+source is what makes print==execute provable (FR-010) and is the FR-012 seam; a
+future emit backend consumes the same `ShellAction`.
 
 ## ShellAction
 
