@@ -60,7 +60,9 @@ agent-container list                 # shows exited status/code
 ```
 
 **Expected**: control returns at once; output and final result are retrievable
-afterward; a successful run is not resurrected.
+afterward; a successful run is not resurrected. A re-`up beta` on the exited
+deployment reports the prior exit status/code (not a silent re-run) — use
+`agent-container redeploy beta` to run the task again.
 
 ## Scenario F — Workspace persistence vs ephemeral (US4, SC-006)
 

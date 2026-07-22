@@ -14,7 +14,7 @@ non-workspace volumes, attach transport, and the 003 credentials are inherited.
 | `--workspace persistent\|bind\|ephemeral` | Workspace mode (default `persistent`). `bind` requires `--workspace-dir` (or reuses `--mount` semantics) and a **local** host. |
 | `--workspace-dir <local-abs-dir>` | The host directory for a `bind` workspace (local hosts only). |
 | `--repo <url>` | Clone-on-start source for persistent/ephemeral workspaces. |
-| `--foreground` | Headless only: stream the run attached and return control on completion (default headless is detached). The attached `compose up` uses `--abort-on-container-exit --exit-code-from agent` so the CLI exit status mirrors the agent container's exit code (FR-002). |
+| `--foreground` | Headless only (**`die` if passed without `--mode headless`**, FR-017): stream the run attached and return control on completion (default headless is detached). The attached `compose up` uses `--abort-on-container-exit --exit-code-from agent` so the CLI exit status mirrors the agent container's exit code (FR-002). |
 
 Non-secret settings (`mode`/`agent`/`repo`/`workspace`) are delivered as compose
 **environment**; the task rides an injected **config** file. `redeploy` accepts the
@@ -63,6 +63,15 @@ an explicit `tmux has-session -t main` check → attach to the running session, 
 present a freshly (re)started session OR report **"nothing running"** clearly.
 Reattach works from any machine (FR-007). Inherited local/remote resolution +
 published port.
+
+## Re-up contract (exited headless deployment)
+
+`up` stays the idempotent no-op for a **running** deployment (001/002). When a
+**headless** deployment has already run and **exited** (its container is in
+`exited` state with a retained exit code), a re-`up <name>` MUST **not** silently
+resurrect the finished job: it **reports the prior exited status/code** (retrievable
+via `list`/`logs`) and directs the operator to **`redeploy`** to re-run the task.
+`redeploy` (deliberately non-idempotent, 002) recreates and re-runs.
 
 ## Failure contract (FR-017)
 
