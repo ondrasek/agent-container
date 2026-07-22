@@ -18,6 +18,15 @@ Today the tool **invokes** external tools on the operator's behalf: `attach` exe
 
 **Why this matters:** (1) **transparency** — the operator sees exactly what would run; (2) **composability** — the emitted config drops into the operator's own shells, aliases, scripts, and CI; (3) **robustness** — when the operator's *own* shell runs the emitted `ssh`/`docker` command, their existing ssh-agent, smartcard, `known_hosts`, and `~/.ssh/config` handle the connection, so environment-specific invocation quirks that are hard for the tool to drive correctly everywhere simply work in the operator's terminal (a friction this project hit driving `ssh`/`docker context` internally during cloud provisioning).
 
+## Clarifications
+
+### Session 2026-07-22
+
+- Q: What should `host env <name>` emit to retarget the operator's docker/podman at the host? → A: **Both, selectable** — default to the host's **registered runtime reference** (`DOCKER_CONTEXT` / the podman connection), which reuses the exact connection the tool established (including any socket-forward); a flag emits the **raw endpoint** form instead (`DOCKER_HOST=ssh://…` / `CONTAINER_HOST=…`) for portability where the registered context is not present.
+- Q: Should `host env` verify reachability at print time? (Edge Cases require print to "not connect"; US2-AC3 said an *unreachable* host emits nothing — a contradiction.) → A: **Registry-only, no probe** — emit purely from registry/state with **no connection**, so print stays side-effect-free. Only an **unknown/unregistered** host emits nothing and exits non-zero; a registered-but-unreachable host still emits — the operator's own `docker ps` surfaces unreachability.
+- Q: What does the `--unset` form do? → A: **Plain unset** — emit `unset` of the vars, reverting to the shell/daemon default (like `minikube docker-env --unset`); it does **not** snapshot or restore a prior custom value, and stores no new state.
+- Q: Which shell dialects ship in this feature? → A: **POSIX (default) + fish**; csh and other dialects remain deferred behind the same selector seam.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Print the attach command instead of running it (Priority: P1)
@@ -49,7 +58,7 @@ The operator runs `eval $(agent-container host env <name>)` and their **own** `d
 
 1. **Given** a registered/provisioned host, **When** the operator evals the host-env output, **Then** subsequent `docker`/`compose` commands in that shell target the host.
 2. **Given** an active host-env, **When** the operator evals the unset output, **Then** the environment reverts to the prior/default target.
-3. **Given** a host that is unreachable or unknown, **When** host-env is requested, **Then** nothing is emitted to stdout and the command exits non-zero (so `eval` runs nothing).
+3. **Given** an **unknown/unregistered** host, **When** host-env is requested, **Then** nothing is emitted to stdout and the command exits non-zero (so `eval` runs nothing). A **registered-but-unreachable** host still emits (print does not probe, per FR-005); the operator's own `docker`/`compose` surfaces the unreachability after eval.
 
 ---
 
@@ -77,7 +86,7 @@ The same operation can either **print** the commands for the operator to run or 
 - **No side effects from printing**: requesting the command/env does not create, connect, start, or mutate anything; running it twice yields identical output.
 - **Shell dialects**: the default output is POSIX (bash/zsh); operators using another shell can request a compatible dialect (e.g. fish/csh), as `minikube docker-env --shell` does.
 - **Unset with nothing set**: the unset form is harmless (a no-op eval) when no env was set.
-- **Target not found / not running**: emits nothing to stdout, a clear stderr message, and a non-zero exit.
+- **Target not found**: an **unknown/unregistered** name (or, for attach, no container) emits nothing to stdout, a clear stderr message, and a non-zero exit. Print does **not** probe reachability (registry-only) — a registered-but-unreachable/stopped host still emits its coordinates; only genuinely absent targets suppress output.
 - **Parity source**: the printed form is generated from the *same* single definition the execute path uses, so they can never drift (Constitution IV/V).
 
 ## Requirements *(mandatory)*
@@ -99,7 +108,8 @@ The same operation can either **print** the commands for the operator to run or 
 
 **Host environment (US2)**
 
-- **FR-008**: The tool MUST provide an **eval-able host environment** form that, when evaluated, makes the operator's own container tooling target a named host directly, plus a **matching unset** form that reverts it.
+- **FR-008**: The tool MUST provide an **eval-able host environment** form that, when evaluated, makes the operator's own container tooling target a named host directly, plus a **matching unset** form that reverts it. The **default** output references the host's **registered runtime target** (docker `DOCKER_CONTEXT` / the podman connection), reusing the exact connection the tool established (including any socket-forward); a **flag** MUST offer the **raw-endpoint** form instead (`DOCKER_HOST=ssh://…` / `CONTAINER_HOST=…`) for portability where the registered context is absent. The output is derived **from registry/state only — no reachability probe, no connection** (consistent with FR-005): an **unknown** host emits nothing and exits non-zero, while a registered-but-unreachable host still emits.
+- **FR-008a**: The **unset** form MUST be a **plain unset** of the variables it sets, reverting to the shell/daemon default (mirroring `minikube docker-env --unset`); it MUST NOT snapshot or restore a prior custom value and stores no new state, and is a harmless no-op when nothing was set.
 
 **Execute toggle (US3)**
 
@@ -108,14 +118,14 @@ The same operation can either **print** the commands for the operator to run or 
 
 **Cross-cutting**
 
-- **FR-011**: The tool SHOULD support at least one **shell dialect selector** (default POSIX sh; e.g. fish/csh optional) so the emitted assignments fit the operator's shell.
+- **FR-011**: The tool MUST support a **shell dialect selector** offering **POSIX sh (default) and fish** so the emitted assignments fit the operator's shell; additional dialects (csh, etc.) are deferred behind the same selector and are out of scope for this feature.
 - **FR-012**: The print/emit seam MUST be **backend-extensible** — computing the action is separated from realizing it (print shell config, or execute), so additional emit backends (e.g. infrastructure-as-code such as Terraform or ARM/Bicep) can be added later without redesigning the action layer. Those IaC backends are **out of scope for this feature**; only the seam that admits them is in scope.
 - **FR-013**: Documentation (README, CLAUDE.md, this spec) MUST be updated in the same change as any change to the print/eval contract or the operations that expose it.
 
 ### Key Entities *(include if data involved)*
 
 - **Shell configuration output**: the eval-able artifact — zero or more environment-variable assignments and/or command lines, rendered for a target shell dialect, escaped to be `eval`-safe. Written to stdout; the sole stdout content in print mode.
-- **Connection descriptor**: the resolved facts a container/host exposes — SSH user, reachable address, published port, tmux session name, and the host's container-runtime target — derived from the existing identity/addressing (001) and attach/session (004). The single source from which both the printed command and the executed command are rendered.
+- **Connection descriptor**: the resolved facts a container/host exposes — SSH user, reachable address, published port, tmux session name, and the host's container-runtime target (both its **registered context/connection reference** and its **raw endpoint**) — derived from the existing identity/addressing (001) and attach/session (004), read from registry/state without connecting. The single source from which both the printed command and the executed command are rendered, and from which host-env renders either the context-reference (default) or raw-endpoint (flagged) form.
 
 ## Success Criteria *(mandatory)*
 
@@ -130,7 +140,7 @@ The same operation can either **print** the commands for the operator to run or 
 
 ## Assumptions
 
-- **Default dialect POSIX**: emitted assignments/commands default to POSIX-sh (bash/zsh compatible); additional dialects (fish/csh) are optional, mirroring `minikube docker-env --shell`.
+- **Default dialect POSIX; fish included**: emitted assignments/commands default to POSIX-sh (bash/zsh compatible) and this feature also ships a **fish** dialect (selectable, mirroring `minikube docker-env --shell`); csh and other dialects are deferred behind the same selector.
 - **Existing verbs keep executing by default**: operations that execute today (notably `attach`) keep that default and gain an opt-in print flag; new emit-oriented subcommands (host-env, ssh-config, show-ssh-style) print by default because they exist to be evaluated. This preserves current behavior and matches the `eval $(…)` idiom.
 - **Depends on 001/004**: reachable address, published port, host runtime target, and the canonical SSH+tmux attach come from Features 001 and 004; this feature exposes them and does not redefine addressing or session semantics.
 - **Robustness benefit is inherent, not a new mechanism**: because the operator's own shell runs the emitted `ssh`/`docker`, their ssh-agent/smartcard/known_hosts/ssh-config handle the connection — the tool need not correctly drive those in every environment for the print path.
