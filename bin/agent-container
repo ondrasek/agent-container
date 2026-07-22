@@ -44,6 +44,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
@@ -272,6 +273,25 @@ def per_container_volumes(name: str) -> list[str]:
     ]
 
 
+def other_container_volumes(name: str) -> list[str]:
+    """The six NON-workspace per-container volume names (Feature 004). The
+    workspace volume is mode-dependent (persistent only), so bind/ephemeral
+    deployments declare only these six in the compose model's `volumes:`.
+
+    >>> other_container_volumes("acme")
+    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    """
+    ws = volume_name(name)
+    return [v for v in per_container_volumes(name) if v != ws]
+
+
+def other_volume_mounts(name: str) -> list[str]:
+    """The six non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
+    the leading workspace mount, which the workspace mode selects separately."""
+    ws_prefix = f"{volume_name(name)}:"
+    return [m for m in all_volume_mounts(name) if not m.startswith(ws_prefix)]
+
+
 def resolve_bind_mount(spec: str) -> str:
     """Resolve a '--mount HOSTDIR[:CONTAINERPATH]' spec into an absolute,
     read-write '-v' value.
@@ -314,6 +334,16 @@ INJECT_PUSH_KEY_PATH = "/run/agent-container/push_ed25519_key"
 INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
 INJECT_APIKEY_DIR = "/run/agent-container/apikeys"
 INJECT_CONFIG_DIR = "/run/agent-container/config"
+# Feature 004 — the initial/headless task rides the same ephemeral compose-config
+# channel (never argv/env, no size cap); the entrypoint reads it here.
+INJECT_TASK_PATH = "/run/agent-container/task"
+
+# Feature 004 — execution surface. The primary agent per deployment, the
+# execution mode, and the workspace mode. These are non-secret and travel as
+# compose environment (mode/agent/repo) — the task travels as an injected file.
+EXEC_MODES = ("interactive", "headless")
+AGENTS = ("claude", "codex", "pi")
+WORKSPACE_MODES = ("persistent", "bind", "ephemeral")
 
 
 def validate_private_key(path: Path) -> None:
@@ -1905,7 +1935,28 @@ def driver_compose_argv(
     return driver_runtime_argv(host) + ["compose", "-p", project, *files, *args]
 
 
-def driver_up_argv(host: dict, project: str, file: Path, override: Path | None = None) -> list[str]:
+def driver_up_argv(
+    host: dict, project: str, file: Path, override: Path | None = None, foreground: bool = False
+) -> list[str]:
+    """Bring the deployment up. Detached by default (`-d`). A headless FOREGROUND
+    run (Feature 004) instead runs ATTACHED with `--abort-on-container-exit
+    --exit-code-from agent` so `compose up`'s own exit status is the agent
+    container's exit code (FR-002/SC-004) — without which compose returns 0
+    regardless of the workload. Sidecar caveat (US4): --abort-on-container-exit
+    stops every service when any one exits, so a headless-foreground deployment's
+    sidecars must be long-lived, not one-shot."""
+    if foreground:
+        return driver_compose_argv(
+            host,
+            project,
+            file,
+            "up",
+            "--build",
+            "--abort-on-container-exit",
+            "--exit-code-from",
+            "agent",
+            override=override,
+        )
     return driver_compose_argv(host, project, file, "up", "-d", "--build", override=override)
 
 
@@ -1971,6 +2022,9 @@ def compose_project(name: str) -> str:
     return container_name(name)
 
 
+_WORKSPACE_DEFAULT = object()  # sentinel: "use the default persistent workspace mount"
+
+
 def build_compose_model(
     name: str,
     build_context: Path | str,
@@ -1979,6 +2033,11 @@ def build_compose_model(
     env_file: Path | None = None,
     extra_mounts: list[str] | None = None,
     injected_configs: list[tuple[str, Path, str]] | None = None,
+    *,
+    restart: str = "unless-stopped",
+    environment: dict[str, str] | None = None,
+    workspace_mount: object = _WORKSPACE_DEFAULT,
+    declare_workspace_volume: bool = True,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
@@ -1997,22 +2056,40 @@ def build_compose_model(
     entrypoint reads the INJECT_* paths.
     """
     port = port_for_name(name)
+    # Feature 004: the /workspace mount is workspace-mode dependent. Default (and
+    # every pre-004 caller) → the persistent named volume; ephemeral → nothing
+    # mounted (None); bind → the caller's '<abs>:/workspace'. The other six volumes
+    # are always mounted.
+    ws = (
+        f"{volume_name(name)}:/workspace"
+        if workspace_mount is _WORKSPACE_DEFAULT
+        else workspace_mount
+    )
+    workspace_mounts = [ws] if ws is not None else []
     service: dict = {
         "container_name": container_name(name),
         "build": {"context": str(build_context)},
-        "restart": "unless-stopped",
+        "restart": restart,
         "ports": [f"{port}:2222"],
-        "volumes": all_volume_mounts(name) + list(extra_mounts or []),
+        "volumes": workspace_mounts + other_volume_mounts(name) + list(extra_mounts or []),
     }
+    if environment:  # Feature 004 non-secret settings (mode/agent/clone-url)
+        service["environment"] = dict(environment)
     if env_file is not None:
         service["env_file"] = [str(env_file)]
+    # The workspace named volume is declared ONLY in persistent mode (Constitution
+    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other six are
+    # always declared. `--purge`/`wipe` tolerate the workspace volume's absence.
+    declared = (
+        per_container_volumes(name) if declare_workspace_volume else other_container_volumes(name)
+    )
     model: dict = {
         "name": compose_project(name),
         "services": {"agent": service},
         # Pin each volume's `name` so compose does NOT prefix it with the project
-        # ("<project>_<vol>"); the seven volume names are the deterministic identity
+        # ("<project>_<vol>"); the volume names are the deterministic identity
         # contract (Constitution IV) that `--purge` and the completions rely on.
-        "volumes": {vn: {"name": vn} for vn in per_container_volumes(name)},
+        "volumes": {vn: {"name": vn} for vn in declared},
     }
     # Injected SSH identity rides as compose `configs` (NOT `secrets`). Both the
     # host key and authorized_keys are delivered this way because a compose
@@ -2370,6 +2447,156 @@ def stage_config_injection(
     return entries
 
 
+@dataclass
+class ExecSpec:
+    """Feature 004 deploy-time execution options, threaded from `up`/`redeploy`
+    into the compose model + the entrypoint. Defaults reproduce the pre-004 shape
+    (interactive claude on a persistent workspace) so existing call sites and
+    every existing deployment are unchanged (Constitution IV)."""
+
+    mode: str = "interactive"
+    agent: str = "claude"
+    task: str | None = None  # resolved text (after @file); delivered as an injected file
+    repo: str | None = None  # clone-on-start source URL (persistent/ephemeral only)
+    workspace: str = "persistent"
+    workspace_dir: str | None = None  # host dir for a bind workspace (local hosts only)
+    foreground: bool = False  # headless: run `compose up` attached (stream + exit code)
+
+    def validate(self) -> None:
+        if self.mode not in EXEC_MODES:
+            die(f"--mode must be one of {', '.join(EXEC_MODES)} (got '{self.mode}')")
+        if self.agent not in AGENTS:
+            die(f"--agent must be one of {', '.join(AGENTS)} (got '{self.agent}')")
+        if self.workspace not in WORKSPACE_MODES:
+            die(f"--workspace must be one of {', '.join(WORKSPACE_MODES)} (got '{self.workspace}')")
+        # --foreground is headless-only (FR-017): a clear diagnostic, never silently
+        # ignored in interactive mode (analyze L1).
+        if self.foreground and self.mode != "headless":
+            die("--foreground is only valid with --mode headless")
+
+    def restart_policy(self) -> str:
+        """Per-mode compose `restart:` — interactive is kept alive; a headless
+        success exits and is not resurrected, a failure follows policy (FR-005)."""
+        return "on-failure" if self.mode == "headless" else "unless-stopped"
+
+    def compose_environment(self) -> dict[str, str]:
+        """The non-secret settings delivered as compose environment. The clone URL
+        env is AGENT_CONTAINER_CLONE_URL — distinct from AGENT_CONTAINER_REPO (the
+        CLI's host-side build-context override)."""
+        env = {"AGENT_CONTAINER_MODE": self.mode, "AGENT_CONTAINER_AGENT": self.agent}
+        # Clone-on-start applies to persistent/ephemeral only — a bind workspace is
+        # already present and is never cloned (data-model R4), so don't even set the
+        # env for it.
+        if self.repo and self.workspace != "bind":
+            env["AGENT_CONTAINER_CLONE_URL"] = self.repo
+        return env
+
+
+def resolve_task(task: str | None) -> str | None:
+    """Resolve --task: a bare string is the task text; a leading '@' reads a LOCAL
+    file whose whole content is the task (research R2). Delivered later as an
+    injected file (never argv/env, no size cap)."""
+    if task is None:
+        return None
+    if task.startswith("@"):
+        p = Path(task[1:]).expanduser()
+        if not p.is_file():
+            die(f"--task {task}: file '{p}' does not exist or is not a file")
+        return p.read_text()
+    return task
+
+
+def resolve_workspace(spec: ExecSpec, name: str, host_rec: dict) -> tuple[str | None, bool]:
+    """Resolve the workspace mode into (/workspace mount | None, declare_volume).
+
+    persistent → the named workspace volume, declared (survives recreation, FR-012);
+    bind → a local-abs '<dir>:/workspace' bind, NOT declared, refused on a non-local
+    host (FR-011); ephemeral → nothing mounted (the container's own layer), not
+    declared (FR-013). Mode is independent of --mode (FR-016)."""
+    if spec.workspace == "persistent":
+        return f"{volume_name(name)}:/workspace", True
+    if spec.workspace == "ephemeral":
+        return None, False
+    # bind
+    if spec.workspace_dir is None:
+        die("--workspace bind requires --workspace-dir <local-abs-dir>")
+    if not host_is_local(host_rec):
+        die(
+            "--workspace bind is only supported on a LOCAL host — a remote host "
+            "cannot see your local filesystem (use persistent or ephemeral there)"
+        )
+    p = Path(spec.workspace_dir).expanduser()
+    if not p.is_dir():
+        die(f"--workspace-dir {spec.workspace_dir} does not exist or is not a directory")
+    return f"{p.resolve()}:/workspace", False
+
+
+def is_ssh_git_url(url: str) -> bool:
+    """A git URL that authenticates over SSH (uses the injected push key): an
+    ssh:// URL or a scp-like 'user@host:path'. https:// uses GH_TOKEN instead.
+
+    >>> is_ssh_git_url("git@github.com:you/repo.git")
+    True
+    >>> is_ssh_git_url("ssh://git@github.com/you/repo.git")
+    True
+    >>> is_ssh_git_url("https://github.com/you/repo.git")
+    False
+    """
+    return url.startswith("ssh://") or bool(re.match(r"^[^/@]+@[^/:]+:", url))
+
+
+def env_file_defines(env_file: Path | None, key: str) -> bool:
+    """Best-effort: does `env_file` define a non-empty `key`? Only for the clone
+    fail-fast pre-check — the entrypoint does the authoritative in-container check."""
+    if env_file is None:
+        return False
+    try:
+        for raw in env_file.read_text().splitlines():
+            line = raw.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip().removeprefix("export ").strip() == key and v.strip().strip("\"'"):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def clone_credential_precheck(spec: ExecSpec, env_file: Path | None, push_key: Path | None) -> None:
+    """Fail fast (FR-014) when an SSH-URL clone-on-start has no push key: refuse
+    BEFORE creating an empty-workspace container. https:// needs no key (GH_TOKEN
+    is always present); bind is never cloned. The entrypoint re-checks in-container."""
+    if not spec.repo or spec.workspace == "bind":
+        return
+    if not is_ssh_git_url(spec.repo):
+        return  # https:// → GH_TOKEN
+    if push_key is not None or env_file_defines(env_file, "SSH_PUSH_KEY_B64"):
+        return
+    die(
+        f"--repo {spec.repo} is an SSH URL but no push key is injected — pass "
+        f"--push-key (or set SSH_PUSH_KEY_B64 in the env-file). Refusing to start "
+        f"an empty-workspace agent (FR-014)."
+    )
+
+
+def stage_task_injection(
+    host: str, name: str, task_text: str | None
+) -> list[tuple[str, Path, str]]:
+    """Stage the initial/headless task as a LOCAL file and return the
+    injected_configs entry (ephemeral /run target — never argv/env, no size cap,
+    research R2). Absent task → [] (the default no-task path is unchanged)."""
+    if task_text is None:
+        return []
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    f = d / f"{name}.task"
+    f.write_text(task_text)
+    f.chmod(0o644)
+    return [("task", f, INJECT_TASK_PATH)]
+
+
 def compose_up_exec(
     host_name: str,
     host_rec: dict,
@@ -2381,6 +2608,7 @@ def compose_up_exec(
     redeploy: bool = False,
     push_key: Path | None = None,
     known_hosts: Path | None = None,
+    spec: ExecSpec | None = None,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
     the host). With redeploy=True it force-recreates (US2, deliberately
@@ -2389,7 +2617,12 @@ def compose_up_exec(
 
     ALL injected material is staged + validated HERE, before the compose call, so
     a missing/invalid item aborts before the container is created — the fail-fast /
-    no-partial-provisioning guard every credential story inherits (FR-016/FR-017)."""
+    no-partial-provisioning guard every credential story inherits (FR-016/FR-017).
+
+    Feature 004: `spec` carries the execution mode/agent/task/workspace/repo. The
+    per-mode `restart`, the workspace mount + conditional workspace volume, the
+    mode/agent/repo env, and the task inject are all threaded into the model here."""
+    spec = spec or ExecSpec()
     port = port_for_name(name)
     if not redeploy and host_is_local(host_rec) and not port_free(port):
         die(
@@ -2406,23 +2639,51 @@ def compose_up_exec(
     # staged fresh each deploy to INJECT_CONFIG_DIR. Automatic — no flags; the
     # entrypoint mirrors it onto the volume each boot (secrets travel the key channel).
     injected += stage_config_injection(host_name, name)
+    # Feature 004: the initial/headless task rides the same ephemeral inject channel.
+    injected += stage_task_injection(host_name, name, spec.task)
+    # Feature 004: resolve the workspace mount (persistent volume / local bind /
+    # none→container layer) + whether to declare the named workspace volume. bind on
+    # a non-local host is refused here, before any runtime call (FR-011).
+    ws_mount, declare_ws = resolve_workspace(spec, name, host_rec)
     build_ctx = resolve_build_context()
     model = build_compose_model(
-        name, build_ctx, hk_file, ak_file, env_file, mounts, injected_configs=injected
+        name,
+        build_ctx,
+        hk_file,
+        ak_file,
+        env_file,
+        mounts,
+        injected_configs=injected,
+        restart=spec.restart_policy(),
+        environment=spec.compose_environment(),
+        workspace_mount=ws_mount,
+        declare_workspace_volume=declare_ws,
     )
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
-    log(f"compose={compose_file}")
+    log(f"compose={compose_file} mode={spec.mode} agent={spec.agent} workspace={spec.workspace}")
+    if spec.workspace == "ephemeral":
+        warn(
+            "workspace=ephemeral: /workspace is NOT persisted — anything not "
+            "committed-and-pushed is LOST on teardown (FR-015)."
+        )
     project = compose_project(name)
     override = resolve_sidecar_override(name)  # validated; merged as a 2nd -f (US4)
     if override is not None:
         log(f"sidecar override={override}")
-    argv = (
-        driver_redeploy_argv(host_rec, project, compose_file, override)
-        if redeploy
-        else driver_up_argv(host_rec, project, compose_file, override)
-    )
+    # Headless --foreground streams the run attached and propagates the agent's
+    # exit code (FR-002/SC-004); everything else brings the deployment up detached.
+    foreground = spec.foreground and spec.mode == "headless" and not redeploy
+    if redeploy:
+        argv = driver_redeploy_argv(host_rec, project, compose_file, override)
+    else:
+        argv = driver_up_argv(host_rec, project, compose_file, override, foreground=foreground)
     rc = subprocess.run(argv).returncode  # inherited stdio: build output streams
+    if foreground:
+        # The container's exit code IS the agent result — surface it as our own.
+        write_state(host_name, name, port)
+        log(f"headless run finished (exit {rc}); logs: agent-container logs {name}")
+        raise typer.Exit(rc)
     if rc != 0:
         die(f"compose {'redeploy' if redeploy else 'up'} failed (exit {rc})")
     write_state(host_name, name, port)
@@ -2442,8 +2703,11 @@ def do_up(
     authorized_keys: list[Path] | None = None,
     push_key: Path | None = None,
     known_hosts: Path | None = None,
+    spec: ExecSpec | None = None,
 ) -> None:
     validate_name(name)
+    spec = spec or ExecSpec()
+    spec.validate()  # mode/agent/workspace choices + --foreground guard (FR-017)
     migrate_flat_state()
     # Resolve binds up front so a bad --mount aborts before any runtime call.
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
@@ -2471,6 +2735,10 @@ def do_up(
         cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
         die(f"no .env found. Looked in: {cands}")
 
+    # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
+    # container is created; https:// uses GH_TOKEN and needs none.
+    clone_credential_precheck(spec, env_file, push_key)
+
     # The image builds on the host via compose (`up --build`) — no pre-built
     # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
     with deployment_lock(host_name, name):
@@ -2484,6 +2752,7 @@ def do_up(
             authorized_keys or [],
             push_key=push_key,
             known_hosts=known_hosts,
+            spec=spec,
         )
 
 
@@ -2688,11 +2957,15 @@ def do_redeploy(
     authorized_keys: list[Path] | None = None,
     push_key: Path | None = None,
     known_hosts: Path | None = None,
+    spec: ExecSpec | None = None,
 ) -> None:
     """Redeploy (FR-008/FR-010): rebuild the image on the host and recreate the
     container, preserving its volumes. Deliberately NON-idempotent — always
-    recreates even with no change, since the operator explicitly asked to rebuild."""
+    recreates even with no change, since the operator explicitly asked to rebuild.
+    A redeploy may also change mode/agent/workspace/repo (Feature 004)."""
     validate_name(name)
+    spec = spec or ExecSpec()
+    spec.validate()
     migrate_flat_state()
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     host_name, host_rec = resolve_deploy_host(host)
@@ -2703,6 +2976,7 @@ def do_redeploy(
     if env_file is None:
         cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
         die(f"no .env found. Looked in: {cands}")
+    clone_credential_precheck(spec, env_file, push_key)
     with deployment_lock(host_name, name):
         compose_up_exec(
             host_name,
@@ -2715,6 +2989,7 @@ def do_redeploy(
             redeploy=True,
             push_key=push_key,
             known_hosts=known_hosts,
+            spec=spec,
         )
 
 
@@ -2896,6 +3171,47 @@ def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -
     return base + ["tmux", "attach", "-t", "main"]
 
 
+def ssh_probe_argv(user: str, host: str, port: str | int, remote_cmd: str) -> list[str]:
+    """A non-interactive (no -t) ssh command that runs `remote_cmd` and returns its
+    exit code — used for the dead-session probe. BatchMode so it never prompts."""
+    return [
+        "ssh",
+        f"{user}@{host}",
+        "-p",
+        str(port),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        remote_cmd,
+    ]
+
+
+def probe_session(user: str, host: str, port: str | int) -> str:
+    """Probe the tmux session 'main' on the target (FR-008). Returns:
+      'alive'       — `tmux has-session -t main` succeeded (attach normally),
+      'dead'        — ssh connected but the session is gone (report, never a silent
+                      empty attach),
+      'unreachable' — ssh transport error (let the real attach surface it).
+    A dead session is the case FR-008 exists for: reported, not silently empty."""
+    argv = ssh_probe_argv(user, host, port, "tmux has-session -t main")
+    try:
+        rc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        ).returncode
+    except OSError, subprocess.SubprocessError:
+        return "unreachable"
+    if rc == 0:
+        return "alive"
+    if rc == 255:  # ssh's own failure code (connection refused / auth / timeout)
+        return "unreachable"
+    return "dead"
+
+
 def tmux_nest_warning() -> str | None:
     if os.environ.get("TMUX"):
         return "already inside tmux; detach the INNER session with Ctrl-B Ctrl-B d"
@@ -2958,6 +3274,16 @@ def cli_attach(
         validate_window(window)
     migrate_flat_state()
     user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
+    # Dead-session probe (FR-008): never present a silent empty attach. If ssh can
+    # reach the container but the tmux session 'main' is gone (agent/session ended),
+    # report it clearly instead of dropping into an empty shell. An 'unreachable'
+    # probe falls through so the real attach surfaces the transport error.
+    if probe_session(user, host, port) == "dead":
+        die(
+            f"nothing running to attach to: the tmux session 'main' for {name} has "
+            f"ended (the agent/session exited). Start a fresh session with: "
+            f"agent-container redeploy {name}"
+        )
     if w := tmux_nest_warning():
         warn(w)  # CLI mode: warn and proceed
     session = '"main"' + (f', window "{window}"' if window else "")
@@ -3414,11 +3740,70 @@ def up(
         help="Inject a known_hosts file for the push remote so the first push does "
         "not stall on host-key verification. Ephemeral.",
     ),
+    mode: str = typer.Option(
+        "interactive",
+        "--mode",
+        help="Execution mode: interactive (agent in a persistent tmux session) or "
+        "headless (agent runs the task as the container's workload and exits).",
+    ),
+    agent: str = typer.Option(
+        "claude", "--agent", help="Primary agent to run: claude | codex | pi."
+    ),
+    task: str | None = typer.Option(
+        None,
+        "--task",
+        help="Initial task (interactive) / the task to run (headless). Text, or "
+        "@FILE to read a local file. Delivered as an injected file (never argv/env).",
+    ),
+    workspace: str = typer.Option(
+        "persistent",
+        "--workspace",
+        help="Workspace at /workspace: persistent (named volume, survives recreate) "
+        "| bind (a local dir, local hosts only) | ephemeral (container layer, gone "
+        "on teardown).",
+    ),
+    workspace_dir: str | None = typer.Option(
+        None, "--workspace-dir", help="Host directory for a --workspace bind (local hosts only)."
+    ),
+    repo: str | None = typer.Option(
+        None,
+        "--repo",
+        help="Clone-on-start source URL for a persistent/ephemeral workspace. "
+        "git@… uses the injected push key; https://… uses GH_TOKEN.",
+    ),
+    foreground: bool = typer.Option(
+        False,
+        "--foreground",
+        help="Headless only: stream the run attached and return control (with the "
+        "agent's exit code) on completion. Default headless is detached.",
+    ),
 ) -> None:
-    """Start container agent-container-NAME (detached)."""
+    """Start container agent-container-NAME.
+
+    Default: an interactive claude session on a persistent workspace (attach with
+    `agent-container attach NAME`). Use --mode headless for a one-shot job."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
-    do_up(name, host, env_file, mount or [], host_key, authorized_key or [], push_key, known_hosts)
+    spec = ExecSpec(
+        mode=mode,
+        agent=agent,
+        task=resolve_task(task),
+        repo=repo,
+        workspace=workspace,
+        workspace_dir=workspace_dir,
+        foreground=foreground,
+    )
+    do_up(
+        name,
+        host,
+        env_file,
+        mount or [],
+        host_key,
+        authorized_key or [],
+        push_key,
+        known_hosts,
+        spec=spec,
+    )
 
 
 @app.command()
@@ -3498,13 +3883,44 @@ def redeploy(
     known_hosts: Path | None = typer.Option(
         None, "--known-hosts", help="Inject known_hosts for the push remote (as for `up`)."
     ),
+    mode: str = typer.Option("interactive", "--mode", help="Execution mode (as for `up`)."),
+    agent: str = typer.Option("claude", "--agent", help="Primary agent (as for `up`)."),
+    task: str | None = typer.Option(None, "--task", help="Initial/headless task (as for `up`)."),
+    workspace: str = typer.Option(
+        "persistent", "--workspace", help="Workspace mode (as for `up`)."
+    ),
+    workspace_dir: str | None = typer.Option(
+        None, "--workspace-dir", help="Host dir for a bind workspace (as for `up`)."
+    ),
+    repo: str | None = typer.Option(None, "--repo", help="Clone-on-start URL (as for `up`)."),
+    foreground: bool = typer.Option(
+        False, "--foreground", help="Headless: stream the run attached (as for `up`)."
+    ),
 ) -> None:
     """Rebuild the image and recreate agent-container-NAME, preserving its volumes.
-    Deliberately non-idempotent: always rebuilds + recreates, even with no change."""
+    Deliberately non-idempotent: always rebuilds + recreates, even with no change.
+    May change mode/agent/workspace/repo."""
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    spec = ExecSpec(
+        mode=mode,
+        agent=agent,
+        task=resolve_task(task),
+        repo=repo,
+        workspace=workspace,
+        workspace_dir=workspace_dir,
+        foreground=foreground,
+    )
     do_redeploy(
-        name, host, env_file, mount or [], host_key, authorized_key or [], push_key, known_hosts
+        name,
+        host,
+        env_file,
+        mount or [],
+        host_key,
+        authorized_key or [],
+        push_key,
+        known_hosts,
+        spec=spec,
     )
 
 

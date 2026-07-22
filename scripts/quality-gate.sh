@@ -40,6 +40,7 @@ TOOL_HINTS=(
     [self-test]="'./bin/agent-container --self-test' failed — a doctest or the port-hash/key-derivation corpus regressed. Read the failing doctest in bin/agent-container; fix the code, or the doctest if the on-disk contract intentionally changed."
     [pytest]="Read the failing test and the code it exercises. Re-run one test: 'uv run --no-project --with pytest --with typer --with questionary --with rich pytest bin/tests/test_FILE.py::test_NAME -x --tb=long'. Fix the source, not the test, unless the test is wrong."
     [shell-entrypoint]="bin/tests/test_entrypoint.sh failed — entrypoint tmux-layout / git-credential / host-key logic. Read entrypoint.sh and the failing assertion label."
+    [shell-execution]="bin/tests/test_entrypoint_execution.sh failed — Feature 004 entrypoint mode branch (interactive agent launch / headless workload+exit code / clone-on-start). Read the mode-branch + clone-on-start sections of entrypoint.sh and the failing assertion label."
     [shell-completions]="bin/tests/test_completions.sh failed — bash/zsh completion parity or an injection guard. Read completions/agent-container.{bash,zsh}."
     [shell-tmux-layout]="bin/tests/test_entrypoint_tmux_layout.sh failed — real-tmux window layout. Read the tmux section of entrypoint.sh."
     [vulture]="Dead code in bin/agent-container flagged by vulture (>=80% confidence). Read the reported line; if truly unused, delete it. If it is used dynamically (a Typer command, a doctest-only helper, a dynamic attribute) it is a false positive — raise the confidence or add a vulture whitelist entry with a rationale."
@@ -169,6 +170,7 @@ run_check_nonempty "refurb"   "${REFURB[@]}" bin/agent-container --quiet
 run_check "self-test"         ./bin/agent-container --self-test
 run_check "pytest"            "${PYT[@]}" bin/tests -x -q
 run_check "shell-entrypoint"      bash bin/tests/test_entrypoint.sh
+run_check "shell-execution"       bash bin/tests/test_entrypoint_execution.sh
 run_check "shell-completions"     bash bin/tests/test_completions.sh
 run_check "shell-tmux-layout"     bash bin/tests/test_entrypoint_tmux_layout.sh
 

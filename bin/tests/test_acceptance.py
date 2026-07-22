@@ -229,8 +229,25 @@ def acc(_image):
     started: list[str] = []
 
     def up(
-        name, *, authorized_key=None, host_key=None, env_extra=None, push_key=None, known_hosts=None
-    ) -> int:  # noqa: E501
+        name,
+        *,
+        authorized_key=None,
+        host_key=None,
+        env_extra=None,
+        push_key=None,
+        known_hosts=None,
+        mode=None,
+        agent=None,
+        task=None,
+        workspace=None,
+        workspace_dir=None,
+        repo=None,
+        foreground=False,
+        wait=True,
+    ):  # noqa: E501
+        """Drive the real `up`. Returns the published port when `wait` (interactive:
+        wait for sshd); with wait=False returns the CompletedProcess (headless — no
+        sshd to wait for). Feature 004 flags are forwarded verbatim."""
         env_file = work / f"{name}.env"
         lines = ["GH_TOKEN=x", "GIT_USER_NAME=Test", "GIT_USER_EMAIL=t@example.com"]
         lines += list(env_extra or [])
@@ -244,9 +261,25 @@ def acc(_image):
             argv += ["--push-key", str(push_key)]
         if known_hosts is not None:
             argv += ["--known-hosts", str(known_hosts)]
+        if mode is not None:
+            argv += ["--mode", mode]
+        if agent is not None:
+            argv += ["--agent", agent]
+        if task is not None:
+            argv += ["--task", task]
+        if workspace is not None:
+            argv += ["--workspace", workspace]
+        if workspace_dir is not None:
+            argv += ["--workspace-dir", str(workspace_dir)]
+        if repo is not None:
+            argv += ["--repo", repo]
+        if foreground:
+            argv += ["--foreground"]
+        started.append(name)  # register for teardown even if `up` returns non-zero
         r = _run_cli(argv, state_dir)
+        if not wait:
+            return r
         assert r.returncode == 0, f"up {name} failed:\n{r.stderr}"
-        started.append(name)
         # Feature 001: state is namespaced per host; `up` with no --host uses the
         # implicit 'local' host, so the port state lands under local/.
         port = int((state_dir / "agent-container" / "local" / f"{name}.port").read_text().strip())
@@ -896,6 +929,111 @@ def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
         assert new_val in staged and old_val not in staged
     finally:
         cli("wipe", name, "-y", timeout=120)
+
+
+# --- Feature 004: execution modes, sessions, workspaces (real containers) ----
+# The agent actually RESPONDING (SC-001, a real model call) is the opt-in/tokened
+# extension and is NOT run here; these verify the mechanisms — the launch fires,
+# sessions survive detach + report a dead session, headless propagates an exit
+# code, and the three workspace modes behave per their durability — without a key.
+
+
+def _logs_of(name: str) -> str:
+    r = subprocess.run([RUNTIME, "logs", f"agent-container-{name}"], capture_output=True, text=True)
+    return r.stdout + r.stderr
+
+
+def test_interactive_launches_agent_in_a_window(acc):
+    """US1/SC-001 (mechanism): interactive mode launches the chosen agent in a
+    dedicated tmux window. The launch is observable in the entrypoint log even if
+    the agent later exits for want of a model key (the response is the tokened bit)."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    acc.up(
+        "acc4int", mode="interactive", agent="claude", authorized_key=[laptop.with_suffix(".pub")]
+    )
+    assert "launched agent 'claude'" in _logs_of("acc4int")
+
+
+def test_detach_reattach_and_session_liveness(acc):
+    """US2/SC-002/003 (FR-006/007/008): the session survives disconnect and a fresh
+    connection reattaches to the same 'main'; once the session ends, the
+    `tmux has-session` signal the attach probe reads flips to dead (the CLI's
+    'nothing running' report off that signal is unit-covered — driving the real
+    interactive attach here would hit host-key verification)."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("acc4sess", authorized_key=[laptop.with_suffix(".pub")])
+    # Two independent ssh connections = detach then reattach: 'main' persists.
+    assert _ssh(port, laptop, "tmux has-session -t main && echo ALIVE").stdout.split() == ["ALIVE"]
+    assert _ssh(port, laptop, "tmux has-session -t main && echo ALIVE").stdout.split() == ["ALIVE"]
+    # End the session -> the probe's signal goes non-zero (dead), never a live 'main'.
+    _ssh(port, laptop, "tmux kill-server")
+    assert (
+        _ssh(port, laptop, "tmux has-session -t main; echo rc=$?").stdout.strip().endswith("rc=1")
+    )
+
+
+def test_headless_foreground_propagates_exit_code(acc):
+    """US3/SC-004 (mechanism, FR-002/004): a headless --foreground run returns
+    control on completion and the CLI exit status IS the agent container's exit
+    code. Without a model key the agent fails, so we assert a NON-ZERO code returns
+    promptly (the success-not-resurrected side is the tokened extension)."""
+    r = acc.up(
+        "acc4hl", mode="headless", agent="claude", task="print ok", foreground=True, wait=False
+    )
+    assert r.returncode != 0  # the agent's failure surfaced as our exit code (SC-004)
+
+
+def test_workspace_persistent_survives_recreate(acc):
+    """US4/SC-006: a persistent workspace retains its working copy across down/up."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("acc4pers", workspace="persistent", authorized_key=[laptop.with_suffix(".pub")])
+    _ssh(port, laptop, "echo keep-me > /workspace/marker")
+    acc.down("acc4pers")  # no --purge: the workspace volume is preserved
+    port = acc.up("acc4pers", workspace="persistent", authorized_key=[laptop.with_suffix(".pub")])
+    r = _ssh(port, laptop, "cat /workspace/marker")
+    assert r.stdout.strip() == "keep-me"
+
+
+def test_workspace_ephemeral_gone_after_teardown(acc):
+    """US4/SC-006: an ephemeral workspace (container layer) does NOT survive."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("acc4eph", workspace="ephemeral", authorized_key=[laptop.with_suffix(".pub")])
+    _ssh(port, laptop, "echo transient > /workspace/marker")
+    acc.down("acc4eph")
+    port = acc.up("acc4eph", workspace="ephemeral", authorized_key=[laptop.with_suffix(".pub")])
+    r = _ssh(port, laptop, "cat /workspace/marker 2>/dev/null; echo GONE")
+    assert r.stdout.strip().splitlines()[-1] == "GONE"
+
+
+def test_workspace_bind_reflects_local_dir(acc):
+    """US4/SC-007: a bind workspace mounts the operator's LOCAL directory at
+    /workspace — the container sees the host dir's contents. (The write-back
+    direction depends on a writable Lima mount, a documented `--mount`
+    prerequisite; the local-only refusal is unit-covered.)"""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    wsdir = acc.tmp / "bindwork"  # under the Lima-shared acc base
+    wsdir.mkdir()
+    (wsdir / "seed").write_text("host-side\n")  # a host file the bind must expose
+    port = acc.up(
+        "acc4bind",
+        workspace="bind",
+        workspace_dir=wsdir,
+        authorized_key=[laptop.with_suffix(".pub")],
+    )
+    assert _ssh(port, laptop, "cat /workspace/seed").stdout.strip() == "host-side"
+
+
+def test_clone_on_start_ssh_without_key_fails_fast(acc):
+    """US4/SC-008 (FR-014): an SSH-URL clone with no injected push key fails BEFORE
+    starting an empty-workspace agent (deterministic; no network)."""
+    r = acc.up(
+        "acc4clone",
+        workspace="ephemeral",
+        repo="git@github.com:you/private-repo.git",
+        wait=False,
+    )
+    assert r.returncode != 0
+    assert "push key" in r.stderr.lower() or "fr-014" in r.stderr.lower()
 
 
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):

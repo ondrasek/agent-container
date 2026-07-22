@@ -364,7 +364,96 @@ if [[ -f "${_openai_key}" && -z "${OPENAI_API_KEY:-}" ]]; then
     export OPENAI_API_KEY
 fi
 
-# --- 4. sshd ----------------------------------------------------------------
+# --- 3d. Clone-on-start (Feature 004, US4) ----------------------------------
+# Populate /workspace from a source repo on first start (persistent/ephemeral).
+# The credential is chosen by URL SCHEME (both wired above): https:// uses the
+# github.com GH_TOKEN helper (section 3); git@…/ssh:// uses the ephemeral push key
+# via core.sshCommand (section 3b) — and an SSH URL with NO push key configured
+# fails fast (FR-014), never starting an empty-workspace agent. Idempotent: skip
+# when /workspace already holds a working copy (a persistent recreate never
+# re-clones over local state). A bind workspace is never given a clone URL by the
+# CLI. Runs BEFORE the agent launch (interactive window / headless workload).
+WORKSPACE_DIR="${AGENT_CONTAINER_WORKSPACE:-/workspace}"
+CLONE_URL="${AGENT_CONTAINER_CLONE_URL:-}"
+if [[ -n "${CLONE_URL}" ]]; then
+    if [[ -d "${WORKSPACE_DIR}/.git" ]]; then
+        log "clone-on-start: ${WORKSPACE_DIR} already holds a working copy, skipping clone"
+    elif [[ -n "$(ls -A "${WORKSPACE_DIR}" 2>/dev/null)" ]]; then
+        log "clone-on-start: ${WORKSPACE_DIR} is non-empty (no .git) — skipping clone"
+    else
+        case "${CLONE_URL}" in
+            https://github.com/*)
+                # The git credential helper (section 3) is scoped to https://github.com,
+                # so GH_TOKEN authenticates ONLY github.com HTTPS clones.
+                log "clone-on-start: cloning via HTTPS (github.com → GH_TOKEN)"
+                git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
+                ;;
+            https://*)
+                # A non-github.com HTTPS remote: GH_TOKEN does NOT apply (the helper is
+                # github.com-scoped for least exposure). Works only if the repo is public
+                # or git already has ambient credentials for that host.
+                log "clone-on-start: cloning via HTTPS (non-github.com host — GH_TOKEN does NOT apply; repo must be public or have its own git credentials)"
+                git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
+                ;;
+            *)  # ssh:// or scp-like git@host:path — needs the injected push key
+                if ! git config --global --get core.sshCommand >/dev/null 2>&1; then
+                    die "clone-on-start: ${CLONE_URL} is an SSH URL but no push key was injected (FR-014); refusing to start an empty-workspace agent"
+                fi
+                log "clone-on-start: cloning via SSH (injected push key)"
+                git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
+                ;;
+        esac
+    fi
+fi
+
+# --- Feature 004: execution mode + per-agent invocation ---------------------
+# AGENT_CONTAINER_MODE (default interactive) selects the container's shape.
+# AGENT_CONTAINER_AGENT (claude|codex|pi) names the primary agent; when UNSET the
+# pre-004 bare-shell layout is preserved (no agent auto-launched). The optional
+# initial/headless task arrives as an EPHEMERAL injected file (never argv/env).
+AGENT_CONTAINER_MODE="${AGENT_CONTAINER_MODE:-interactive}"
+AGENT_CONTAINER_AGENT="${AGENT_CONTAINER_AGENT:-}"
+TASK_FILE="${INJECT_DIR}/task"
+
+# Interactive launch command for the tmux window: the agent, seeded with the task.
+# The task text is kept out of the host-side compose model and read from the
+# injected file at runtime — it is then passed to the agent as its argument (so it
+# appears in the agent's in-container process argv, the same as any prompt would).
+# Returns an empty string for an unknown/blank agent so the caller can skip the launch.
+build_interactive_cmd() {
+    local a="$1"
+    case "${a}" in
+        claude) [[ -f "${TASK_FILE}" ]] && echo "claude \"\$(cat ${TASK_FILE})\"" || echo "claude" ;;
+        codex)  [[ -f "${TASK_FILE}" ]] && echo "codex \"\$(cat ${TASK_FILE})\""  || echo "codex" ;;
+        pi)     [[ -f "${TASK_FILE}" ]] && echo "pi \"\$(cat ${TASK_FILE})\""      || echo "pi" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Headless: exec the agent's non-interactive form as PID 1's workload so the
+# CONTAINER exits with the agent's exit code (FR-002). The task (possibly empty)
+# is read from the injected file. Uses `exec` — the agent replaces this entrypoint.
+run_headless_agent() {
+    local a="$1" t=""
+    [[ -f "${TASK_FILE}" ]] && t="$(cat "${TASK_FILE}")"
+    case "${a}" in
+        claude) exec claude -p "${t}" ;;
+        codex)  exec codex exec "${t}" ;;
+        pi)     exec pi -p "${t}" ;;
+        *) die "headless mode: unknown agent '${a}' (choose claude|codex|pi)" ;;
+    esac
+}
+
+if [[ "${AGENT_CONTAINER_MODE}" == "headless" ]]; then
+    # A headless run needs neither sshd nor tmux — output is retrieved via
+    # `compose logs` and the result is the container exit code (research R5).
+    log "headless mode: running agent '${AGENT_CONTAINER_AGENT:-claude}' as the container workload"
+    run_headless_agent "${AGENT_CONTAINER_AGENT:-claude}"
+    # run_headless_agent execs; the lines below are unreachable in headless mode.
+    die "headless agent failed to exec"
+fi
+
+# --- 4. sshd (interactive mode) ---------------------------------------------
 # Daemonize (no -D) so the entrypoint can continue to start tmux and tail.
 # Started as the dev user (rootless) — sshd listens on the unprivileged port
 # 2222 with its host key + pidfile under the dev-owned ~/.ssh volume.
@@ -415,6 +504,28 @@ else
         # Select the first window so an attach lands there (by id, not name).
         tmux select-window -t "${first_id}"
         log "tmux session 'main' ready with ${#valid_windows[@]} window(s)"
+    fi
+fi
+
+# --- 5b. Launch the primary agent (Feature 004, US1) ------------------------
+# In interactive mode, run the chosen agent in a DEDICATED tmux window, seeded
+# with the injected task if present. Only when an agent is configured
+# (AGENT_CONTAINER_AGENT set) — otherwise the pre-004 bare-shell layout stands
+# (backward compatible; no agent auto-launched). Idempotent: skip if the window
+# already exists. A crash-restart rebuilds 'main' fresh (has-session was false),
+# so the agent relaunches on a fresh session (FR-009).
+if [[ -n "${AGENT_CONTAINER_AGENT}" ]]; then
+    if tmux list-windows -t main -F '#{window_name}' 2>/dev/null | grep -qxF "${AGENT_CONTAINER_AGENT}"; then
+        log "agent window '${AGENT_CONTAINER_AGENT}' already present, leaving it alone"
+    else
+        launch_cmd="$(build_interactive_cmd "${AGENT_CONTAINER_AGENT}")"
+        if [[ -n "${launch_cmd}" ]]; then
+            tmux new-window -t main -n "${AGENT_CONTAINER_AGENT}" "${launch_cmd}"
+            # Land an attach on the agent window (by name; the names claude/codex/pi
+            # are never index-ambiguous).
+            tmux select-window -t "main:${AGENT_CONTAINER_AGENT}"
+            log "launched agent '${AGENT_CONTAINER_AGENT}' in a tmux window (attach lands here)"
+        fi
     fi
 fi
 

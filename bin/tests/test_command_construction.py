@@ -342,6 +342,7 @@ def test_ssh_argv_is_the_canonical_attach_command(wiz):
 
 def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
     wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")  # FR-008 probe
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
     wiz.cli_attach("acme", "local", None, None)
@@ -376,6 +377,7 @@ def test_ssh_argv_without_window_is_unchanged(wiz):
 
 def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
     wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")  # FR-008 probe
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
     wiz.cli_attach("acme", "local", None, None, "edit")

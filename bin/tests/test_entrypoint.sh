@@ -144,6 +144,9 @@ _export_env() {
     [[ -n "${TEST_APIKEY_RUNTIME}" ]] && export AGENT_CONTAINER_APIKEY_RUNTIME="${TEST_APIKEY_RUNTIME}" || unset AGENT_CONTAINER_APIKEY_RUNTIME
     # A leaked provider key env must never steer the US2 file-injection tests.
     unset ANTHROPIC_API_KEY OPENAI_API_KEY
+    # Feature 004: keep this suite on the pre-004 bare-shell path — no execution
+    # mode/agent/clone. Those behaviors are covered by test_entrypoint_execution.sh.
+    unset AGENT_CONTAINER_MODE AGENT_CONTAINER_AGENT AGENT_CONTAINER_CLONE_URL AGENT_CONTAINER_WORKSPACE
 }
 
 # run_entrypoint <mode>; mode is __unset__ | __empty__ | any literal value.
