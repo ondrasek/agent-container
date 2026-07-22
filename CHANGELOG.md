@@ -2,6 +2,45 @@
 
 <!-- version list -->
 
+## v0.9.0 (2026-07-22)
+
+### Bug Fixes
+
+- **shell**: Strip ssh:// passwords + reconcile --endpoint + docs
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`2ec843d`](https://github.com/ondrasek/agent-container/commit/2ec843da8231c1d966e0497c0ead21fcd2586f8a))
+
+### Chores
+
+- **deps**: Sync uv.lock to released 0.8.0
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`340413c`](https://github.com/ondrasek/agent-container/commit/340413c218cb2ce875f267da9b6dd4e92cfa0678))
+
+### Documentation
+
+- **specs**: Address analyze findings for Feature 005
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`de9fdda`](https://github.com/ondrasek/agent-container/commit/de9fdda03bd36af666de81026714be657b5f06c6))
+
+- **specs**: Clarify Feature 005 shell-integration
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`4f85d8b`](https://github.com/ondrasek/agent-container/commit/4f85d8bdaa836e4fd32279050d967d0a86a67c58))
+
+- **specs**: Plan Feature 005 shell-integration
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`8bae3cd`](https://github.com/ondrasek/agent-container/commit/8bae3cd9de20e403a01bdb1612223d17c659e7e3))
+
+- **specs**: Task list for Feature 005 + add PowerShell dialect
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`32b8014`](https://github.com/ondrasek/agent-container/commit/32b80141ea5e0aad708346994e2073c399b45614))
+
+### Features
+
+- **shell**: Print/emit surface — attach --print + host env
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`3f2d081`](https://github.com/ondrasek/agent-container/commit/3f2d0817077c462e3f101ed4d77c0547cf63c2eb))
+
+
 ## v0.8.0 (2026-07-22)
 
 ### Bug Fixes
