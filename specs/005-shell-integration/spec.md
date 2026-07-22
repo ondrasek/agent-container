@@ -25,7 +25,7 @@ Today the tool **invokes** external tools on the operator's behalf: `attach` exe
 - Q: What should `host env <name>` emit to retarget the operator's docker/podman at the host? → A: **Both, selectable** — default to the host's **registered runtime reference** (`DOCKER_CONTEXT` / the podman connection), which reuses the exact connection the tool established (including any socket-forward); a flag emits the **raw endpoint** form instead (`DOCKER_HOST=ssh://…` / `CONTAINER_HOST=…`) for portability where the registered context is not present.
 - Q: Should `host env` verify reachability at print time? (Edge Cases require print to "not connect"; US2-AC3 said an *unreachable* host emits nothing — a contradiction.) → A: **Registry-only, no probe** — emit purely from registry/state with **no connection**, so print stays side-effect-free. Only an **unknown/unregistered** host emits nothing and exits non-zero; a registered-but-unreachable host still emits — the operator's own `docker ps` surfaces unreachability.
 - Q: What does the `--unset` form do? → A: **Plain unset** — emit `unset` of the vars, reverting to the shell/daemon default (like `minikube docker-env --unset`); it does **not** snapshot or restore a prior custom value, and stores no new state.
-- Q: Which shell dialects ship in this feature? → A: **POSIX (default) + fish**; csh and other dialects remain deferred behind the same selector seam.
+- Q: Which shell dialects ship in this feature? → A: **POSIX (default) + fish + PowerShell (pwsh)**; csh and other dialects remain deferred behind the same selector seam. (PowerShell added by later direction — the eval idiom there is `Invoke-Expression`/`iex`.)
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -84,7 +84,7 @@ The same operation can either **print** the commands for the operator to run or 
 - **Stream discipline**: in print mode, stdout carries *only* the shell-evaluable text; every human-readable message, hint, or warning goes to stderr.
 - **Quoting/escaping**: emitted commands and values are safe to `eval` in the target shell (no word-splitting or injection from names, paths, addresses).
 - **No side effects from printing**: requesting the command/env does not create, connect, start, or mutate anything; running it twice yields identical output.
-- **Shell dialects**: the default output is POSIX (bash/zsh); operators using another shell can request a compatible dialect (e.g. fish/csh), as `minikube docker-env --shell` does.
+- **Shell dialects**: the default output is POSIX (bash/zsh); operators using another shell can request a compatible dialect (**fish** or **PowerShell/pwsh**), as `minikube docker-env --shell` does. Each dialect's quoting differs (POSIX `shlex`; fish single-quote escaping of `\`/`'`; PowerShell single-quote doubling `''`) and must be eval-safe in that shell.
 - **Unset with nothing set**: the unset form is harmless (a no-op eval) when no env was set.
 - **Target not found**: an **unknown/unregistered** name (or, for attach, no container) emits nothing to stdout, a clear stderr message, and a non-zero exit. Print does **not** probe reachability (registry-only) — a registered-but-unreachable/stopped host still emits its coordinates; only genuinely absent targets suppress output.
 - **Parity source**: the printed form is generated from the *same* single definition the execute path uses, so they can never drift (Constitution IV/V).
@@ -118,7 +118,7 @@ The same operation can either **print** the commands for the operator to run or 
 
 **Cross-cutting**
 
-- **FR-011**: The tool MUST support a **shell dialect selector** offering **POSIX sh (default) and fish** so the emitted assignments fit the operator's shell; additional dialects (csh, etc.) are deferred behind the same selector and are out of scope for this feature.
+- **FR-011**: The tool MUST support a **shell dialect selector** offering **POSIX sh (default), fish, and PowerShell (pwsh)** so the emitted assignments/commands fit the operator's shell — each rendered with that shell's own assignment/unset syntax and eval-safe quoting (e.g. PowerShell `$env:NAME='…'` / `Remove-Item Env:NAME`, evaluated via `Invoke-Expression`); additional dialects (csh, etc.) are deferred behind the same selector and are out of scope for this feature.
 - **FR-012**: The print/emit seam MUST be **backend-extensible** — computing the action is separated from realizing it (print shell config, or execute), so additional emit backends (e.g. infrastructure-as-code such as Terraform or ARM/Bicep) can be added later without redesigning the action layer. Those IaC backends are **out of scope for this feature**; only the seam that admits them is in scope.
 - **FR-013**: Documentation (README, CLAUDE.md, this spec) MUST be updated in the same change as any change to the print/eval contract or the operations that expose it.
 
@@ -140,7 +140,7 @@ The same operation can either **print** the commands for the operator to run or 
 
 ## Assumptions
 
-- **Default dialect POSIX; fish included**: emitted assignments/commands default to POSIX-sh (bash/zsh compatible) and this feature also ships a **fish** dialect (selectable, mirroring `minikube docker-env --shell`); csh and other dialects are deferred behind the same selector.
+- **Default dialect POSIX; fish + PowerShell included**: emitted assignments/commands default to POSIX-sh (bash/zsh compatible) and this feature also ships **fish** and **PowerShell (pwsh)** dialects (selectable, mirroring `minikube docker-env --shell`); csh and other dialects are deferred behind the same selector. In PowerShell the eval idiom is `Invoke-Expression`/`iex` (there is no `eval $(…)`), so the emitted text must be a valid pwsh script fragment.
 - **Existing verbs keep executing by default**: operations that execute today (notably `attach`) keep that default and gain an opt-in print flag; new emit-oriented subcommands (host-env, ssh-config, show-ssh-style) print by default because they exist to be evaluated. This preserves current behavior and matches the `eval $(…)` idiom.
 - **Depends on 001/004**: reachable address, published port, host runtime target, and the canonical SSH+tmux attach come from Features 001 and 004; this feature exposes them and does not redefine addressing or session semantics.
 - **Robustness benefit is inherent, not a new mechanism**: because the operator's own shell runs the emitted `ssh`/`docker`, their ssh-agent/smartcard/known_hosts/ssh-config handle the connection — the tool need not correctly drive those in every environment for the print path.

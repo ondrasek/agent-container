@@ -11,11 +11,11 @@ this feature *exposes* them.
 |----------------|---------|
 | `attach <name> --print` | Emit the runnable `ssh … -t tmux attach -t main` command to **stdout only**; do not connect. Execute stays the default (no `--print`). |
 | `attach <name> --ssh-config` | Emit a `~/.ssh/config` `Host <name>` stanza to stdout (append-and-`ssh <name>` later). |
-| `attach <name> --shell posix\|fish` | Dialect for `--print` (default `posix`). |
+| `attach <name> --shell posix\|fish\|pwsh` | Dialect for `--print` (default `posix`). |
 | `host env <name>` | Emit env assignments that retarget the operator's `docker`/`podman` at host `<name>` (prints by default — it exists to be `eval`'d). |
 | `host env <name> --endpoint` | Emit the **raw endpoint** form (`DOCKER_HOST`/`CONTAINER_HOST=ssh://…`) instead of the default context reference. |
 | `host env --unset` | Emit a **plain unset** of the vars `host env` sets (reverts to the shell/daemon default; no snapshot/restore). |
-| `host env <name> --shell posix\|fish` | Dialect for the emitted assignments (default `posix`). |
+| `host env <name> --shell posix\|fish\|pwsh` | Dialect for the emitted assignments (default `posix`). |
 
 ## Emitted formats
 
@@ -60,6 +60,18 @@ export CONTAINER_HOST=ssh://dev@vps.example.com
 **host env — fish** (`--shell fish`): `set -x DOCKER_CONTEXT agent-container-hz1`;
 unset: `set -e DOCKER_CONTEXT`.
 
+**host env — pwsh** (`--shell pwsh`, evaluated with `| Invoke-Expression`):
+
+```powershell
+$env:DOCKER_CONTEXT = 'agent-container-hz1'
+# --unset:
+Remove-Item Env:DOCKER_CONTEXT -ErrorAction SilentlyContinue
+```
+
+**attach — pwsh** (`attach acme --print --shell pwsh`): the same `ssh … -t tmux
+attach -t main` command line, pwsh-quoted (single quotes, `''` doubling on a literal
+quote).
+
 **host env — `--unset` (posix)**: `unset DOCKER_CONTEXT` (and/or `DOCKER_HOST` if the
 endpoint form was used — the unset covers the vars this feature sets for the driver).
 
@@ -70,7 +82,7 @@ endpoint form was used — the unset covers the vars this feature sets for the d
 | stdout content | In print mode, **only** shell-evaluable text on stdout — zero non-config bytes (FR-001/002, SC-003). |
 | humans | All messages/hints/warnings/errors go to **stderr**, never stdout (FR-002). |
 | error → eval-safe | On **any** failure, **nothing** is written to stdout and the exit code is **non-zero** (FR-003, SC-004). Output is buffered and flushed only on complete success. |
-| eval-safety | Every value/token is quoted for the target dialect (`shlex.quote` / fish quoter) so a name/path/address cannot word-split or inject (FR-004). |
+| eval-safety | Every value/token is quoted for the target dialect (`shlex.quote` / fish quoter / pwsh `''`-doubling quoter) so a name/path/address cannot word-split, expand, or inject (FR-004) — under `eval $(…)` (POSIX/fish) or `Invoke-Expression` (pwsh). |
 | no side effects | Printing creates/starts/connects/mutates nothing; **registry-only, no reachability probe**; two prints are identical (FR-005). |
 | no secrets | **No** secret is ever emitted to stdout — only connection coordinates (Constitution III). |
 | parity | The printed command is generated from the **same** `ShellAction`/descriptor the execute path uses; they cannot diverge (FR-010, SC-001). |

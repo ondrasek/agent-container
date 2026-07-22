@@ -43,28 +43,32 @@ run verbatim reaches the same session.
 
 ---
 
-## R2 — Eval-safe quoting: stdlib `shlex` for POSIX, a small quoter for fish
+## R2 — Eval-safe quoting: stdlib `shlex` for POSIX, dedicated quoters for fish and PowerShell
 
-**Decision**: POSIX rendering quotes every value and argv token with stdlib
-**`shlex.quote`**. Fish rendering uses a **dedicated fish quoter** (fish quoting
-differs from POSIX: single-quoted strings in fish escape only `\` and `'` with a
-backslash, and `set -x NAME value` / `set -e NAME` are the assignment/unset forms).
-No value or command token is ever emitted unquoted.
+**Decision**: Each dialect quotes every value and argv token with rules for that
+shell; no value or command token is ever emitted unquoted:
+- **POSIX** — stdlib **`shlex.quote`**; assign `export NAME=<q>`, unset `unset NAME`.
+- **fish** — a **dedicated fish quoter** (single-quoted; escape only `\` and `'`
+  with a backslash); assign `set -x NAME <q>`, unset `set -e NAME`.
+- **PowerShell (pwsh)** — a **dedicated pwsh quoter** (single-quoted; escape a
+  literal `'` by **doubling** it `''`; single quotes suppress `$` expansion);
+  assign `$env:NAME = <q>`, unset `Remove-Item Env:NAME` (tolerant if absent).
 
-**Rationale**: `shlex.quote` is the correct, stdlib (Constitution VI) POSIX quoter
-and is what makes `eval` safe against adversarial names/paths/addresses (FR-004).
-Fish is not POSIX-compatible for either quoting or variable assignment, so it needs
-its own small renderer — but the *action* is identical, only the rendering differs.
+**Rationale**: `shlex.quote` is the correct stdlib (Constitution VI) POSIX quoter;
+fish and PowerShell are not POSIX-compatible for quoting *or* assignment/unset, so
+each needs its own small renderer — but the *action* is identical, only the
+rendering differs. Doubling `''` is PowerShell's literal-single-quote rule and
+blocks injection/expansion (FR-004).
 
 **Alternatives rejected**: (a) shelling out to the target shell to quote — requires
 that shell present on the host and is slow/fragile; (b) hand-rolled POSIX escaping —
-reinvents `shlex` and invites injection bugs; (c) fish via `shlex.quote` — wrong,
-fish would mis-parse POSIX `$'…'`/backslash rules.
+reinvents `shlex` and invites injection bugs; (c) one quoter for all shells — wrong,
+each shell mis-parses the others' escaping (POSIX `$'…'`, fish backslash, pwsh `''`).
 
 **Validation**: unit — feed adversarial tokens (`a b`, `a;rm -rf ~`, `$(touch x)`,
-`a'b"c`, unicode) through each renderer and assert the rendered line, when parsed by
-the target shell, yields the original token verbatim with no extra words/side
-effects.
+`a'b"c`, `$env:x`, unicode) through each renderer and assert the rendered line, when
+parsed by the target shell, yields the original token verbatim with no extra
+words/side effects.
 
 ---
 
@@ -165,17 +169,23 @@ resolved fields; acceptance — appending it and running `ssh <name>` attaches.
 
 ## R7 — Shell dialects shipped
 
-**Decision** (clarify Q4): ship **POSIX sh (default)** and **fish**. POSIX covers
-bash/zsh; fish gets its own renderer (`set -x`/`set -e`, fish quoting). `--shell`
-selects; an unrecognized value is an error (empty stdout + non-zero). csh and other
-dialects are **deferred** behind the same selector seam (not built here).
+**Decision** (clarify Q4 + later direction): ship **POSIX sh (default)**, **fish**,
+and **PowerShell (pwsh)**. POSIX covers bash/zsh; fish and pwsh each get their own
+renderer (fish `set -x`/`set -e`; pwsh `$env:NAME=…`/`Remove-Item Env:NAME`) and
+quoter (R2). `--shell posix|fish|pwsh` selects; an unrecognized value is an error
+(empty stdout + non-zero). csh and other dialects are **deferred** behind the same
+selector seam (not built here). Note the eval idiom differs by shell — POSIX/fish
+`eval $(…)` vs PowerShell `… | Invoke-Expression` (`iex`); the emitted text is a
+valid fragment for the selected shell regardless.
 
-**Rationale**: bash/zsh + fish cover the operator population; the seam (R1) makes
-adding a dialect a new renderer, no action-layer change. Keeping csh out holds scope
-(the spec marks it deferred).
+**Rationale**: bash/zsh + fish + PowerShell cover the operator population across
+Unix and Windows/cross-platform pwsh; the seam (R1) makes adding a dialect a new
+renderer + quoter, no action-layer change. Keeping csh out holds scope (deferred).
 
-**Alternatives rejected**: POSIX-only now — the clarification explicitly includes
-fish; all dialects now — csh/tcsh are niche and cost scope for little reach.
+**Alternatives rejected**: POSIX+fish only — excludes PowerShell operators (now
+in scope by direction); all dialects now — csh/tcsh are niche and cost scope for
+little reach.
 
-**Validation**: unit — POSIX and fish renderers each produce eval-correct output for
-the same action; `--shell csh` → clear error, empty stdout, non-zero.
+**Validation**: unit — POSIX, fish, and pwsh renderers each produce eval-correct
+output for the *same* action (POSIX/fish eval-safe under `eval`, pwsh under
+`Invoke-Expression`); `--shell csh` → clear error, empty stdout, non-zero.

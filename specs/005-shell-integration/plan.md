@@ -18,7 +18,7 @@ Technical approach (see [research.md](./research.md)): introduce a small
 structured **`ShellAction`** (ordered env set/unset ops + command lines + comment
 lines) from the existing **connection facts** (name → user/address/port/session
 via 001/004; host → runtime context/connection via 001), then either **renders**
-it for a shell dialect (POSIX default, fish) or **executes** it. The *same*
+it for a shell dialect (POSIX default, fish, PowerShell/pwsh) or **executes** it. The *same*
 `ShellAction` feeds both paths, so print and execute can never drift (FR-010). Two
 surfaces expose it: **`attach --print`/`--ssh-config`/`--shell`** (US1/US3, execute
 stays the default) and a new **`host env <name>`** emitter (US2, prints by default)
@@ -26,7 +26,7 @@ that emits the host's registered runtime reference (`DOCKER_CONTEXT` /
 `CONTAINER_CONNECTION`) by default or the raw endpoint (`DOCKER_HOST` /
 `CONTAINER_HOST=ssh://…`) under `--endpoint`, plus a plain `--unset`. Output is
 **registry-only** (no reachability probe), **eval-safe** (POSIX via stdlib
-`shlex.quote`, fish via a small dedicated quoter), **stdout-is-config-only**
+`shlex.quote`, fish and PowerShell via small dedicated quoters), **stdout-is-config-only**
 (humans to stderr), and **empty-stdout+non-zero on any error**. The emit seam is
 deliberately backend-extensible (FR-012) so a future IaC emitter can slot in
 without reshaping the action layer — but no IaC backend is built here. Zero new
@@ -40,7 +40,7 @@ surface + renderers).
 
 **Primary Dependencies**: none new. Typer + questionary + rich (existing CLI);
 **stdlib `shlex`** for POSIX quoting (new import, stdlib — no third-party add);
-fish quoting is a small hand-rolled function. No runtime/agent/tmux/ssh dependency
+fish and PowerShell quoting are small hand-rolled functions. No runtime/agent/tmux/ssh dependency
 is *added* — the point is to emit their commands rather than drive them.
 
 **Storage**: none new. Print reads the existing host **registry**
@@ -48,7 +48,7 @@ is *added* — the point is to emit their commands rather than drive them.
 persists nothing and (per the clarification) does **not** connect.
 
 **Testing**: hermetic unit (`bin/tests/`) — the `ShellAction` renders correct
-POSIX and fish; `shlex`/fish quoting is eval-safe against adversarial
+POSIX, fish, and pwsh; `shlex`/fish/pwsh quoting is eval-safe against adversarial
 names/paths; the attach print output is byte-for-byte the argv the execute path
 runs (parity); `host env` emits the right var per driver (docker
 `DOCKER_CONTEXT` / podman `CONTAINER_CONNECTION`; `--endpoint` →
@@ -93,14 +93,14 @@ them; FR-012).
 | **III. Least Exposure** | ✅ **Load-bearing gate.** The `ShellAction`/connection descriptor carries **only non-secret connection coordinates** (user, public address, port, session, context name); no push key, token, `known_hosts` content, or API key is ever rendered to stdout. The raw-endpoint form is `ssh://user@address` — a public address already used for attach. Explicit invariant + test. |
 | **IV. Deterministic Identity** | ✅ Reinforced. The printed command derives from the *same* deterministic identity (name → port/address/context) as execute, via one authoritative descriptor — no second source, no drift (FR-010). |
 | **V. Durable Spec, Disposable Code** | ✅ The parity requirement (print == execute from one `ShellAction`) is exactly this principle; verification is acceptance-weighted (eval reaches the same session) and survives a re-implementation. |
-| **VI. Least Dependencies** | ✅ Zero new third-party deps; POSIX quoting reuses stdlib `shlex`; the fish quoter and the emit seam are a few small functions, not a framework. |
+| **VI. Least Dependencies** | ✅ Zero new third-party deps; POSIX quoting reuses stdlib `shlex`; the fish and pwsh quoters and the emit seam are a few small functions, not a framework. |
 | **VII. Continuous Deployment** | ✅ Ships as a `feat` minor on merge; docs (README, CLAUDE.md, this spec) updated in-change (FR-013). |
 
 **Result: PASS.** No violations; **Complexity Tracking is empty**. The
 compute-action-then-realize seam is not gratuitous abstraction — it is the minimal
 structure that makes print==execute provable (FR-010) and admits future backends
-(FR-012); it is a small dataclass plus two renderers, justified by two functional
-requirements.
+(FR-012); it is a small dataclass plus three dialect renderers, justified by two
+functional requirements.
 
 ## Project Structure
 
@@ -123,8 +123,8 @@ specs/005-shell-integration/
 bin/agent-container          # single-file CLI — the ONLY file edited:
                              #   • ShellAction (env set/unset ops + command lines + comments) — the
                              #     one definition print and execute both consume
-                             #   • dialect renderers: render_posix() (shlex.quote) / render_fish()
-                             #     (dedicated fish quoter); a --shell posix|fish selector
+                             #   • dialect renderers: render_posix() (shlex.quote) / render_fish() /
+                             #     render_pwsh() (dedicated quoters); a --shell posix|fish|pwsh selector
                              #   • emit discipline: stdout-only config, humans->stderr, buffer-then-
                              #     write so any error yields EMPTY stdout + non-zero (eval-safe)
                              #   • connection descriptor: derive user/address/port/session +
@@ -152,18 +152,19 @@ All edits are single-file-sequential in `bin/agent-container`.
 ## Phase 0 — Outline & Research
 
 Complete. See [research.md](./research.md): R1 (compute-action-then-realize seam),
-R2 (eval-safe quoting: stdlib shlex + a fish quoter), R3 (host-env target form by
+R2 (eval-safe quoting: stdlib shlex + fish/pwsh quoters), R3 (host-env target form by
 driver + endpoint fallback, registry-only), R4 (stdout/stderr discipline +
 empty-on-error), R5 (attach print/execute toggle), R6 (SSH-config stanza), R7
-(dialects: POSIX + fish). All four clarifications (host-env dual form, no-probe,
-plain unset, POSIX+fish) are folded in; no NEEDS CLARIFICATION remain.
+(dialects: POSIX + fish + PowerShell/pwsh). All clarifications (host-env dual form,
+no-probe, plain unset, POSIX+fish, plus pwsh by later direction) are folded in; no
+NEEDS CLARIFICATION remain.
 
 ## Phase 1 — Design & Contracts
 
 Complete. [data-model.md](./data-model.md) defines the `ShellAction`, the dialect
 renderers, the connection descriptor, and the emit-result/exit discipline.
 [contracts/shell-integration.md](./contracts/shell-integration.md) pins the CLI
-surface, the stdout/stderr/exit contract, the emitted POSIX/fish formats, the
+surface, the stdout/stderr/exit contract, the emitted POSIX/fish/pwsh formats, the
 eval-safety and no-secret invariants, and the print==execute parity requirement.
 [quickstart.md](./quickstart.md) gives runnable scenarios A–G mapped to
 SC-001…SC-006. (No `update-agent-context` script exists in this repo — skipped, as
@@ -174,7 +175,7 @@ in 001–004.)
 Tasks will be organized by user story: **US1 attach print (MVP)** — the
 `ShellAction` + POSIX renderer + `attach --print`/`--ssh-config` → **US3 execute
 toggle** (the same action, execute vs print; parity test) → **US2 host env**
-(the emitter subcommand + endpoint/unset) → **fish dialect** + Polish (docs). All
+(the emitter subcommand + endpoint/unset) → **fish + pwsh dialects** + Polish (docs). All
 edits are sequential in the single CLI file; test modules and docs are `[P]`. The
 real-shell eval acceptance (eval reaches the same session; eval retargets docker)
 is the authoritative acceptance tier.

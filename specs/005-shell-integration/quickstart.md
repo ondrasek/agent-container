@@ -59,15 +59,26 @@ eval "$(agent-container host env does-not-exist)"          # runs nothing
 **Expected**: in print mode stdout carries only shell-evaluable text; on any error
 stdout is empty and the exit code is non-zero, so `eval $(…)` executes nothing.
 
-## Scenario F — fish dialect (SC-002)
+## Scenario F — fish and PowerShell dialects (SC-002)
 
 ```fish
+# fish
 agent-container host env acme --shell fish   # set -x DOCKER_CONTEXT …
 eval (agent-container host env acme --shell fish)
 docker ps
 ```
 
-**Expected**: fish-correct assignments (`set -x` / `set -e`), eval-safe in fish.
+```powershell
+# PowerShell (pwsh) — the eval idiom is Invoke-Expression, not eval $(…)
+agent-container host env acme --shell pwsh   # $env:DOCKER_CONTEXT = '…'
+agent-container host env acme --shell pwsh | Invoke-Expression
+docker ps
+agent-container host env --unset --shell pwsh | Invoke-Expression   # Remove-Item Env:…
+```
+
+**Expected**: fish-correct assignments (`set -x` / `set -e`) eval-safe in fish;
+pwsh-correct assignments (`$env:NAME='…'` / `Remove-Item Env:NAME`) that run under
+`Invoke-Expression`; each dialect's quoting is safe in that shell.
 
 ## Scenario G — No side effects from printing (SC-005)
 

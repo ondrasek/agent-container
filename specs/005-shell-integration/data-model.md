@@ -46,6 +46,9 @@ Rendering rules:
   NAME`; command lines as space-joined quoted argv; comments as `# …`.
 - **fish**: `set -x NAME <q>` / `set -e NAME`; fish-quoted values/tokens; comments
   as `# …`.
+- **pwsh** (PowerShell): `$env:NAME = <q>` / `Remove-Item Env:NAME` (tolerant if
+  absent); pwsh-quoted values/tokens (single-quote, doubling a literal `'`);
+  command lines as space-joined quoted argv; comments as `# …`.
 - A rendered block ends with a single trailing newline and contains **only** the
   rendered lines (no banner, no diagnostics — those are stderr).
 
@@ -53,10 +56,11 @@ Rendering rules:
 
 Selected with `--shell` (default `posix`).
 
-| Dialect | Assign | Unset | Quoting |
-|---------|--------|-------|---------|
-| **posix** (default) | `export NAME=<q>` | `unset NAME` | stdlib `shlex.quote` |
-| **fish** | `set -x NAME <q>` | `set -e NAME` | dedicated fish quoter |
+| Dialect | Assign | Unset | Quoting | Eval idiom |
+|---------|--------|-------|---------|------------|
+| **posix** (default) | `export NAME=<q>` | `unset NAME` | stdlib `shlex.quote` | `eval $(…)` |
+| **fish** | `set -x NAME <q>` | `set -e NAME` | dedicated fish quoter | `eval (…)` |
+| **pwsh** | `$env:NAME = <q>` | `Remove-Item Env:NAME` | pwsh quoter (`''` doubling) | `… \| Invoke-Expression` |
 
 An unrecognized dialect is an error → **empty stdout + non-zero** (never a partial
 or wrong-dialect emit).
