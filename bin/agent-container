@@ -5,6 +5,7 @@
 #   "typer>=0.12,<1",
 #   "questionary>=2.0,<3",
 #   "rich>=13,<15",
+#   "pyyaml>=6,<7",
 # ]
 # ///
 #
@@ -2610,6 +2611,7 @@ def compose_up_exec(
     push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
+    extra_injected_configs: list[tuple[str, Path, str]] | None = None,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
     the host). With redeploy=True it force-recreates (US2, deliberately
@@ -2642,6 +2644,10 @@ def compose_up_exec(
     injected += stage_config_injection(host_name, name)
     # Feature 004: the initial/headless task rides the same ephemeral inject channel.
     injected += stage_task_injection(host_name, name, spec.task)
+    # Feature 006: the .agent-container spec is delivered READ-ONLY via this same
+    # compose-`configs` channel (remote-context-safe; FR-020) — the agent-as-code
+    # apply path passes it here so the governing spec is immutable in-container.
+    injected += list(extra_injected_configs or [])
     # Feature 004: resolve the workspace mount (persistent volume / local bind /
     # none→container layer) + whether to declare the named workspace volume. bind on
     # a non-local host is refused here, before any runtime call (FR-011).
@@ -2705,6 +2711,7 @@ def do_up(
     push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
+    extra_injected_configs: list[tuple[str, Path, str]] | None = None,
 ) -> None:
     validate_name(name)
     spec = spec or ExecSpec()
@@ -2754,6 +2761,7 @@ def do_up(
             push_key=push_key,
             known_hosts=known_hosts,
             spec=spec,
+            extra_injected_configs=extra_injected_configs,
         )
 
 
@@ -3854,6 +3862,334 @@ def wizard_loop() -> int:
             return 0
 
 
+# --- Feature 006: agent-as-code (declarative .agent-container/ project) -------
+# A `.agent-container/` directory is the DESIRED STATE for one or more agent
+# environments, reconciled by driving the existing imperative internals (do_up /
+# down_container / the host registry). Additive: no marker up the tree ⇒ today's
+# behavior. The governing spec is immutable in-container — read ONLY host-side, and
+# delivered READ-ONLY via the compose-`configs` channel (remote-safe; FR-020).
+
+PROJECT_MARKER = ".agent-container"
+CRED_SOURCES = ("env", "file", "keychain", "encrypted")
+# The read-only spec target in the container (defense-in-depth; the tool never
+# reads this copy — it reads only the host-side .agent-container/).
+INJECT_AAC_DIR = "/workspace/.agent-container"
+
+
+def find_project_root(start: Path | None = None) -> Path | None:
+    """Walk upward from `start` (cwd) to the nearest ancestor holding a
+    `.agent-container/` directory; return it, or None (declarative model inert →
+    today's imperative behavior, FR-004). Deterministic regardless of subdir."""
+    cur = (start or Path.cwd()).resolve()
+    for d in (cur, *cur.parents):
+        if (d / PROJECT_MARKER).is_dir():
+            return d
+    return None
+
+
+def _spec_yaml_files(root: Path) -> list[Path]:
+    d = root / PROJECT_MARKER
+    return sorted(p for p in d.rglob("*") if p.is_file() and p.suffix in (".yaml", ".yml"))
+
+
+def _enum_field(block: dict, key: str, allowed: tuple[str, ...], where: str) -> None:
+    v = block.get(key)
+    if v is not None and v not in allowed:
+        die(f"{where}: {key}={v!r} is not one of {{{', '.join(allowed)}}}")
+
+
+def validate_credential(cred: object, where: str) -> None:
+    if not isinstance(cred, dict):
+        die(f"{where}: must be a mapping")
+    if not cred.get("name"):
+        die(f"{where}: missing required 'name'")
+    src = cred.get("source")
+    if src not in CRED_SOURCES:
+        die(f"{where}: source={src!r} is not one of {{{', '.join(CRED_SOURCES)}}}")
+    required_by_source = {
+        "env": ("var",),
+        "file": ("path",),
+        "keychain": ("service", "account"),
+        "encrypted": ("path", "decrypt"),
+    }
+    detail = required_by_source.get(src, ())
+    for k in detail:
+        if not cred.get(k):
+            die(f"{where}: source={src} requires '{k}'")
+    allowed = {"name", "source", *detail}
+    for k in cred:
+        if k not in allowed:
+            die(f"{where}: unknown credential key {k!r}")
+
+
+def validate_environment(env: object, where: str) -> None:
+    """Validate one environment against the pinned schema (contracts §Schema).
+    On any error `die` naming the offending field; make no partial change (FR-003)."""
+    if not isinstance(env, dict):
+        die(f"{where}: must be a mapping")
+    name = env.get("name")
+    if not name or not isinstance(name, str):
+        die(f"{where}: missing required string 'name'")
+    validate_name(name)  # deterministic-identity charset
+    where = f"{where} ({name})"
+    host = env.get("host")
+    if host is None:
+        die(f"{where}: missing required 'host'")
+    if not isinstance(host, (str, dict)):
+        die(f"{where}: 'host' must be a host name (string) or a provision table")
+    container = env.get("container") or {}
+    if not isinstance(container, dict):
+        die(f"{where}: 'container' must be a mapping")
+    _enum_field(container, "mode", EXEC_MODES, where)
+    _enum_field(container, "agent", AGENTS, where)
+    _enum_field(container, "workspace", WORKSPACE_MODES, where)
+    allowed_c = {"mode", "agent", "task", "workspace", "workspace_dir", "repo", "env_file"}
+    for k in container:
+        if k not in allowed_c:
+            die(f"{where}: unknown container key {k!r}")
+    creds = env.get("credentials") or []
+    if not isinstance(creds, list):
+        die(f"{where}: 'credentials' must be a list")
+    for j, cred in enumerate(creds):
+        validate_credential(cred, f"{where} credentials[{j}]")
+    for k in env:
+        if k not in {"name", "host", "container", "credentials"}:
+            die(f"{where}: unknown key {k!r}")
+
+
+def load_project_spec(root: Path) -> list[dict]:
+    """Read + validate the `.agent-container/` YAML into a list of environment
+    dicts. `yaml.safe_load` ONLY (never `yaml.load` — an untrusted `!!python/...`
+    tag must never construct an object). On any error `die` naming the offending
+    file+field with no partial change (FR-003)."""
+    import yaml
+
+    files = _spec_yaml_files(root)
+    if not files:
+        die(f"{root / PROJECT_MARKER}: no .yaml/.yml spec files found")
+    environments: list[dict] = []
+    for f in files:
+        try:
+            data = yaml.safe_load(f.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            die(f"{f}: invalid YAML ({str(e).splitlines()[0]})")
+        except (UnicodeDecodeError, OSError) as e:
+            die(f"{f}: cannot read spec file ({e})")
+        if data is None:
+            continue
+        if not isinstance(data, dict):
+            die(f"{f}: top-level must be a mapping")
+        for k in data:
+            if k != "environments":
+                die(f"{f}: unknown top-level key {k!r} (only 'environments' is allowed)")
+        envs = data.get("environments")
+        if envs is None:
+            die(f"{f}: missing required key 'environments'")
+        if not isinstance(envs, list) or not envs:
+            die(f"{f}: 'environments' must be a non-empty list")
+        for i, env in enumerate(envs):
+            validate_environment(env, f"{f}: environments[{i}]")
+            assert isinstance(env, dict)  # narrowed by validate_environment; helps the type checker
+            environments.append(env)
+    names = [e["name"] for e in environments]
+    dups = sorted({n for n in names if names.count(n) > 1})
+    if dups:
+        die(f"duplicate environment name(s) across the project spec: {', '.join(dups)}")
+    return environments
+
+
+def env_host_name(env: dict) -> str | None:
+    """The declared host: a name (string) → referenced; a table → provisioned (US4,
+    not resolved in this increment)."""
+    h = env.get("host")
+    if isinstance(h, dict):
+        die(f"environment {env['name']}: declarative host provisioning is not yet supported (US4)")
+    return h
+
+
+def env_exec_spec(env: dict) -> ExecSpec:
+    """Map a declared `container` block to the 004 ExecSpec."""
+    c = env.get("container") or {}
+    return ExecSpec(
+        mode=c.get("mode", "interactive"),
+        agent=c.get("agent", "claude"),
+        task=resolve_task(c.get("task")),
+        repo=c.get("repo"),
+        workspace=c.get("workspace", "persistent"),
+        workspace_dir=c.get("workspace_dir"),
+    )
+
+
+def env_state(host_rec: dict, name: str) -> str:
+    """Reconcile state for the declared env's DETERMINISTIC identity (Constitution
+    IV — no state file): absent | matching (running) | drifted (present, stopped)."""
+    cname = container_name(name)
+    if cname in host_container_names(host_rec):
+        return "matching"
+    if cname in host_container_names(host_rec, include_stopped=True):
+        return "drifted"
+    return "absent"
+
+
+def stage_agent_container_spec(
+    host_name: str, name: str, root: Path
+) -> list[tuple[str, Path, str]]:
+    """Deliver every host-side `.agent-container/` file as a READ-ONLY compose
+    `config` (FR-020) targeting `/workspace/.agent-container/<rel>` — remote-context
+    -safe (a host bind would fail over a remote context; the 001/003 lesson). The
+    tool reads the spec ONLY host-side; this delivery is defense-in-depth so the
+    in-container copy the agent sees cannot be altered."""
+    d = root / PROJECT_MARKER
+    sd = host_state_dir(host_name)
+    sd.mkdir(parents=True, exist_ok=True)
+    sd.chmod(0o700)
+    entries: list[tuple[str, Path, str]] = []
+    # Use the enumeration INDEX for the staged filename and the compose-config
+    # resource name so both are injective — a lossy path-flattening could otherwise
+    # collide two distinct spec files onto one config (and one would silently win).
+    for i, src in enumerate(sorted(p for p in d.rglob("*") if p.is_file())):
+        rel = src.relative_to(d).as_posix()
+        staged = sd / f"{name}.aac.{i}"
+        staged.write_bytes(src.read_bytes())
+        staged.chmod(0o644)
+        entries.append((f"aac_{name}_{i}", staged, f"{INJECT_AAC_DIR}/{rel}"))
+    return entries
+
+
+def _verify_ro_spec_delivery(aac_configs: list[tuple[str, Path, str]], spec: ExecSpec) -> None:
+    """FR-020 refuse-if-writable (M3): the spec files must be delivered ONLY via the
+    read-only compose-configs channel and never exposed writable. A `bind` workspace
+    could mount the project dir RW at /workspace — refuse if it would shadow the
+    spec (the operator should use persistent/ephemeral for a self-hosting repo)."""
+    if not aac_configs:
+        return
+    for _tok, _src, target in aac_configs:
+        if not target.startswith(INJECT_AAC_DIR + "/"):
+            die(f"spec-integrity: refusing to deploy — spec file target {target} is not read-only")
+    if spec.workspace == "bind":
+        die(
+            "spec-integrity (FR-020): a bind workspace would expose /workspace/.agent-container "
+            "writable to the agent. Use --workspace persistent|ephemeral for a self-hosting "
+            "project, so the spec is delivered read-only."
+        )
+
+
+def _precheck_environments(environments: list[dict]) -> None:
+    """Reject unsupported/unsafe environments UP FRONT — before any deploy — so a
+    later environment's problem never leaves earlier ones partially applied (FR-003,
+    even on the `--host` override path where the per-env host guard is short-circuited)."""
+    for env in environments:
+        name = env["name"]
+        if isinstance(env.get("host"), dict):
+            die(f"environment {name}: declarative host provisioning is not yet supported (US4)")
+        c = env.get("container") or {}
+        if c.get("workspace") == "bind":
+            die(
+                f"environment {name}: workspace=bind would expose /workspace/.agent-container "
+                f"writable to the agent (FR-020). Use persistent|ephemeral for a self-hosting project."
+            )
+
+
+def _reconcile_plan(environments: list[dict], host_override: str | None):
+    """Compute (env, name, host_name, host_rec, state) per declared environment,
+    applying spec-wins precedence (the spec's host, FR-018) and reporting."""
+    plans = []
+    for env in environments:
+        name = env["name"]
+        host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
+        ensure_tunnel(host_rec)
+        state = env_state(host_rec, name)
+        plans.append((env, name, host_name, host_rec, state))
+        log(f"  {name} → host={host_name}: {state}")
+    return plans
+
+
+def do_aac_status(host_override: str | None = None) -> None:
+    """`status`/`plan`: print the per-resource plan and mutate NOTHING (FR-008)."""
+    root = find_project_root()
+    if root is None:
+        die(
+            "no .agent-container/ project found up the tree — the declarative model is "
+            "inert here (use the imperative commands, or create a .agent-container/ spec)"
+        )
+    log(f"project root: {root}")
+    environments = load_project_spec(root)
+    _precheck_environments(environments)
+    _reconcile_plan(environments, host_override)
+
+
+def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
+    """`apply`: discover → validate → plan → (confirm) → converge by driving `do_up`
+    per environment. Idempotent (matching ⇒ no change, SC-002). The `.agent-container/`
+    spec is delivered read-only (FR-020)."""
+    root = find_project_root()
+    if root is None:
+        die(
+            "no .agent-container/ project found up the tree — the declarative model is "
+            "inert here (use the imperative commands, or create a .agent-container/ spec)"
+        )
+    log(f"project root: {root}")
+    environments = load_project_spec(root)
+    _precheck_environments(
+        environments
+    )  # reject unsupported/unsafe envs before ANY deploy (FR-003)
+    plans = _reconcile_plan(environments, host_override)
+    todo = [p for p in plans if p[4] != "matching"]
+    if not todo:
+        log("no changes — every declared environment already matches the spec")
+        return
+    if not yes and is_tty():
+        what = ", ".join(f"{p[1]} ({p[4]})" for p in todo)
+        if not questionary.confirm(f"apply {len(todo)} change(s): {what}?", default=False).ask():
+            log("aborted")
+            return
+    for env, name, host_name, host_rec, state in todo:
+        spec = env_exec_spec(env)
+        aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
+        _verify_ro_spec_delivery(aac, spec)
+        c = env.get("container") or {}
+        env_file = (root / c["env_file"]).resolve() if c.get("env_file") else None
+        if state == "drifted":
+            # present-but-stopped → recreate to converge (announced). Use the plan's
+            # resolved (host_name, host_rec) so the pair is always consistent.
+            log(f"{name}: drifted (present, stopped) — recreating to converge")
+            down_container(host_name, host_rec, name, purge=False)
+        # Deploy to the SAME host the plan/preview resolved (honoring --host), not the
+        # raw spec host — else the container would land on a host the operator never
+        # confirmed. `host_name` is the resolved name; do_up re-resolves it identically.
+        do_up(
+            name,
+            host=host_name,
+            env_file_override=env_file,
+            spec=spec,
+            extra_injected_configs=aac,
+        )
+    log("apply complete")
+
+
+def do_aac_destroy(host_override: str | None = None, yes: bool = False) -> None:
+    """`destroy`: remove ONLY the resources the spec declares/owns — by deterministic
+    identity (SC-007). A referenced host is never deprovisioned (FR-009/017)."""
+    root = find_project_root()
+    if root is None:
+        die("no .agent-container/ project found up the tree")
+    log(f"project root: {root}")
+    environments = load_project_spec(root)
+    if not yes and is_tty():
+        names = ", ".join(e["name"] for e in environments)
+        if not questionary.confirm(
+            f"destroy the declared environment(s): {names}?", default=False
+        ).ask():
+            log("aborted")
+            return
+    for env in environments:
+        name = env["name"]
+        host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
+        with deployment_lock(host_name, name):
+            down_container(host_name, host_rec, name, purge=True)  # owned identity only
+    log("destroy complete")
+
+
 # --- entry -------------------------------------------------------------------
 
 app = typer.Typer(
@@ -4349,6 +4685,51 @@ def logs(
 def menu() -> None:
     """Interactive wizard (same as bare agent-container)."""
     raise typer.Exit(wizard_loop())
+
+
+# --- Feature 006: declarative (agent-as-code) verbs --------------------------
+# Active only when a `.agent-container/` project root is discovered up the tree;
+# otherwise they report the model is inert (use the imperative commands).
+
+
+@app.command()
+def apply(
+    host: str | None = typer.Option(
+        None, "--host", help="Override the host for every environment (default: the spec's host)."
+    ),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+) -> None:
+    """Reconcile the `.agent-container/` project: discover → validate → plan → converge.
+
+    Idempotent — an already-satisfied spec makes no changes. The governing spec is
+    delivered read-only into the container (FR-020)."""
+    do_aac_apply(host, yes)
+
+
+@app.command()
+def plan(
+    host: str | None = typer.Option(None, "--host", help="Override the host for the plan."),
+) -> None:
+    """Show the per-environment reconcile plan (absent/matching/drifted); mutate nothing."""
+    do_aac_status(host)
+
+
+@app.command()
+def status(
+    host: str | None = typer.Option(None, "--host", help="Override the host for the status."),
+) -> None:
+    """Alias of `plan` — the current state of each declared environment vs the spec."""
+    do_aac_status(host)
+
+
+@app.command()
+def destroy(
+    host: str | None = typer.Option(None, "--host", help="Override the host for the teardown."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+) -> None:
+    """Remove ONLY the resources the `.agent-container/` spec declares and owns
+    (by deterministic identity). A referenced host is never deprovisioned."""
+    do_aac_destroy(host, yes)
 
 
 def _completion_script(shell: str) -> str:

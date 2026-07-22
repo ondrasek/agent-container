@@ -16,6 +16,16 @@ This is the "as code" model familiar from Compose/Terraform/Pulumi projects: the
 
 The declarative model is **additive**: it does not remove the imperative CLI or the global registry. When no project spec is present, the tool behaves exactly as it does today. When a project spec *is* present, it becomes the source of truth for that invocation.
 
+## Clarifications
+
+### Session 2026-07-22
+
+- Q: How should the encrypted-at-rest credential form (FR-012) actually decrypt? → A: **Operator-supplied decrypt command** — the spec references an encrypted file **plus a decrypt command** (e.g. `sops -d <file>`, `age -d`); the tool runs that command at apply time and reads the plaintext **in memory only**. No encryption library/tool is bundled (Constitution VI), the decryption key stays outside the directory, and it works with whatever the operator already uses — consistent with Feature 005's invoke-external-tools philosophy.
+- Q: What marks a "project root" for deterministic discovery (FR-001)? → A: **A `.agent-container/` directory** holding the declarative spec file(s) marks the root; the tool walks **upward** from the working directory to the nearest such marker and **reports** which root it selected. Git-independent.
+- Q: How does the tool know which resources it "owns" (scoped teardown SC-007, drift FR-008)? → A: **Derive ownership from the deterministic identity** (Constitution IV) — a declared resource's name maps to the same deterministic container/volume/host identity the tool already computes; "owned" = a resource exists with that identity, and drift = declared-vs-live for those identities. **No separate state/lock file** is stored (nothing new to persist, desync, or leak — consistent with the ephemerality ethos).
+- Q: Precedence when a project spec and the global registry name the same host with different settings (FR-018)? → A: **The project spec wins for its scope** — inside a spec directory the spec is authoritative and overrides a same-named global-registry host, and the **override is reported** (never a silent merge).
+- Q: A repo can carry its own `.agent-container/` and *become* the agent's workspace — how is the untrusted agent prevented from modifying the spec that governs it (and pushing that back)? → A: **The governing spec is immutable from inside the container.** The tool (1) reads the spec **only** from the operator's host-side `.agent-container/`, never a container's copy (load-bearing — an agent edit/`git push` can't re-govern), and (2) delivers the declared spec files **read-only** into the container via the Feature 003 injection channel (compose `configs`, mounted read-only and **remote-context-safe**, unlike a host bind), kernel-enforced for every uid (Constitution II/IV). The agent works on the repo freely but cannot alter its own host binding, credential references, or container config; a spec change is a **host-side git edit the operator reviews**, taking effect only on the next `apply`.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Declare an agent environment in a folder and bring it up (Priority: P1)
@@ -86,13 +96,14 @@ The spec can declare not only the container and agent but the **target host** �
 
 ### Edge Cases
 
-- **Spec discovery ambiguity**: the tool is run in a subdirectory of a project. It MUST resolve the same project root deterministically regardless of which subdirectory it is run from (walk upward to a project-root marker or the git root), and report which root it selected.
+- **Spec discovery ambiguity**: the tool is run in a subdirectory of a project. It MUST resolve the same project root deterministically regardless of which subdirectory it is run from (walk upward to the nearest **`.agent-container/`** marker directory), and report which root it selected.
 - **Multiple specs / no spec**: a directory tree containing more than one project root, or none, MUST resolve to a single unambiguous answer or a clear error — never a silent guess.
 - **Partial apply failure**: if apply fails midway (e.g., host reachable but container fails to start), the tool MUST report exactly what was and was not changed; it MUST NOT leave the operator unable to tell current state.
 - **Spec vs. global registry conflict**: a project spec names a host that also exists in the global registry with different settings. Precedence MUST be defined and reported, not silently merged.
 - **Secret source changes between plan and apply**: a referenced secret becomes unavailable after the plan is shown but before apply completes — the tool MUST fail safe rather than deploy a half-credentialed environment.
 - **Committed-plaintext detection false-negative risk**: a plaintext secret placed in a directory the tool does not scan. The tool MUST document the boundary of what it can and cannot detect rather than imply a guarantee.
 - **Drift in a field the tool cannot change in place**: some drift may require recreate rather than update; the tool MUST say so before doing it.
+- **Agent self-modification of the spec**: a repo that is the agent's workspace carries its own `.agent-container/`. The in-container agent MUST NOT be able to modify it — the tool delivers the declared spec files read-only (via the remote-context-safe compose-`configs` injection channel, kernel-enforced) and **never reads the spec from the container's copy**, so the agent cannot re-govern itself or smuggle a spec change via `git push`; an operator-intended change is a host-side git edit applied on the next reconcile (FR-020).
 
 ## Requirements *(mandatory)*
 
@@ -100,7 +111,7 @@ The spec can declare not only the container and agent but the **target host** �
 
 **Discovery & model**
 
-- **FR-001**: The tool MUST, when run inside a directory, discover a project specification composed of one or more declarative configuration files in that directory and its subdirectories, resolving a single deterministic project root regardless of the working subdirectory.
+- **FR-001**: The tool MUST, when run inside a directory, discover a project specification composed of the declarative configuration file(s) held in a **`.agent-container/` marker directory**, resolving a single deterministic project root by walking **upward** from the working directory to the nearest such marker (regardless of the working subdirectory) and **reporting** the selected root.
 - **FR-002**: The tool MUST treat the discovered specification as the **desired state** for one or more agent environments (host binding, container(s), agent configuration, SSH identity, and credential references).
 - **FR-003**: The tool MUST validate the specification before taking any action and, on any error, refuse to act and report the offending file and field with no partial changes.
 - **FR-004**: When no project specification is present, the tool MUST behave exactly as it does today (imperative CLI over the global registry); the declarative model MUST be additive, not a replacement.
@@ -111,13 +122,13 @@ The spec can declare not only the container and agent but the **target host** �
 - **FR-006**: The tool MUST provide an apply operation that converges the actual environment toward the specification, and this operation MUST be idempotent — applying an already-satisfied spec makes and reports no changes.
 - **FR-007**: The tool MUST present the planned changes (a preview/plan) before mutating anything, and honor the existing headless/non-interactive conventions for confirmation.
 - **FR-008**: The tool MUST provide a status/diff operation that reports, per declared resource, whether it is absent, matching, or drifted, with a human-readable delta.
-- **FR-009**: The tool MUST provide a down/destroy operation that removes exactly the resources the specification declares and owns, and MUST NOT remove resources it does not own.
+- **FR-009**: The tool MUST provide a **`destroy`** operation (a distinct verb from the imperative `down`) that removes exactly the resources the specification declares and owns, and MUST NOT remove resources it does not own. **Ownership is derived from the deterministic identity** (Constitution IV): a declared resource's name maps to the tool's computed container/volume/host identity, and "owned" means a resource exists with that identity — there is **no separate state/lock file**. Drift (FR-008) is likewise the declared-vs-live comparison for those identities.
 - **FR-010**: On partial failure of any operation, the tool MUST report precisely what changed and what did not, leaving no ambiguity about current state.
 
 **Credentials (the "how")**
 
 - **FR-011**: The specification MUST be able to declare each required credential (agent API keys, git push identity, host SSH keys) by **reference to a source** rather than by embedding its value.
-- **FR-012**: The tool MUST support at least these credential sources: an environment variable, an external file outside the tracked directory, and an OS keychain/secret-store entry; and MUST support an **encrypted-at-rest** file that may be safely committed, decrypted only at apply time with a key held outside the directory.
+- **FR-012**: The tool MUST support at least these credential sources: an environment variable, an external file outside the tracked directory, and an OS keychain/secret-store entry; and MUST support an **encrypted-at-rest** file that may be safely committed, decrypted **only at apply time via an operator-supplied decrypt command** (e.g. `sops -d`, `age -d`) whose key is held outside the directory. The tool runs that command and holds the plaintext **in memory only** — it bundles no encryption tool or library of its own (Constitution VI).
 - **FR-013**: The tool MUST resolve each credential reference at apply time and inject the secret into its target **at runtime**, never baking a secret into an image and never passing it on a command line where other processes could observe it.
 - **FR-014**: The tool MUST NOT write a resolved plaintext secret value back into the tracked directory, into logs, or into the global registry at any point.
 - **FR-015**: The tool MUST refuse to proceed when it detects a plaintext secret that is tracked by git within the project, and MUST tell the operator how to remedy it (ignore, externalize, or encrypt); it MUST also document the boundary of what it can and cannot detect.
@@ -126,14 +137,21 @@ The spec can declare not only the container and agent but the **target host** �
 **Host & precedence**
 
 - **FR-017**: The specification MUST be able to bind an environment to a host, either an existing runtime context or a host to be provisioned; a host the spec merely references MUST be treated as externally owned and never deprovisioned, while a host the spec provisioned MAY be deprovisioned on teardown when the operator intends it.
-- **FR-018**: When a project spec and the global registry describe the same-named host with different settings, the tool MUST apply a defined precedence and report which source won; it MUST NOT silently merge conflicting definitions.
+- **FR-018**: When a project spec and the global registry describe the same-named host with different settings, **the project spec wins for its scope** (the invocation running inside it) — the tool applies the spec's definition, overriding the registry entry, and **reports** the override; it MUST NOT silently merge conflicting definitions.
 - **FR-019**: The tool MUST report which project root and which host it selected for every operation, so the operator is never guessing which spec is in effect.
+
+**Spec integrity (agent cannot re-govern itself)**
+
+- **FR-020**: When a repo carrying its own `.agent-container/` becomes an agent's workspace, the tool MUST make that governing spec **immutable from inside the container**, by two guarantees:
+  - **(1) Host-side-only read (load-bearing)** — the tool reads the spec **only** from the operator's host-side `.agent-container/`, **never** from a container's copy. So an agent's edit or `git push` cannot re-govern; a spec change is an operator host-side git edit, reviewable in git, taking effect only on the next reconcile.
+  - **(2) Read-only in-container delivery (defense-in-depth)** — the declared spec files are delivered into the container **read-only** via the runtime **injection channel** (Feature 003's compose `configs`, which mount read-only and — unlike a host bind — work over a **remote context**), kernel-enforced and uid-independent, so the rootless untrusted agent (Constitution II) cannot modify the host binding, credential references, or container config that govern it.
+  The tool MUST **verify** the spec files are delivered **read-only** (never via a writable mount) and **refuse to deploy** otherwise.
 
 ### Key Entities *(include if feature involves data)*
 
-- **Project specification**: the directory tree, rooted at a deterministically discovered marker, whose declarative files collectively define the desired agent environment(s). Portable and optionally git-tracked.
+- **Project specification**: the directory tree, rooted at a deterministically discovered **`.agent-container/`** marker directory, whose declarative files collectively define the desired agent environment(s). Portable and optionally git-tracked.
 - **Environment (declared)**: one desired agent setup within the spec — its host binding, container(s), agent configuration, SSH identity, and credential references. The unit of apply/status/down.
-- **Credential reference**: a named requirement for a secret plus a *source* descriptor (environment variable / external file / keychain / encrypted-at-rest file) — never the secret value itself.
+- **Credential reference**: a named requirement for a secret plus a *source* descriptor (environment variable / external file / keychain / encrypted-at-rest file **+ its operator-supplied decrypt command**) — never the secret value itself.
 - **Plan/diff**: the computed delta between desired state (spec) and actual state (running containers/registered hosts), per declared resource, presented before mutation.
 - **Host binding**: the spec's link to a target host — referenced (externally owned) or provisioned (spec-owned) — reusing the existing host/provisioner model.
 
@@ -153,11 +171,11 @@ The spec can declare not only the container and agent but the **target host** �
 
 - **Additive, not a rewrite**: the existing imperative CLI (Features 001–005) and the global `hosts.json` registry remain; this feature layers a declarative source-of-truth model on top and reuses the existing host, container, credentialing, and provisioning capabilities rather than replacing them.
 - **Reconciliation model**: "as code" implies desired-state convergence — apply is idempotent, drift is detectable, and teardown is scoped to spec-owned resources. This is assumed rather than a one-shot imperative generator.
-- **Declarative file format**: human-readable declarative configuration files (YAML, as the user indicated) define the spec; a conventional project-root marker makes discovery deterministic. The exact schema is a planning/design concern, not fixed by this spec.
+- **Declarative file format**: human-readable declarative configuration files (YAML, as the user indicated) live in a **`.agent-container/` marker directory** that makes discovery deterministic (walk upward to the nearest one). The exact schema is a planning/design concern, not fixed by this spec.
 - **git optional**: the directory may be git-tracked (enabling the committed-plaintext safety check and reproducible checkouts) but git is not required for the declarative model to function.
 - **Single operator**: consistent with the constitution, one operator is assumed; no multi-tenant spec ownership or access control.
-- **Precedence default (pending confirmation)**: absent other direction, a present project spec is authoritative for its scope for the invocation that runs inside it, overriding a same-named global-registry host, with the override reported.
-- **Credential model (see Question 1)**: the recommended default is *references + encrypted-at-rest + gitignored-plaintext-escape-hatch*, so that no plaintext secret is required to live in a committed directory, but the operator can still version encrypted secrets alongside the spec. This is the one decision with material security and scope impact and is raised as a clarification.
+- **Precedence (confirmed)**: a present project spec is authoritative for its scope for the invocation that runs inside it, overriding a same-named global-registry host, with the override reported (Clarifications Q4 / FR-018).
+- **Credential model (confirmed)**: references (env / external file / keychain) + an **encrypted-at-rest** file decrypted by an **operator-supplied decrypt command** run in memory at apply time (Clarifications Q1 / FR-012) + the gitignored-plaintext escape hatch (FR-015). No plaintext secret need live in a committed directory, the operator can version encrypted secrets alongside the spec, and the tool bundles no crypto of its own.
 
 ## Dependencies
 

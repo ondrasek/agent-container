@@ -321,6 +321,29 @@ agent-container host env hz1 --shell pwsh | Invoke-Expression   # PowerShell idi
   eval-safe-quoted; printing has no side effects and **never emits a secret** — only
   connection coordinates. Details: [docs/shell-integration.md](docs/shell-integration.md).
 
+**Agent-as-code — declarative `.agent-container/` projects (Feature 006).** A
+directory can *be* the desired state: run the tool inside a project holding a
+`.agent-container/` spec and it reconciles reality to the files (Compose/Terraform-
+adjacent). Additive — with no `.agent-container/` up the tree, the tool behaves
+exactly as today.
+
+```bash
+# .agent-container/project.yaml declares one or more environments (name/host/container/credentials)
+agent-container plan        # per-environment: absent / matching / drifted (no mutation)
+agent-container apply        # discover -> validate -> plan -> converge (idempotent)
+agent-container destroy      # remove only what the spec owns (by deterministic identity)
+```
+
+- The spec is parsed with **`yaml.safe_load`** and **validated before any action**
+  (a bad field names the offending file+field, no partial change). Ownership derives
+  from the **deterministic identity** — no state file. The spec **wins for its scope**
+  over the global registry (reported).
+- **Spec integrity (FR-020):** when a repo that carries `.agent-container/` becomes
+  the agent's workspace, the governing spec is **immutable from inside the
+  container** — read only host-side, and delivered **read-only** via the compose-
+  `configs` channel (remote-context-safe). An untrusted agent cannot re-govern
+  itself. Details: [docs/agent-as-code.md](docs/agent-as-code.md).
+
 **Hosts and the run mechanism.** A *host* is a named target where containers run — a
 local or remote container-runtime context, registered with `host add` and stored in
 `~/.config/agent-container/hosts.json` (the registry supersedes the older `hosts.conf`
