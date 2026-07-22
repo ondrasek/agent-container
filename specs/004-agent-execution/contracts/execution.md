@@ -70,6 +70,7 @@ published port.
 |-----------|----------|
 | `--workspace bind` on a non-local host | CLI `die`s with a clear message **before** deploy (FR-011) |
 | `--repo git@…` with no injected push key | CLI/entrypoint `die`s before starting an empty-workspace agent (FR-014) |
+| headless `--foreground` **with a sidecar** (002 US4) | `--abort-on-container-exit` stops all services when any exits; a one-shot/crashing sidecar exiting first SIGTERMs the agent and `--exit-code-from agent` reports that forced code, not the task result — sidecars for headless-foreground must be **long-lived** |
 | reattach to a dead session | clear "nothing running" / fresh session — never silent (FR-008) |
 | ephemeral durability | surfaced at deploy + documented as non-durable (FR-015) |
 
