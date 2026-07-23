@@ -2,6 +2,36 @@
 
 <!-- version list -->
 
+## v0.11.0 (2026-07-23)
+
+### Bug Fixes
+
+- **aac**: Address US2 adversarial-verification findings
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`aac5373`](https://github.com/ondrasek/agent-container/commit/aac537376e7bc9d18e37f603840ed249195b1664))
+
+### Chores
+
+- **deps**: Sync uv.lock to 0.9.0 ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`5d4e85b`](https://github.com/ondrasek/agent-container/commit/5d4e85b6618b1e505ffd125fcf7d24c8e311b85f))
+
+### Documentation
+
+- **aac**: Clarify the source=file FR-015 detection boundary
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`4faeb73`](https://github.com/ondrasek/agent-container/commit/4faeb73cfb492187aabf5c5a5eaff2602628a827))
+
+- **specs**: Align US2 task text with resolve_credential_value
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`724483a`](https://github.com/ondrasek/agent-container/commit/724483a03eb8927c13de6e477898a3471a1777d0))
+
+### Features
+
+- **aac**: US2 — resolve declared credential references at apply
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`e5f5346`](https://github.com/ondrasek/agent-container/commit/e5f534607b1b761549c8121faa4e90ec214533a0))
+
+
 ## v0.10.0 (2026-07-22)
 
 ### Bug Fixes
