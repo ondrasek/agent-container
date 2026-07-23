@@ -9,13 +9,19 @@
 name: ci
 
 on:
+  # Only run push-triggered CI on main (the release gate). Feature-branch pushes
+  # are covered by the `pull_request` event — running BOTH doubled the CI (two
+  # concurrent acceptance runs), which is wasteful and was implicated in port-2202
+  # flakes when they raced.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 concurrency:
+  # Supersede an in-progress PR run when a newer commit is pushed, but NEVER cancel
+  # a main run (each merge's CI must complete to gate its release, Principle VII).
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   quality-gate:
