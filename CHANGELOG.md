@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.13.0 (2026-07-23)
+
+### Chores
+
+- Sync uv.lock to released version 0.11.1
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`0ddaaa3`](https://github.com/ondrasek/agent-container/commit/0ddaaa33b442e3b3f39ff0bad28ab4908acddca8))
+
+### Features
+
+- **cli**: Declarative host provisioning + SSH-key credential routing for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`9396f8f`](https://github.com/ondrasek/agent-container/commit/9396f8fba0164cad7b4ba9097c49381b6c5e7594))
+
+
 ## v0.12.0 (2026-07-23)
 
 ### Features
