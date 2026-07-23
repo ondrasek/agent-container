@@ -431,6 +431,65 @@ def test_apply_injects_declared_credentials(wiz, aac_env, tmp_path, monkeypatch)
     assert not any("sk-live" in n or "sk-live" in t for n, _f, t in kw["extra_injected_configs"])
 
 
+def test_apply_pre_resolves_credentials_before_any_deploy(wiz, aac_env, tmp_path, monkeypatch):
+    # Regression (verification HIGH / FR-016): a missing source in a LATER env must
+    # die BEFORE any earlier env is deployed.
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: None)
+    monkeypatch.delenv("MISSING_K", raising=False)
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: a\n    host: local\n  - name: b\n    host: local\n"
+        "    credentials:\n      - { name: X, source: env, var: MISSING_K }\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="MISSING_K"):
+        wiz.do_aac_apply(yes=True)
+    assert aac_env["up"] == []  # env 'a' was NOT deployed
+
+
+def test_apply_preserves_convention_env_as_merge_base(wiz, aac_env, tmp_path, monkeypatch):
+    # Regression (verification HIGH): credentials must MERGE onto the convention .env
+    # (GH_TOKEN/GIT_*), not replace it.
+    conv = tmp_path / "conv.env"
+    conv.write_text("GH_TOKEN=from-dotenv\n")
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: conv)
+    monkeypatch.setenv("AK", "sk-live")
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: acme\n    host: local\n    credentials:\n"
+        "      - { name: OTHER, source: env, var: AK }\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    wiz.do_aac_apply(yes=True)
+    _name, kw = aac_env["up"][0]
+    merged = kw["env_file_override"].read_text()
+    assert "GH_TOKEN=from-dotenv" in merged and "OTHER=sk-live" in merged
+
+
+def test_env_credential_dotenv_unsafe_value_refused(wiz, tmp_path, monkeypatch):
+    monkeypatch.setenv("V", "tok #comment")  # an inline ' #' would be mangled by dotenv
+    creds = [{"name": "TOK", "source": "env", "var": "V"}]
+    with pytest.raises(wiz.Fatal, match="mangle"):
+        wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+
+
+def test_env_credential_invalid_name_refused(wiz, tmp_path, monkeypatch):
+    monkeypatch.setenv("V", "x")
+    creds = [{"name": "BAD NAME", "source": "env", "var": "V"}]  # not a valid env identifier
+    with pytest.raises(wiz.Fatal, match="valid environment-variable identifier"):
+        wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+
+
+def test_apikey_trailing_newline_stripped(wiz, tmp_path, monkeypatch):
+    ext = tmp_path / "anthropic.key"
+    ext.write_text("sk-ant-key\n")  # file ends in a newline
+    creds = [{"name": "anthropic", "source": "file", "path": str(ext)}]
+    configs, _env = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert configs[0][1].read_text() == "sk-ant-key"  # no trailing newline in the apikey file
+
+
 def test_config_tokens_and_staged_files_injective(wiz, tmp_path):
     root = _project(tmp_path, MINIMAL)
     # two paths that a lossy flattener could collide

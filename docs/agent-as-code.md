@@ -98,8 +98,18 @@ the tool resolves it **in memory** and injects it via the existing runtime chann
 (a read-only compose config → `/run/agent-container/apikeys/<provider>`, never even
 the environment); any other credential is delivered as an **environment variable**
 via a per-deployment secrets env-file (mode 0600, in the state dir — not the project).
-Multi-line values are rejected for env delivery (SSH-key routing to `--push-key`/
-`--host-key` is a follow-on).
+Multi-line values, and values with characters an env-file parser would mangle
+(leading/trailing whitespace, an inline ` #`, a leading quote), are **rejected** for
+env delivery — deliver those as a provider API key (file channel). SSH-key routing
+to `--push-key`/`--host-key` is a follow-on.
+
+**Notes.** All declared credentials are resolved **up front** — before any container
+is deployed — so a missing source never leaves an earlier environment partially
+applied. Resolved values are staged as 0600 files under your private state dir
+(`$XDG_STATE_HOME`), the same posture as the Feature 003 injected material; they are
+regenerated each `apply`. Don't both declare a provider credential *and* drop a
+convention `agent-container.<name>.<provider>.key` file for the same provider — they
+target the same in-container path.
 
 ## Roadmap (this feature ships incrementally)
 

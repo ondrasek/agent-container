@@ -4142,7 +4142,7 @@ def _keychain_lookup(service: str, account: str, name: str) -> str:
     else:
         argv = ["secret-tool", "lookup", "service", service, "account", account]
     r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    if r.returncode != 0 or not r.stdout:
+    if r.returncode != 0:
         die(
             f"credential {name}: OS keychain lookup failed for service={service!r} "
             f"account={account!r} (FR-016 — the source is unavailable)"
@@ -4159,8 +4159,9 @@ def _run_decrypt(decrypt_cmd: str, enc_path: Path, name: str) -> str:
     argv = shlex.split(decrypt_cmd) + [str(enc_path)]
     r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode != 0:
-        last = (r.stderr.strip().splitlines() or ["nonzero exit"])[-1]
-        die(f"credential {name}: decrypt command failed ({last}) (FR-016)")
+        # Do NOT echo the tool's stderr — a verbose/broken decrypt wrapper could emit
+        # secret material there. A generic message keeps the log secret-free (III).
+        die(f"credential {name}: decrypt command exited {r.returncode} (FR-016)")
     return r.stdout
 
 
@@ -4225,7 +4226,9 @@ def stage_declared_credentials(
     configs: list[tuple[str, Path, str]] = []
     env_lines: list[str] = []
     for cred in creds or []:
-        value = resolve_credential_value(cred, root)
+        # Drop a spurious trailing newline (a key file often ends in one) so the
+        # value is delivered byte-clean to both the apikey file and the env var.
+        value = resolve_credential_value(cred, root).rstrip("\n")
         cname = cred["name"]
         provider = CRED_PROVIDER.get(cname)
         if provider:
@@ -4234,13 +4237,26 @@ def stage_declared_credentials(
             f.chmod(0o600)
             configs.append((f"cred_apikey_{provider}", f, f"{INJECT_APIKEY_DIR}/{provider}"))
         else:
-            if "\n" in value.rstrip("\n"):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cname):
                 die(
-                    f"credential {cname}: a multi-line value cannot be delivered as an env "
-                    f"var. Use a provider name for an API key; multi-line SSH-key delivery is "
-                    f"a follow-on increment."
+                    f"credential {cname}: name is not a valid environment-variable identifier "
+                    f"for env delivery. Use a provider name (anthropic/openai) for an API key."
                 )
-            env_lines.append(f"{cname}={value.rstrip(chr(10))}")
+            if "\n" in value:
+                die(
+                    f"credential {cname}: a multi-line value cannot be delivered as an env var. "
+                    f"Use a provider name for an API key; multi-line SSH-key delivery is a "
+                    f"follow-on increment."
+                )
+            # Fail closed on values compose's env-file (dotenv) parsing would mangle —
+            # leading/trailing whitespace, an inline ' #' comment, or a leading quote.
+            if value != value.strip() or " #" in value or value[:1] in {'"', "'"}:
+                die(
+                    f"credential {cname}: the value contains whitespace/#/quote characters that "
+                    f"compose's env-file parsing would mangle — deliver it as a provider API key "
+                    f"(file channel), not an env var."
+                )
+            env_lines.append(f"{cname}={value}")
     if not env_lines:
         return configs, base_env_file  # nothing to merge — pass the base env through
     merged = d / f"{name}.cred.env"
@@ -4278,17 +4294,23 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
         if not questionary.confirm(f"apply {len(todo)} change(s): {what}?", default=False).ask():
             log("aborted")
             return
+    # US2: resolve + stage ALL declared credentials for EVERY environment UP FRONT,
+    # before any container is touched — a missing/unavailable source in a later env
+    # must not leave earlier envs partially deployed (FR-016). The convention `.env`
+    # (resolve_env_file) is the merge base when no container.env_file is declared, so
+    # GH_TOKEN/GIT_* are preserved, not dropped.
+    staged_creds: dict[str, tuple[list[tuple[str, Path, str]], Path | None]] = {}
+    for env, name, host_name, _host_rec, _state in todo:
+        c = env.get("container") or {}
+        base_env = (root / c["env_file"]).resolve() if c.get("env_file") else resolve_env_file(name)
+        staged_creds[name] = stage_declared_credentials(
+            host_name, name, env.get("credentials"), root, base_env
+        )
     for env, name, host_name, host_rec, state in todo:
         spec = env_exec_spec(env)
         aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
         _verify_ro_spec_delivery(aac, spec)
-        c = env.get("container") or {}
-        base_env = (root / c["env_file"]).resolve() if c.get("env_file") else None
-        # US2: resolve declared credential references in memory and deliver them via
-        # the 003 channels (provider keys → apikey files; others → a secrets env-file).
-        cred_configs, env_file = stage_declared_credentials(
-            host_name, name, env.get("credentials"), root, base_env
-        )
+        cred_configs, env_file = staged_creds[name]
         aac = aac + cred_configs
         if state == "drifted":
             # present-but-stopped → recreate to converge (announced). Use the plan's
