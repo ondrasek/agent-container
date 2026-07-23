@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.12.0 (2026-07-23)
+
+### Features
+
+- **cli**: Field-level drift, convergence, and scoped destroy for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`ae70bee`](https://github.com/ondrasek/agent-container/commit/ae70beee1bb4b1284e39009fa82456219f2ac941))
+
+
 ## v0.11.1 (2026-07-23)
 
 ### Bug Fixes
