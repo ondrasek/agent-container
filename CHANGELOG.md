@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.11.1 (2026-07-23)
+
+### Bug Fixes
+
+- **cli**: Raise wait_port_released ceiling to 30s
+  ([`3d4d84d`](https://github.com/ondrasek/agent-container/commit/3d4d84dada755efe212a640bb7ab113d7837a3d0))
+
+### Continuous Integration
+
+- Run push CI only on main; never cancel main runs
+  ([`8784da1`](https://github.com/ondrasek/agent-container/commit/8784da1a95aee964418066c368b4640194a5eb46))
+
+
 ## v0.11.0 (2026-07-23)
 
 ### Bug Fixes
