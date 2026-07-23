@@ -3916,6 +3916,15 @@ CRED_PROVIDER = {
     "openai": "openai",
     "OPENAI_API_KEY": "openai",
 }
+# A credential may declare an explicit SSH `target` (US2/T012a): the resolved value
+# is routed to a Feature 003 ssh-injection channel (multi-line keys the env-file
+# channel refuses) instead of an env var — outbound git push identity, inbound sshd
+# host identity, or an inbound authorized key. Absent → today's apikey/env routing.
+CRED_SSH_TARGETS = ("push_key", "host_key", "authorized_key")
+# US4 declarative host provisioning: a `host:` table's provider discriminator + the
+# keys forwarded to the Feature 001 provisioner (provision_host's actual args).
+PROVISION_PROVIDERS = ("hetzner",)
+PROVISION_KEYS = {"provision", "name", "server_type", "location", "ssh_key"}
 # The read-only spec target in the container (defense-in-depth; the tool never
 # reads this copy — it reads only the host-side .agent-container/).
 INJECT_AAC_DIR = "/workspace/.agent-container"
@@ -3961,10 +3970,37 @@ def validate_credential(cred: object, where: str) -> None:
     for k in detail:
         if not cred.get(k):
             die(f"{where}: source={src} requires '{k}'")
-    allowed = {"name", "source", *detail}
+    tgt = cred.get("target")
+    if tgt is not None and tgt not in CRED_SSH_TARGETS:
+        die(f"{where}: target={tgt!r} is not one of {{{', '.join(CRED_SSH_TARGETS)}}}")
+    allowed = {"name", "source", "target", *detail}
     for k in cred:
         if k not in allowed:
             die(f"{where}: unknown credential key {k!r}")
+
+
+def validate_provision_table(table: dict, env_name: str, where: str) -> None:
+    """Validate a `host:` provision table (US4) BEFORE any allocation (FR-003). The
+    provider is the discriminator; the effective host registry name (`name` or the env
+    name) must be RFC-1123 (Hetzner rejects underscores), so an underscore-bearing env
+    needs an explicit `host.name`."""
+    prov = table.get("provision")
+    if prov not in PROVISION_PROVIDERS:
+        die(f"{where}: host provision={prov!r} is not one of {{{', '.join(PROVISION_PROVIDERS)}}}")
+    for k in table:
+        if k not in PROVISION_KEYS:
+            die(f"{where}: unknown host provision key {k!r}")
+    name_val = table.get("name")
+    if name_val is not None and not isinstance(name_val, str):
+        # A non-string YAML scalar (123, true, 1.5, a list) must die naming the field,
+        # not traceback in the regex below (FR-003 — clean refusal; adversarial LOW).
+        die(f"{where}: host provision name must be a string, got {type(name_val).__name__}")
+    host_name = name_val or env_name
+    if not HETZNER_NAME_RE.fullmatch(host_name):
+        die(
+            f"{where}: provisioned host name '{host_name}' is not RFC-1123 (lowercase "
+            f"letters, digits, hyphens; no underscore; <=63). Add an explicit host.name."
+        )
 
 
 def validate_environment(env: object, where: str) -> None:
@@ -3982,6 +4018,8 @@ def validate_environment(env: object, where: str) -> None:
         die(f"{where}: missing required 'host'")
     if not isinstance(host, (str, dict)):
         die(f"{where}: 'host' must be a host name (string) or a provision table")
+    if isinstance(host, dict):
+        validate_provision_table(host, name, where)
     container = env.get("container") or {}
     if not isinstance(container, dict):
         die(f"{where}: 'container' must be a mapping")
@@ -4043,13 +4081,54 @@ def load_project_spec(root: Path) -> list[dict]:
     return environments
 
 
-def env_host_name(env: dict) -> str | None:
-    """The declared host: a name (string) → referenced; a table → provisioned (US4,
-    not resolved in this increment)."""
-    h = env.get("host")
+def env_host_binding(env: dict) -> tuple[str, dict | None]:
+    """Resolve the declared host binding to (host_name, provision_table_or_None): a
+    string host is REFERENCED (externally owned, never deprovisioned); a table is
+    PROVISIONED (spec-owned, US4). A provisioned host's registry name is the table
+    `name` or the env name (validated RFC-1123 at parse time)."""
+    h = env["host"]
     if isinstance(h, dict):
-        die(f"environment {env['name']}: declarative host provisioning is not yet supported (US4)")
-    return h
+        return (h.get("name") or env["name"]), h
+    return h, None
+
+
+def ensure_provisioned_host(host_name: str, table: dict) -> dict:
+    """Idempotently provision + register a spec-owned host (US4), driving the Feature
+    001 provisioner. A second `apply` must NOT allocate a second (billable) server: an
+    existing tool-created host of the same provider is reused unchanged. A name
+    collision with a host this spec did not create is refused (never silently reused
+    or re-provisioned over)."""
+    provider = table["provision"]
+    existing = get_host(load_registry(), host_name)
+    if existing is not None:
+        prov = existing.get("provisioning") or {}
+        if existing.get("created_by_tool") and prov.get("provider") == provider:
+            log(f"host {host_name}: already provisioned ({provider}) — reusing")
+            return existing
+        die(
+            f"host {host_name}: a host of that name already exists but was not provisioned "
+            f"by this spec (provider={prov.get('provider')!r}, created_by_tool="
+            f"{bool(existing.get('created_by_tool'))}). Rename the environment's host or "
+            f"remove the existing host first."
+        )
+    log(f"provisioning host {host_name} ({provider}) — billable…")
+    record = provision_host(
+        provider,
+        host_name,
+        server_type=table.get("server_type"),
+        location=table.get("location"),
+        ssh_key=table.get("ssh_key"),
+        ssh_pubkey=None,
+    )
+    reg = load_registry()
+    hosts = registry_hosts(reg)
+    hosts[host_name] = record
+    reg["hosts"] = hosts
+    if default_host_name(reg) is None:
+        reg["default"] = host_name
+    save_registry(reg)
+    log(f"registered provisioned host '{host_name}'")
+    return record
 
 
 def env_exec_spec(env: dict) -> ExecSpec:
@@ -4196,14 +4275,24 @@ def _verify_ro_spec_delivery(aac_configs: list[tuple[str, Path, str]], spec: Exe
         )
 
 
-def _precheck_environments(environments: list[dict]) -> None:
+def _precheck_environments(environments: list[dict], host_override: str | None = None) -> None:
     """Reject unsupported/unsafe environments UP FRONT — before any deploy — so a
     later environment's problem never leaves earlier ones partially applied (FR-003,
     even on the `--host` override path where the per-env host guard is short-circuited)."""
     for env in environments:
         name = env["name"]
-        if isinstance(env.get("host"), dict):
-            die(f"environment {name}: declarative host provisioning is not yet supported (US4)")
+        if (
+            isinstance(env.get("host"), dict)
+            and host_override is None
+            and not os.environ.get("HCLOUD_TOKEN")
+        ):
+            # US4: a provision table is deployable now, but allocation is billable and
+            # needs the cloud token — fail before ANY container work if it is absent.
+            # A --host override bypasses provisioning entirely, so it needs no token.
+            die(
+                f"environment {name}: host provisioning ({env['host'].get('provision')}) "
+                f"requires HCLOUD_TOKEN in the environment"
+            )
         c = env.get("container") or {}
         if c.get("workspace") == "bind":
             die(
@@ -4216,9 +4305,29 @@ def _reconcile_plan(environments: list[dict], host_override: str | None):
     """Compute (env, name, host_name, host_rec, state) per declared environment,
     applying spec-wins precedence (the spec's host, FR-018) and reporting."""
     plans = []
+    reg = load_registry()  # detect a not-yet-provisioned host WITHOUT mutating
     for env in environments:
         name = env["name"]
-        host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
+        binding_name, prov_table = env_host_binding(env)
+        to_provision = prov_table is not None and get_host(reg, binding_name) is None
+        if to_provision and host_override is None:
+            # US4: a to-be-provisioned host that does not exist yet. status/plan MUST
+            # NOT allocate a billable server — report the intent, host_rec None.
+            plans.append(
+                (
+                    env,
+                    name,
+                    binding_name,
+                    None,
+                    "absent",
+                    f"host {binding_name} will be provisioned ({prov_table['provision']})",
+                )
+            )
+            log(
+                f"  {name} → host={binding_name}: absent (will provision {prov_table['provision']})"
+            )
+            continue
+        host_name, host_rec = resolve_deploy_host(host_override or binding_name)
         ensure_tunnel(host_rec)
         state, detail = env_reconcile(host_rec, name, env_exec_spec(env))
         plans.append((env, name, host_name, host_rec, state, detail))
@@ -4236,7 +4345,7 @@ def do_aac_status(host_override: str | None = None) -> None:
         )
     log(f"project root: {root}")
     environments = load_project_spec(root)
-    _precheck_environments(environments)
+    _precheck_environments(environments, host_override)
     _reconcile_plan(environments, host_override)
 
 
@@ -4324,14 +4433,27 @@ def resolve_credential_value(cred: dict, root: Path) -> str:
     return _run_decrypt(cred["decrypt"], enc.expanduser(), name)
 
 
+@dataclass
+class SshCreds:
+    """Resolved SSH-target credentials (T012a) threaded into do_up's typed params —
+    distinct lifecycles: push_key is the ephemeral outbound git identity, host_key the
+    persisted inbound sshd identity, authorized_keys accumulate inbound principals."""
+
+    push_key: Path | None = None
+    host_key: Path | None = None
+    authorized_keys: list[Path] = field(default_factory=list)
+
+
 def stage_declared_credentials(
     host_name: str, name: str, creds: list[dict] | None, root: Path, base_env_file: Path | None
-) -> tuple[list[tuple[str, Path, str]], Path | None]:
-    """Resolve the declared credentials and deliver them: **provider API keys** (by
-    name) via the 003 file-first apikey channel (a config → INJECT_APIKEY_DIR/<provider>,
-    never even the env); **everything else** as environment variables via a
-    per-deployment secrets env-file merged with the declared env_file. Returns
-    (extra_configs, env_file). Plaintext lives ONLY in memory + 0600 staged files
+) -> tuple[list[tuple[str, Path, str]], Path | None, SshCreds]:
+    """Resolve the declared credentials and deliver them: an explicit SSH **target**
+    (push_key/host_key/authorized_key) → a 0600 staged file threaded into the 003
+    ssh-injection channels (multi-line keys the env-file rejects, T012a); **provider
+    API keys** (by name) via the 003 file-first apikey channel (a config →
+    INJECT_APIKEY_DIR/<provider>, never even the env); **everything else** as env vars
+    via a per-deployment secrets env-file merged with the declared env_file. Returns
+    (extra_configs, env_file, ssh). Plaintext lives ONLY in memory + 0600 staged files
     under the state dir — never the tracked project, logs, argv, or registry
     (FR-013/014). Absent credentials → the base env_file passes through unchanged."""
     d = host_state_dir(host_name)
@@ -4339,7 +4461,28 @@ def stage_declared_credentials(
     d.chmod(0o700)
     configs: list[tuple[str, Path, str]] = []
     env_lines: list[str] = []
+    ssh = SshCreds()
     for cred in creds or []:
+        target = cred.get("target")
+        if target in CRED_SSH_TARGETS:
+            # Multi-line SSH material → the 003 ssh-injection paths, NOT the env-file.
+            # Keep a trailing newline (OpenSSH/PEM keys and authorized_keys lines are
+            # newline-terminated); do NOT run the env-var mangle checks. do_up re-stages
+            # this host-side 0600 file into the correct channel (0600 here is fine — it
+            # is read only by the operator uid running the CLI before re-staging).
+            value = resolve_credential_value(cred, root)
+            if not value.endswith("\n"):
+                value += "\n"
+            f = d / f"{name}.cred.{target}"
+            f.write_text(value)
+            f.chmod(0o600)
+            if target == "push_key":
+                ssh.push_key = f
+            elif target == "host_key":
+                ssh.host_key = f
+            else:
+                ssh.authorized_keys.append(f)
+            continue
         # Drop a spurious trailing newline (a key file often ends in one) so the
         # value is delivered byte-clean to both the apikey file and the env var.
         value = resolve_credential_value(cred, root).rstrip("\n")
@@ -4372,7 +4515,7 @@ def stage_declared_credentials(
                 )
             env_lines.append(f"{cname}={value}")
     if not env_lines:
-        return configs, base_env_file  # nothing to merge — pass the base env through
+        return configs, base_env_file, ssh  # nothing to merge — pass the base env through
     merged = d / f"{name}.cred.env"
     parts: list[str] = []
     if base_env_file and base_env_file.is_file():
@@ -4380,7 +4523,7 @@ def stage_declared_credentials(
     parts.extend(env_lines)
     merged.write_text("\n".join(p for p in parts if p) + "\n")
     merged.chmod(0o600)
-    return configs, merged
+    return configs, merged, ssh
 
 
 def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
@@ -4396,7 +4539,7 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
     log(f"project root: {root}")
     environments = load_project_spec(root)
     _precheck_environments(
-        environments
+        environments, host_override
     )  # reject unsupported/unsafe envs before ANY deploy (FR-003)
     plans = _reconcile_plan(environments, host_override)
     todo = [p for p in plans if p[4] != "matching"]
@@ -4404,7 +4547,8 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
         log("no changes — every declared environment already matches the spec")
         return
     if not yes and is_tty():
-        what = ", ".join(f"{p[1]} ({p[4]})" for p in todo)
+        # Surface the detail (a to-be-provisioned host is a BILLABLE allocation).
+        what = ", ".join(f"{p[1]} ({p[5] or p[4]})" for p in todo)
         if not questionary.confirm(f"apply {len(todo)} change(s): {what}?", default=False).ask():
             log("aborted")
             return
@@ -4413,7 +4557,7 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
     # must not leave earlier envs partially deployed (FR-016). The convention `.env`
     # (resolve_env_file) is the merge base when no container.env_file is declared, so
     # GH_TOKEN/GIT_* are preserved, not dropped.
-    staged_creds: dict[str, tuple[list[tuple[str, Path, str]], Path | None]] = {}
+    staged_creds: dict[str, tuple[list[tuple[str, Path, str]], Path | None, SshCreds]] = {}
     for env, name, host_name, _host_rec, _state, _detail in todo:
         c = env.get("container") or {}
         base_env = (root / c["env_file"]).resolve() if c.get("env_file") else resolve_env_file(name)
@@ -4426,10 +4570,18 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
     failures: list[tuple[str, str]] = []
     for env, name, host_name, host_rec, state, detail in todo:
         try:
+            if host_rec is None:
+                # US4: a spec-owned host not yet provisioned → provision + register it
+                # (billable) before deploy. Idempotent — a second apply reuses it.
+                # host_rec is None ONLY for a provision-table env (set so in _reconcile_plan).
+                _bn, prov_table = env_host_binding(env)
+                assert prov_table is not None
+                host_rec = ensure_provisioned_host(host_name, prov_table)
+                ensure_tunnel(host_rec)
             spec = env_exec_spec(env)
             aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
             _verify_ro_spec_delivery(aac, spec)
-            cred_configs, env_file = staged_creds[name]
+            cred_configs, env_file, ssh = staged_creds[name]
             aac = aac + cred_configs
             if state == "drifted":
                 # present-but-stopped OR a running config delta → recreate to converge,
@@ -4440,12 +4592,17 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
             # Deploy to the SAME host the plan/preview resolved (honoring --host), not
             # the raw spec host — else the container would land on a host the operator
             # never confirmed. `host_name` is the resolved name; do_up re-resolves it.
+            # SSH-target credentials (T012a) ride do_up's typed params (push_key must be
+            # a param, not a config, so clone_credential_precheck sees it for an ssh --repo).
             do_up(
                 name,
                 host=host_name,
                 env_file_override=env_file,
                 spec=spec,
                 extra_injected_configs=aac,
+                push_key=ssh.push_key,
+                host_key=ssh.host_key,
+                authorized_keys=ssh.authorized_keys,
             )
             done.append(name)
         except Fatal as e:
@@ -4459,18 +4616,28 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
     log("apply complete")
 
 
-def do_aac_destroy(host_override: str | None = None, yes: bool = False) -> None:
+def do_aac_destroy(
+    host_override: str | None = None, yes: bool = False, deprovision: bool = False
+) -> None:
     """`destroy`: remove ONLY the resources the spec declares/owns — by deterministic
-    identity (SC-007). A referenced host is never deprovisioned (FR-009/017)."""
+    identity (SC-007). A referenced host is NEVER deprovisioned (FR-009/017); a
+    spec-PROVISIONED host is deprovisioned only with explicit `--deprovision` intent,
+    and only AFTER its container is removed (spec.md US4-3), reusing the Feature 001
+    fail-closed tool-created + provably-empty teardown."""
     root = find_project_root()
     if root is None:
         die("no .agent-container/ project found up the tree")
     log(f"project root: {root}")
     environments = load_project_spec(root)
+    # Fail before any change if a --deprovision would need a cloud token it lacks.
+    if deprovision and not os.environ.get("HCLOUD_TOKEN"):
+        if any(isinstance(e.get("host"), dict) for e in environments):
+            die("--deprovision needs HCLOUD_TOKEN in the environment")
     if not yes and is_tty():
         names = ", ".join(e["name"] for e in environments)
+        extra = " and DEPROVISION their spec-created hosts" if deprovision else ""
         if not questionary.confirm(
-            f"destroy the declared environment(s): {names}?", default=False
+            f"destroy the declared environment(s): {names}{extra}?", default=False
         ).ask():
             log("aborted")
             return
@@ -4479,10 +4646,25 @@ def do_aac_destroy(host_override: str | None = None, yes: bool = False) -> None:
     for env in environments:
         name = env["name"]
         try:
-            host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
+            binding_name, prov_table = env_host_binding(env)
+            unprovisioned = (
+                prov_table is not None and get_host(load_registry(), binding_name) is None
+            )
+            if unprovisioned and host_override is None:
+                log(f"{name}: host {binding_name} not provisioned — nothing to destroy")
+                done.append(name)
+                continue
+            host_name, host_rec = resolve_deploy_host(host_override or binding_name)
             with deployment_lock(host_name, name):
                 down_container(host_name, host_rec, name, purge=True)  # owned identity only
             done.append(name)
+            # US4: deprovision ONLY a spec-provisioned host, ONLY on explicit intent,
+            # ONLY when not overridden, and NEVER a referenced host. Containers first
+            # (down above), THEN the host. cli_host_rm is the single fail-closed
+            # tool-created + provably-empty teardown; guard with get_host for idempotency.
+            if deprovision and prov_table is not None and host_override is None:
+                if get_host(load_registry(), host_name) is not None:
+                    cli_host_rm(host_name, destroy=True, yes=True)
         except Fatal as e:
             failures.append((name, str(e)))
             warn(f"{name}: destroy failed — {e}")
@@ -5030,10 +5212,17 @@ def status(
 def destroy(
     host: str | None = typer.Option(None, "--host", help="Override the host for the teardown."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+    deprovision: bool = typer.Option(
+        False,
+        "--deprovision",
+        help="Also deprovision each spec-PROVISIONED host (US4). A referenced host is "
+        "never touched; requires HCLOUD_TOKEN.",
+    ),
 ) -> None:
     """Remove ONLY the resources the `.agent-container/` spec declares and owns
-    (by deterministic identity). A referenced host is never deprovisioned."""
-    do_aac_destroy(host, yes)
+    (by deterministic identity). A referenced host is never deprovisioned; a
+    spec-provisioned host is deprovisioned only with --deprovision."""
+    do_aac_destroy(host, yes, deprovision)
 
 
 def _completion_script(shell: str) -> str:

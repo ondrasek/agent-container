@@ -110,3 +110,17 @@ environment in one command (idempotent), invalid specs are refused cleanly, abse
 specs are inert, secrets never hit the directory, drift is visible and convergeable,
 destroy is scoped, and the in-container `.agent-container/` is read-only — matching
 SC-001…SC-007 + the FR-020 integrity guarantee.
+
+## Validation results (T024)
+
+- **A–G (local, CI-safe)** — validated by the hermetic suite (`bin/tests/test_agent_as_code.py`,
+  63 tests) plus the real-container acceptance
+  `test_declarative_apply_ro_spec_credential_drift_destroy`: apply → running, idempotent
+  no-op, read-only in-container spec (FR-020), env-referenced credential injected with no
+  plaintext on disk (SC-004), field-level drift → converge, and scoped `destroy --deprovision`
+  that leaves a referenced (local) host + unrelated container untouched. **Green.**
+- **H referenced-host path** — the `destroy --deprovision`-leaves-referenced-host assertion runs
+  in that same CI acceptance (no cloud). **Green.**
+- **H provisioned-host path (real Hetzner)** — `test_declarative_provisioned_host_hetzner`, gated
+  behind `HCLOUD_TOKEN` + `AGENT_CONTAINER_PROVISION_ACCEPTANCE=1`. **Billable — excluded from
+  CI; run manually to exercise the end-to-end provision → deploy → `destroy --deprovision`.**

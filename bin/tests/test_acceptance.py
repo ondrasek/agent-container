@@ -1385,9 +1385,50 @@ def test_declarative_apply_ro_spec_credential_drift_destroy(acc):
     assert "matching" in st.stderr and "drifted" not in st.stderr
 
     # T016 / SC-006/007: destroy removes ONLY the declared identity; an unrelated
-    # imperative container is untouched.
+    # imperative container is untouched. --deprovision on a REFERENCED host (local)
+    # removes the container but NEVER the host (T019/FR-017, CI-safe — no cloud).
     acc.up("aacother")  # unrelated running container (registered for teardown by up)
-    r = acc.cli(["destroy", "-y"], cwd=proj, extra_env=env)
-    assert r.returncode == 0, f"destroy failed:\n{r.stderr}"
+    r = acc.cli(["destroy", "-y", "--deprovision"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"destroy --deprovision failed:\n{r.stderr}"
     _wait_container_state(f"agent-container-{name}", "")  # gone
     assert _container_state("agent-container-aacother") == "running"  # untouched
+    # the referenced local host is unaffected — the daemon still serves containers
+    assert RUNTIME and _container_state("agent-container-aacother") == "running"
+
+
+# T019 (provisioned-host end-to-end) is REAL Hetzner — billable, MUST NOT run in CI.
+# Opt in with HCLOUD_TOKEN + AGENT_CONTAINER_PROVISION_ACCEPTANCE=1 to exercise it.
+@pytest.mark.skipif(
+    not (os.environ.get("HCLOUD_TOKEN") and os.environ.get("AGENT_CONTAINER_PROVISION_ACCEPTANCE")),
+    reason="real-Hetzner provisioning is billable/opt-in (set HCLOUD_TOKEN + "
+    "AGENT_CONTAINER_PROVISION_ACCEPTANCE=1)",
+)
+def test_declarative_provisioned_host_hetzner(acc):
+    name = "aacprov"
+    hostname = "aac-prov-acc"  # RFC-1123 (no underscore)
+    proj = acc.tmp / "provproj"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "project.yaml").write_text(
+        f"environments:\n  - name: {name}\n"
+        f"    host: {{ provision: hetzner, name: {hostname}, server_type: cx22, location: nbg1 }}\n"
+        f"    container:\n      env_file: ./ci.env\n"
+    )
+    (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+    acc.register(name)
+    tok = {"HCLOUD_TOKEN": os.environ["HCLOUD_TOKEN"]}
+    try:
+        r = acc.cli(["apply", "-y"], cwd=proj, extra_env=tok, timeout=1200)
+        assert r.returncode == 0, f"provisioned apply failed:\n{r.stderr}"
+        assert f"provisioning host {hostname}" in r.stderr
+        # the provisioned host is registered as tool-created
+        show = acc.cli(["host", "show", hostname, "--json"], extra_env=tok)
+        assert (
+            '"created_by_tool": true' in show.stdout.replace(" ", "").replace("\n", "").lower()
+            or '"created_by_tool":true' in show.stdout.lower()
+        )
+    finally:
+        # destroy --deprovision removes the container AND the spec-created server.
+        d = acc.cli(["destroy", "-y", "--deprovision"], cwd=proj, extra_env=tok, timeout=1200)
+        assert d.returncode == 0, f"destroy --deprovision failed:\n{d.stderr}"
+        gone = acc.cli(["host", "show", hostname, "--json"], extra_env=tok)
+        assert gone.returncode != 0  # host removed from the registry after deprovision

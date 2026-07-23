@@ -38,7 +38,7 @@ partial change**.
 |------|----------|-----------------------|
 | `environments` | **yes** | non-empty list |
 | `environments[].name` | **yes** | string, matches the existing container-name charset (`validate_name`) — unique within the project |
-| `environments[].host` | **yes** | a host name (string), **or** a table `{ provision: "hetzner", server_type, location, … }` (US4) |
+| `environments[].host` | **yes** | a host name (string, **referenced**), **or** a **provisioned** table `{ provision: "hetzner", name?, server_type?, location?, ssh_key? }` (US4) — the registry name is `name` or the env name (must be RFC-1123); unknown table keys rejected |
 | `environments[].container` | no | table (below); absent → tool defaults |
 | `…container.mode` | no | `interactive` \| `headless` (default `interactive`) |
 | `…container.agent` | no | `claude` \| `codex` \| `pi` (default `claude`) |
@@ -51,6 +51,7 @@ partial change**.
 | `credentials[].name` | **yes** | string |
 | `credentials[].source` | **yes** | `env` \| `file` \| `keychain` \| `encrypted` |
 | source detail | **yes** (per source) | `env`→`var`; `file`→`path` (outside the tracked dir); `keychain`→`service`+`account`; `encrypted`→`path`+`decrypt` |
+| `credentials[].target` | no | `push_key` \| `host_key` \| `authorized_key` (T012a) — route the resolved value to the Feature 003 ssh-injection channel instead of an env var/apikey; absent → name-based apikey/env routing |
 
 Unknown top-level or unknown per-block keys are a validation error (named), not
 silently ignored. Enum violations name the field and the allowed set.
