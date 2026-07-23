@@ -89,7 +89,7 @@ the tool resolves it **in memory** and injects it via the existing runtime chann
 | `source` | Resolution |
 |----------|-----------|
 | `env` | read the named environment variable (`var`) |
-| `file` | read an external file (`path`) **outside** the project — a git-tracked plaintext file *inside* the project is **refused** with remediation (FR-015) |
+| `file` | read a file at `path` (typically outside the project). A plaintext file that is **git-tracked inside the project** is **refused** with remediation (FR-015); an external file, or a project-local file that is **untracked/gitignored**, is allowed. Detection boundary: only files inside the project tree and known to git are flagged. |
 | `keychain` | OS store — macOS `security find-generic-password -w`, Linux `secret-tool lookup` (by `service`+`account`) |
 | `encrypted` | run the operator's `decrypt` command on `path` (e.g. `age -d -i key`, `sops -d`); the file may be committed, the plaintext stays in memory |
 
