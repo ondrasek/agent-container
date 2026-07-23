@@ -95,10 +95,20 @@ def _exec(name: str, argv: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def _run_cli(argv: list[str], state_dir: Path, timeout: int = 600):
+def _run_cli(
+    argv: list[str],
+    state_dir: Path,
+    timeout: int = 600,
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+):
+    env = _cli_env(state_dir)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         argv,
-        env=_cli_env(state_dir),
+        env=env,
+        cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
@@ -311,11 +321,20 @@ def acc(_image):
         ).stdout.splitlines()
         return [v for v in out if v.startswith(f"agent-container-{name}-")]
 
+    def cli(argv, *, cwd=None, extra_env=None, timeout=600):
+        """Drive an arbitrary CLI subcommand against the fixture's isolated state
+        (used by the declarative apply/status/destroy acceptance)."""
+        return _run_cli(
+            [*AGENT_CONTAINER, *argv], state_dir, timeout=timeout, cwd=cwd, extra_env=extra_env
+        )
+
     yield types.SimpleNamespace(
         up=up,
         down=down,
         keys=keys,
         volumes_of=volumes_of,
+        cli=cli,
+        register=started.append,  # ensure a declaratively-applied container is torn down
         tmp=work,
     )
 
@@ -1292,3 +1311,83 @@ def test_hetzner_provision_deploy_destroy(tmp_path, monkeypatch):
                 print(f"provisioner_destroy failed: {e}")
         if shutil.which("hcloud"):
             subprocess.run(["hcloud", "server", "delete", name], capture_output=True)
+
+
+# --- Feature 006 declarative (agent-as-code) acceptance ----------------------
+# Batches the deferred US1/US2 acceptance (T010/T013) with US3 (T016): a real
+# `.agent-container/` project applies to a running container, the governing spec
+# is read-only in-container (FR-020), a referenced credential is injected with no
+# plaintext on disk (SC-004), and status→drift→converge→scoped-destroy holds.
+
+_AAC_PROJECT = """\
+environments:
+  - name: {name}
+    host: local
+    container:
+      mode: interactive
+      agent: {agent}
+      workspace: persistent
+      env_file: ./ci.env
+    credentials:
+      - {{ name: MYSECRET, source: env, var: MYSECRET_SRC }}
+"""
+
+
+def _write_project(proj: Path, name: str, agent: str = "claude") -> None:
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "project.yaml").write_text(
+        _AAC_PROJECT.format(name=name, agent=agent)
+    )
+    (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+
+
+def test_declarative_apply_ro_spec_credential_drift_destroy(acc):
+    name = "aacacc"
+    secret = "sk-decl-acceptancevalue"  # env-file-clean (no space/quote/# to mangle)
+    proj = acc.tmp / "aacproj"
+    _write_project(proj, name, agent="claude")
+    acc.register(name)  # ensure teardown even if an assertion fails mid-test
+    env = {"MYSECRET_SRC": secret}
+
+    # apply → the declared environment converges to a running container.
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"apply failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "running")
+
+    # T010 / FR-020: the governing spec is delivered READ-ONLY in-container — a
+    # write must fail, and the in-container copy matches the host spec.
+    w = _exec(name, ["sh", "-c", "echo pwned >> /workspace/.agent-container/project.yaml"])
+    assert w.returncode != 0, "FR-020 breach: the in-container spec was writable"
+    shown = _exec(name, ["cat", "/workspace/.agent-container/project.yaml"])
+    assert shown.returncode == 0 and f"name: {name}" in shown.stdout
+
+    # T013 / SC-004: the referenced credential reached the container as an env var,
+    # and NO plaintext of the value appears anywhere in the tracked project dir.
+    got = _exec(name, ["printenv", "MYSECRET"])
+    assert got.returncode == 0 and got.stdout.strip() == secret
+    on_disk = [p for p in proj.rglob("*") if p.is_file() and secret in p.read_text(errors="ignore")]
+    assert on_disk == [], f"SC-004 breach: plaintext secret found in project dir: {on_disk}"
+
+    # apply is idempotent — a matching spec makes no change (SC-002).
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0 and "no changes" in r.stderr
+
+    # T016 / FR-008: change the declared config (agent) → status reports field-level
+    # drift; apply converges (recreates) → status returns to matching.
+    _write_project(proj, name, agent="codex")
+    st = acc.cli(["status"], cwd=proj, extra_env=env)
+    assert st.returncode == 0 and "drifted" in st.stderr and "agent" in st.stderr
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"converge failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "running")
+    assert _exec(name, ["printenv", "AGENT_CONTAINER_AGENT"]).stdout.strip() == "codex"
+    st = acc.cli(["status"], cwd=proj, extra_env=env)
+    assert "matching" in st.stderr and "drifted" not in st.stderr
+
+    # T016 / SC-006/007: destroy removes ONLY the declared identity; an unrelated
+    # imperative container is untouched.
+    acc.up("aacother")  # unrelated running container (registered for teardown by up)
+    r = acc.cli(["destroy", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"destroy failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "")  # gone
+    assert _container_state("agent-container-aacother") == "running"  # untouched

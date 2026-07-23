@@ -146,24 +146,105 @@ def test_env_exec_spec_maps_container(wiz):
     assert (spec.mode, spec.agent, spec.workspace) == ("headless", "codex", "ephemeral")
 
 
-def test_env_state_absent_matching_drifted(wiz, monkeypatch):
+def _spec(mode="interactive", agent="claude", repo=None, workspace="persistent"):
+    # tiny helper: the ExecSpec constructor lives in wiz; imported per-test via fixture
+    return dict(mode=mode, agent=agent, repo=repo, workspace=workspace)
+
+
+def test_env_reconcile_absent_matching_stopped(wiz, monkeypatch):
     cname = wiz.container_name("acme")
-
-    def running_none(host, include_stopped=False):
-        return set()
-
-    monkeypatch.setattr(wiz, "host_container_names", running_none)
-    assert wiz.env_state(LOCAL_HOST, "acme") == "absent"
-
+    spec = wiz.ExecSpec(**_spec())
+    # absent — no container for the identity
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    assert wiz.env_reconcile(LOCAL_HOST, "acme", spec) == ("absent", "")
+    # running + live config matches the spec → matching
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
-    assert wiz.env_state(LOCAL_HOST, "acme") == "matching"
-
+    monkeypatch.setattr(
+        wiz,
+        "env_live_config",
+        lambda hr, n: {"mode": "interactive", "agent": "claude", "repo": None},
+    )
+    assert wiz.env_reconcile(LOCAL_HOST, "acme", spec) == ("matching", "")
+    # present but stopped → drifted (existence-level), never touches live config
     monkeypatch.setattr(
         wiz,
         "host_container_names",
         lambda host, include_stopped=False: {cname} if include_stopped else set(),
     )
-    assert wiz.env_state(LOCAL_HOST, "acme") == "drifted"
+    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    assert state == "drifted" and "stopped" in detail
+
+
+def test_env_reconcile_field_level_drift(wiz, monkeypatch):
+    # US3: a running container whose agent-config differs from the spec is drifted,
+    # and the detail names each changed field (live→desired).
+    cname = wiz.container_name("acme")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
+    monkeypatch.setattr(
+        wiz,
+        "env_live_config",
+        lambda hr, n: {"mode": "interactive", "agent": "claude", "repo": None},
+    )
+    spec = wiz.ExecSpec(**_spec(agent="codex"))  # declared agent changed
+    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    assert state == "drifted" and "agent" in detail and "codex" in detail and "claude" in detail
+
+
+def test_env_reconcile_repo_drift_redacts_embedded_credential(wiz, monkeypatch):
+    # Least exposure (III): a credential embedded in the declared repo URL must NOT
+    # appear in the drift detail (status/apply log it). Adversarial-verify MEDIUM.
+    cname = wiz.container_name("acme")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
+    monkeypatch.setattr(
+        wiz,
+        "env_live_config",
+        lambda hr, n: {"mode": "interactive", "agent": "claude", "repo": None},
+    )
+    spec = wiz.ExecSpec(mode="interactive", agent="claude", workspace="persistent")
+    spec.repo = "ssh://git:s3cr3t@github.com/o/r.git"
+    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    assert state == "drifted" and "repo" in detail
+    assert "s3cr3t" not in detail and "git@github.com" in detail  # password stripped, user kept
+    # https token form is redacted whole-userinfo
+    spec.repo = "https://x-access-token:ghp_SECRET@github.com/o/r.git"
+    _s, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    assert "ghp_SECRET" not in detail and "x-access-token" not in detail
+
+
+def test_env_reconcile_uninspectable_is_existence_match(wiz, monkeypatch):
+    # A running-but-not-inspectable container must NOT read as a false drift/matching
+    # from a failed probe — it degrades to existence-level 'matching' (no false churn).
+    cname = wiz.container_name("acme")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
+    monkeypatch.setattr(wiz, "env_live_config", lambda hr, n: None)
+    assert wiz.env_reconcile(LOCAL_HOST, "acme", wiz.ExecSpec(**_spec())) == ("matching", "")
+
+
+def test_config_drift_pure(wiz):
+    same = {"mode": "interactive", "agent": "claude", "repo": None}
+    assert wiz.config_drift(same, same) == []
+    d = wiz.config_drift(
+        {"mode": "headless", "agent": "claude", "repo": "r"},
+        {"mode": "interactive", "agent": "claude", "repo": None},
+    )
+    assert ("mode", "headless", "interactive") in d and ("repo", "r", None) in d
+    assert not any(f == "agent" for f, _, _ in d)  # unchanged field omitted
+
+
+def test_env_live_config_parses_inspect_env(wiz, monkeypatch):
+    import subprocess
+
+    out = '["PATH=/usr/bin", "AGENT_CONTAINER_MODE=headless", "AGENT_CONTAINER_AGENT=codex"]'
+    monkeypatch.setattr(
+        wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 0, out, "")
+    )
+    cfg = wiz.env_live_config(LOCAL_HOST, "acme")
+    assert cfg == {"mode": "headless", "agent": "codex", "repo": None}
+    # a failed inspect → None (never a fabricated config)
+    monkeypatch.setattr(
+        wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 1, "", "no such")
+    )
+    assert wiz.env_live_config(LOCAL_HOST, "acme") is None
 
 
 # --- FR-020 read-only spec delivery ------------------------------------------
@@ -198,6 +279,9 @@ def aac_env(wiz, monkeypatch):
     """Stub host resolution + live state + effects so apply/status are hermetic."""
     monkeypatch.setattr(wiz, "resolve_deploy_host", lambda h: (h or "local", LOCAL_HOST))
     monkeypatch.setattr(wiz, "ensure_tunnel", lambda host: None)
+    # Default: running containers are inspected as existence-level matches (no real
+    # `docker inspect` subprocess in the hermetic tier). Drift tests override this.
+    monkeypatch.setattr(wiz, "env_live_config", lambda hr, n: None)
     calls: dict = {"up": [], "down": []}
     monkeypatch.setattr(wiz, "do_up", lambda name, **kw: calls["up"].append((name, kw)))
     monkeypatch.setattr(
@@ -502,3 +586,90 @@ def test_config_tokens_and_staged_files_injective(wiz, tmp_path):
     assert len(tokens) == len(set(tokens))  # unique config resource names
     assert len(staged) == len(set(staged))  # unique staged files
     assert len(targets) == len(set(targets))  # unique in-container targets
+
+
+# --- US3: drift, converge, scoped teardown (FR-008/009/010, SC-003/006/007) ---
+
+
+def test_apply_converges_config_drift_recreates(wiz, aac_env, tmp_path, monkeypatch):
+    # A RUNNING container whose live agent-config differs from the spec is drifted;
+    # apply announces then recreates it (down + up) to converge (FR-008).
+    root = _project(tmp_path, MINIMAL)  # spec: interactive/claude
+    monkeypatch.chdir(root)
+    cname = wiz.container_name("acme")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
+    # live differs (agent=codex) → config drift
+    monkeypatch.setattr(
+        wiz,
+        "env_live_config",
+        lambda hr, n: {"mode": "interactive", "agent": "codex", "repo": None},
+    )
+    wiz.do_aac_apply(yes=True)
+    assert aac_env["down"] == ["acme"]  # recreated to converge
+    assert len(aac_env["up"]) == 1
+
+
+def test_status_reports_field_level_drift_no_mutation(wiz, aac_env, tmp_path, monkeypatch, capsys):
+    root = _project(tmp_path, MINIMAL)
+    monkeypatch.chdir(root)
+    cname = wiz.container_name("acme")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
+    monkeypatch.setattr(
+        wiz, "env_live_config", lambda hr, n: {"mode": "headless", "agent": "claude", "repo": None}
+    )
+    wiz.do_aac_status()
+    assert aac_env["up"] == [] and aac_env["down"] == []  # FR-008: mutates nothing
+    err = capsys.readouterr().err
+    assert "drifted" in err and "mode" in err and "headless" in err  # the delta is shown
+
+
+def test_status_plan_portable_across_checkout_paths(wiz, aac_env, tmp_path, monkeypatch, capsys):
+    # FR-005/SC-003: the same spec from a fresh checkout at a DIFFERENT path yields an
+    # identical plan (ownership is identity-derived; location does not affect it).
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+
+    def plan_lines(base):
+        root = _project(base, MINIMAL)
+        monkeypatch.chdir(root)
+        capsys.readouterr()  # drain
+        wiz.do_aac_status()
+        # drop the path-dependent "project root:" line; keep the reconcile plan lines
+        return [ln for ln in capsys.readouterr().err.splitlines() if "project root" not in ln]
+
+    a = plan_lines(tmp_path / "one")
+    b = plan_lines(tmp_path / "two" / "nested")
+    assert a == b and any("acme" in ln and "absent" in ln for ln in a)
+
+
+def test_destroy_scoped_to_owned_identity(wiz, aac_env, tmp_path, monkeypatch):
+    import contextlib
+
+    root = _project(tmp_path, MINIMAL)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "deployment_lock", lambda *a, **k: contextlib.nullcontext())
+    wiz.do_aac_destroy(yes=True)
+    # SC-007: destroy targets ONLY the declared identity's container/volumes via
+    # down_container(purge=True) — an unrelated container is never named/touched.
+    assert aac_env["down"] == ["acme"]
+
+
+def test_destroy_partial_failure_reports_both(wiz, aac_env, tmp_path, monkeypatch):
+    import contextlib
+
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: aa\n    host: local\n  - name: bb\n    host: local\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "deployment_lock", lambda *a, **k: contextlib.nullcontext())
+
+    def flaky_down(hn, hr, name, purge=False, **kw):
+        if name == "bb":
+            wiz.die("host unreachable")
+        aac_env["down"].append(name)
+
+    monkeypatch.setattr(wiz, "down_container", flaky_down)
+    # FR-010: one env fails, the other is removed, and the report names both.
+    with pytest.raises(wiz.Fatal, match=r"removed \[aa\].*failed \[bb"):
+        wiz.do_aac_destroy(yes=True)
+    assert aac_env["down"] == ["aa"]

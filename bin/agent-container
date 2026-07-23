@@ -2232,6 +2232,12 @@ def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
     if host_name is not None:
         h = get_host(reg, host_name)
         if h is None:
+            if host_name == DEFAULT_HOST:
+                # 'local' is the reserved implicit-host name: a spec (or `--host local`)
+                # naming it resolves to the implicit local host WITHOUT an explicit
+                # registration — matching the no-`--host` behavior and keeping a
+                # declarative `host: local` spec portable to a fresh checkout.
+                return DEFAULT_HOST, implicit_local_host()
             die(f"no host named '{host_name}' (see: agent-container host ls)")
         return host_name, h
     default = default_host_name(reg)
@@ -3407,6 +3413,34 @@ def _sanitize_ssh_uri(uri: str) -> str:
     return f"{scheme}{user}@{rest}"
 
 
+def _redact_url_userinfo(value: str | None) -> str | None:
+    """Strip a `user:password@` / `:token@` from ANY URL-scheme value before it can be
+    emitted (Constitution III — least exposure). A declared clone `repo` may embed a
+    credential (ssh://user:tok@…, https://x-access-token:ghp_…@…); the drift detail and
+    logs must never print it. ssh:// keeps the (non-secret) user and drops the password,
+    matching _sanitize_ssh_uri; other schemes drop the whole userinfo (a bare principal
+    there is often itself the token). Non-URL / userinfo-free values pass through.
+
+    >>> _redact_url_userinfo("ssh://git:s3cr3t@github.com/o/r.git")
+    'ssh://git@github.com/o/r.git'
+    >>> _redact_url_userinfo("https://x-access-token:ghp_AAA@github.com/o/r.git")
+    'https://github.com/o/r.git'
+    >>> _redact_url_userinfo("https://github.com/o/r.git")
+    'https://github.com/o/r.git'
+    >>> _redact_url_userinfo(None) is None
+    True
+    """
+    if not value:
+        return value
+    m = re.match(r"^([a-z][a-z0-9+.\-]*://)([^@/]+)@(.*)$", value, re.IGNORECASE)
+    if not m:
+        return value
+    scheme, userinfo, rest = m.groups()
+    if scheme.lower() == "ssh://":
+        return f"{scheme}{userinfo.split(':', 1)[0]}@{rest}"
+    return f"{scheme}{rest}"
+
+
 def host_env_action(host_rec: dict, endpoint: bool) -> ShellAction:
     """Build the `host env` set-action for a host record (registry-only, no probe).
     Default emits the driver's context reference (DOCKER_CONTEXT / CONTAINER_CONNECTION,
@@ -4031,15 +4065,92 @@ def env_exec_spec(env: dict) -> ExecSpec:
     )
 
 
-def env_state(host_rec: dict, name: str) -> str:
-    """Reconcile state for the declared env's DETERMINISTIC identity (Constitution
-    IV — no state file): absent | matching (running) | drifted (present, stopped)."""
+def env_live_config(host_rec: dict, name: str) -> dict[str, str | None] | None:
+    """Inspect the RUNNING container's agent-config env (the settings `apply` writes:
+    AGENT_CONTAINER_MODE / AGENT_CONTAINER_AGENT / AGENT_CONTAINER_CLONE_URL) so drift
+    can be reported field-by-field (US3). Returns None if the container can't be
+    inspected — the caller then falls back to existence-level state (never a false
+    'matching' from a failed probe)."""
     cname = container_name(name)
-    if cname in host_container_names(host_rec):
-        return "matching"
-    if cname in host_container_names(host_rec, include_stopped=True):
-        return "drifted"
-    return "absent"
+    argv = driver_runtime_argv(host_rec) + ["inspect", cname, "--format", "{{json .Config.Env}}"]
+    r = query(argv)
+    if r.returncode != 0:
+        return None
+    try:
+        env_list = json.loads(r.stdout)
+    except json.JSONDecodeError, ValueError:
+        return None
+    env: dict[str, str] = {}
+    for item in env_list or []:
+        k, _, v = str(item).partition("=")
+        env[k] = v
+    return {
+        "mode": env.get("AGENT_CONTAINER_MODE"),
+        "agent": env.get("AGENT_CONTAINER_AGENT"),
+        "repo": env.get("AGENT_CONTAINER_CLONE_URL"),
+    }
+
+
+def env_desired_config(spec: ExecSpec) -> dict[str, str | None]:
+    """The declared agent-config in the same shape env_live_config returns — the
+    clone URL only applies to a non-bind workspace (mirrors compose_environment)."""
+    return {
+        "mode": spec.mode,
+        "agent": spec.agent,
+        "repo": spec.repo if (spec.repo and spec.workspace != "bind") else None,
+    }
+
+
+def config_drift(
+    desired: dict[str, str | None], live: dict[str, str | None]
+) -> list[tuple[str, str | None, str | None]]:
+    """Field-level delta (field, desired, live) for the reconcilable agent-config
+    settings. Pure — the self-test exercises it.
+
+    >>> config_drift({"mode": "interactive", "agent": "claude", "repo": None},
+    ...              {"mode": "interactive", "agent": "claude", "repo": None})
+    []
+    >>> config_drift({"mode": "headless", "agent": "codex", "repo": None},
+    ...              {"mode": "interactive", "agent": "claude", "repo": None})
+    [('mode', 'headless', 'interactive'), ('agent', 'codex', 'claude')]
+    """
+    return [
+        (field, desired.get(field), live.get(field))
+        for field in ("mode", "agent", "repo")
+        if desired.get(field) != live.get(field)
+    ]
+
+
+def env_reconcile(host_rec: dict, name: str, spec: ExecSpec) -> tuple[str, str]:
+    """Reconcile the declared env's DETERMINISTIC identity (Constitution IV — no state
+    file) against reality, returning (state, detail):
+      absent   — no container for the identity
+      drifted  — present-but-stopped, OR running with a config delta vs the spec
+      matching — running and the agent-config matches the spec
+    `detail` is a human-readable delta ('' for absent/matching). Because both the
+    desired config and the identity derive only from the spec (never an absolute
+    path), a fresh checkout at any location reconciles identically (FR-005/SC-003)."""
+    cname = container_name(name)
+    all_names = host_container_names(host_rec, include_stopped=True)
+    if cname not in all_names:
+        return "absent", ""
+    if cname not in host_container_names(host_rec):
+        return "drifted", "present but stopped"
+    live = env_live_config(host_rec, name)
+    if live is None:
+        return "matching", ""  # running but not inspectable — existence-level match
+    diffs = config_drift(env_desired_config(spec), live)
+    if not diffs:
+        return "matching", ""
+    # Redact any credential embedded in the repo/clone URL before it reaches the
+    # detail string — status/apply log this, so an ssh://user:tok@ or https://…:token@
+    # repo must never be printed verbatim (Constitution III; adversarial-verify MEDIUM).
+    parts = []
+    for f, want, live in diffs:
+        if f == "repo":
+            want, live = _redact_url_userinfo(want), _redact_url_userinfo(live)
+        parts.append(f"{f}: {live!r}→{want!r}")
+    return "drifted", "; ".join(parts)
 
 
 def stage_agent_container_spec(
@@ -4109,9 +4220,9 @@ def _reconcile_plan(environments: list[dict], host_override: str | None):
         name = env["name"]
         host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
         ensure_tunnel(host_rec)
-        state = env_state(host_rec, name)
-        plans.append((env, name, host_name, host_rec, state))
-        log(f"  {name} → host={host_name}: {state}")
+        state, detail = env_reconcile(host_rec, name, env_exec_spec(env))
+        plans.append((env, name, host_name, host_rec, state, detail))
+        log(f"  {name} → host={host_name}: {state}" + (f" ({detail})" if detail else ""))
     return plans
 
 
@@ -4303,32 +4414,47 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
     # (resolve_env_file) is the merge base when no container.env_file is declared, so
     # GH_TOKEN/GIT_* are preserved, not dropped.
     staged_creds: dict[str, tuple[list[tuple[str, Path, str]], Path | None]] = {}
-    for env, name, host_name, _host_rec, _state in todo:
+    for env, name, host_name, _host_rec, _state, _detail in todo:
         c = env.get("container") or {}
         base_env = (root / c["env_file"]).resolve() if c.get("env_file") else resolve_env_file(name)
         staged_creds[name] = stage_declared_credentials(
             host_name, name, env.get("credentials"), root, base_env
         )
-    for env, name, host_name, host_rec, state in todo:
-        spec = env_exec_spec(env)
-        aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
-        _verify_ro_spec_delivery(aac, spec)
-        cred_configs, env_file = staged_creds[name]
-        aac = aac + cred_configs
-        if state == "drifted":
-            # present-but-stopped → recreate to converge (announced). Use the plan's
-            # resolved (host_name, host_rec) so the pair is always consistent.
-            log(f"{name}: drifted (present, stopped) — recreating to converge")
-            down_container(host_name, host_rec, name, purge=False)
-        # Deploy to the SAME host the plan/preview resolved (honoring --host), not the
-        # raw spec host — else the container would land on a host the operator never
-        # confirmed. `host_name` is the resolved name; do_up re-resolves it identically.
-        do_up(
-            name,
-            host=host_name,
-            env_file_override=env_file,
-            spec=spec,
-            extra_injected_configs=aac,
+    # Reconcile each environment independently; a per-env failure is recorded and the
+    # rest proceed, then reported — never silently swallowed (FR-010).
+    done: list[str] = []
+    failures: list[tuple[str, str]] = []
+    for env, name, host_name, host_rec, state, detail in todo:
+        try:
+            spec = env_exec_spec(env)
+            aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
+            _verify_ro_spec_delivery(aac, spec)
+            cred_configs, env_file = staged_creds[name]
+            aac = aac + cred_configs
+            if state == "drifted":
+                # present-but-stopped OR a running config delta → recreate to converge,
+                # ANNOUNCED before the destructive step. Use the plan's resolved
+                # (host_name, host_rec) so the pair is always consistent.
+                log(f"{name}: drifted ({detail or 'present, stopped'}) — recreating to converge")
+                down_container(host_name, host_rec, name, purge=False)
+            # Deploy to the SAME host the plan/preview resolved (honoring --host), not
+            # the raw spec host — else the container would land on a host the operator
+            # never confirmed. `host_name` is the resolved name; do_up re-resolves it.
+            do_up(
+                name,
+                host=host_name,
+                env_file_override=env_file,
+                spec=spec,
+                extra_injected_configs=aac,
+            )
+            done.append(name)
+        except Fatal as e:
+            failures.append((name, str(e)))
+            warn(f"{name}: apply failed — {e}")
+    if failures:
+        die(
+            f"apply incomplete: converged [{', '.join(done) or 'none'}]; "
+            f"failed [{'; '.join(f'{n}: {e}' for n, e in failures)}] (FR-010)"
         )
     log("apply complete")
 
@@ -4348,11 +4474,23 @@ def do_aac_destroy(host_override: str | None = None, yes: bool = False) -> None:
         ).ask():
             log("aborted")
             return
+    done: list[str] = []
+    failures: list[tuple[str, str]] = []
     for env in environments:
         name = env["name"]
-        host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
-        with deployment_lock(host_name, name):
-            down_container(host_name, host_rec, name, purge=True)  # owned identity only
+        try:
+            host_name, host_rec = resolve_deploy_host(host_override or env_host_name(env))
+            with deployment_lock(host_name, name):
+                down_container(host_name, host_rec, name, purge=True)  # owned identity only
+            done.append(name)
+        except Fatal as e:
+            failures.append((name, str(e)))
+            warn(f"{name}: destroy failed — {e}")
+    if failures:
+        die(
+            f"destroy incomplete: removed [{', '.join(done) or 'none'}]; "
+            f"failed [{'; '.join(f'{n}: {e}' for n, e in failures)}] (FR-010)"
+        )
     log("destroy complete")
 
 

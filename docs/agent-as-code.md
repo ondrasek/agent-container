@@ -39,9 +39,17 @@ making no partial change. Unknown keys and out-of-range enums are errors.
 
 | Command | What it does |
 |---------|--------------|
-| `agent-container plan` / `status` | Show the per-environment plan (**absent** / **matching** / **drifted**) — mutates nothing. |
-| `agent-container apply` | Discover → validate → plan → (confirm) → converge: bring up each declared environment. **Idempotent** — a matching spec makes no changes. |
+| `agent-container plan` / `status` | Show the per-environment plan (**absent** / **matching** / **drifted**, with a field-level delta) — mutates nothing. |
+| `agent-container apply` | Discover → validate → plan → (confirm) → converge: bring up each declared environment. **Idempotent** — a matching spec makes no changes; a drifted one is announced then recreated. |
 | `agent-container destroy` | Remove **only** the resources the spec declares and owns. |
+
+**Drift is field-level (US3).** `status` inspects each running container's live agent-config
+(`mode` / `agent` / clone `repo`) and reports exactly which fields diverge from the spec
+(`agent: 'claude'→'codex'`); `apply` announces a drifted environment before recreating it to
+converge. A partial failure (one environment of several fails to reconcile) reports precisely
+which converged and which did not, then exits non-zero — never a silent half-apply (FR-010).
+A spec naming `host: local` resolves to the implicit local host with no registration needed,
+so a fresh checkout reconciles identically regardless of where it lives (FR-005/SC-003).
 
 Ownership is derived from the tool's **deterministic identity** (Constitution IV) —
 a declared `name` maps to the same container/volume identity the imperative CLI
