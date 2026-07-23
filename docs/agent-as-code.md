@@ -108,8 +108,23 @@ the environment); any other credential is delivered as an **environment variable
 via a per-deployment secrets env-file (mode 0600, in the state dir — not the project).
 Multi-line values, and values with characters an env-file parser would mangle
 (leading/trailing whitespace, an inline ` #`, a leading quote), are **rejected** for
-env delivery — deliver those as a provider API key (file channel). SSH-key routing
-to `--push-key`/`--host-key` is a follow-on.
+env delivery — deliver those as a provider API key (file channel), or, for an SSH key,
+give the credential an explicit **`target`** (below).
+
+**SSH-key credentials** — a credential with `target: push_key | host_key |
+authorized_key` is routed to the Feature 003 ssh-injection channels instead of an env
+var (the multi-line delivery the env-file rejects): `push_key` → the outbound git push
+identity (`--push-key`, ephemeral `/run`), `host_key` → the inbound sshd host identity
+(`--host-key`, persisted to the `~/.ssh` volume), `authorized_key` → an inbound
+principal (`--authorized-key`, accumulates). The resolved key stays in memory then a
+0600 staged file; it never touches the project, logs, argv, or registry. A
+passphrase-protected private key is (correctly) refused for `push_key` — pre-decrypt
+via `source: encrypted`.
+
+```yaml
+credentials:
+  - { name: git-push, source: encrypted, path: ./deploy.key.age, decrypt: "age -d -i ~/.age/key", target: push_key }
+```
 
 **Notes.** All declared credentials are resolved **up front** — before any container
 is deployed — so a missing source never leaves an earlier environment partially
@@ -119,18 +134,38 @@ regenerated each `apply`. Don't both declare a provider credential *and* drop a
 convention `agent-container.<name>.<provider>.key` file for the same provider — they
 target the same in-container path.
 
-## Roadmap (this feature ships incrementally)
+## Host binding — referenced vs provisioned (US4)
 
-Shipped: **US1** (declare → validate → idempotent `apply`/`plan`/`status`/`destroy`
-with the read-only spec integrity) and **US2** (credential resolution, above).
-Still layering on:
+An environment's `host` is either a **name** (referenced — an existing/known host,
+externally owned) or a **provision table** (spec-owned):
 
-- **US3 — full drift deltas** (field-level) and richer `status` output.
-- **US4 — declarative host provisioning**: a `host: { provision: hetzner, … }`
-  table provisions/registers the host before deploy; `destroy --deprovision` removes
-  only a spec-created host (a *referenced* host is externally owned, never removed).
-- SSH-key credential routing to `--push-key`/`--host-key`, and the read-only
-  acceptance test (T010/T013).
+```yaml
+environments:
+  - name: acme
+    host: { provision: hetzner, name: acme-box, server_type: cax11, location: nbg1 }
+```
+
+`apply` **provisions + registers** a spec-owned host (driving the Feature 001 Hetzner
+provisioner) **before** deploying onto it — **idempotently**: a second `apply` reuses
+the already-provisioned server rather than allocating (and billing) another. A
+provisioned host needs `HCLOUD_TOKEN` in the environment (a `--host` override bypasses
+provisioning and needs none). The host registry name is the table `name`, or the env
+name if it is RFC-1123 (Hetzner rejects underscores — an underscore-bearing env needs
+an explicit `host.name`). `plan`/`status` **never allocate** — a to-be-provisioned host
+is reported as intent only.
+
+**`destroy`** removes the container. **`destroy --deprovision`** *also* removes a
+spec-**provisioned** host — containers first, then the server — reusing the Feature 001
+fail-closed teardown (tool-created **and** provably-empty, or it refuses). A
+**referenced** host is **never** deprovisioned regardless of the flag (FR-017).
+
+## Roadmap
+
+**Shipped: US1–US4** — declare → validate → idempotent `apply`/`plan`/`status`/`destroy`
+with read-only spec integrity (US1); credential resolution incl. SSH-key `target`
+routing (US2 + T012a); field-level drift → converge + scoped teardown + partial-failure
+reporting (US3); declarative host provisioning with `destroy --deprovision` (US4). The
+real-Hetzner provisioned-host acceptance is opt-in/tokened (billable — never CI).
 
 See [`specs/006-agent-as-code/`](../specs/006-agent-as-code/) for the full spec,
 plan, and contract.

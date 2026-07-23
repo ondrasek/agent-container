@@ -126,11 +126,45 @@ def test_credential_validation(wiz):
         wiz.validate_credential({"name": "K", "source": "encrypted", "path": "x"}, "w")
 
 
-def test_provisioned_host_not_yet_supported(wiz, tmp_path):
-    root = _project(tmp_path, "environments:\n  - name: acme\n    host: { provision: hetzner }\n")
-    envs = wiz.load_project_spec(root)  # a provision table is a valid schema shape
-    with pytest.raises(wiz.Fatal, match="not yet supported"):
-        wiz.env_host_name(envs[0])
+def test_env_host_binding_referenced_vs_provisioned(wiz, tmp_path):
+    # US4: a string host is referenced; a provision table is provisioned. The
+    # provisioned host's registry name defaults to the env name (RFC-1123).
+    referenced = _project(tmp_path / "a", "environments:\n  - name: acme\n    host: hz1\n")
+    (env,) = wiz.load_project_spec(referenced)
+    assert wiz.env_host_binding(env) == ("hz1", None)
+    provisioned = _project(
+        tmp_path / "b", "environments:\n  - name: acme\n    host: { provision: hetzner }\n"
+    )
+    (env,) = wiz.load_project_spec(provisioned)
+    hn, table = wiz.env_host_binding(env)
+    assert hn == "acme" and table["provision"] == "hetzner"
+
+
+def test_provision_table_validation(wiz, tmp_path):
+    # bad provider enum
+    bad = _project(tmp_path / "x", "environments:\n  - name: acme\n    host: { provision: aws }\n")
+    with pytest.raises(wiz.Fatal, match="provision='aws'"):
+        wiz.load_project_spec(bad)
+    # underscore env name → invalid Hetzner host name unless host.name given
+    us = _project(
+        tmp_path / "y", "environments:\n  - name: my_box\n    host: { provision: hetzner }\n"
+    )
+    with pytest.raises(wiz.Fatal, match="RFC-1123"):
+        wiz.load_project_spec(us)
+    # unknown key inside the provision table rejected
+    uk = _project(
+        tmp_path / "z",
+        "environments:\n  - name: acme\n    host: { provision: hetzner, bogus: 1 }\n",
+    )
+    with pytest.raises(wiz.Fatal, match="unknown host provision key 'bogus'"):
+        wiz.load_project_spec(uk)
+    # a non-string host.name dies cleanly naming the field (not a TypeError traceback)
+    nn = _project(
+        tmp_path / "n",
+        "environments:\n  - name: acme\n    host: { provision: hetzner, name: 123 }\n",
+    )
+    with pytest.raises(wiz.Fatal, match="provision name must be a string"):
+        wiz.load_project_spec(nn)
 
 
 # --- reconcile + ownership (FR-006/008, Constitution IV) ---------------------
@@ -353,18 +387,38 @@ def test_precheck_rejects_bind_upfront_no_partial_apply(wiz, aac_env, tmp_path, 
     assert aac_env["up"] == []  # FR-003: no env deployed before the later bind env is rejected
 
 
-def test_precheck_rejects_provision_table_upfront_even_with_host_override(
+_TWO_ENVS = (
+    "environments:\n  - name: a\n    host: local\n  - name: b\n    host: { provision: hetzner }\n"
+)
+
+
+def test_provision_table_with_host_override_deploys_no_provisioning(
     wiz, aac_env, tmp_path, monkeypatch
 ):
-    root = _project(
-        tmp_path,
-        "environments:\n  - name: a\n    host: local\n  - name: b\n    host: { provision: hetzner }\n",
-    )
+    # US4: a --host override bypasses provisioning entirely — a provision-table env
+    # deploys onto the override host, allocates nothing, needs no HCLOUD_TOKEN.
+    root = _project(tmp_path, _TWO_ENVS)
     monkeypatch.chdir(root)
+    monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
-    with pytest.raises(wiz.Fatal, match="not yet supported"):
-        wiz.do_aac_apply(host_override="x", yes=True)  # override must not bypass the guard
-    assert aac_env["up"] == []
+    called: list = []
+    monkeypatch.setattr(wiz, "ensure_provisioned_host", lambda hn, t: called.append(hn) or {})
+    wiz.do_aac_apply(host_override="x", yes=True)
+    assert called == []  # never provisioned
+    assert sorted(n for n, _kw in aac_env["up"]) == ["a", "b"]
+    assert all(kw["host"] == "x" for _n, kw in aac_env["up"])
+
+
+def test_provision_table_without_token_rejected_upfront(wiz, aac_env, tmp_path, monkeypatch):
+    # US4: without --host and without HCLOUD_TOKEN, a provision-table env is refused
+    # BEFORE any deploy (FR-003) — billable allocation needs the token.
+    root = _project(tmp_path, _TWO_ENVS)
+    monkeypatch.chdir(root)
+    monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="requires HCLOUD_TOKEN"):
+        wiz.do_aac_apply(yes=True)
+    assert aac_env["up"] == []  # nothing deployed before the rejection
 
 
 def test_unknown_top_level_key_dies(wiz, tmp_path):
@@ -466,7 +520,7 @@ def test_refuse_git_tracked_plaintext(wiz, tmp_path, monkeypatch):
 def test_stage_credentials_provider_apikey_file_channel(wiz, tmp_path, monkeypatch):
     monkeypatch.setenv("AK", "sk-anthropic")
     creds = [{"name": "ANTHROPIC_API_KEY", "source": "env", "var": "AK"}]
-    configs, env_file = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    configs, env_file, _ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert env_file is None  # provider key does NOT go via env
     (cfgname, staged, target) = configs[0]
     assert target == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
@@ -481,7 +535,7 @@ def test_stage_credentials_env_delivery_merges_base(wiz, tmp_path, monkeypatch):
     base = tmp_path / "base.env"
     base.write_text("GIT_USER_NAME=x\n")
     creds = [{"name": "GH_TOKEN", "source": "env", "var": "GT"}]
-    configs, env_file = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, base)
+    configs, env_file, _ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, base)
     assert configs == []
     text = env_file.read_text()
     assert "GIT_USER_NAME=x" in text and "GH_TOKEN=ghp_secret" in text  # merged
@@ -570,7 +624,7 @@ def test_apikey_trailing_newline_stripped(wiz, tmp_path, monkeypatch):
     ext = tmp_path / "anthropic.key"
     ext.write_text("sk-ant-key\n")  # file ends in a newline
     creds = [{"name": "anthropic", "source": "file", "path": str(ext)}]
-    configs, _env = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    configs, _env, _ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert configs[0][1].read_text() == "sk-ant-key"  # no trailing newline in the apikey file
 
 
@@ -673,3 +727,151 @@ def test_destroy_partial_failure_reports_both(wiz, aac_env, tmp_path, monkeypatc
     with pytest.raises(wiz.Fatal, match=r"removed \[aa\].*failed \[bb"):
         wiz.do_aac_destroy(yes=True)
     assert aac_env["down"] == ["aa"]
+
+
+# --- US4: declarative host provisioning (FR-017, SC-007) ---------------------
+
+
+def _tool_host(provider="hetzner"):
+    return {
+        "driver": "docker",
+        "context": "agent-container-prov",
+        "address": "1.2.3.4",
+        "created_by_tool": True,
+        "provisioning": {"provider": provider, "server_id": 42, "created": True},
+    }
+
+
+def test_ensure_provisioned_host_idempotent_and_collision(wiz, monkeypatch):
+    # Idempotency (no double-bill): an existing tool-created host of the same provider
+    # is reused, provision_host is NEVER called again.
+    existing = _tool_host()
+    monkeypatch.setattr(
+        wiz, "load_registry", lambda: {"hosts": {"acme": existing}, "default": "acme"}
+    )
+    called: list = []
+    monkeypatch.setattr(wiz, "provision_host", lambda *a, **k: called.append(1) or {})
+    assert wiz.ensure_provisioned_host("acme", {"provision": "hetzner"}) is existing
+    assert called == []  # reused, not re-provisioned
+    # a name collision with a host this spec did not create → refuse (no silent reuse)
+    ref = {"driver": "docker", "context": "c", "created_by_tool": False, "provisioning": None}
+    monkeypatch.setattr(wiz, "load_registry", lambda: {"hosts": {"acme": ref}, "default": "acme"})
+    with pytest.raises(wiz.Fatal, match="not provisioned by this spec"):
+        wiz.ensure_provisioned_host("acme", {"provision": "hetzner"})
+
+
+def test_apply_provisions_unregistered_host_before_deploy(wiz, aac_env, tmp_path, monkeypatch):
+    root = _project(tmp_path, "environments:\n  - name: acme\n    host: { provision: hetzner }\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("HCLOUD_TOKEN", "tok")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    monkeypatch.setattr(wiz, "load_registry", lambda: {"hosts": {}, "default": None})
+    prov: list = []
+    monkeypatch.setattr(
+        wiz,
+        "ensure_provisioned_host",
+        lambda hn, t: prov.append((hn, t["provision"])) or dict(LOCAL_HOST),
+    )
+    wiz.do_aac_apply(yes=True)
+    assert prov == [("acme", "hetzner")]  # provisioned first
+    assert [n for n, _ in aac_env["up"]] == ["acme"]  # then deployed
+
+
+def test_status_provision_table_plans_without_allocating(
+    wiz, aac_env, tmp_path, monkeypatch, capsys
+):
+    # status/plan MUST NOT allocate a billable server — it reports the intent only.
+    root = _project(tmp_path, "environments:\n  - name: acme\n    host: { provision: hetzner }\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("HCLOUD_TOKEN", "tok")
+    monkeypatch.setattr(wiz, "load_registry", lambda: {"hosts": {}, "default": None})
+    boom = lambda *a, **k: pytest.fail("status must not provision")  # noqa: E731
+    monkeypatch.setattr(wiz, "provision_host", boom)
+    monkeypatch.setattr(wiz, "ensure_provisioned_host", boom)
+    wiz.do_aac_status()
+    err = capsys.readouterr().err
+    assert "will provision" in err and "acme" in err
+    assert aac_env["up"] == []
+
+
+def _destroy_env(wiz, monkeypatch, hosts):
+    import contextlib
+
+    monkeypatch.setattr(wiz, "deployment_lock", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(
+        wiz, "load_registry", lambda: {"hosts": hosts, "default": next(iter(hosts), None)}
+    )
+    rm: list = []
+    monkeypatch.setattr(wiz, "cli_host_rm", lambda name, destroy, yes: rm.append((name, destroy)))
+    return rm
+
+
+def test_destroy_deprovision_scoped_to_provisioned_host(wiz, aac_env, tmp_path, monkeypatch):
+    # FR-017/SC-007: --deprovision removes the spec-PROVISIONED host only; a REFERENCED
+    # host is never deprovisioned.
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: refenv\n    host: hz1\n"
+        "  - name: prov\n    host: { provision: hetzner }\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("HCLOUD_TOKEN", "tok")
+    rm = _destroy_env(wiz, monkeypatch, {"hz1": {"created_by_tool": False}, "prov": _tool_host()})
+    wiz.do_aac_destroy(yes=True, deprovision=True)
+    assert aac_env["down"] == ["refenv", "prov"]  # both containers removed
+    assert rm == [("prov", True)]  # ONLY the provisioned host deprovisioned; hz1 untouched
+
+
+def test_destroy_without_deprovision_leaves_provisioned_host(wiz, aac_env, tmp_path, monkeypatch):
+    # FR-017: deprovision is opt-in — a bare destroy removes containers, never the host.
+    root = _project(tmp_path, "environments:\n  - name: prov\n    host: { provision: hetzner }\n")
+    monkeypatch.chdir(root)
+    rm = _destroy_env(wiz, monkeypatch, {"prov": _tool_host()})
+    wiz.do_aac_destroy(yes=True, deprovision=False)
+    assert aac_env["down"] == ["prov"] and rm == []  # container gone, host left intact
+
+
+def test_destroy_deprovision_without_token_fails_upfront(wiz, aac_env, tmp_path, monkeypatch):
+    root = _project(tmp_path, "environments:\n  - name: prov\n    host: { provision: hetzner }\n")
+    monkeypatch.chdir(root)
+    monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+    with pytest.raises(wiz.Fatal, match="deprovision needs HCLOUD_TOKEN"):
+        wiz.do_aac_destroy(yes=True, deprovision=True)
+    assert aac_env["down"] == []  # nothing torn down before the early refusal
+
+
+# --- T012a: SSH-key credential routing (least exposure) ----------------------
+
+
+def test_ssh_target_credential_routes_to_ssh_channel(wiz, tmp_path, monkeypatch):
+    key = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
+    monkeypatch.setenv("PUSHKEY", key)  # multi-line — the env-file channel rejects this
+    creds = [{"name": "git-push", "source": "env", "var": "PUSHKEY", "target": "push_key"}]
+    configs, env_file, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert configs == [] and env_file is None  # NOT the apikey/env channels
+    assert ssh.push_key is not None and ssh.host_key is None and ssh.authorized_keys == []
+    body = ssh.push_key.read_text()
+    assert "BEGIN OPENSSH" in body and body.endswith("\n")  # multi-line kept, newline ensured
+    import stat
+
+    assert stat.S_IMODE(ssh.push_key.stat().st_mode) == 0o600  # 0600 staged file
+
+
+def test_ssh_target_credential_invalid_target_rejected(wiz):
+    with pytest.raises(wiz.Fatal, match="target='bogus'"):
+        wiz.validate_credential({"name": "K", "source": "env", "var": "V", "target": "bogus"}, "w")
+
+
+def test_apply_threads_ssh_push_key_to_do_up(wiz, aac_env, tmp_path, monkeypatch):
+    spec_yaml = (
+        "environments:\n  - name: acme\n    host: local\n"
+        "    credentials:\n      - { name: gitpush, source: env, var: PUSHKEY, target: push_key }\n"
+    )
+    root = _project(tmp_path, spec_yaml)
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("PUSHKEY", "-----BEGIN KEY-----\nx\n-----END KEY-----")
+    (root / ".env").write_text("GH_TOKEN=x\n")  # base env so do_up has one
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    wiz.do_aac_apply(yes=True)
+    _name, kw = aac_env["up"][0]
+    assert kw["push_key"] is not None and kw["push_key"].read_text().startswith("-----BEGIN KEY")
