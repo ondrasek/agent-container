@@ -27,6 +27,14 @@ reason** — while still letting the operator override it. The wizard becomes a 
 that walks a newcomer from nothing to a running, attachable agent, and adapts to an
 experienced operator's healthy or broken environments.
 
+## Clarifications
+
+### Session 2026-07-23
+
+- Q: What does the wizard scope its state assessment and single "next step" recommendation to? → A: A **single active target** — one host plus one container identity it guides toward; it defaults the host to the implicit local target and prompts the operator to choose/name when the target is ambiguous (multiple hosts, or which container).
+- Q: Is "credentials/configuration present" a hard gate before recommending starting a container, or a soft step? → A: **Soft** — the wizard recommends supplying missing credentials but still allows starting a container that can run without them (e.g. a local interactive agent that can authenticate inside the session); it never hard-blocks "start" on missing credentials.
+- Q: How does the wizard establish which container name to start for a first-time operator? → A: **Prompt with a sensible default** the operator can accept or edit; if exactly one container already exists for the active target, target that one rather than prompting for a new name.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Zero to attached, guided the whole way (Priority: P1) 🎯 MVP
@@ -60,9 +68,12 @@ recommended action and explained why.
    and explains why it is needed before a container can start.
 3. **Given** host and image are ready but the required credentials/configuration are
    missing, **When** the wizard advances, **Then** it recommends supplying them and
-   explains what they are for, before offering to start a container.
+   explains what they are for, **while still allowing** the operator to start a
+   container that can run without them (the credentials step is a soft recommendation,
+   not a gate).
 4. **Given** all prerequisites are satisfied and no container exists, **When** the
-   wizard advances, **Then** it recommends starting a container.
+   wizard advances, **Then** it recommends starting a container, establishing the
+   container's short name from a sensible default the operator can accept or edit.
 5. **Given** a container is running, **When** the wizard advances, **Then** it
    recommends attaching, and following that recommendation lands the operator in the
    session.
@@ -222,6 +233,22 @@ action.
 - **FR-016**: The set of setup stages the wizard recognizes and the order it walks them
   MUST match the tool's actual prerequisite chain, so following the wizard never leaves
   a required step skipped.
+- **FR-017**: The wizard MUST scope its state assessment and its single recommended next
+  step to a **single active target** — one host plus one container identity. It MUST
+  default the host to the implicit local target when a working local runtime is present
+  and no host is explicitly selected, and MUST prompt the operator to choose when the
+  target is ambiguous (more than one host, or which container an action applies to) —
+  never silently guessing. State inspection is bounded to the active target rather than
+  probing every registered host on each run.
+- **FR-018**: The wizard MUST treat credentials/configuration as a **soft** prerequisite:
+  when required credentials are absent it recommends supplying them, but MUST still allow
+  the operator to start a container that can run without them (e.g. a local interactive
+  agent that authenticates inside the session). It MUST NOT hard-block "start" on missing
+  credentials.
+- **FR-019**: When guiding toward a first container, the wizard MUST establish the
+  container's short name by offering a sensible **default** the operator can accept or
+  change; if exactly one container already exists for the active target, the wizard MUST
+  target that existing container instead of prompting for a new name.
 
 ### Key Entities *(include if data involved)*
 
@@ -229,9 +256,14 @@ action.
   reachable, host available, image available, credentials/config present, container
   created, container running/attachable), each with a notion of *satisfied /
   unsatisfied / present-but-unusable*.
+- **Active target**: the single host + container identity the wizard is guiding toward
+  at a given moment (host defaults to the implicit local target; the operator is prompted
+  to choose/name when ambiguous). All state assessment and the recommended next step are
+  scoped to it.
 - **Environment state snapshot**: the wizard's assessment, at a moment, of every setup
-  stage plus the inventory of hosts and containers with their health — the input from
-  which the recommendation is derived.
+  stage **for the active target** plus enough host/container inventory to choose a target
+  when ambiguous and to detect broken states — the input from which the recommendation is
+  derived.
 - **Recommended action**: the single best next step for the current snapshot, carrying
   its rationale, its target (which host/container, if applicable), whether it is
   destructive, and its equivalent non-interactive command.
