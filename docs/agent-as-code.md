@@ -78,18 +78,51 @@ for a self-hosting repo.
 > never reads the container's. The host-side-only read is the load-bearing gate;
 > the read-only delivery is defense-in-depth.
 
+## Credentials — resolved at apply, injected at runtime (US2)
+
+Each `credentials[]` entry is a **reference to a source**, never a value. At `apply`
+the tool resolves it **in memory** and injects it via the existing runtime channels
+— the plaintext never touches the tracked directory, logs, argv, or the registry
+(FR-013/014). A missing/unavailable source **fails before any change** and names it
+(FR-016).
+
+| `source` | Resolution |
+|----------|-----------|
+| `env` | read the named environment variable (`var`) |
+| `file` | read a file at `path` (typically outside the project). A plaintext file that is **git-tracked inside the project** is **refused** with remediation (FR-015); an external file, or a project-local file that is **untracked/gitignored**, is allowed. Detection boundary: only files inside the project tree and known to git are flagged. |
+| `keychain` | OS store — macOS `security find-generic-password -w`, Linux `secret-tool lookup` (by `service`+`account`) |
+| `encrypted` | run the operator's `decrypt` command on `path` (e.g. `age -d -i key`, `sops -d`); the file may be committed, the plaintext stays in memory |
+
+**Delivery** reuses Feature 003's channels: a **provider API key** (name
+`ANTHROPIC_API_KEY`/`anthropic`, `OPENAI_API_KEY`/`openai`) is delivered **file-first**
+(a read-only compose config → `/run/agent-container/apikeys/<provider>`, never even
+the environment); any other credential is delivered as an **environment variable**
+via a per-deployment secrets env-file (mode 0600, in the state dir — not the project).
+Multi-line values, and values with characters an env-file parser would mangle
+(leading/trailing whitespace, an inline ` #`, a leading quote), are **rejected** for
+env delivery — deliver those as a provider API key (file channel). SSH-key routing
+to `--push-key`/`--host-key` is a follow-on.
+
+**Notes.** All declared credentials are resolved **up front** — before any container
+is deployed — so a missing source never leaves an earlier environment partially
+applied. Resolved values are staged as 0600 files under your private state dir
+(`$XDG_STATE_HOME`), the same posture as the Feature 003 injected material; they are
+regenerated each `apply`. Don't both declare a provider credential *and* drop a
+convention `agent-container.<name>.<provider>.key` file for the same provider — they
+target the same in-container path.
+
 ## Roadmap (this feature ships incrementally)
 
-The **US1 MVP** (declare → validate → idempotent `apply`/`plan`/`status`/`destroy`
-with the read-only spec integrity) is what ships first. Layering on:
+Shipped: **US1** (declare → validate → idempotent `apply`/`plan`/`status`/`destroy`
+with the read-only spec integrity) and **US2** (credential resolution, above).
+Still layering on:
 
-- **US2 — credential resolution**: resolve each `credentials[]` reference (env /
-  external file / OS keychain / encrypted-at-rest + an operator decrypt command run
-  in memory) → the Feature 003 runtime-injection channels, never to disk/log/registry.
 - **US3 — full drift deltas** (field-level) and richer `status` output.
 - **US4 — declarative host provisioning**: a `host: { provision: hetzner, … }`
   table provisions/registers the host before deploy; `destroy --deprovision` removes
   only a spec-created host (a *referenced* host is externally owned, never removed).
+- SSH-key credential routing to `--push-key`/`--host-key`, and the read-only
+  acceptance test (T010/T013).
 
 See [`specs/006-agent-as-code/`](../specs/006-agent-as-code/) for the full spec,
 plan, and contract.
