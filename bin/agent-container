@@ -780,13 +780,16 @@ def port_free(port: int) -> bool:
         return False
 
 
-def wait_port_released(port: int, timeout: float = 15.0) -> None:
+def wait_port_released(port: int, timeout: float = 30.0) -> None:
     """Block until `port` is bindable again (or timeout elapses). `<rt> rm`
     returns before the daemon has finished tearing down the published-port
     forwarding, so an immediate `up` on the same name hits a false 'port in
     use'. Making `down` wait keeps a down+up (recreate) cycle on one name
-    reliable. Best-effort: on timeout we simply return and let `up` report the
-    real state."""
+    reliable. The ceiling is generous (30s) because a busy daemon — notably a
+    loaded CI runner tearing down many containers in one acceptance run — can be
+    slow to free the forward, and a premature return leaks a false 'port in use'
+    into the next deploy (an observed acceptance flake). Best-effort: on timeout
+    we simply return and let `up` report the real state."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if port_free(port):
