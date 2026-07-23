@@ -302,6 +302,135 @@ def test_non_utf8_spec_dies_cleanly(wiz, tmp_path):
         wiz.load_project_spec(root)
 
 
+# --- US2: credential resolution (FR-011..016) --------------------------------
+
+
+def test_resolve_credential_env(wiz, tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_KEY", "sk-secret")
+    assert (
+        wiz.resolve_credential_value({"name": "K", "source": "env", "var": "MY_KEY"}, tmp_path)
+        == "sk-secret"
+    )
+
+
+def test_resolve_credential_env_missing_dies(wiz, tmp_path, monkeypatch):
+    monkeypatch.delenv("ABSENT_KEY", raising=False)
+    with pytest.raises(wiz.Fatal, match="is not set"):
+        wiz.resolve_credential_value({"name": "K", "source": "env", "var": "ABSENT_KEY"}, tmp_path)
+
+
+def test_resolve_credential_external_file(wiz, tmp_path):
+    ext = tmp_path / "outside.key"  # OUTSIDE any project root
+    ext.write_text("file-secret")
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    assert (
+        wiz.resolve_credential_value({"name": "K", "source": "file", "path": str(ext)}, root)
+        == "file-secret"
+    )
+
+
+def test_resolve_credential_keychain(wiz, tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        wiz.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, stdout="kc-secret\n"),
+    )
+    cred = {"name": "K", "source": "keychain", "service": "s", "account": "a"}
+    assert wiz.resolve_credential_value(cred, tmp_path) == "kc-secret"
+
+
+def test_resolve_credential_encrypted_in_memory(wiz, tmp_path, monkeypatch):
+    import subprocess
+
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    (root / ".agent-container" / "s.age").write_text("ENCRYPTED-BYTES")
+    seen = {}
+
+    def fake_run(argv, **k):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout="decrypted-secret")
+
+    monkeypatch.setattr(wiz.subprocess, "run", fake_run)
+    cred = {
+        "name": "K",
+        "source": "encrypted",
+        "path": ".agent-container/s.age",
+        "decrypt": "age -d -i key",
+    }
+    assert wiz.resolve_credential_value(cred, root) == "decrypted-secret"
+    assert "decrypted-secret" not in " ".join(seen["argv"])  # secret never on argv
+
+
+def test_refuse_git_tracked_plaintext(wiz, tmp_path, monkeypatch):
+    import subprocess
+
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    secret = root / ".agent-container" / "plain.key"
+    secret.write_text("leak")
+    monkeypatch.setattr(
+        wiz.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0)
+    )  # tracked
+    with pytest.raises(wiz.Fatal, match="tracked by git"):
+        wiz.resolve_credential_value({"name": "K", "source": "file", "path": str(secret)}, root)
+
+
+def test_stage_credentials_provider_apikey_file_channel(wiz, tmp_path, monkeypatch):
+    monkeypatch.setenv("AK", "sk-anthropic")
+    creds = [{"name": "ANTHROPIC_API_KEY", "source": "env", "var": "AK"}]
+    configs, env_file = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert env_file is None  # provider key does NOT go via env
+    (cfgname, staged, target) = configs[0]
+    assert target == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
+    assert (
+        "sk-anthropic" not in cfgname and "sk-anthropic" not in target
+    )  # secret not in names/targets
+    assert staged.read_text() == "sk-anthropic" and (staged.stat().st_mode & 0o777) == 0o600
+
+
+def test_stage_credentials_env_delivery_merges_base(wiz, tmp_path, monkeypatch):
+    monkeypatch.setenv("GT", "ghp_secret")
+    base = tmp_path / "base.env"
+    base.write_text("GIT_USER_NAME=x\n")
+    creds = [{"name": "GH_TOKEN", "source": "env", "var": "GT"}]
+    configs, env_file = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, base)
+    assert configs == []
+    text = env_file.read_text()
+    assert "GIT_USER_NAME=x" in text and "GH_TOKEN=ghp_secret" in text  # merged
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_stage_credentials_multiline_env_value_refused(wiz, tmp_path):
+    ext = tmp_path / "key.pem"
+    ext.write_text("-----BEGIN-----\nline2\n-----END-----\n")
+    creds = [{"name": "SOME_KEY", "source": "file", "path": str(ext)}]
+    with pytest.raises(wiz.Fatal, match="multi-line"):
+        wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+
+
+def test_apply_injects_declared_credentials(wiz, aac_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("AK", "sk-live")
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: acme\n    host: local\n    credentials:\n"
+        "      - { name: ANTHROPIC_API_KEY, source: env, var: AK }\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    wiz.do_aac_apply(yes=True)
+    _name, kw = aac_env["up"][0]
+    targets = [t for _n, _f, t in kw["extra_injected_configs"]]
+    assert (
+        f"{wiz.INJECT_APIKEY_DIR}/anthropic" in targets
+    )  # credential injected via the 003 channel
+    # the secret value is never in the config names/targets passed to do_up
+    assert not any("sk-live" in n or "sk-live" in t for n, _f, t in kw["extra_injected_configs"])
+
+
 def test_config_tokens_and_staged_files_injective(wiz, tmp_path):
     root = _project(tmp_path, MINIMAL)
     # two paths that a lossy flattener could collide
