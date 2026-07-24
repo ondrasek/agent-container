@@ -24,6 +24,9 @@ valid_actions(snapshot: EnvSnapshot) -> list[RecommendedAction] # the escape-hat
   `supply_credentials` recommendation **only when nothing hard is pending**, and never
   blocks a subsequent `start` (FR-018) — the `start` action stays in `valid_actions`.
 - Every returned/listed action's `equivalent_cmd` is **secret-free** (Constitution III).
+- `valid_actions` contains **only actions valid right now** — any action whose **hard**
+  prerequisites are unmet is **withheld**, not shown-marked (FR-004) — and **always
+  includes `quit`** (FR-015).
 - Determinism: the same snapshot always yields the same recommendation (testable).
 
 ## 2. Stage → probe mapping (snapshot assembler, thin/impure)

@@ -198,9 +198,10 @@ action.
   appropriate to the detected state, distinctly marked as the recommendation.
 - **FR-003**: Each recommendation MUST include a short, plain-language **reason** ("why
   this step, now") that a non-expert can act on.
-- **FR-004**: The wizard MUST NOT present an action whose prerequisites are unmet as
-  though it were ready; such actions are either withheld until their prerequisites are
-  satisfied, or shown clearly marked with the missing prerequisite.
+- **FR-004**: The wizard MUST NOT present an action whose **hard** prerequisites are unmet
+  as though it were ready; such actions are **withheld** until their prerequisites are
+  satisfied — the escape-hatch list of choices contains only actions valid right now.
+  (Soft prerequisites do not withhold their dependent action; see FR-018.)
 - **FR-005**: After each action, the wizard MUST re-evaluate the state and advance its
   recommendation, so the operator can proceed step-by-step from an empty machine to a
   running, attachable container by following recommendations alone.
@@ -286,9 +287,11 @@ action.
 - **SC-004**: For each defined broken/partial state (runtime unreachable, container
   exited/crash-looping, missing credential, orphaned volumes), the wizard identifies
   the specific problem and recommends a corrective step — verified for every case.
-- **SC-005**: A first-time operator reaches their first attached session in
-  **noticeably fewer decisions** than the flat menu required — no step where the
-  operator must know, unaided, which of several options applies.
+- **SC-005**: At **no step** in the setup journey must the operator know, unaided, which
+  of several options applies — every step presents a single recommended action (verified
+  across the journey, reinforcing SC-002/SC-003). The guided flow structurally removes the
+  flat menu's "which option, when?" decisions; this is validated by inspection of the
+  journey rather than a decision-count threshold.
 - **SC-006**: For any action the operator takes through the wizard, the equivalent
   non-interactive command is shown, so a returning operator can reproduce the same
   outcome without the wizard.
