@@ -42,6 +42,16 @@ clear **recommended taxonomy** replaces the ad-hoc source list.
   **non-interactive** (stdin closed, bounded time); the operator unlocks the manager
   beforehand (e.g. `op signin`, `bw unlock`).
 
+### Session 2026-07-24
+
+- Q: How is the generic resolver command expressed — an argv list run directly, or a shell
+  command string? → A: An **argv list run directly** (`argv: ["op", "read", "op://…"]`), with
+  **no shell** interpretation — zero injection surface, deterministic (Constitution II/III). A
+  pipe/filter is done by an operator wrapper script referenced by the argv, not inline.
+- Q: How does a named-manager source locate the secret? → A: **Structured typed fields** the
+  tool assembles into the manager's invocation — 1Password: `vault` / `item` / `field`;
+  Bitwarden: `item` / `field` — each field individually required/validated.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Reference a secret from any credential manager (Priority: P1)
@@ -159,8 +169,10 @@ the retained sources (`env`, `file`, `keychain`) still work.
 ### Functional Requirements
 
 - **FR-001**: The tool MUST provide a **generic resolver credential source**: the operator
-  declares a resolver command (an argument vector); at apply the tool runs it and captures
-  its standard output as the secret value.
+  declares a resolver command **as an argv list** (e.g. `argv: ["op", "read", "op://…"]`); at
+  apply the tool runs it **directly, with no shell** (no shell parsing, no injection surface,
+  Constitution II/III) and captures its standard output as the secret value. Any pipe/filter
+  is an operator wrapper script referenced by the argv, not an inline shell string.
 - **FR-002**: The resolver MUST run **host-side at apply time**, on the operator's machine
   — never inside the container and never visible to the agent.
 - **FR-003**: A resolved secret value MUST NOT appear in the repository, in command
@@ -176,9 +188,10 @@ the retained sources (`env`, `file`, `keychain`) still work.
 - **FR-006**: The tool MUST never echo a resolver's error-stream output (it may contain
   secret material); failures are reported with a generic, secret-free message.
 - **FR-007**: The tool MUST provide **named convenience sources** for at least **1Password**
-  and **Bitwarden**, each accepting a small set of typed fields that the tool expands into
-  the correct resolver invocation; a malformed named reference (missing required field) is
-  refused before any change, naming the field.
+  and **Bitwarden**, each accepting a small set of **structured typed fields** that the tool
+  assembles into the correct (no-shell) argv invocation — **1Password**: `vault` / `item` /
+  `field`; **Bitwarden**: `item` / `field`. A malformed named reference (a missing required
+  field) is refused before any change, naming the field.
 - **FR-008**: The generic resolver source MUST remain available as the extensible option
   for any manager the tool does not name — adding support for a new manager MUST NOT
   require changing the tool.
@@ -210,10 +223,11 @@ the retained sources (`env`, `file`, `keychain`) still work.
 
 - **Credential reference**: a declared entry naming a **source** and its per-source locator
   fields; never a secret value. Sources after this feature: `env`, `file`, `keychain`,
-  `command` (generic resolver), and named managers (e.g. `onepassword`, `bitwarden`). The
-  `encrypted` source is removed.
-- **Resolver**: the host-side command that yields a secret on standard output; the generic
-  `command` source is an explicit resolver, a named manager source expands to one.
+  `command` (generic resolver — an **argv list**), and named managers (`onepassword`:
+  `vault`/`item`/`field`; `bitwarden`: `item`/`field`). The `encrypted` source is removed.
+- **Resolver**: the host-side command (an **argv list**, run directly with no shell) that
+  yields a secret on standard output; the generic `command` source is an explicit resolver,
+  and a named manager source assembles one from its structured typed fields.
 - **Credential taxonomy**: the recommended preference hierarchy over sources — the
   decision guide a repository reviewer applies.
 
