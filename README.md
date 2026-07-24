@@ -299,6 +299,51 @@ Detach/reattach is unchanged (tmux survives disconnect; reattach from any machin
 clearly (**"nothing running"**, redeploy to start fresh) instead of a silent empty
 shell. Execution mode and workspace mode are independently selectable.
 
+**Shell integration — print/emit mode (Feature 005).** Rather than only *invoking*
+`ssh`/`docker` for you, the tool can **emit shell-evaluable configuration** to
+stdout so you `eval $(…)` it, alias it, or drop it into `~/.ssh/config`:
+
+```bash
+agent-container attach acme --print          # prints: ssh dev@localhost -p 2206 -t tmux attach -t main
+eval "$(agent-container attach acme --print)"    # run it in YOUR shell (your ssh-agent/config apply)
+agent-container attach acme --ssh-config >> ~/.ssh/config   # then: ssh acme
+eval "$(agent-container host env hz1)"       # your own `docker` now targets host hz1
+eval "$(agent-container host env --unset)"   # revert
+agent-container host env hz1 --shell pwsh | Invoke-Expression   # PowerShell idiom
+```
+
+- **`attach --print` / `--ssh-config`** — the printed command is byte-for-byte what
+  execute runs (execute stays the default). **`host env <name>`** emits the host's
+  `DOCKER_CONTEXT`/`CONTAINER_CONNECTION` (or `DOCKER_HOST`/`CONTAINER_HOST` via
+  `--endpoint`); `--unset` reverts. **`--shell posix|fish|pwsh`** picks the dialect.
+- **The eval contract**: stdout is config-only (humans → stderr); any error emits
+  **nothing to stdout** and exits non-zero (so `eval` runs nothing); output is
+  eval-safe-quoted; printing has no side effects and **never emits a secret** — only
+  connection coordinates. Details: [docs/shell-integration.md](docs/shell-integration.md).
+
+**Agent-as-code — declarative `.agent-container/` projects (Feature 006).** A
+directory can *be* the desired state: run the tool inside a project holding a
+`.agent-container/` spec and it reconciles reality to the files (Compose/Terraform-
+adjacent). Additive — with no `.agent-container/` up the tree, the tool behaves
+exactly as today.
+
+```bash
+# .agent-container/project.yaml declares one or more environments (name/host/container/credentials)
+agent-container plan        # per-environment: absent / matching / drifted (no mutation)
+agent-container apply        # discover -> validate -> plan -> converge (idempotent)
+agent-container destroy      # remove only what the spec owns (by deterministic identity)
+```
+
+- The spec is parsed with **`yaml.safe_load`** and **validated before any action**
+  (a bad field names the offending file+field, no partial change). Ownership derives
+  from the **deterministic identity** — no state file. The spec **wins for its scope**
+  over the global registry (reported).
+- **Spec integrity (FR-020):** when a repo that carries `.agent-container/` becomes
+  the agent's workspace, the governing spec is **immutable from inside the
+  container** — read only host-side, and delivered **read-only** via the compose-
+  `configs` channel (remote-context-safe). An untrusted agent cannot re-govern
+  itself. Details: [docs/agent-as-code.md](docs/agent-as-code.md).
+
 **Hosts and the run mechanism.** A *host* is a named target where containers run — a
 local or remote container-runtime context, registered with `host add` and stored in
 `~/.config/agent-container/hosts.json` (the registry supersedes the older `hosts.conf`

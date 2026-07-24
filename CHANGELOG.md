@@ -2,6 +2,210 @@
 
 <!-- version list -->
 
+## v0.13.0 (2026-07-23)
+
+### Chores
+
+- Sync uv.lock to released version 0.11.1
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`0ddaaa3`](https://github.com/ondrasek/agent-container/commit/0ddaaa33b442e3b3f39ff0bad28ab4908acddca8))
+
+### Features
+
+- **cli**: Declarative host provisioning + SSH-key credential routing for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`9396f8f`](https://github.com/ondrasek/agent-container/commit/9396f8fba0164cad7b4ba9097c49381b6c5e7594))
+
+
+## v0.12.0 (2026-07-23)
+
+### Features
+
+- **cli**: Field-level drift, convergence, and scoped destroy for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`ae70bee`](https://github.com/ondrasek/agent-container/commit/ae70beee1bb4b1284e39009fa82456219f2ac941))
+
+
+## v0.11.1 (2026-07-23)
+
+### Bug Fixes
+
+- **cli**: Raise wait_port_released ceiling to 30s
+  ([`3d4d84d`](https://github.com/ondrasek/agent-container/commit/3d4d84dada755efe212a640bb7ab113d7837a3d0))
+
+### Continuous Integration
+
+- Run push CI only on main; never cancel main runs
+  ([`8784da1`](https://github.com/ondrasek/agent-container/commit/8784da1a95aee964418066c368b4640194a5eb46))
+
+
+## v0.11.0 (2026-07-23)
+
+### Bug Fixes
+
+- **aac**: Address US2 adversarial-verification findings
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`aac5373`](https://github.com/ondrasek/agent-container/commit/aac537376e7bc9d18e37f603840ed249195b1664))
+
+### Chores
+
+- **deps**: Sync uv.lock to 0.9.0 ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`5d4e85b`](https://github.com/ondrasek/agent-container/commit/5d4e85b6618b1e505ffd125fcf7d24c8e311b85f))
+
+### Documentation
+
+- **aac**: Clarify the source=file FR-015 detection boundary
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`4faeb73`](https://github.com/ondrasek/agent-container/commit/4faeb73cfb492187aabf5c5a5eaff2602628a827))
+
+- **specs**: Align US2 task text with resolve_credential_value
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`724483a`](https://github.com/ondrasek/agent-container/commit/724483a03eb8927c13de6e477898a3471a1777d0))
+
+### Features
+
+- **aac**: US2 — resolve declared credential references at apply
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`e5f5346`](https://github.com/ondrasek/agent-container/commit/e5f534607b1b761549c8121faa4e90ec214533a0))
+
+
+## v0.10.0 (2026-07-22)
+
+### Bug Fixes
+
+- **aac**: Address adversarial-verification findings
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`5cc457e`](https://github.com/ondrasek/agent-container/commit/5cc457e4aaf7d3ac300ba0866b468fee5f267f69))
+
+### Chores
+
+- **deps**: Lock PyYAML for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`38956d1`](https://github.com/ondrasek/agent-container/commit/38956d19e01c5b410055e9ec01bc166543572aae))
+
+### Continuous Integration
+
+- Add pyyaml pin to the pytest jobs for agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`baad2ca`](https://github.com/ondrasek/agent-container/commit/baad2ca838a318fbf82632ead38c1304cc13b775))
+
+### Documentation
+
+- **aac**: Document the declarative agent-as-code model
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`90ad959`](https://github.com/ondrasek/agent-container/commit/90ad9598d11c2348db141f20825f764d33f5751a))
+
+- **specs**: Address analyze findings for Feature 006
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`5eaefa1`](https://github.com/ondrasek/agent-container/commit/5eaefa1e3bd36ce4d4f74f3d8fed3469d3116ddc))
+
+- **specs**: Clarify Feature 006 agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`1db95eb`](https://github.com/ondrasek/agent-container/commit/1db95eb688709c2f2701c990305881847659fc39))
+
+- **specs**: Mark 006 clarification checklist item complete
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`fe41e58`](https://github.com/ondrasek/agent-container/commit/fe41e58fb7a010aca2fafe175ab142d57293add9))
+
+- **specs**: Pin Feature 006 spec format to YAML/PyYAML
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`7c05bb9`](https://github.com/ondrasek/agent-container/commit/7c05bb9b0035ce8ccf0e95d69b30b2c90c97c14b))
+
+- **specs**: Plan Feature 006 agent-as-code + spec-integrity FR-020
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`7a49e9a`](https://github.com/ondrasek/agent-container/commit/7a49e9a45ca86053ec6fbd224128badd0b9573b8))
+
+- **specs**: Task list for Feature 006 agent-as-code
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`3393961`](https://github.com/ondrasek/agent-container/commit/339396166a50b65f166d85d62ea0939eda60df9f))
+
+### Features
+
+- **aac**: Declarative .agent-container project — apply/plan/status/destroy
+  ([#006](https://github.com/ondrasek/agent-container/pull/6),
+  [`fd09368`](https://github.com/ondrasek/agent-container/commit/fd09368b4c27e67ca458c710528a446a9aa882e5))
+
+
+## v0.9.0 (2026-07-22)
+
+### Bug Fixes
+
+- **shell**: Strip ssh:// passwords + reconcile --endpoint + docs
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`2ec843d`](https://github.com/ondrasek/agent-container/commit/2ec843da8231c1d966e0497c0ead21fcd2586f8a))
+
+### Chores
+
+- **deps**: Sync uv.lock to released 0.8.0
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`340413c`](https://github.com/ondrasek/agent-container/commit/340413c218cb2ce875f267da9b6dd4e92cfa0678))
+
+### Documentation
+
+- **specs**: Address analyze findings for Feature 005
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`de9fdda`](https://github.com/ondrasek/agent-container/commit/de9fdda03bd36af666de81026714be657b5f06c6))
+
+- **specs**: Clarify Feature 005 shell-integration
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`4f85d8b`](https://github.com/ondrasek/agent-container/commit/4f85d8bdaa836e4fd32279050d967d0a86a67c58))
+
+- **specs**: Plan Feature 005 shell-integration
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`8bae3cd`](https://github.com/ondrasek/agent-container/commit/8bae3cd9de20e403a01bdb1612223d17c659e7e3))
+
+- **specs**: Task list for Feature 005 + add PowerShell dialect
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`32b8014`](https://github.com/ondrasek/agent-container/commit/32b80141ea5e0aad708346994e2073c399b45614))
+
+### Features
+
+- **shell**: Print/emit surface — attach --print + host env
+  ([#005](https://github.com/ondrasek/agent-container/pull/5),
+  [`3f2d081`](https://github.com/ondrasek/agent-container/commit/3f2d0817077c462e3f101ed4d77c0547cf63c2eb))
+
+
+## v0.8.0 (2026-07-22)
+
+### Bug Fixes
+
+- **execution**: Clarify clone-on-start HTTPS credential log
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`889ebb7`](https://github.com/ondrasek/agent-container/commit/889ebb77dbba4e891d8727dc0858de4b1af5619a))
+
+### Documentation
+
+- **execution**: Correct the task-delivery guarantee wording
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`8a64683`](https://github.com/ondrasek/agent-container/commit/8a646837e0bf707d32b8518440a2ea60b5f7bc2f))
+
+- **specs**: Apply analyze remediation H1/M1/M2/M3 for Feature 004
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`3789a07`](https://github.com/ondrasek/agent-container/commit/3789a078ecc1cbdf6847819206fd204dabe648f1))
+
+- **specs**: Fold in --foreground guard and headless re-up semantics
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`33ee5cd`](https://github.com/ondrasek/agent-container/commit/33ee5cd06d4a46bf9aaa3533dcf0edf050c49633))
+
+- **specs**: Note headless-foreground sidecar caveat for M1
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`210641d`](https://github.com/ondrasek/agent-container/commit/210641d91f3d5b630bcb2b47cf6f6d46880bb94e))
+
+- **specs**: Plan Feature 004 agent-execution
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`f0ef779`](https://github.com/ondrasek/agent-container/commit/f0ef779fc5ed3e00a2a1da9b23b5e5a0ee25bc59))
+
+- **specs**: Task list for Feature 004 agent-execution
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`b8f586b`](https://github.com/ondrasek/agent-container/commit/b8f586b9b8b6aa41602677948c03bca9759239d8))
+
+### Features
+
+- **execution**: Agent execution modes, sessions & workspaces
+  ([#004](https://github.com/ondrasek/agent-container/pull/4),
+  [`4ea731a`](https://github.com/ondrasek/agent-container/commit/4ea731a9afb2bb1284fb4769d4832327d63e2990))
+
+
 ## v0.7.0 (2026-07-16)
 
 ### Chores

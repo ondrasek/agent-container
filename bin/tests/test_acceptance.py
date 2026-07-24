@@ -95,10 +95,20 @@ def _exec(name: str, argv: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def _run_cli(argv: list[str], state_dir: Path, timeout: int = 600):
+def _run_cli(
+    argv: list[str],
+    state_dir: Path,
+    timeout: int = 600,
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+):
+    env = _cli_env(state_dir)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         argv,
-        env=_cli_env(state_dir),
+        env=env,
+        cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
@@ -311,11 +321,20 @@ def acc(_image):
         ).stdout.splitlines()
         return [v for v in out if v.startswith(f"agent-container-{name}-")]
 
+    def cli(argv, *, cwd=None, extra_env=None, timeout=600):
+        """Drive an arbitrary CLI subcommand against the fixture's isolated state
+        (used by the declarative apply/status/destroy acceptance)."""
+        return _run_cli(
+            [*AGENT_CONTAINER, *argv], state_dir, timeout=timeout, cwd=cwd, extra_env=extra_env
+        )
+
     yield types.SimpleNamespace(
         up=up,
         down=down,
         keys=keys,
         volumes_of=volumes_of,
+        cli=cli,
+        register=started.append,  # ensure a declaratively-applied container is torn down
         tmp=work,
     )
 
@@ -1036,6 +1055,61 @@ def test_clone_on_start_ssh_without_key_fails_fast(acc):
     assert "push key" in r.stderr.lower() or "fr-014" in r.stderr.lower()
 
 
+# --- Feature 005: shell integration (real containers) ------------------------
+
+
+def test_attach_print_matches_the_live_target(acc):
+    """US1/SC-001: `attach --print` emits the runnable ssh+tmux command with the
+    LIVE deployment's coordinates (byte-for-byte what execute runs — parity is
+    unit-proven — so running it verbatim reaches the same session). We assert the
+    coordinates match the live port without tripping the test host's key verification."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("acc5print", authorized_key=[laptop.with_suffix(".pub")])
+    state = acc.tmp / "state"
+    r = _run_cli([*AGENT_CONTAINER, "attach", "acc5print", "--local", "--print"], state)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == f"ssh dev@localhost -p {port} -t tmux attach -t main"
+    r2 = _run_cli([*AGENT_CONTAINER, "attach", "acc5print", "--local", "--ssh-config"], state)
+    assert f"Port {port}" in r2.stdout and "RemoteCommand tmux attach -t main" in r2.stdout
+
+
+@pytest.mark.skipif(
+    RUNTIME != "docker", reason="host env DOCKER_CONTEXT eval test is docker-specific"
+)
+def test_host_env_eval_retargets_docker(acc):
+    """US2/SC-002: `eval $(agent-container host env NAME)` sets DOCKER_CONTEXT so the
+    operator's own docker lists that host's containers — with no tool wrapper."""
+    acc.up("acc5env")
+    state = acc.tmp / "state"
+    ctx = subprocess.run(
+        ["docker", "context", "show"], capture_output=True, text=True
+    ).stdout.strip()
+    cfg = _config_dir_of(state)
+    cfg.mkdir(parents=True, exist_ok=True)
+    cfg.joinpath("hosts.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default": None,
+                "hosts": {
+                    "acc5envhost": {"driver": "docker", "context": ctx, "address": "localhost"}
+                },
+            }
+        )
+    )
+    r = _run_cli([*AGENT_CONTAINER, "host", "env", "acc5envhost"], state)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == f"export DOCKER_CONTEXT={ctx}"
+    # eval the EMITTED text in a real sh, then confirm docker targets that context.
+    ps = subprocess.run(
+        ["sh", "-c", 'eval "$1"; docker ps --format "{{.Names}}"', "_", r.stdout],
+        env=_cli_env(state),
+        capture_output=True,
+        text=True,
+    )
+    assert "agent-container-acc5env" in ps.stdout
+
+
 def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
     """US3 / SC-005 against REAL containers: `host rm --destroy` must refuse while
     ANY container is still present on the host, and release only once it is empty.
@@ -1237,3 +1311,124 @@ def test_hetzner_provision_deploy_destroy(tmp_path, monkeypatch):
                 print(f"provisioner_destroy failed: {e}")
         if shutil.which("hcloud"):
             subprocess.run(["hcloud", "server", "delete", name], capture_output=True)
+
+
+# --- Feature 006 declarative (agent-as-code) acceptance ----------------------
+# Batches the deferred US1/US2 acceptance (T010/T013) with US3 (T016): a real
+# `.agent-container/` project applies to a running container, the governing spec
+# is read-only in-container (FR-020), a referenced credential is injected with no
+# plaintext on disk (SC-004), and status→drift→converge→scoped-destroy holds.
+
+_AAC_PROJECT = """\
+environments:
+  - name: {name}
+    host: local
+    container:
+      mode: interactive
+      agent: {agent}
+      workspace: persistent
+      env_file: ./ci.env
+    credentials:
+      - {{ name: MYSECRET, source: env, var: MYSECRET_SRC }}
+"""
+
+
+def _write_project(proj: Path, name: str, agent: str = "claude") -> None:
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "project.yaml").write_text(
+        _AAC_PROJECT.format(name=name, agent=agent)
+    )
+    (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+
+
+def test_declarative_apply_ro_spec_credential_drift_destroy(acc):
+    name = "aacacc"
+    secret = "sk-decl-acceptancevalue"  # env-file-clean (no space/quote/# to mangle)
+    proj = acc.tmp / "aacproj"
+    _write_project(proj, name, agent="claude")
+    acc.register(name)  # ensure teardown even if an assertion fails mid-test
+    env = {"MYSECRET_SRC": secret}
+
+    # apply → the declared environment converges to a running container.
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"apply failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "running")
+
+    # T010 / FR-020: the governing spec is delivered READ-ONLY in-container — a
+    # write must fail, and the in-container copy matches the host spec.
+    w = _exec(name, ["sh", "-c", "echo pwned >> /workspace/.agent-container/project.yaml"])
+    assert w.returncode != 0, "FR-020 breach: the in-container spec was writable"
+    shown = _exec(name, ["cat", "/workspace/.agent-container/project.yaml"])
+    assert shown.returncode == 0 and f"name: {name}" in shown.stdout
+
+    # T013 / SC-004: the referenced credential reached the container as an env var,
+    # and NO plaintext of the value appears anywhere in the tracked project dir.
+    got = _exec(name, ["printenv", "MYSECRET"])
+    assert got.returncode == 0 and got.stdout.strip() == secret
+    on_disk = [p for p in proj.rglob("*") if p.is_file() and secret in p.read_text(errors="ignore")]
+    assert on_disk == [], f"SC-004 breach: plaintext secret found in project dir: {on_disk}"
+
+    # apply is idempotent — a matching spec makes no change (SC-002).
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0 and "no changes" in r.stderr
+
+    # T016 / FR-008: change the declared config (agent) → status reports field-level
+    # drift; apply converges (recreates) → status returns to matching.
+    _write_project(proj, name, agent="codex")
+    st = acc.cli(["status"], cwd=proj, extra_env=env)
+    assert st.returncode == 0 and "drifted" in st.stderr and "agent" in st.stderr
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"converge failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "running")
+    assert _exec(name, ["printenv", "AGENT_CONTAINER_AGENT"]).stdout.strip() == "codex"
+    st = acc.cli(["status"], cwd=proj, extra_env=env)
+    assert "matching" in st.stderr and "drifted" not in st.stderr
+
+    # T016 / SC-006/007: destroy removes ONLY the declared identity; an unrelated
+    # imperative container is untouched. --deprovision on a REFERENCED host (local)
+    # removes the container but NEVER the host (T019/FR-017, CI-safe — no cloud).
+    acc.up("aacother")  # unrelated running container (registered for teardown by up)
+    r = acc.cli(["destroy", "-y", "--deprovision"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"destroy --deprovision failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "")  # gone
+    assert _container_state("agent-container-aacother") == "running"  # untouched
+    # the referenced local host is unaffected — the daemon still serves containers
+    assert RUNTIME and _container_state("agent-container-aacother") == "running"
+
+
+# T019 (provisioned-host end-to-end) is REAL Hetzner — billable, MUST NOT run in CI.
+# Opt in with HCLOUD_TOKEN + AGENT_CONTAINER_PROVISION_ACCEPTANCE=1 to exercise it.
+@pytest.mark.skipif(
+    not (os.environ.get("HCLOUD_TOKEN") and os.environ.get("AGENT_CONTAINER_PROVISION_ACCEPTANCE")),
+    reason="real-Hetzner provisioning is billable/opt-in (set HCLOUD_TOKEN + "
+    "AGENT_CONTAINER_PROVISION_ACCEPTANCE=1)",
+)
+def test_declarative_provisioned_host_hetzner(acc):
+    name = "aacprov"
+    hostname = "aac-prov-acc"  # RFC-1123 (no underscore)
+    proj = acc.tmp / "provproj"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "project.yaml").write_text(
+        f"environments:\n  - name: {name}\n"
+        f"    host: {{ provision: hetzner, name: {hostname}, server_type: cx22, location: nbg1 }}\n"
+        f"    container:\n      env_file: ./ci.env\n"
+    )
+    (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+    acc.register(name)
+    tok = {"HCLOUD_TOKEN": os.environ["HCLOUD_TOKEN"]}
+    try:
+        r = acc.cli(["apply", "-y"], cwd=proj, extra_env=tok, timeout=1200)
+        assert r.returncode == 0, f"provisioned apply failed:\n{r.stderr}"
+        assert f"provisioning host {hostname}" in r.stderr
+        # the provisioned host is registered as tool-created
+        show = acc.cli(["host", "show", hostname, "--json"], extra_env=tok)
+        assert (
+            '"created_by_tool": true' in show.stdout.replace(" ", "").replace("\n", "").lower()
+            or '"created_by_tool":true' in show.stdout.lower()
+        )
+    finally:
+        # destroy --deprovision removes the container AND the spec-created server.
+        d = acc.cli(["destroy", "-y", "--deprovision"], cwd=proj, extra_env=tok, timeout=1200)
+        assert d.returncode == 0, f"destroy --deprovision failed:\n{d.stderr}"
+        gone = acc.cli(["host", "show", hostname, "--json"], extra_env=tok)
+        assert gone.returncode != 0  # host removed from the registry after deprovision

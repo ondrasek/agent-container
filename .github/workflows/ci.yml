@@ -9,13 +9,19 @@
 name: ci
 
 on:
+  # Only run push-triggered CI on main (the release gate). Feature-branch pushes
+  # are covered by the `pull_request` event — running BOTH doubled the CI (two
+  # concurrent acceptance runs), which is wasteful and was implicated in port-2202
+  # flakes when they raced.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 concurrency:
+  # Supersede an in-progress PR run when a newer commit is pushed, but NEVER cancel
+  # a main run (each merge's CI must complete to gate its release, Principle VII).
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   quality-gate:
@@ -72,7 +78,7 @@ jobs:
         run: >
           uv run --no-project --python ${{ matrix.python }} --with pytest
           --with 'pytest-github-actions-annotate-failures>=0.2,<1'
-          --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
+          --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' --with 'pyyaml>=6,<7'
           pytest bin/tests
 
   build:
@@ -99,5 +105,5 @@ jobs:
         run: >
           uv run --no-project --python 3.14 --with pytest
           --with 'pytest-github-actions-annotate-failures>=0.2,<1'
-          --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15'
+          --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' --with 'pyyaml>=6,<7'
           pytest bin/tests -m acceptance

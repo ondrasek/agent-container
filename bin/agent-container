@@ -5,6 +5,7 @@
 #   "typer>=0.12,<1",
 #   "questionary>=2.0,<3",
 #   "rich>=13,<15",
+#   "pyyaml>=6,<7",
 # ]
 # ///
 #
@@ -33,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -778,13 +780,16 @@ def port_free(port: int) -> bool:
         return False
 
 
-def wait_port_released(port: int, timeout: float = 15.0) -> None:
+def wait_port_released(port: int, timeout: float = 30.0) -> None:
     """Block until `port` is bindable again (or timeout elapses). `<rt> rm`
     returns before the daemon has finished tearing down the published-port
     forwarding, so an immediate `up` on the same name hits a false 'port in
     use'. Making `down` wait keeps a down+up (recreate) cycle on one name
-    reliable. Best-effort: on timeout we simply return and let `up` report the
-    real state."""
+    reliable. The ceiling is generous (30s) because a busy daemon — notably a
+    loaded CI runner tearing down many containers in one acceptance run — can be
+    slow to free the forward, and a premature return leaks a false 'port in use'
+    into the next deploy (an observed acceptance flake). Best-effort: on timeout
+    we simply return and let `up` report the real state."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if port_free(port):
@@ -2227,6 +2232,12 @@ def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
     if host_name is not None:
         h = get_host(reg, host_name)
         if h is None:
+            if host_name == DEFAULT_HOST:
+                # 'local' is the reserved implicit-host name: a spec (or `--host local`)
+                # naming it resolves to the implicit local host WITHOUT an explicit
+                # registration — matching the no-`--host` behavior and keeping a
+                # declarative `host: local` spec portable to a fresh checkout.
+                return DEFAULT_HOST, implicit_local_host()
             die(f"no host named '{host_name}' (see: agent-container host ls)")
         return host_name, h
     default = default_host_name(reg)
@@ -2609,6 +2620,7 @@ def compose_up_exec(
     push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
+    extra_injected_configs: list[tuple[str, Path, str]] | None = None,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
     the host). With redeploy=True it force-recreates (US2, deliberately
@@ -2641,6 +2653,10 @@ def compose_up_exec(
     injected += stage_config_injection(host_name, name)
     # Feature 004: the initial/headless task rides the same ephemeral inject channel.
     injected += stage_task_injection(host_name, name, spec.task)
+    # Feature 006: the .agent-container spec is delivered READ-ONLY via this same
+    # compose-`configs` channel (remote-context-safe; FR-020) — the agent-as-code
+    # apply path passes it here so the governing spec is immutable in-container.
+    injected += list(extra_injected_configs or [])
     # Feature 004: resolve the workspace mount (persistent volume / local bind /
     # none→container layer) + whether to declare the named workspace volume. bind on
     # a non-local host is refused here, before any runtime call (FR-011).
@@ -2704,6 +2720,7 @@ def do_up(
     push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
+    extra_injected_configs: list[tuple[str, Path, str]] | None = None,
 ) -> None:
     validate_name(name)
     spec = spec or ExecSpec()
@@ -2753,6 +2770,7 @@ def do_up(
             push_key=push_key,
             known_hosts=known_hosts,
             spec=spec,
+            extra_injected_configs=extra_injected_configs,
         )
 
 
@@ -3261,19 +3279,254 @@ def resolve_attach_target(
     return user, host, port, "local"
 
 
+# --- Feature 005: shell integration (print/emit seam) ------------------------
+# Every print-capable operation computes ONE structured ShellAction (env set/unset
+# ops + command lines), which is then either RENDERED for a shell dialect (→ stdout)
+# or EXECUTED — so print and execute can never drift (FR-010). Output is eval-safe
+# (per-dialect quoting), stdout-is-config-only (humans go to stderr via eprint/die),
+# registry-only (no probe), and carries NO secret (Constitution III — only
+# connection coordinates). The seam is deliberately backend-extensible (FR-012).
+
+SHELL_DIALECTS = ("posix", "fish", "pwsh")
+# Every var `host env` can set — `--unset` clears all of them, name-free (FR-008a).
+HOST_ENV_VARS = ("DOCKER_CONTEXT", "DOCKER_HOST", "CONTAINER_CONNECTION", "CONTAINER_HOST")
+
+
+@dataclass
+class ShellAction:
+    """The one definition print and execute share (Feature 005). `env_set` is
+    ordered (NAME, value) pairs; `env_unset` is NAMEs; `commands` is argv lists.
+    Carries only non-secret material by construction (Constitution III)."""
+
+    env_set: list[tuple[str, str]] = field(default_factory=list)
+    env_unset: list[str] = field(default_factory=list)
+    commands: list[list[str]] = field(default_factory=list)
+
+
+def _quote_fish(s: str) -> str:
+    """fish single-quote: only `\\` and `'` are special inside single quotes; each
+    is escaped with a backslash. (Adversarial cases are covered in
+    test_shell_integration.py, where backslash escaping is unambiguous.)
+
+    >>> _quote_fish("a b")
+    "'a b'"
+    """
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _quote_pwsh(s: str) -> str:
+    """PowerShell single-quoted literal: a literal `'` is escaped by DOUBLING it;
+    single quotes suppress `$` expansion, so this is injection/expansion-safe.
+
+    >>> _quote_pwsh("a b")
+    "'a b'"
+    >>> _quote_pwsh("a'b")
+    "'a''b'"
+    >>> _quote_pwsh("$env:x")
+    "'$env:x'"
+    """
+    return "'" + s.replace("'", "''") + "'"
+
+
+def render_action(action: ShellAction, dialect: str) -> str:
+    """Render a ShellAction to eval-safe text for `dialect` (posix|fish|pwsh),
+    ending in a single newline. An unknown dialect `die`s (empty stdout + non-zero,
+    FR-003). Every value/token is quoted for the shell (FR-004)."""
+    if dialect not in SHELL_DIALECTS:
+        die(f"--shell must be one of {', '.join(SHELL_DIALECTS)} (got '{dialect}')")
+    lines: list[str] = []
+    if dialect == "posix":
+        for name, val in action.env_set:
+            lines.append(f"export {name}={shlex.quote(val)}")
+        if action.env_unset:
+            lines.append("unset " + " ".join(action.env_unset))
+        for cmd in action.commands:
+            lines.append(shlex.join(cmd))
+    elif dialect == "fish":
+        for name, val in action.env_set:
+            lines.append(f"set -x {name} {_quote_fish(val)}")
+        if action.env_unset:
+            lines.append("set -e " + " ".join(action.env_unset))
+        for cmd in action.commands:
+            lines.append(" ".join(_quote_fish(t) for t in cmd))
+    else:  # pwsh
+        for name, val in action.env_set:
+            lines.append(f"$env:{name} = {_quote_pwsh(val)}")
+        if action.env_unset:
+            targets = ",".join(f"Env:{n}" for n in action.env_unset)
+            lines.append(f"Remove-Item {targets} -ErrorAction SilentlyContinue")
+        for cmd in action.commands:
+            # In PowerShell a quoted string at statement start is a value, not an
+            # invocation — leave the executable (cmd[0]) unquoted and quote the args.
+            head = cmd[0]
+            rest = " ".join(_quote_pwsh(t) for t in cmd[1:])
+            lines.append(f"{head} {rest}".rstrip())
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def print_shell(text: str) -> None:
+    """Write the fully-rendered block to stdout — the ONLY stdout write on the
+    print path. Callers resolve + render EVERYTHING first (any failure `die`s to
+    stderr before this), so on error stdout stays empty (eval-safe, FR-003/SC-004)."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def attach_shell_action(user: str, host: str, port: str, window: str | None = None) -> ShellAction:
+    """The attach command as a ShellAction — the SINGLE source the print path
+    renders and the execute path runs (FR-010 parity). Only connection coordinates."""
+    return ShellAction(commands=[ssh_argv(user, host, port, window)])
+
+
+def ssh_config_stanza(name: str, user: str, host: str, port: str) -> str:
+    """A `~/.ssh/config` `Host` block reproducing attach via `ssh <name>` (FR-007).
+    All fields are resolved/validated coordinates — no secret, no injection."""
+    return (
+        f"Host {name}\n"
+        f"    HostName {host}\n"
+        f"    User {user}\n"
+        f"    Port {port}\n"
+        f"    RequestTTY yes\n"
+        f"    RemoteCommand tmux attach -t main\n"
+    )
+
+
+def _sanitize_ssh_uri(uri: str) -> str:
+    """Strip any PASSWORD from an ssh:// URI's userinfo before it can be emitted
+    (Constitution III — least exposure): keep the user, drop ':password'. A
+    docker/podman endpoint authenticates by key, so a password in the URI is both
+    unnecessary and a secret that must never reach stdout. Non-ssh:// / userinfo-
+    free URIs pass through unchanged.
+
+    >>> _sanitize_ssh_uri("ssh://user:hunter2@host:22")
+    'ssh://user@host:22'
+    >>> _sanitize_ssh_uri("ssh://dev@vps.example.com")
+    'ssh://dev@vps.example.com'
+    >>> _sanitize_ssh_uri("ssh://vps.example.com")
+    'ssh://vps.example.com'
+    """
+    m = re.match(r"^(ssh://)([^@/]+)@(.*)$", uri)
+    if not m:
+        return uri
+    scheme, userinfo, rest = m.groups()
+    user = userinfo.split(":", 1)[0]  # drop ':password' if present
+    return f"{scheme}{user}@{rest}"
+
+
+def _redact_url_userinfo(value: str | None) -> str | None:
+    """Strip a `user:password@` / `:token@` from ANY URL-scheme value before it can be
+    emitted (Constitution III — least exposure). A declared clone `repo` may embed a
+    credential (ssh://user:tok@…, https://x-access-token:ghp_…@…); the drift detail and
+    logs must never print it. ssh:// keeps the (non-secret) user and drops the password,
+    matching _sanitize_ssh_uri; other schemes drop the whole userinfo (a bare principal
+    there is often itself the token). Non-URL / userinfo-free values pass through.
+
+    >>> _redact_url_userinfo("ssh://git:s3cr3t@github.com/o/r.git")
+    'ssh://git@github.com/o/r.git'
+    >>> _redact_url_userinfo("https://x-access-token:ghp_AAA@github.com/o/r.git")
+    'https://github.com/o/r.git'
+    >>> _redact_url_userinfo("https://github.com/o/r.git")
+    'https://github.com/o/r.git'
+    >>> _redact_url_userinfo(None) is None
+    True
+    """
+    if not value:
+        return value
+    m = re.match(r"^([a-z][a-z0-9+.\-]*://)([^@/]+)@(.*)$", value, re.IGNORECASE)
+    if not m:
+        return value
+    scheme, userinfo, rest = m.groups()
+    if scheme.lower() == "ssh://":
+        return f"{scheme}{userinfo.split(':', 1)[0]}@{rest}"
+    return f"{scheme}{rest}"
+
+
+def host_env_action(host_rec: dict, endpoint: bool) -> ShellAction:
+    """Build the `host env` set-action for a host record (registry-only, no probe).
+    Default emits the driver's context reference (DOCKER_CONTEXT / CONTAINER_CONNECTION,
+    mirroring driver_runtime_argv); --endpoint emits the raw endpoint
+    (DOCKER_HOST / CONTAINER_HOST = ssh://[user@]address). No secret is included."""
+    driver = host_rec.get("driver")
+    if driver not in ("docker", "podman"):
+        die(f"host env: host driver '{driver}' is attach-only — it has no runtime to target")
+    ctx = host_rec.get("context") or ""
+    if endpoint:
+        # Best-effort raw endpoint (FR-008 portability). If the registered context
+        # is itself an ssh:// URI, use it verbatim (it carries the working user);
+        # otherwise (a named or socket-forwarded context) reconstruct address-only
+        # ssh://<address> — the operator's own ~/.ssh/config supplies the user, and
+        # this cannot reproduce a socket-forward (the default context-ref form is
+        # authoritative). Any password in the URI is stripped (Constitution III).
+        if ctx.startswith("ssh://"):
+            uri = _sanitize_ssh_uri(ctx)
+        else:
+            addr = host_rec.get("address") or ""
+            if not addr:
+                die("host env --endpoint: no address on record to build an endpoint URI")
+            uri = f"ssh://{addr}"
+        var = "DOCKER_HOST" if driver == "docker" else "CONTAINER_HOST"
+        return ShellAction(env_set=[(var, uri)])
+    if not ctx:
+        # Context-less (implicit local): the default daemon is already the target.
+        return ShellAction()
+    var = "DOCKER_CONTEXT" if driver == "docker" else "CONTAINER_CONNECTION"
+    # A context NAME is not secret; sanitize defensively in case it is an ssh:// URI.
+    return ShellAction(env_set=[(var, _sanitize_ssh_uri(ctx))])
+
+
+def cli_host_env(name: str | None, endpoint: bool, unset: bool, shell: str) -> None:
+    """`host env` — emit eval-able env that retargets the operator's docker/podman
+    at a host, or a plain `--unset`. Print-only (a child cannot set the parent
+    shell's env — FR-009 exempts it). Registry-only; unknown host → empty stdout +
+    non-zero. Everything is resolved + rendered BEFORE the single stdout write."""
+    if shell not in SHELL_DIALECTS:
+        die(f"--shell must be one of {', '.join(SHELL_DIALECTS)} (got '{shell}')")
+    if unset:
+        # Name-free: clear every var host env can set (FR-008a).
+        print_shell(render_action(ShellAction(env_unset=list(HOST_ENV_VARS)), shell))
+        return
+    if not name:
+        die("host env: NAME is required (or use --unset)")
+    rec = registry_hosts(load_registry()).get(name)
+    if rec is None:
+        die(f"unknown host '{name}' — not in the registry (see: agent-container host ls)")
+    action = host_env_action(rec, endpoint)
+    if not action.env_set:
+        eprint(
+            f"[agent-container] host '{name}' targets the local daemon already; "
+            f"no environment change needed (nothing to eval)"
+        )
+        return  # nothing on stdout; harmless no-op eval; exit 0
+    print_shell(render_action(action, shell))
+
+
 def cli_attach(
     name: str,
     mode: str,
     user_override: str | None,
     host_override: str | None,
     window: str | None = None,
+    print_mode: bool = False,
+    ssh_config: bool = False,
+    shell: str = "posix",
 ) -> None:
     # Validate the window BEFORE resolving/building the command (it is embedded
     # in the remote shell string).
     if window:
         validate_window(window)
+    if (print_mode or ssh_config) and shell not in SHELL_DIALECTS:
+        die(f"--shell must be one of {', '.join(SHELL_DIALECTS)} (got '{shell}')")
     migrate_flat_state()
     user, host, port, _ = resolve_attach_target(name, mode, user_override, host_override)
+    # Feature 005 print mode: emit the ssh+tmux command / ssh-config stanza to
+    # stdout and do nothing else — no probe, no connection (registry-only). The
+    # printed command is the SAME argv the execute path runs (FR-010 parity).
+    if ssh_config:
+        print_shell(ssh_config_stanza(name, user, host, port))
+        return
+    if print_mode:
+        print_shell(render_action(attach_shell_action(user, host, port, window), shell))
+        return
     # Dead-session probe (FR-008): never present a silent empty attach. If ssh can
     # reach the container but the tmux session 'main' is gone (agent/session ended),
     # report it clearly instead of dropping into an empty shell. An 'unreachable'
@@ -3291,8 +3544,10 @@ def cli_attach(
     sys.stdout.flush()
     sys.stderr.flush()
     # Full handover: the process is replaced; signals, SIGWINCH, TTY ownership
-    # and the exit code belong to ssh — identical to bash `exec ssh`.
-    os.execvp("ssh", ssh_argv(user, host, port, window))
+    # and the exit code belong to ssh — identical to bash `exec ssh`. The argv is
+    # built from the SAME ShellAction the print path renders, so `attach --print`
+    # is byte-for-byte what execute runs (FR-010 parity, single source).
+    os.execvp("ssh", attach_shell_action(user, host, port, window).commands[0])
 
 
 def _child_default_sigint() -> None:
@@ -4092,6 +4347,783 @@ def wizard_loop() -> int:
             return 0
 
 
+# --- Feature 006: agent-as-code (declarative .agent-container/ project) -------
+# A `.agent-container/` directory is the DESIRED STATE for one or more agent
+# environments, reconciled by driving the existing imperative internals (do_up /
+# down_container / the host registry). Additive: no marker up the tree ⇒ today's
+# behavior. The governing spec is immutable in-container — read ONLY host-side, and
+# delivered READ-ONLY via the compose-`configs` channel (remote-safe; FR-020).
+
+PROJECT_MARKER = ".agent-container"
+CRED_SOURCES = ("env", "file", "keychain", "encrypted")
+# Credential names that map to a provider API key delivered via the 003 file-first
+# apikey channel (never even the env). Everything else is delivered as an env var.
+CRED_PROVIDER = {
+    "anthropic": "anthropic",
+    "ANTHROPIC_API_KEY": "anthropic",
+    "openai": "openai",
+    "OPENAI_API_KEY": "openai",
+}
+# A credential may declare an explicit SSH `target` (US2/T012a): the resolved value
+# is routed to a Feature 003 ssh-injection channel (multi-line keys the env-file
+# channel refuses) instead of an env var — outbound git push identity, inbound sshd
+# host identity, or an inbound authorized key. Absent → today's apikey/env routing.
+CRED_SSH_TARGETS = ("push_key", "host_key", "authorized_key")
+# US4 declarative host provisioning: a `host:` table's provider discriminator + the
+# keys forwarded to the Feature 001 provisioner (provision_host's actual args).
+PROVISION_PROVIDERS = ("hetzner",)
+PROVISION_KEYS = {"provision", "name", "server_type", "location", "ssh_key"}
+# The read-only spec target in the container (defense-in-depth; the tool never
+# reads this copy — it reads only the host-side .agent-container/).
+INJECT_AAC_DIR = "/workspace/.agent-container"
+
+
+def find_project_root(start: Path | None = None) -> Path | None:
+    """Walk upward from `start` (cwd) to the nearest ancestor holding a
+    `.agent-container/` directory; return it, or None (declarative model inert →
+    today's imperative behavior, FR-004). Deterministic regardless of subdir."""
+    cur = (start or Path.cwd()).resolve()
+    for d in (cur, *cur.parents):
+        if (d / PROJECT_MARKER).is_dir():
+            return d
+    return None
+
+
+def _spec_yaml_files(root: Path) -> list[Path]:
+    d = root / PROJECT_MARKER
+    return sorted(p for p in d.rglob("*") if p.is_file() and p.suffix in (".yaml", ".yml"))
+
+
+def _enum_field(block: dict, key: str, allowed: tuple[str, ...], where: str) -> None:
+    v = block.get(key)
+    if v is not None and v not in allowed:
+        die(f"{where}: {key}={v!r} is not one of {{{', '.join(allowed)}}}")
+
+
+def validate_credential(cred: object, where: str) -> None:
+    if not isinstance(cred, dict):
+        die(f"{where}: must be a mapping")
+    if not cred.get("name"):
+        die(f"{where}: missing required 'name'")
+    src = cred.get("source")
+    if src not in CRED_SOURCES:
+        die(f"{where}: source={src!r} is not one of {{{', '.join(CRED_SOURCES)}}}")
+    required_by_source = {
+        "env": ("var",),
+        "file": ("path",),
+        "keychain": ("service", "account"),
+        "encrypted": ("path", "decrypt"),
+    }
+    detail = required_by_source.get(src, ())
+    for k in detail:
+        if not cred.get(k):
+            die(f"{where}: source={src} requires '{k}'")
+    tgt = cred.get("target")
+    if tgt is not None and tgt not in CRED_SSH_TARGETS:
+        die(f"{where}: target={tgt!r} is not one of {{{', '.join(CRED_SSH_TARGETS)}}}")
+    allowed = {"name", "source", "target", *detail}
+    for k in cred:
+        if k not in allowed:
+            die(f"{where}: unknown credential key {k!r}")
+
+
+def validate_provision_table(table: dict, env_name: str, where: str) -> None:
+    """Validate a `host:` provision table (US4) BEFORE any allocation (FR-003). The
+    provider is the discriminator; the effective host registry name (`name` or the env
+    name) must be RFC-1123 (Hetzner rejects underscores), so an underscore-bearing env
+    needs an explicit `host.name`."""
+    prov = table.get("provision")
+    if prov not in PROVISION_PROVIDERS:
+        die(f"{where}: host provision={prov!r} is not one of {{{', '.join(PROVISION_PROVIDERS)}}}")
+    for k in table:
+        if k not in PROVISION_KEYS:
+            die(f"{where}: unknown host provision key {k!r}")
+    name_val = table.get("name")
+    if name_val is not None and not isinstance(name_val, str):
+        # A non-string YAML scalar (123, true, 1.5, a list) must die naming the field,
+        # not traceback in the regex below (FR-003 — clean refusal; adversarial LOW).
+        die(f"{where}: host provision name must be a string, got {type(name_val).__name__}")
+    host_name = name_val or env_name
+    if not HETZNER_NAME_RE.fullmatch(host_name):
+        die(
+            f"{where}: provisioned host name '{host_name}' is not RFC-1123 (lowercase "
+            f"letters, digits, hyphens; no underscore; <=63). Add an explicit host.name."
+        )
+
+
+def validate_environment(env: object, where: str) -> None:
+    """Validate one environment against the pinned schema (contracts §Schema).
+    On any error `die` naming the offending field; make no partial change (FR-003)."""
+    if not isinstance(env, dict):
+        die(f"{where}: must be a mapping")
+    name = env.get("name")
+    if not name or not isinstance(name, str):
+        die(f"{where}: missing required string 'name'")
+    validate_name(name)  # deterministic-identity charset
+    where = f"{where} ({name})"
+    host = env.get("host")
+    if host is None:
+        die(f"{where}: missing required 'host'")
+    if not isinstance(host, (str, dict)):
+        die(f"{where}: 'host' must be a host name (string) or a provision table")
+    if isinstance(host, dict):
+        validate_provision_table(host, name, where)
+    container = env.get("container") or {}
+    if not isinstance(container, dict):
+        die(f"{where}: 'container' must be a mapping")
+    _enum_field(container, "mode", EXEC_MODES, where)
+    _enum_field(container, "agent", AGENTS, where)
+    _enum_field(container, "workspace", WORKSPACE_MODES, where)
+    allowed_c = {"mode", "agent", "task", "workspace", "workspace_dir", "repo", "env_file"}
+    for k in container:
+        if k not in allowed_c:
+            die(f"{where}: unknown container key {k!r}")
+    creds = env.get("credentials") or []
+    if not isinstance(creds, list):
+        die(f"{where}: 'credentials' must be a list")
+    for j, cred in enumerate(creds):
+        validate_credential(cred, f"{where} credentials[{j}]")
+    for k in env:
+        if k not in {"name", "host", "container", "credentials"}:
+            die(f"{where}: unknown key {k!r}")
+
+
+def load_project_spec(root: Path) -> list[dict]:
+    """Read + validate the `.agent-container/` YAML into a list of environment
+    dicts. `yaml.safe_load` ONLY (never `yaml.load` — an untrusted `!!python/...`
+    tag must never construct an object). On any error `die` naming the offending
+    file+field with no partial change (FR-003)."""
+    import yaml
+
+    files = _spec_yaml_files(root)
+    if not files:
+        die(f"{root / PROJECT_MARKER}: no .yaml/.yml spec files found")
+    environments: list[dict] = []
+    for f in files:
+        try:
+            data = yaml.safe_load(f.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            die(f"{f}: invalid YAML ({str(e).splitlines()[0]})")
+        except (UnicodeDecodeError, OSError) as e:
+            die(f"{f}: cannot read spec file ({e})")
+        if data is None:
+            continue
+        if not isinstance(data, dict):
+            die(f"{f}: top-level must be a mapping")
+        for k in data:
+            if k != "environments":
+                die(f"{f}: unknown top-level key {k!r} (only 'environments' is allowed)")
+        envs = data.get("environments")
+        if envs is None:
+            die(f"{f}: missing required key 'environments'")
+        if not isinstance(envs, list) or not envs:
+            die(f"{f}: 'environments' must be a non-empty list")
+        for i, env in enumerate(envs):
+            validate_environment(env, f"{f}: environments[{i}]")
+            assert isinstance(env, dict)  # narrowed by validate_environment; helps the type checker
+            environments.append(env)
+    names = [e["name"] for e in environments]
+    dups = sorted({n for n in names if names.count(n) > 1})
+    if dups:
+        die(f"duplicate environment name(s) across the project spec: {', '.join(dups)}")
+    return environments
+
+
+def env_host_binding(env: dict) -> tuple[str, dict | None]:
+    """Resolve the declared host binding to (host_name, provision_table_or_None): a
+    string host is REFERENCED (externally owned, never deprovisioned); a table is
+    PROVISIONED (spec-owned, US4). A provisioned host's registry name is the table
+    `name` or the env name (validated RFC-1123 at parse time)."""
+    h = env["host"]
+    if isinstance(h, dict):
+        return (h.get("name") or env["name"]), h
+    return h, None
+
+
+def ensure_provisioned_host(host_name: str, table: dict) -> dict:
+    """Idempotently provision + register a spec-owned host (US4), driving the Feature
+    001 provisioner. A second `apply` must NOT allocate a second (billable) server: an
+    existing tool-created host of the same provider is reused unchanged. A name
+    collision with a host this spec did not create is refused (never silently reused
+    or re-provisioned over)."""
+    provider = table["provision"]
+    existing = get_host(load_registry(), host_name)
+    if existing is not None:
+        prov = existing.get("provisioning") or {}
+        if existing.get("created_by_tool") and prov.get("provider") == provider:
+            log(f"host {host_name}: already provisioned ({provider}) — reusing")
+            return existing
+        die(
+            f"host {host_name}: a host of that name already exists but was not provisioned "
+            f"by this spec (provider={prov.get('provider')!r}, created_by_tool="
+            f"{bool(existing.get('created_by_tool'))}). Rename the environment's host or "
+            f"remove the existing host first."
+        )
+    log(f"provisioning host {host_name} ({provider}) — billable…")
+    record = provision_host(
+        provider,
+        host_name,
+        server_type=table.get("server_type"),
+        location=table.get("location"),
+        ssh_key=table.get("ssh_key"),
+        ssh_pubkey=None,
+    )
+    reg = load_registry()
+    hosts = registry_hosts(reg)
+    hosts[host_name] = record
+    reg["hosts"] = hosts
+    if default_host_name(reg) is None:
+        reg["default"] = host_name
+    save_registry(reg)
+    log(f"registered provisioned host '{host_name}'")
+    return record
+
+
+def env_exec_spec(env: dict) -> ExecSpec:
+    """Map a declared `container` block to the 004 ExecSpec."""
+    c = env.get("container") or {}
+    return ExecSpec(
+        mode=c.get("mode", "interactive"),
+        agent=c.get("agent", "claude"),
+        task=resolve_task(c.get("task")),
+        repo=c.get("repo"),
+        workspace=c.get("workspace", "persistent"),
+        workspace_dir=c.get("workspace_dir"),
+    )
+
+
+def env_live_config(host_rec: dict, name: str) -> dict[str, str | None] | None:
+    """Inspect the RUNNING container's agent-config env (the settings `apply` writes:
+    AGENT_CONTAINER_MODE / AGENT_CONTAINER_AGENT / AGENT_CONTAINER_CLONE_URL) so drift
+    can be reported field-by-field (US3). Returns None if the container can't be
+    inspected — the caller then falls back to existence-level state (never a false
+    'matching' from a failed probe)."""
+    cname = container_name(name)
+    argv = driver_runtime_argv(host_rec) + ["inspect", cname, "--format", "{{json .Config.Env}}"]
+    r = query(argv)
+    if r.returncode != 0:
+        return None
+    try:
+        env_list = json.loads(r.stdout)
+    except json.JSONDecodeError, ValueError:
+        return None
+    env: dict[str, str] = {}
+    for item in env_list or []:
+        k, _, v = str(item).partition("=")
+        env[k] = v
+    return {
+        "mode": env.get("AGENT_CONTAINER_MODE"),
+        "agent": env.get("AGENT_CONTAINER_AGENT"),
+        "repo": env.get("AGENT_CONTAINER_CLONE_URL"),
+    }
+
+
+def env_desired_config(spec: ExecSpec) -> dict[str, str | None]:
+    """The declared agent-config in the same shape env_live_config returns — the
+    clone URL only applies to a non-bind workspace (mirrors compose_environment)."""
+    return {
+        "mode": spec.mode,
+        "agent": spec.agent,
+        "repo": spec.repo if (spec.repo and spec.workspace != "bind") else None,
+    }
+
+
+def config_drift(
+    desired: dict[str, str | None], live: dict[str, str | None]
+) -> list[tuple[str, str | None, str | None]]:
+    """Field-level delta (field, desired, live) for the reconcilable agent-config
+    settings. Pure — the self-test exercises it.
+
+    >>> config_drift({"mode": "interactive", "agent": "claude", "repo": None},
+    ...              {"mode": "interactive", "agent": "claude", "repo": None})
+    []
+    >>> config_drift({"mode": "headless", "agent": "codex", "repo": None},
+    ...              {"mode": "interactive", "agent": "claude", "repo": None})
+    [('mode', 'headless', 'interactive'), ('agent', 'codex', 'claude')]
+    """
+    return [
+        (field, desired.get(field), live.get(field))
+        for field in ("mode", "agent", "repo")
+        if desired.get(field) != live.get(field)
+    ]
+
+
+def env_reconcile(host_rec: dict, name: str, spec: ExecSpec) -> tuple[str, str]:
+    """Reconcile the declared env's DETERMINISTIC identity (Constitution IV — no state
+    file) against reality, returning (state, detail):
+      absent   — no container for the identity
+      drifted  — present-but-stopped, OR running with a config delta vs the spec
+      matching — running and the agent-config matches the spec
+    `detail` is a human-readable delta ('' for absent/matching). Because both the
+    desired config and the identity derive only from the spec (never an absolute
+    path), a fresh checkout at any location reconciles identically (FR-005/SC-003)."""
+    cname = container_name(name)
+    all_names = host_container_names(host_rec, include_stopped=True)
+    if cname not in all_names:
+        return "absent", ""
+    if cname not in host_container_names(host_rec):
+        return "drifted", "present but stopped"
+    live = env_live_config(host_rec, name)
+    if live is None:
+        return "matching", ""  # running but not inspectable — existence-level match
+    diffs = config_drift(env_desired_config(spec), live)
+    if not diffs:
+        return "matching", ""
+    # Redact any credential embedded in the repo/clone URL before it reaches the
+    # detail string — status/apply log this, so an ssh://user:tok@ or https://…:token@
+    # repo must never be printed verbatim (Constitution III; adversarial-verify MEDIUM).
+    parts = []
+    for f, want, live in diffs:
+        if f == "repo":
+            want, live = _redact_url_userinfo(want), _redact_url_userinfo(live)
+        parts.append(f"{f}: {live!r}→{want!r}")
+    return "drifted", "; ".join(parts)
+
+
+def stage_agent_container_spec(
+    host_name: str, name: str, root: Path
+) -> list[tuple[str, Path, str]]:
+    """Deliver every host-side `.agent-container/` file as a READ-ONLY compose
+    `config` (FR-020) targeting `/workspace/.agent-container/<rel>` — remote-context
+    -safe (a host bind would fail over a remote context; the 001/003 lesson). The
+    tool reads the spec ONLY host-side; this delivery is defense-in-depth so the
+    in-container copy the agent sees cannot be altered."""
+    d = root / PROJECT_MARKER
+    sd = host_state_dir(host_name)
+    sd.mkdir(parents=True, exist_ok=True)
+    sd.chmod(0o700)
+    entries: list[tuple[str, Path, str]] = []
+    # Use the enumeration INDEX for the staged filename and the compose-config
+    # resource name so both are injective — a lossy path-flattening could otherwise
+    # collide two distinct spec files onto one config (and one would silently win).
+    for i, src in enumerate(sorted(p for p in d.rglob("*") if p.is_file())):
+        rel = src.relative_to(d).as_posix()
+        staged = sd / f"{name}.aac.{i}"
+        staged.write_bytes(src.read_bytes())
+        staged.chmod(0o644)
+        entries.append((f"aac_{name}_{i}", staged, f"{INJECT_AAC_DIR}/{rel}"))
+    return entries
+
+
+def _verify_ro_spec_delivery(aac_configs: list[tuple[str, Path, str]], spec: ExecSpec) -> None:
+    """FR-020 refuse-if-writable (M3): the spec files must be delivered ONLY via the
+    read-only compose-configs channel and never exposed writable. A `bind` workspace
+    could mount the project dir RW at /workspace — refuse if it would shadow the
+    spec (the operator should use persistent/ephemeral for a self-hosting repo)."""
+    if not aac_configs:
+        return
+    for _tok, _src, target in aac_configs:
+        if not target.startswith(INJECT_AAC_DIR + "/"):
+            die(f"spec-integrity: refusing to deploy — spec file target {target} is not read-only")
+    if spec.workspace == "bind":
+        die(
+            "spec-integrity (FR-020): a bind workspace would expose /workspace/.agent-container "
+            "writable to the agent. Use --workspace persistent|ephemeral for a self-hosting "
+            "project, so the spec is delivered read-only."
+        )
+
+
+def _precheck_environments(environments: list[dict], host_override: str | None = None) -> None:
+    """Reject unsupported/unsafe environments UP FRONT — before any deploy — so a
+    later environment's problem never leaves earlier ones partially applied (FR-003,
+    even on the `--host` override path where the per-env host guard is short-circuited)."""
+    for env in environments:
+        name = env["name"]
+        if (
+            isinstance(env.get("host"), dict)
+            and host_override is None
+            and not os.environ.get("HCLOUD_TOKEN")
+        ):
+            # US4: a provision table is deployable now, but allocation is billable and
+            # needs the cloud token — fail before ANY container work if it is absent.
+            # A --host override bypasses provisioning entirely, so it needs no token.
+            die(
+                f"environment {name}: host provisioning ({env['host'].get('provision')}) "
+                f"requires HCLOUD_TOKEN in the environment"
+            )
+        c = env.get("container") or {}
+        if c.get("workspace") == "bind":
+            die(
+                f"environment {name}: workspace=bind would expose /workspace/.agent-container "
+                f"writable to the agent (FR-020). Use persistent|ephemeral for a self-hosting project."
+            )
+
+
+def _reconcile_plan(environments: list[dict], host_override: str | None):
+    """Compute (env, name, host_name, host_rec, state) per declared environment,
+    applying spec-wins precedence (the spec's host, FR-018) and reporting."""
+    plans = []
+    reg = load_registry()  # detect a not-yet-provisioned host WITHOUT mutating
+    for env in environments:
+        name = env["name"]
+        binding_name, prov_table = env_host_binding(env)
+        to_provision = prov_table is not None and get_host(reg, binding_name) is None
+        if to_provision and host_override is None:
+            # US4: a to-be-provisioned host that does not exist yet. status/plan MUST
+            # NOT allocate a billable server — report the intent, host_rec None.
+            plans.append(
+                (
+                    env,
+                    name,
+                    binding_name,
+                    None,
+                    "absent",
+                    f"host {binding_name} will be provisioned ({prov_table['provision']})",
+                )
+            )
+            log(
+                f"  {name} → host={binding_name}: absent (will provision {prov_table['provision']})"
+            )
+            continue
+        host_name, host_rec = resolve_deploy_host(host_override or binding_name)
+        ensure_tunnel(host_rec)
+        state, detail = env_reconcile(host_rec, name, env_exec_spec(env))
+        plans.append((env, name, host_name, host_rec, state, detail))
+        log(f"  {name} → host={host_name}: {state}" + (f" ({detail})" if detail else ""))
+    return plans
+
+
+def do_aac_status(host_override: str | None = None) -> None:
+    """`status`/`plan`: print the per-resource plan and mutate NOTHING (FR-008)."""
+    root = find_project_root()
+    if root is None:
+        die(
+            "no .agent-container/ project found up the tree — the declarative model is "
+            "inert here (use the imperative commands, or create a .agent-container/ spec)"
+        )
+    log(f"project root: {root}")
+    environments = load_project_spec(root)
+    _precheck_environments(environments, host_override)
+    _reconcile_plan(environments, host_override)
+
+
+# --- Feature 006 US2: credential references (resolve at apply, inject at runtime) ---
+# A declared credential names a SOURCE (env / external file / OS keychain /
+# encrypted-at-rest + a decrypt command). We resolve the value IN MEMORY at apply
+# and deliver it via the existing 003 runtime channels — never writing plaintext to
+# the tracked directory, logs, argv, or the registry (FR-013/014). A missing source
+# fails before any change (FR-016); a git-tracked plaintext file is refused (FR-015).
+
+
+def _keychain_lookup(service: str, account: str, name: str) -> str:
+    """Read a secret from the OS store — macOS `security`, Linux `secret-tool`. The
+    value is captured from stdout (never argv/disk)."""
+    if sys.platform == "darwin":
+        argv = ["security", "find-generic-password", "-w", "-s", service, "-a", account]
+    else:
+        argv = ["secret-tool", "lookup", "service", service, "account", account]
+    r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        die(
+            f"credential {name}: OS keychain lookup failed for service={service!r} "
+            f"account={account!r} (FR-016 — the source is unavailable)"
+        )
+    return r.stdout.rstrip("\n")
+
+
+def _run_decrypt(decrypt_cmd: str, enc_path: Path, name: str) -> str:
+    """Run the operator's decrypt command on the encrypted file; the plaintext is
+    read from stdout and held IN MEMORY only (never to disk). The path rides on argv;
+    the secret never does."""
+    if not enc_path.is_file():
+        die(f"credential {name}: encrypted file {enc_path} does not exist (FR-016)")
+    argv = shlex.split(decrypt_cmd) + [str(enc_path)]
+    r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        # Do NOT echo the tool's stderr — a verbose/broken decrypt wrapper could emit
+        # secret material there. A generic message keeps the log secret-free (III).
+        die(f"credential {name}: decrypt command exited {r.returncode} (FR-016)")
+    return r.stdout
+
+
+def _refuse_git_tracked_plaintext(path: Path, root: Path, name: str) -> None:
+    """FR-015: a plaintext secret FILE that is git-tracked inside the project is a
+    leak risk — refuse with remediation. (The detection boundary: only files INSIDE
+    the project tree and known to git; an external file or an untracked one is not
+    flagged — documented.)"""
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return  # outside the project — the operator's own external file
+    r = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--error-unmatch", str(rel)],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+    if r.returncode == 0:
+        die(
+            f"credential {name}: the plaintext secret file '{rel}' is tracked by git in "
+            f"the project — a leak risk. Remedy: move it OUTSIDE the project, add it to "
+            f".gitignore, or use source=encrypted with a decrypt command (FR-015)."
+        )
+
+
+def resolve_credential_value(cred: dict, root: Path) -> str:
+    """Resolve one credential reference to its value, IN MEMORY (FR-011/012). A
+    missing/unavailable source dies naming it (FR-016)."""
+    src, name = cred["source"], cred["name"]
+    if src == "env":
+        v = os.environ.get(cred["var"])
+        if v is None:
+            die(f"credential {name}: environment variable {cred['var']} is not set (FR-016)")
+        return v
+    if src == "file":
+        p = Path(cred["path"]).expanduser()
+        _refuse_git_tracked_plaintext(p, root, name)
+        if not p.is_file():
+            die(f"credential {name}: file {p} does not exist (FR-016)")
+        return p.read_text()
+    if src == "keychain":
+        return _keychain_lookup(cred["service"], cred["account"], name)
+    # encrypted: the encrypted file may be committed in the project (relative → root).
+    enc = Path(cred["path"])
+    enc = enc if enc.is_absolute() else (root / enc)
+    return _run_decrypt(cred["decrypt"], enc.expanduser(), name)
+
+
+@dataclass
+class SshCreds:
+    """Resolved SSH-target credentials (T012a) threaded into do_up's typed params —
+    distinct lifecycles: push_key is the ephemeral outbound git identity, host_key the
+    persisted inbound sshd identity, authorized_keys accumulate inbound principals."""
+
+    push_key: Path | None = None
+    host_key: Path | None = None
+    authorized_keys: list[Path] = field(default_factory=list)
+
+
+def stage_declared_credentials(
+    host_name: str, name: str, creds: list[dict] | None, root: Path, base_env_file: Path | None
+) -> tuple[list[tuple[str, Path, str]], Path | None, SshCreds]:
+    """Resolve the declared credentials and deliver them: an explicit SSH **target**
+    (push_key/host_key/authorized_key) → a 0600 staged file threaded into the 003
+    ssh-injection channels (multi-line keys the env-file rejects, T012a); **provider
+    API keys** (by name) via the 003 file-first apikey channel (a config →
+    INJECT_APIKEY_DIR/<provider>, never even the env); **everything else** as env vars
+    via a per-deployment secrets env-file merged with the declared env_file. Returns
+    (extra_configs, env_file, ssh). Plaintext lives ONLY in memory + 0600 staged files
+    under the state dir — never the tracked project, logs, argv, or registry
+    (FR-013/014). Absent credentials → the base env_file passes through unchanged."""
+    d = host_state_dir(host_name)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    configs: list[tuple[str, Path, str]] = []
+    env_lines: list[str] = []
+    ssh = SshCreds()
+    for cred in creds or []:
+        target = cred.get("target")
+        if target in CRED_SSH_TARGETS:
+            # Multi-line SSH material → the 003 ssh-injection paths, NOT the env-file.
+            # Keep a trailing newline (OpenSSH/PEM keys and authorized_keys lines are
+            # newline-terminated); do NOT run the env-var mangle checks. do_up re-stages
+            # this host-side 0600 file into the correct channel (0600 here is fine — it
+            # is read only by the operator uid running the CLI before re-staging).
+            value = resolve_credential_value(cred, root)
+            if not value.endswith("\n"):
+                value += "\n"
+            f = d / f"{name}.cred.{target}"
+            f.write_text(value)
+            f.chmod(0o600)
+            if target == "push_key":
+                ssh.push_key = f
+            elif target == "host_key":
+                ssh.host_key = f
+            else:
+                ssh.authorized_keys.append(f)
+            continue
+        # Drop a spurious trailing newline (a key file often ends in one) so the
+        # value is delivered byte-clean to both the apikey file and the env var.
+        value = resolve_credential_value(cred, root).rstrip("\n")
+        cname = cred["name"]
+        provider = CRED_PROVIDER.get(cname)
+        if provider:
+            f = d / f"{name}.cred.apikey.{provider}"
+            f.write_text(value)
+            f.chmod(0o600)
+            configs.append((f"cred_apikey_{provider}", f, f"{INJECT_APIKEY_DIR}/{provider}"))
+        else:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cname):
+                die(
+                    f"credential {cname}: name is not a valid environment-variable identifier "
+                    f"for env delivery. Use a provider name (anthropic/openai) for an API key."
+                )
+            if "\n" in value:
+                die(
+                    f"credential {cname}: a multi-line value cannot be delivered as an env var. "
+                    f"Use a provider name for an API key; multi-line SSH-key delivery is a "
+                    f"follow-on increment."
+                )
+            # Fail closed on values compose's env-file (dotenv) parsing would mangle —
+            # leading/trailing whitespace, an inline ' #' comment, or a leading quote.
+            if value != value.strip() or " #" in value or value[:1] in {'"', "'"}:
+                die(
+                    f"credential {cname}: the value contains whitespace/#/quote characters that "
+                    f"compose's env-file parsing would mangle — deliver it as a provider API key "
+                    f"(file channel), not an env var."
+                )
+            env_lines.append(f"{cname}={value}")
+    if not env_lines:
+        return configs, base_env_file, ssh  # nothing to merge — pass the base env through
+    merged = d / f"{name}.cred.env"
+    parts: list[str] = []
+    if base_env_file and base_env_file.is_file():
+        parts.append(base_env_file.read_text().rstrip("\n"))
+    parts.extend(env_lines)
+    merged.write_text("\n".join(p for p in parts if p) + "\n")
+    merged.chmod(0o600)
+    return configs, merged, ssh
+
+
+def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
+    """`apply`: discover → validate → plan → (confirm) → converge by driving `do_up`
+    per environment. Idempotent (matching ⇒ no change, SC-002). The `.agent-container/`
+    spec is delivered read-only (FR-020)."""
+    root = find_project_root()
+    if root is None:
+        die(
+            "no .agent-container/ project found up the tree — the declarative model is "
+            "inert here (use the imperative commands, or create a .agent-container/ spec)"
+        )
+    log(f"project root: {root}")
+    environments = load_project_spec(root)
+    _precheck_environments(
+        environments, host_override
+    )  # reject unsupported/unsafe envs before ANY deploy (FR-003)
+    plans = _reconcile_plan(environments, host_override)
+    todo = [p for p in plans if p[4] != "matching"]
+    if not todo:
+        log("no changes — every declared environment already matches the spec")
+        return
+    if not yes and is_tty():
+        # Surface the detail (a to-be-provisioned host is a BILLABLE allocation).
+        what = ", ".join(f"{p[1]} ({p[5] or p[4]})" for p in todo)
+        if not questionary.confirm(f"apply {len(todo)} change(s): {what}?", default=False).ask():
+            log("aborted")
+            return
+    # US2: resolve + stage ALL declared credentials for EVERY environment UP FRONT,
+    # before any container is touched — a missing/unavailable source in a later env
+    # must not leave earlier envs partially deployed (FR-016). The convention `.env`
+    # (resolve_env_file) is the merge base when no container.env_file is declared, so
+    # GH_TOKEN/GIT_* are preserved, not dropped.
+    staged_creds: dict[str, tuple[list[tuple[str, Path, str]], Path | None, SshCreds]] = {}
+    for env, name, host_name, _host_rec, _state, _detail in todo:
+        c = env.get("container") or {}
+        base_env = (root / c["env_file"]).resolve() if c.get("env_file") else resolve_env_file(name)
+        staged_creds[name] = stage_declared_credentials(
+            host_name, name, env.get("credentials"), root, base_env
+        )
+    # Reconcile each environment independently; a per-env failure is recorded and the
+    # rest proceed, then reported — never silently swallowed (FR-010).
+    done: list[str] = []
+    failures: list[tuple[str, str]] = []
+    for env, name, host_name, host_rec, state, detail in todo:
+        try:
+            if host_rec is None:
+                # US4: a spec-owned host not yet provisioned → provision + register it
+                # (billable) before deploy. Idempotent — a second apply reuses it.
+                # host_rec is None ONLY for a provision-table env (set so in _reconcile_plan).
+                _bn, prov_table = env_host_binding(env)
+                assert prov_table is not None
+                host_rec = ensure_provisioned_host(host_name, prov_table)
+                ensure_tunnel(host_rec)
+            spec = env_exec_spec(env)
+            aac = stage_agent_container_spec(host_name, name, root)  # FR-020 RO delivery
+            _verify_ro_spec_delivery(aac, spec)
+            cred_configs, env_file, ssh = staged_creds[name]
+            aac = aac + cred_configs
+            if state == "drifted":
+                # present-but-stopped OR a running config delta → recreate to converge,
+                # ANNOUNCED before the destructive step. Use the plan's resolved
+                # (host_name, host_rec) so the pair is always consistent.
+                log(f"{name}: drifted ({detail or 'present, stopped'}) — recreating to converge")
+                down_container(host_name, host_rec, name, purge=False)
+            # Deploy to the SAME host the plan/preview resolved (honoring --host), not
+            # the raw spec host — else the container would land on a host the operator
+            # never confirmed. `host_name` is the resolved name; do_up re-resolves it.
+            # SSH-target credentials (T012a) ride do_up's typed params (push_key must be
+            # a param, not a config, so clone_credential_precheck sees it for an ssh --repo).
+            do_up(
+                name,
+                host=host_name,
+                env_file_override=env_file,
+                spec=spec,
+                extra_injected_configs=aac,
+                push_key=ssh.push_key,
+                host_key=ssh.host_key,
+                authorized_keys=ssh.authorized_keys,
+            )
+            done.append(name)
+        except Fatal as e:
+            failures.append((name, str(e)))
+            warn(f"{name}: apply failed — {e}")
+    if failures:
+        die(
+            f"apply incomplete: converged [{', '.join(done) or 'none'}]; "
+            f"failed [{'; '.join(f'{n}: {e}' for n, e in failures)}] (FR-010)"
+        )
+    log("apply complete")
+
+
+def do_aac_destroy(
+    host_override: str | None = None, yes: bool = False, deprovision: bool = False
+) -> None:
+    """`destroy`: remove ONLY the resources the spec declares/owns — by deterministic
+    identity (SC-007). A referenced host is NEVER deprovisioned (FR-009/017); a
+    spec-PROVISIONED host is deprovisioned only with explicit `--deprovision` intent,
+    and only AFTER its container is removed (spec.md US4-3), reusing the Feature 001
+    fail-closed tool-created + provably-empty teardown."""
+    root = find_project_root()
+    if root is None:
+        die("no .agent-container/ project found up the tree")
+    log(f"project root: {root}")
+    environments = load_project_spec(root)
+    # Fail before any change if a --deprovision would need a cloud token it lacks.
+    if deprovision and not os.environ.get("HCLOUD_TOKEN"):
+        if any(isinstance(e.get("host"), dict) for e in environments):
+            die("--deprovision needs HCLOUD_TOKEN in the environment")
+    if not yes and is_tty():
+        names = ", ".join(e["name"] for e in environments)
+        extra = " and DEPROVISION their spec-created hosts" if deprovision else ""
+        if not questionary.confirm(
+            f"destroy the declared environment(s): {names}{extra}?", default=False
+        ).ask():
+            log("aborted")
+            return
+    done: list[str] = []
+    failures: list[tuple[str, str]] = []
+    for env in environments:
+        name = env["name"]
+        try:
+            binding_name, prov_table = env_host_binding(env)
+            unprovisioned = (
+                prov_table is not None and get_host(load_registry(), binding_name) is None
+            )
+            if unprovisioned and host_override is None:
+                log(f"{name}: host {binding_name} not provisioned — nothing to destroy")
+                done.append(name)
+                continue
+            host_name, host_rec = resolve_deploy_host(host_override or binding_name)
+            with deployment_lock(host_name, name):
+                down_container(host_name, host_rec, name, purge=True)  # owned identity only
+            done.append(name)
+            # US4: deprovision ONLY a spec-provisioned host, ONLY on explicit intent,
+            # ONLY when not overridden, and NEVER a referenced host. Containers first
+            # (down above), THEN the host. cli_host_rm is the single fail-closed
+            # tool-created + provably-empty teardown; guard with get_host for idempotency.
+            if deprovision and prov_table is not None and host_override is None:
+                if get_host(load_registry(), host_name) is not None:
+                    cli_host_rm(host_name, destroy=True, yes=True)
+        except Fatal as e:
+            failures.append((name, str(e)))
+            warn(f"{name}: destroy failed — {e}")
+    if failures:
+        die(
+            f"destroy incomplete: removed [{', '.join(done) or 'none'}]; "
+            f"failed [{'; '.join(f'{n}: {e}' for n, e in failures)}] (FR-010)"
+        )
+    log("destroy complete")
+
+
 # --- entry -------------------------------------------------------------------
 
 app = typer.Typer(
@@ -4513,6 +5545,28 @@ def host_rm(
     cli_host_rm(name, destroy, yes)
 
 
+@host_app.command("env")
+def host_env(
+    name: str = typer.Argument(None, help="Host short name to target (omit with --unset)."),
+    endpoint: bool = typer.Option(
+        False,
+        "--endpoint",
+        help="Emit the raw endpoint (DOCKER_HOST/CONTAINER_HOST=ssh://…) instead of "
+        "the registered context reference (DOCKER_CONTEXT/CONTAINER_CONNECTION).",
+    ),
+    unset: bool = typer.Option(
+        False, "--unset", help="Emit a plain unset of all vars host env can set (no name needed)."
+    ),
+    shell: str = typer.Option("posix", "--shell", help="Dialect: posix (default), fish, or pwsh."),
+) -> None:
+    """Emit eval-able env that points the operator's own docker/podman at a host.
+
+    Prints by default (it exists to be eval'd): `eval $(agent-container host env NAME)`
+    (POSIX/fish) or `agent-container host env NAME --shell pwsh | Invoke-Expression`.
+    Registry-only — no connection is made."""
+    cli_host_env(name, endpoint, unset, shell)
+
+
 @app.command()
 def attach(
     name: str = typer.Argument(..., help="Container short name."),
@@ -4525,12 +5579,31 @@ def attach(
     window: str | None = typer.Option(
         None, "--window", "-w", help="Select tmux window NAME (session 'main') before attaching."
     ),
+    print_cmd: bool = typer.Option(
+        False,
+        "--print",
+        help="Print the runnable ssh+tmux command to stdout (eval/alias it) instead "
+        "of connecting. Byte-for-byte what execute runs; nothing is connected.",
+    ),
+    ssh_config: bool = typer.Option(
+        False,
+        "--ssh-config",
+        help="Print a ~/.ssh/config Host stanza to stdout (append it, then `ssh NAME`).",
+    ),
+    shell: str = typer.Option(
+        "posix", "--shell", help="Dialect for --print output: posix (default), fish, or pwsh."
+    ),
 ) -> None:
-    """ssh + tmux attach to container NAME (local state file or hosts.conf)."""
+    """ssh + tmux attach to container NAME (local state file or hosts.conf).
+
+    With --print / --ssh-config, emit the command/config to stdout instead of
+    connecting (for `eval $(…)`, aliases, or ~/.ssh/config)."""
     if local and remote:
         raise typer.BadParameter("--local and --remote are mutually exclusive")
+    if print_cmd and ssh_config:
+        raise typer.BadParameter("--print and --ssh-config are mutually exclusive")
     mode = "local" if local else ("remote" if remote else "auto")
-    cli_attach(name, mode, user, host, window)
+    cli_attach(name, mode, user, host, window, print_cmd, ssh_config, shell)
 
 
 @app.command()
@@ -4546,6 +5619,58 @@ def logs(
 def menu() -> None:
     """Interactive wizard (same as bare agent-container)."""
     raise typer.Exit(wizard_loop())
+
+
+# --- Feature 006: declarative (agent-as-code) verbs --------------------------
+# Active only when a `.agent-container/` project root is discovered up the tree;
+# otherwise they report the model is inert (use the imperative commands).
+
+
+@app.command()
+def apply(
+    host: str | None = typer.Option(
+        None, "--host", help="Override the host for every environment (default: the spec's host)."
+    ),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+) -> None:
+    """Reconcile the `.agent-container/` project: discover → validate → plan → converge.
+
+    Idempotent — an already-satisfied spec makes no changes. The governing spec is
+    delivered read-only into the container (FR-020)."""
+    do_aac_apply(host, yes)
+
+
+@app.command()
+def plan(
+    host: str | None = typer.Option(None, "--host", help="Override the host for the plan."),
+) -> None:
+    """Show the per-environment reconcile plan (absent/matching/drifted); mutate nothing."""
+    do_aac_status(host)
+
+
+@app.command()
+def status(
+    host: str | None = typer.Option(None, "--host", help="Override the host for the status."),
+) -> None:
+    """Alias of `plan` — the current state of each declared environment vs the spec."""
+    do_aac_status(host)
+
+
+@app.command()
+def destroy(
+    host: str | None = typer.Option(None, "--host", help="Override the host for the teardown."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+    deprovision: bool = typer.Option(
+        False,
+        "--deprovision",
+        help="Also deprovision each spec-PROVISIONED host (US4). A referenced host is "
+        "never touched; requires HCLOUD_TOKEN.",
+    ),
+) -> None:
+    """Remove ONLY the resources the `.agent-container/` spec declares and owns
+    (by deterministic identity). A referenced host is never deprovisioned; a
+    spec-provisioned host is deprovisioned only with --deprovision."""
+    do_aac_destroy(host, yes, deprovision)
 
 
 def _completion_script(shell: str) -> str:
