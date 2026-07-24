@@ -44,7 +44,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
@@ -3369,7 +3369,8 @@ def wiz_build(rt: str) -> None:
 
 
 def wiz_up(rt: str) -> None:
-    name = questionary.text("container name", validate=_validate_wiz_name).ask()
+    # FR-019: offer a sensible default the operator can accept or edit.
+    name = questionary.text("container name", default="dev", validate=_validate_wiz_name).ask()
     if not name:
         return
     migrate_flat_state()
@@ -3597,22 +3598,472 @@ def wiz_keys(rt: str) -> None:
     )
 
 
-_MENU: list[tuple[str, Callable[[str], None] | None]] = [
-    ("Provision (build image)", wiz_build),
-    ("Start a container", wiz_up),
-    ("Attach", wiz_attach),
-    ("Inject SSH keys", wiz_keys),
-    ("Logs", wiz_logs),
-    ("Stop / remove", wiz_down),
-    ("Purge orphaned volume", wiz_purge_volume),
-    ("Quit", None),
-]
+# --- Feature 007: state-aware guided wizard ----------------------------------
+# A PURE recommendation engine (no I/O) drives a thin interactive shell: assemble a
+# snapshot of the setup journey for a SINGLE active target, compute the one most
+# useful next step, and lead with it (a reason + the secret-free equivalent command)
+# while still letting the operator pick any valid action. The engine is pure so its
+# rules — exactly one recommendation; never an unmet-hard-prereq action; broken-state
+# detection; soft credentials — are hermetically testable (Constitution V).
+
+STAGE_SATISFIED = "satisfied"
+STAGE_UNSATISFIED = "unsatisfied"  # absent
+STAGE_UNUSABLE = "unusable"  # present but not usable (unreachable / not healthy)
+STAGE_KEYS = ("runtime", "host", "image", "credentials", "container", "running")
+SOFT_STAGES = frozenset({"credentials"})  # recommended, never a gate (FR-018)
+
+
+@dataclass
+class SetupStage:
+    key: str
+    status: str  # STAGE_SATISFIED | STAGE_UNSATISFIED | STAGE_UNUSABLE
+    detail: str = ""
+
+    @property
+    def hard(self) -> bool:
+        return self.key not in SOFT_STAGES
+
+    @property
+    def satisfied(self) -> bool:
+        return self.status == STAGE_SATISFIED
+
+
+@dataclass
+class ActiveTarget:
+    host_name: str
+    host_rec: dict
+    container_name: str | None = None
+    ambiguous_host: bool = False
+
+
+@dataclass
+class EnvSnapshot:
+    target: ActiveTarget
+    stages: list[SetupStage]
+    containers: list[tuple[str, str]] = field(default_factory=list)  # (short name, status)
+    orphan_volumes: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+    def stage(self, key: str) -> SetupStage:
+        return next(s for s in self.stages if s.key == key)
+
+
+@dataclass
+class RecommendedAction:
+    kind: str
+    reason: str
+    equivalent_cmd: str = ""  # secret-free (Constitution III) — a flag/path, never a value
+    target: ActiveTarget | None = None
+    destructive: bool = False
+    soft: bool = False  # a recommendation the operator may skip un-blocked (e.g. credentials)
+
+
+@dataclass
+class ActionOutcome:
+    ok: bool
+    message: str = ""
+
+
+def assess_stages(p: dict) -> list[SetupStage]:
+    """PURE classifier: map raw probe results to the ordered, tri-state stage list (no
+    I/O). `credentials` is soft; all others hard. This is the load-bearing assessment,
+    tested directly against probe-result dicts."""
+
+    def present_stage(key: str, present: bool, usable: bool, absent_d: str, unusable_d: str):
+        if not present:
+            return SetupStage(key, STAGE_UNSATISFIED, absent_d)
+        return (
+            SetupStage(key, STAGE_SATISFIED)
+            if usable
+            else SetupStage(key, STAGE_UNUSABLE, unusable_d)
+        )
+
+    stages = [
+        present_stage(
+            "runtime",
+            p.get("runtime_present", True),
+            p.get("runtime_usable", True),
+            "no container runtime found",
+            p.get("runtime_detail", "runtime unreachable"),
+        ),
+        present_stage(
+            "host",
+            p.get("host_present", True),
+            p.get("host_usable", True),
+            "no host is configured yet",
+            p.get("host_detail", "host unreachable"),
+        ),
+        SetupStage("image", STAGE_SATISFIED if p.get("image_present") else STAGE_UNSATISFIED),
+        SetupStage(
+            "credentials", STAGE_SATISFIED if p.get("credentials_present") else STAGE_UNSATISFIED
+        ),
+    ]
+    # container: absent → unsatisfied; present+running → satisfied; present+not-running → unusable
+    if not p.get("container_present", False):
+        stages.append(SetupStage("container", STAGE_UNSATISFIED))
+    elif p.get("running"):
+        stages.append(SetupStage("container", STAGE_SATISFIED))
+    else:
+        stages.append(
+            SetupStage("container", STAGE_UNUSABLE, p.get("container_detail", "not running"))
+        )
+    # running: running+session → satisfied; running+dead-session → unusable; else unsatisfied
+    if p.get("running") and p.get("session_ok", True):
+        stages.append(SetupStage("running", STAGE_SATISFIED))
+    elif p.get("running"):
+        stages.append(SetupStage("running", STAGE_UNUSABLE, "session not reachable"))
+    else:
+        stages.append(SetupStage("running", STAGE_UNSATISFIED))
+    return stages
+
+
+def _host_flag(t: ActiveTarget) -> str:
+    return "" if t.host_name == DEFAULT_HOST else f" --host {t.host_name}"
+
+
+def _tname(t: ActiveTarget) -> str:
+    return t.container_name or "<name>"
+
+
+def _rec_ambiguous(s: EnvSnapshot) -> RecommendedAction | None:
+    if s.target.ambiguous_host:
+        return RecommendedAction(
+            "choose_host",
+            "more than one host is registered — choose which one to work with",
+            "agent-container host ls",
+            s.target,
+        )
+    return None
+
+
+def _rec_blocked(s: EnvSnapshot) -> RecommendedAction | None:
+    """A hard-unmet prerequisite or a broken infra/container — corrective, taking
+    precedence over forward progress (SC-003/SC-004). Returns None if nothing blocks."""
+    t = s.target
+    runtime, host, image = s.stage("runtime"), s.stage("host"), s.stage("image")
+    container, running = s.stage("container"), s.stage("running")
+    if runtime.status != STAGE_SATISFIED:
+        return RecommendedAction(
+            "fix_runtime",
+            f"the container runtime is not usable ({runtime.detail}) — fix it before any container action",
+            "",
+            t,
+        )
+    if host.status == STAGE_UNUSABLE:
+        return RecommendedAction(
+            "fix_runtime",
+            f"host '{t.host_name}' is unreachable ({host.detail}) — fix connectivity first",
+            "",
+            t,
+        )
+    if host.status == STAGE_UNSATISFIED:
+        return RecommendedAction(
+            "setup_host",
+            "no host is configured yet — a host is where containers run",
+            "agent-container host add <name> --docker-context <ctx>",
+            t,
+        )
+    if image.status != STAGE_SATISFIED:
+        return RecommendedAction(
+            "build_image",
+            "the agent image is not built here yet — a container needs it to start",
+            "agent-container build",
+            t,
+        )
+    if STAGE_UNUSABLE in (container.status, running.status):
+        return RecommendedAction(
+            "view_logs",
+            f"container '{_tname(t)}' is not healthy ({container.detail or running.detail}) — "
+            f"check its logs, then recreate or remove",
+            f"agent-container logs {_tname(t)}",
+            t,
+        )
+    return None
+
+
+def _rec_forward(s: EnvSnapshot) -> RecommendedAction:
+    """All hard prerequisites met: attach if running, else start (soft credentials
+    noted but never gating, FR-018); clean leftover volumes before a fresh start."""
+    t = s.target
+    if s.stage("running").satisfied:
+        return RecommendedAction(
+            "attach",
+            f"container '{_tname(t)}' is running — attach to it",
+            f"agent-container attach {_tname(t)}{_host_flag(t)}",
+            t,
+        )
+    if s.stage("container").status == STAGE_UNSATISFIED and s.orphan_volumes:
+        return RecommendedAction(
+            "clean_volumes",
+            f"leftover volumes from a removed container ({', '.join(s.orphan_volumes)}) — "
+            f"clean them up first (they hold a prior workspace)",
+            "agent-container purge <name>",
+            t,
+            destructive=True,
+        )
+    reason = "everything is ready — start the container"
+    if not s.stage("credentials").satisfied:
+        reason = (
+            "ready to start — no credentials found; the agent can authenticate interactively "
+            "inside the session, or supply a key first"
+        )
+    return RecommendedAction("start", reason, f"agent-container up {_tname(t)}{_host_flag(t)}", t)
+
+
+def recommend_next_step(s: EnvSnapshot) -> RecommendedAction:
+    """PURE: the single most useful next step (SC-002). Ambiguity → choose; a broken or
+    hard-unmet prerequisite → its corrective/prerequisite action (never the blocked
+    action, SC-003); otherwise forward progress to a running, attachable container."""
+    return _rec_ambiguous(s) or _rec_blocked(s) or _rec_forward(s)
+
+
+def valid_actions(s: EnvSnapshot) -> list[RecommendedAction]:
+    """Every action valid in the current state — the escape hatch (FR-008/SC-007). Any
+    action whose HARD prerequisites are unmet is WITHHELD (FR-004), and `quit` is ALWAYS
+    present (FR-015)."""
+    t = s.target
+    acts: list[RecommendedAction] = []
+    runtime_ok = s.stage("runtime").satisfied
+    host_ok = s.stage("host").satisfied
+    image_ok = s.stage("image").satisfied
+    acts.append(
+        RecommendedAction(
+            "setup_host",
+            "register or provision another host",
+            "agent-container host add <name> --docker-context <ctx>",
+            t,
+        )
+    )
+    if runtime_ok and host_ok and not image_ok:
+        acts.append(
+            RecommendedAction(
+                "build_image", "build the agent image here", "agent-container build", t
+            )
+        )
+    if runtime_ok and host_ok and image_ok:
+        if not s.stage("credentials").satisfied:
+            acts.append(
+                RecommendedAction(
+                    "supply_credentials",
+                    "provide the agent's credentials/config",
+                    f"agent-container up {_tname(t)} --env-file <path>",
+                    t,
+                    soft=True,
+                )
+            )
+        if s.stage("running").satisfied:
+            acts.extend(
+                (
+                    RecommendedAction(
+                        "attach",
+                        "attach to a running container",
+                        f"agent-container attach {_tname(t)}{_host_flag(t)}",
+                        t,
+                    ),
+                    RecommendedAction(
+                        "view_logs",
+                        "view a container's logs",
+                        f"agent-container logs {_tname(t)}",
+                        t,
+                    ),
+                    RecommendedAction(
+                        "remove",
+                        "stop and remove a container",
+                        f"agent-container down {_tname(t)} --purge",
+                        t,
+                        destructive=True,
+                    ),
+                    RecommendedAction(
+                        "inject_keys",
+                        "inject SSH keys into a running container",
+                        f"agent-container keys {_tname(t)}",
+                        t,
+                    ),
+                )
+            )
+        else:
+            acts.append(
+                RecommendedAction(
+                    "start",
+                    "start a container",
+                    f"agent-container up {_tname(t)}{_host_flag(t)}",
+                    t,
+                )
+            )
+    if s.orphan_volumes:
+        acts.append(
+            RecommendedAction(
+                "clean_volumes",
+                "clean up orphaned volumes",
+                "agent-container purge <name>",
+                t,
+                destructive=True,
+            )
+        )
+    acts.append(RecommendedAction("quit", "leave the wizard", "", t))  # FR-015: always
+    return acts
+
+
+# --- snapshot assembler + active-target resolution (impure — reuse existing probes) ---
+
+
+def _is_running(status: str) -> bool:
+    return status.strip().lower().startswith("up")
+
+
+def resolve_active_target(
+    rt: str, selected_host: str | None = None, selected_name: str | None = None
+) -> ActiveTarget:
+    """Resolve the (host, container) the wizard guides toward (FR-017). Host: the
+    selection, else the registry default, else the implicit local host; `ambiguous_host`
+    when >1 host is registered and none is selected or defaulted. Container name is
+    filled in by build_snapshot (reuse-sole-or-default, FR-019)."""
+    reg = load_registry()
+    hosts = registry_hosts(reg)
+    if selected_host:
+        host_name, host_rec = resolve_deploy_host(selected_host)
+        ambiguous = False
+    elif len(hosts) > 1 and default_host_name(reg) is None:
+        host_name, host_rec, ambiguous = DEFAULT_HOST, implicit_local_host(rt), True
+    else:
+        host_name, host_rec = resolve_deploy_host(None)
+        ambiguous = False
+    return ActiveTarget(host_name, host_rec, selected_name, ambiguous)
+
+
+def build_snapshot(rt: str, target: ActiveTarget) -> EnvSnapshot:
+    """Assemble the snapshot for the active target by calling EXISTING probes, bounded
+    to the active host (FR-017). Impure/thin: the classification lives in assess_stages
+    and the recommendation in recommend_next_step (both pure)."""
+    hr = target.host_rec
+    try:
+        host_err = probe_host_runtime(hr)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        host_err = str(e) or "unreachable"
+    reachable = host_err is None
+    registered = bool(registry_hosts(load_registry()))
+    p: dict = {
+        "runtime_present": True,  # a runtime binary is a precondition of the loop
+        "runtime_usable": True,
+        "host_present": reachable or registered,
+        "host_usable": reachable,
+        "host_detail": host_err or "",
+        "image_present": bool(reachable and image_exists(rt, IMAGE_NAME)),
+    }
+    containers: list[tuple[str, str]] = []
+    orphan: list[str] = []
+    if reachable:
+        try:
+            for cname, _img, status, _up in host_ps_rows(hr, include_stopped=True):
+                containers.append((_short(cname), status))
+        except Fatal, OSError, subprocess.SubprocessError:
+            pass
+        present = [n for n, _s in containers]
+        if target.container_name is None and len(present) == 1:
+            target.container_name = present[0]  # FR-019: reuse the sole existing container
+        orphan = _orphan_volumes(rt, containers) if target.host_name == DEFAULT_HOST else []
+    active_status = next((st for n, st in containers if n == target.container_name), None)
+    p["container_present"] = active_status is not None
+    p["running"] = active_status is not None and _is_running(active_status)
+    p["container_detail"] = active_status or ""
+    p["credentials_present"] = bool(
+        target.container_name and resolve_env_file(target.container_name) is not None
+    )
+    p["session_ok"] = True
+    stages = assess_stages(p)
+    problems: list[str] = []
+    if p["host_present"] and not p["host_usable"]:
+        problems.append(f"host '{target.host_name}' unreachable: {host_err}")
+    if p["container_present"] and not p["running"]:
+        problems.append(f"container '{target.container_name}' is {active_status}")
+    if orphan:
+        problems.append(f"{len(orphan)} orphaned volume(s): {', '.join(orphan)}")
+    return EnvSnapshot(target, stages, containers, orphan, problems)
+
+
+def _orphan_volumes(rt: str, containers: list[tuple[str, str]]) -> list[str]:
+    owners = {container_name(n) for n, _s in containers}
+    return [
+        v
+        for v in _volume_names(rt)
+        if container_name(v[len(CONTAINER_PREFIX) : -len("-workspace")]) not in owners
+    ]
+
+
+# Action kind → the EXISTING interactive handler that performs it (each already shows
+# its own `hint()` equivalent command on success, FR-010). Kinds absent here
+# (setup_host / fix_runtime / choose_host / quit) are handled inline by the shell.
+_WIZ_DISPATCH: dict[str, Callable[[str], None]] = {
+    "build_image": wiz_build,
+    "supply_credentials": wiz_up,  # the env-file prompt lives in wiz_up
+    "start": wiz_up,
+    "attach": wiz_attach,
+    "view_logs": wiz_logs,
+    "remove": wiz_down,
+    "clean_volumes": wiz_purge_volume,
+    "inject_keys": wiz_keys,
+}
+
+_STAGE_GLYPH = {
+    STAGE_SATISFIED: "[green]✓[/green]",
+    STAGE_UNSATISFIED: "[dim]•[/dim]",
+    STAGE_UNUSABLE: "[red]![/red]",
+}
+
+
+def _render_state(s: EnvSnapshot) -> None:
+    """Compact current-state summary shown every turn (FR-009): the target, the stage
+    ladder, and any named problems."""
+    console.print(
+        f"target: [bold]{s.target.host_name}[/bold] / {s.target.container_name or '(no container)'}",
+        style="dim",
+    )
+    console.print("  ".join(f"{_STAGE_GLYPH[st.status]} {st.key}" for st in s.stages))
+    for prob in s.problems:
+        console.print(f"[red]![/red] {prob}")
+
+
+def _action_label(a: RecommendedAction, recommended: bool) -> str:
+    star = "★ " if recommended else "  "
+    tail = " [dim](confirms)[/dim]" if a.destructive else ""
+    return f"{star}{a.kind.replace('_', ' ')} — {a.reason}{tail}"
+
+
+def _prompt_action(rec: RecommendedAction, actions: list[RecommendedAction]):
+    """Show the single marked recommendation first, then every other valid action (the
+    escape hatch, FR-008); `quit` is always present (FR-015). Returns the chosen action."""
+    ordered = [rec] + [a for a in actions if a.kind != rec.kind]
+    choices = [questionary.Choice(_action_label(a, a is rec), value=a) for a in ordered]
+    return questionary.select("recommended next step:", choices=choices).ask()
+
+
+def _pick_host(rt: str) -> str | None:
+    hosts = sorted(registry_hosts(load_registry()))
+    if not hosts:
+        return None
+    sel = questionary.select("use which host?", choices=[*hosts, "(local)"]).ask()
+    return None if sel in (None, "(local)") else sel
+
+
+def _perform(rt: str, a: RecommendedAction) -> None:
+    handler = _WIZ_DISPATCH.get(a.kind)
+    if handler is not None:
+        handler(rt)  # performs the action and shows its own equivalent command on success
+        return
+    # Guidance-only kinds (no underlying interactive handler): explain + show the command.
+    console.print(f"[bold]→[/bold] {a.reason}")
+    if a.equivalent_cmd:
+        hint(a.equivalent_cmd)
 
 
 def wizard_loop() -> int:
+    """State-aware guided wizard: assess the active target, lead with the single most
+    useful next step (+ reason + equivalent command), let the operator pick any valid
+    action, perform it, and re-evaluate — from an empty machine to a running session."""
     if not is_tty():
         eprint(
-            "[agent-container] no TTY; interactive wizard unavailable. Use subcommands (agent-container --help)."
+            "[agent-container] no TTY; guided wizard needs an interactive terminal. "
+            "Use the subcommands instead (agent-container --help)."
         )
         return 2
     try:
@@ -3620,26 +4071,23 @@ def wizard_loop() -> int:
     except Fatal as e:
         eprint(f"[agent-container] FATAL: {e}")
         return 1
-    actions = dict(_MENU)
+    selected_host: str | None = None
     while True:
         try:
-            running = len(ps_agent_container(rt))
-            hosts = "present" if HOSTS_CONF.is_file() else "absent"
-            console.print(
-                f"runtime: {rt} | running local containers: {running} | hosts.conf: {hosts}",
-                style="dim",
-            )
-            choice = questionary.select(
-                "agent-container — what now?", choices=[t for t, _ in _MENU]
-            ).ask()
-            if choice is None or choice == "Quit":
+            snap = build_snapshot(rt, resolve_active_target(rt, selected_host))
+            _render_state(snap)
+            choice = _prompt_action(recommend_next_step(snap), valid_actions(snap))
+            if choice is None or choice.kind == "quit":  # FR-015: quit always available
                 return 0
-            try:
-                action = actions[choice]
-                if action is not None:
-                    action(rt)
-            except Fatal as e:
-                eprint(f"[agent-container] ERROR: {e}")  # back to the menu, not exit
+            if choice.kind == "choose_host":
+                selected_host = _pick_host(rt)
+                continue
+            _perform(rt, choice)
+            # re-loop → a fresh snapshot is re-assessed (FR-005); a Fatal or a cancelled
+            # prompt below just returns to this re-evaluated state, never a dead end
+            # (FR-012/FR-015).
+        except Fatal as e:
+            eprint(f"[agent-container] ERROR: {e}")  # report + re-evaluate, not exit
         except KeyboardInterrupt, EOFError:
             return 0
 

@@ -80,3 +80,27 @@ recommendations alone; the wizard leads with exactly one reasoned recommendation
 a single active target; it never presents an unmet-prerequisite action as ready; it names
 broken states and guides out of them; it always shows a secret-free equivalent command and
 never hides a valid choice — matching SC-001…SC-007.
+
+## Validation results (T019)
+
+The load-bearing logic is validated hermetically because it is a **pure function** of an
+injected snapshot — `bin/tests/test_guided_wizard.py` (23 tests):
+
+- **A/B/C (US1)** — `recommend_next_step` walks the empty→attached order (build → start →
+  attach); exactly one recommendation (SC-002); never an unmet-hard-prereq action (SC-003);
+  soft credentials never gate `start` (FR-018); a default container name is offered (FR-019,
+  `build_snapshot` reuse-sole + `wiz_up` default). **Green.**
+- **D (US2)** — a running target recommends `attach`, and `valid_actions` carries the
+  day-to-day set (attach/logs/remove). **Green.**
+- **E (US3)** — each broken state (unreachable runtime/host, exited container, orphaned
+  volumes) yields its named corrective, ahead of forward progress (SC-004). **Green.**
+- **F (US4)** — `valid_actions` always includes `quit` (FR-015), withholds hard-unmet
+  actions (FR-004), flags destructive ones, and every `equivalent_cmd` is secret-free even
+  with a resolved credential in the environment (SC-006, Constitution III). **Green.**
+- **G (FR-013)** — a **real** no-TTY invocation of the wizard entry declines cleanly with a
+  non-zero status (`test_wizard_no_tty_real_invocation`). **Green.**
+
+The interactive TUI surface itself (a `questionary`-driven terminal) is intentionally thin
+glue over the tested engine and the existing, already-acceptance-tested `wiz_*` action
+handlers (build/up/attach/logs/down/purge); a full pty-driven journey acceptance is
+deferred as impractical (documented in research R6).
