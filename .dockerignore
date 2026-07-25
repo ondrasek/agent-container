@@ -1,0 +1,30 @@
+# Build-context allowlist — DENY BY DEFAULT.
+#
+# This is a SECURITY control, not a size optimization. `up`/`redeploy` build the
+# image ON THE TARGET HOST via compose, so the whole build context is transferred
+# to that daemon — including a REMOTE one. By the Feature 003 convention an
+# operator's secrets live in exactly this directory:
+#
+#     .env                                     (GH_TOKEN, GIT_*, agent API keys)
+#     agent-container.<name>.<provider>.key    (file-first API keys)
+#     agent-container.<name>.config/…          (canonical agent config)
+#     *.pem / id_* / known_hosts               (injected SSH material)
+#
+# None of it is referenced by the Dockerfile, but without this file all of it
+# would be shipped to a remote host on every build (Constitution III, Least
+# Exposure). Denying everything and allow-listing only what the build actually
+# consumes makes that impossible by construction rather than by vigilance.
+#
+# The image needs exactly two paths from the context:
+#   Dockerfile      — the build recipe (compose sets `context` only, so the
+#                     daemon resolves <context>/Dockerfile)
+#   entrypoint.sh   — the sole COPY source in the Dockerfile
+#
+# If you add a COPY/ADD instruction, allow-list its source below. The packaging
+# test `test_dockerignore_allowlists_every_dockerfile_copy_source` fails until
+# you do, so this file cannot silently drift out of sync with the Dockerfile.
+
+*
+
+!Dockerfile
+!entrypoint.sh

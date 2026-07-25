@@ -192,3 +192,61 @@ def test_completion_script_reads_from_checkout(wiz):
     assert wiz.REPO_ROOT is not None
     text = wiz._completion_script("bash")
     assert text == (wiz.REPO_ROOT / "completions" / "agent-container.bash").read_text()
+
+
+# --- build-context hygiene (.dockerignore) ------------------------------------
+# `up`/`redeploy` build on the TARGET host, so the build context is transferred to
+# that daemon — including a remote one. By the Feature 003 convention the operator's
+# secrets (.env, agent-container.<name>.<provider>.key, the config dir) live in the
+# repo root, i.e. inside that context. The .dockerignore denies everything and
+# allow-lists only what the build consumes, so secrets cannot ride along
+# (Constitution III). These guards keep it that way.
+
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
+
+
+def _dockerignore_rules() -> list[str]:
+    return [
+        ln.strip()
+        for ln in DOCKERIGNORE.read_text().splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+
+
+def test_dockerignore_denies_by_default():
+    assert DOCKERIGNORE.is_file(), ".dockerignore is missing — the build context would ship secrets"
+    rules = _dockerignore_rules()
+    assert "*" in rules, "the context must DENY BY DEFAULT (a bare '*' rule)"
+    # the deny-all must come before any allow-list entry, or it would override them
+    assert rules.index("*") < min(
+        (i for i, r in enumerate(rules) if r.startswith("!")), default=len(rules)
+    )
+
+
+def test_dockerignore_allowlists_every_dockerfile_copy_source():
+    """Every COPY/ADD source in the Dockerfile must be allow-listed, or the build
+    breaks. Fails loudly when someone adds a COPY without updating .dockerignore."""
+    allowed = {r.lstrip("!") for r in _dockerignore_rules() if r.startswith("!")}
+    sources: list[str] = []
+    for line in DOCKERFILE.read_text().splitlines():
+        parts = line.split()
+        if parts and parts[0].upper() in {"COPY", "ADD"}:
+            args = [p for p in parts[1:] if not p.startswith("--")]
+            sources.extend(args[:-1])  # everything but the destination
+    assert sources, "expected at least one COPY in the Dockerfile"
+    for src in sources:
+        assert src in allowed, (
+            f"Dockerfile COPY source {src!r} is not allow-listed in .dockerignore — "
+            f"the build would fail. Add '!{src}'."
+        )
+    # the Dockerfile itself must survive: compose sets `context` only, so the daemon
+    # resolves <context>/Dockerfile
+    assert "Dockerfile" in allowed
+
+
+def test_dockerignore_excludes_operator_secret_conventions():
+    """The Feature 003 secret conventions must NOT be allow-listed."""
+    allowed = {r.lstrip("!") for r in _dockerignore_rules() if r.startswith("!")}
+    for pattern in (".env", "agent-container.*.key", "*.pem", ".git"):
+        assert pattern not in allowed, f"{pattern} must never be in the build context"
