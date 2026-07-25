@@ -9,57 +9,78 @@
 ## Requirement Completeness
 
 - [ ] CHK001 Are the requirements for **which commands resolve credentials** defined — i.e. does a read-only `plan`/`status` contact the manager, or only `apply`? [Gap, Spec §FR-002]
+      - ⚠️ **FINDING**: FR-002 says "at apply time", but no requirement states that read-only `plan`/`status` must NOT resolve — a status command triggering a YubiKey touch / manager prompt is user-visible.
 - [ ] CHK002 Are requirements defined for resolving **the same credential referenced more than once** in one run (re-invoke the resolver, or resolve once)? [Gap]
-- [ ] CHK003 Are requirements defined for the **order and independence** of resolving multiple credentials (all up front, one failure aborts all)? [Completeness, Spec §FR-004]
-- [ ] CHK004 Does the spec state a requirement that a resolver's **stdout is the sole secret channel** (i.e. that no other stream or exit artifact is read as the value)? [Completeness, Spec §FR-001]
+      - ⚠️ **FINDING**: Undefined. The same credential declared in two environments resolves twice today (two hardware touches). Low impact — specify or record as deliberate.
+- [x] CHK003 Are requirements defined for the **order and independence** of resolving multiple credentials (all up front, one failure aborts all)? [Completeness, Spec §FR-004]
+- [x] CHK004 Does the spec state a requirement that a resolver's **stdout is the sole secret channel** (i.e. that no other stream or exit artifact is read as the value)? [Completeness, Spec §FR-001]
 - [ ] CHK005 Are requirements defined for what the operator is told when a manager session is **locked or expired** — beyond naming the source, is remediation guidance (e.g. "unlock first") required? [Gap, Spec §FR-004]
+      - ⚠️ **FINDING**: No requirement. Tension with FR-006: suppressing the resolver stderr also suppresses the manager's own "not signed in" diagnostic, leaving the operator no hint.
 - [ ] CHK006 Is a requirement stated for **communicating the breaking removal** to upgrading operators (changelog/release note), or is that left entirely to process? [Gap, Spec §FR-009]
-- [ ] CHK007 Are the **taxonomy** documentation requirements specific about what must appear (the tiers, the refused case, the HW-key-as-backing note) rather than "document the taxonomy"? [Completeness, Spec §FR-014]
+      - ⚠️ **FINDING**: No requirement in the spec; currently covered only by tasks.md T016 (the `BREAKING CHANGE:` footer).
+- [x] CHK007 Are the **taxonomy** documentation requirements specific about what must appear (the tiers, the refused case, the HW-key-as-backing note) rather than "document the taxonomy"? [Completeness, Spec §FR-014]
 - [ ] CHK008 Are requirements defined for how a resolved value's **trailing newline** is handled before delivery (managers commonly emit one)? [Gap, Spec §FR-012]
+      - ⚠️ **FINDING**: Only the vague edge-case phrase "a trailing newline is handled per channel". The design docs specify strip-for-apikey/env, ensure-for-SSH — the spec should say which.
 
 ## Requirement Clarity & Measurability
 
 - [ ] CHK009 Is "**bounded in time**" quantified in the spec itself, or only in the plan? A requirement that names no bound cannot be objectively verified. [Clarity, Spec §FR-005]
+      - ⚠️ **FINDING**: The spec never states a bound at all; the 30 s value exists only in plan.md. A requirement naming no bound cannot be verified.
 - [ ] CHK010 Is "**empty when a value is required**" precise about whether **whitespace-only** output counts as empty? [Ambiguity, Spec §FR-004]
-- [ ] CHK011 Can "**generic, secret-free message**" be objectively verified — is there a stated criterion for what makes a message secret-free? [Measurability, Spec §FR-006]
-- [ ] CHK012 Is "**the tool's stored state**" defined concretely (registry, state dir, compose artifacts) so the no-leak requirement is checkable? [Clarity, Spec §FR-003]
-- [ ] CHK013 Is "**non-interactive**" defined by an observable property (no TTY / stdin closed) rather than intent? [Measurability, Spec §FR-005]
-- [ ] CHK014 Is "**private (owner-only) files**" expressed as a verifiable permission requirement? [Measurability, Spec §FR-012]
-- [ ] CHK015 Is "**regenerated each apply**" stated in a way that can be objectively confirmed (e.g. staleness is impossible)? [Measurability, Spec §FR-012]
-- [ ] CHK016 Is "**zero changes to the tool**" for an unnamed manager expressed as a testable property rather than an aspiration? [Measurability, Spec §SC-004]
+      - ⚠️ **FINDING**: "empty" is ambiguous — a whitespace-only result is effectively empty, and that gap was the C2 defect class found in analyze.
+- [x] CHK011 Can "**generic, secret-free message**" be objectively verified — is there a stated criterion for what makes a message secret-free? [Measurability, Spec §FR-006]
+- [x] CHK012 Is "**the tool's stored state**" defined concretely (registry, state dir, compose artifacts) so the no-leak requirement is checkable? [Clarity, Spec §FR-003]
+- [x] CHK013 Is "**non-interactive**" defined by an observable property (no TTY / stdin closed) rather than intent? [Measurability, Spec §FR-005]
+- [x] CHK014 Is "**private (owner-only) files**" expressed as a verifiable permission requirement? [Measurability, Spec §FR-012]
+- [x] CHK015 Is "**regenerated each apply**" stated in a way that can be objectively confirmed (e.g. staleness is impossible)? [Measurability, Spec §FR-012]
+- [x] CHK016 Is "**zero changes to the tool**" for an unnamed manager expressed as a testable property rather than an aspiration? [Measurability, Spec §SC-004]
 
 ## Requirement Consistency
 
 - [ ] CHK017 Do the **spec, data-model, and contract** agree on the emptiness rule after remediation (spec says "empty", the design says "empty-or-whitespace-only")? [Conflict, Spec §FR-004]
-- [ ] CHK018 Is the **argv-list shape** described identically in spec, data-model, and contract (non-empty list of strings, no shell)? [Consistency, Spec §FR-001]
-- [ ] CHK019 Are the **named-manager field sets** stated identically across spec, data-model, and contract (1Password `vault`/`item`/`field`; Bitwarden `item`/`field`)? [Consistency, Spec §FR-007]
-- [ ] CHK020 Is terminology consistent — "**resolver**" vs "credential helper" vs "manager" used for distinct concepts without drift? [Consistency]
-- [ ] CHK021 Do the retained-source requirements stay consistent with Feature 006's existing behavior (no silent redefinition of `env`/`file`/`keychain`)? [Consistency, Spec §FR-010]
+      - ⚠️ **FINDING**: CONFLICT — spec FR-004 says "empty"; data-model.md and contracts/credential-managers.md now say "empty-or-whitespace-only".
+- [x] CHK018 Is the **argv-list shape** described identically in spec, data-model, and contract (non-empty list of strings, no shell)? [Consistency, Spec §FR-001]
+- [x] CHK019 Are the **named-manager field sets** stated identically across spec, data-model, and contract (1Password `vault`/`item`/`field`; Bitwarden `item`/`field`)? [Consistency, Spec §FR-007]
+- [x] CHK020 Is terminology consistent — "**resolver**" vs "credential helper" vs "manager" used for distinct concepts without drift? [Consistency]
+- [x] CHK021 Do the retained-source requirements stay consistent with Feature 006's existing behavior (no silent redefinition of `env`/`file`/`keychain`)? [Consistency, Spec §FR-010]
 
 ## Scenario & Edge-Case Coverage (manager failure modes)
 
-- [ ] CHK022 Are requirements defined for **every named failure mode** — binary missing, non-zero exit, timeout, empty output, locked session — or only some? [Coverage, Spec §FR-004]
-- [ ] CHK023 Are requirements defined for a resolver that **blocks on an interactive prompt** (as opposed to merely exiting non-zero)? [Edge Case, Spec §FR-005]
-- [ ] CHK024 Are requirements defined for a resolver whose **stderr carries secret material**, distinct from the generic-message rule? [Coverage, Spec §FR-006]
-- [ ] CHK025 Are requirements defined for **multi-line values** (an SSH key from a manager) reaching the correct delivery channel? [Coverage, Spec §FR-012]
-- [ ] CHK026 Is the **partial-failure** requirement explicit — a later credential's failure must not leave an earlier environment applied? [Coverage, Spec §FR-004]
+- [x] CHK022 Are requirements defined for **every named failure mode** — binary missing, non-zero exit, timeout, empty output, locked session — or only some? [Coverage, Spec §FR-004]
+- [x] CHK023 Are requirements defined for a resolver that **blocks on an interactive prompt** (as opposed to merely exiting non-zero)? [Edge Case, Spec §FR-005]
+- [x] CHK024 Are requirements defined for a resolver whose **stderr carries secret material**, distinct from the generic-message rule? [Coverage, Spec §FR-006]
+- [x] CHK025 Are requirements defined for **multi-line values** (an SSH key from a manager) reaching the correct delivery channel? [Coverage, Spec §FR-012]
+- [x] CHK026 Is the **partial-failure** requirement explicit — a later credential's failure must not leave an earlier environment applied? [Coverage, Spec §FR-004]
 
 ## Migration & Breaking-Change Requirements
 
-- [ ] CHK027 Are the **migration targets** enumerated in the refusal requirement (manager / keychain / external-untracked file), or left to the docs? [Completeness, Spec §FR-009]
-- [ ] CHK028 Is it specified that the removed source is refused with the **actionable migration message rather than the generic unknown-source error**? [Clarity, Spec §FR-009]
-- [ ] CHK029 Are requirements defined for **when** the refusal fires (validation of any command touching the spec, not only `apply`)? [Gap, Spec §FR-009/§FR-015]
+- [x] CHK027 Are the **migration targets** enumerated in the refusal requirement (manager / keychain / external-untracked file), or left to the docs? [Completeness, Spec §FR-009]
+- [x] CHK028 Is it specified that the removed source is refused with the **actionable migration message rather than the generic unknown-source error**? [Clarity, Spec §FR-009]
+- [x] CHK029 Are requirements defined for **when** the refusal fires (validation of any command touching the spec, not only `apply`)? [Gap, Spec §FR-009/§FR-015]
 
 ## Dependencies & Assumptions
 
-- [ ] CHK030 Is the assumption that the operator has an **unlocked manager session** stated as an assumption *and* reflected in a requirement for the failure path? [Assumption, Spec §Assumptions]
+- [x] CHK030 Is the assumption that the operator has an **unlocked manager session** stated as an assumption *and* reflected in a requirement for the failure path? [Assumption, Spec §Assumptions]
 - [ ] CHK031 Is the claim that `keychain` reaches the **macOS Keychain (incl. iCloud-synced)** and the **Linux Secret Service** a verifiable requirement or an untested assertion? [Assumption, Spec §FR-010]
-- [ ] CHK032 Is the "**no new dependency**" constraint stated as a requirement (managers are operator-supplied CLIs), so it is enforceable at review? [Dependency, Spec §Assumptions]
+      - ⚠️ **FINDING**: Stated as a MUST but not verifiable in CI (environmental claim); reads as an inherited-behaviour note rather than a testable requirement.
+- [x] CHK032 Is the "**no new dependency**" constraint stated as a requirement (managers are operator-supplied CLIs), so it is enforceable at review? [Dependency, Spec §Assumptions]
 
 ## Ambiguities & Conflicts
 
-- [ ] CHK033 Is there a requirement preventing an operator from placing a **secret value inside the resolver argv** (the spec notes the risk in edge cases but states no rule)? [Gap, Spec §Edge Cases]
-- [ ] CHK034 Are the **out-of-scope exclusions** (stdin helper protocol, secret writing/rotation, in-container resolution) unambiguous enough to prevent scope creep during implementation? [Clarity, Spec §Out of Scope]
+- [x] CHK033 Is there a requirement preventing an operator from placing a **secret value inside the resolver argv** (the spec notes the risk in edge cases but states no rule)? [Gap, Spec §Edge Cases]
+- [x] CHK034 Are the **out-of-scope exclusions** (stdin helper protocol, secret writing/rotation, in-container resolution) unambiguous enough to prevent scope creep during implementation? [Clarity, Spec §Out of Scope]
+
+## Results — 2026-07-25 (pre-implementation pass)
+
+**25 / 34 pass.** 9 items failed; each carries an inline ⚠️ **FINDING** above. Grouped by fix cost:
+
+| Priority | Items | Nature |
+|----------|-------|--------|
+| **Fix before implement** | CHK009, CHK010 + CHK017, CHK008, CHK001 | An unquantified bound, a spec↔design **conflict**, a vague newline rule, and undefined resolve-timing — all one-line spec edits |
+| **Worth a line** | CHK005, CHK031 | No diagnostic hint on a locked manager; the iCloud claim is an unverifiable MUST |
+| **Record or defer** | CHK002, CHK006 | Duplicate-credential resolution undefined; breaking-change comms live only in tasks.md T016 |
+
+Note: **CHK033 passed on close reading** — FR-013 ("express a credential only as a locator … never as a value") already covers a secret embedded in a resolver argv, contrary to the initial suspicion when the item was written.
 
 ## Notes
 
