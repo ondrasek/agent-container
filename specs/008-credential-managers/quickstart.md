@@ -76,6 +76,29 @@ Read `docs/agent-as-code.md`: the preference hierarchy is explicit — manager /
 local / HW-key-backed **recommended**; a plaintext secret tracked in git **refused**; no
 encrypted-in-git tier. HW keys (YubiKey) are a **backing** for a resolver, not a source.
 
+## Validation results (T015)
+
+- **A — generic `command` source (CI-safe)** — validated by the real-container acceptance
+  `test_declarative_command_source_injects_without_plaintext`: a resolver (`printenv
+  RESOLVER_SRC_008`, a pure **locator**) delivers the secret into the container with the
+  trailing newline stripped, **no plaintext anywhere in the project dir or the output**
+  (SC-001), and a failing resolver **aborts before any change** naming the credential with a
+  remediation hint while its stderr is never echoed (SC-002/FR-006). **Green.**
+- **B — named managers** — argv assembly (`op read op://{vault}/{item}/{field}`,
+  `bw get {field} {item}`) and the required-field refusals are pinned hermetically
+  (`test_resolver_argv_assembly`, `test_named_manager_required_fields`,
+  `test_named_sources_resolve_identically_to_command` for SC-005). The **live** path needs a
+  real unlocked `op`/`bw` session — **opt-in, never CI**.
+- **C — any other manager, zero tool change (SC-004)** — verified by validating + assembling
+  resolvers for **Vault, pass, KeePassXC, and gcloud secrets** with no code change. **Green.**
+- **D — migration refusal (SC-003)** — `test_declarative_encrypted_source_refused_with_migration`
+  (real CLI) plus the hermetic `test_encrypted_source_refused_with_migration`: refused by any
+  command that loads the spec, naming the migration targets, **not** the generic enum error.
+  **Green.**
+- **E — taxonomy** — documented in [`docs/agent-as-code.md`](../../docs/agent-as-code.md)
+  (recommended / refused / removed tiers, HW-key-as-backing, and the migration recipe).
+  **Green.**
+
 ## Success signal
 
 All scenarios pass: a secret referenced through a manager applies and reaches the container

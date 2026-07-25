@@ -3907,7 +3907,17 @@ def wizard_loop() -> int:
 # delivered READ-ONLY via the compose-`configs` channel (remote-safe; FR-020).
 
 PROJECT_MARKER = ".agent-container"
-CRED_SOURCES = ("env", "file", "keychain", "encrypted")
+# Credential sources (008). `command` is the generic resolver — an argv list run
+# DIRECTLY (no shell, no injection surface); `onepassword`/`bitwarden` are named
+# managers whose structured fields the tool assembles into that same argv. The
+# `encrypted` (committed-ciphertext) source was REMOVED — secrets never live in the
+# git remote; a spec still declaring it is refused with a migration (FR-009).
+CRED_SOURCES = ("env", "file", "keychain", "command", "onepassword", "bitwarden")
+# How long a resolver may take before it is killed. The operator pre-unlocks the
+# manager (resolution is non-interactive), so a fetch is quick — but a manager may
+# make a network round-trip (Vault, a cloud store). 30 s covers that while
+# guaranteeing a wedged CLI can never hang an apply (FR-005, research R5).
+RESOLVER_TIMEOUT = 30
 # Credential names that map to a provider API key delivered via the 003 file-first
 # apikey channel (never even the env). Everything else is delivered as an env var.
 CRED_PROVIDER = {
@@ -3958,18 +3968,38 @@ def validate_credential(cred: object, where: str) -> None:
     if not cred.get("name"):
         die(f"{where}: missing required 'name'")
     src = cred.get("source")
+    if src == "encrypted":
+        # Checked BEFORE the enum error so an upgrading operator gets an actionable
+        # migration rather than a bare "not one of {…}" (FR-009).
+        die(
+            f"{where}: the 'encrypted' credential source was REMOVED — a secret must not "
+            f"live in the git remote, even as ciphertext. Migrate to a manager "
+            f"(source: onepassword | bitwarden | command), the OS keychain "
+            f"(source: keychain), or a file OUTSIDE the project / untracked "
+            f"(source: file). See docs/agent-as-code.md."
+        )
     if src not in CRED_SOURCES:
         die(f"{where}: source={src!r} is not one of {{{', '.join(CRED_SOURCES)}}}")
     required_by_source = {
         "env": ("var",),
         "file": ("path",),
         "keychain": ("service", "account"),
-        "encrypted": ("path", "decrypt"),
+        "command": ("argv",),
+        "onepassword": ("vault", "item", "field"),
+        "bitwarden": ("item", "field"),
     }
     detail = required_by_source.get(src, ())
     for k in detail:
         if not cred.get(k):
             die(f"{where}: source={src} requires '{k}'")
+    if src == "command":
+        # The resolver is run DIRECTLY (never through a shell), so argv must be a real
+        # non-empty list of strings — a bare string would be neither runnable nor safe.
+        argv = cred.get("argv")
+        if not isinstance(argv, list) or not argv:
+            die(f"{where}: source=command requires 'argv' to be a non-empty list of strings")
+        if not all(isinstance(a, str) for a in argv):
+            die(f"{where}: source=command 'argv' must contain only strings")
     tgt = cred.get("target")
     if tgt is not None and tgt not in CRED_SSH_TARGETS:
         die(f"{where}: target={tgt!r} is not one of {{{', '.join(CRED_SSH_TARGETS)}}}")
@@ -4373,18 +4403,50 @@ def _keychain_lookup(service: str, account: str, name: str) -> str:
     return r.stdout.rstrip("\n")
 
 
-def _run_decrypt(decrypt_cmd: str, enc_path: Path, name: str) -> str:
-    """Run the operator's decrypt command on the encrypted file; the plaintext is
-    read from stdout and held IN MEMORY only (never to disk). The path rides on argv;
-    the secret never does."""
-    if not enc_path.is_file():
-        die(f"credential {name}: encrypted file {enc_path} does not exist (FR-016)")
-    argv = shlex.split(decrypt_cmd) + [str(enc_path)]
-    r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+RESOLVER_HINT = (
+    "check that the manager CLI is installed and its session is unlocked, and that the item exists"
+)
+
+
+def _run_resolver(argv: list[str], name: str, *, timeout: float = RESOLVER_TIMEOUT) -> str:
+    """Run a credential resolver HOST-SIDE and return its stdout as the secret (FR-001/002).
+
+    The one audited runner every manager source funnels through, so the least-exposure
+    guarantees live in a single place:
+      * `argv` is executed DIRECTLY — never through a shell, so nothing in the locator
+        can be interpreted (Constitution II/III, no injection surface);
+      * stdin is CLOSED — resolution is non-interactive; a resolver that wants to prompt
+        fails instead of blocking (FR-005);
+      * a `timeout` bounds it — a wedged CLI can never hang an apply (FR-005);
+      * on failure the resolver's STDERR IS NEVER ECHOED (it may carry secret material);
+        the message is generic + secret-free, but carries a non-specific remediation hint
+        so the failure stays actionable (FR-006).
+    The value is returned unmodified and held in memory only — newline normalization
+    belongs to delivery (FR-012).
+    """
+    try:
+        r = subprocess.run(
+            argv, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        die(
+            f"credential {name}: resolver '{argv[0]}' did not finish within {timeout:g}s "
+            f"— {RESOLVER_HINT} (FR-005)"
+        )
+    except OSError:
+        # Missing binary / not executable. Report the program name (a locator, never a
+        # secret) but not the OS message verbatim.
+        die(f"credential {name}: resolver '{argv[0]}' could not be run — {RESOLVER_HINT}")
     if r.returncode != 0:
-        # Do NOT echo the tool's stderr — a verbose/broken decrypt wrapper could emit
-        # secret material there. A generic message keeps the log secret-free (III).
-        die(f"credential {name}: decrypt command exited {r.returncode} (FR-016)")
+        die(
+            f"credential {name}: resolver '{argv[0]}' exited {r.returncode} "
+            f"— {RESOLVER_HINT} (FR-004)"
+        )
+    if not r.stdout.strip():
+        # Test the STRIPPED output: delivery strips a trailing newline, so a
+        # whitespace-only result would otherwise become a silently-injected empty
+        # secret (FR-004).
+        die(f"credential {name}: resolver '{argv[0]}' produced no value — {RESOLVER_HINT}")
     return r.stdout
 
 
@@ -4427,10 +4489,30 @@ def resolve_credential_value(cred: dict, root: Path) -> str:
         return p.read_text()
     if src == "keychain":
         return _keychain_lookup(cred["service"], cred["account"], name)
-    # encrypted: the encrypted file may be committed in the project (relative → root).
-    enc = Path(cred["path"])
-    enc = enc if enc.is_absolute() else (root / enc)
-    return _run_decrypt(cred["decrypt"], enc.expanduser(), name)
+    # Manager sources (008): each reduces to "run an argv, take stdout". The named
+    # sources assemble that argv from their structured fields; `command` is the
+    # operator's own. All three go through the one audited runner.
+    return _run_resolver(resolver_argv(cred), name)
+
+
+def resolver_argv(cred: dict) -> list[str]:
+    """The argv a manager-source credential resolves through — assembled from typed
+    fields for a named manager, taken verbatim for the generic `command` source. Pure,
+    so the exact invocation is unit-testable without running anything.
+
+    >>> resolver_argv({"source": "command", "argv": ["pass", "show", "acme/key"]})
+    ['pass', 'show', 'acme/key']
+    >>> resolver_argv({"source": "onepassword", "vault": "Personal", "item": "anthropic", "field": "key"})
+    ['op', 'read', 'op://Personal/anthropic/key']
+    >>> resolver_argv({"source": "bitwarden", "item": "gh-token", "field": "password"})
+    ['bw', 'get', 'password', 'gh-token']
+    """
+    src = cred["source"]
+    if src == "command":
+        return list(cred["argv"])
+    if src == "onepassword":
+        return ["op", "read", f"op://{cred['vault']}/{cred['item']}/{cred['field']}"]
+    return ["bw", "get", cred["field"], cred["item"]]
 
 
 @dataclass

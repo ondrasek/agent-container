@@ -98,8 +98,42 @@ the tool resolves it **in memory** and injects it via the existing runtime chann
 |----------|-----------|
 | `env` | read the named environment variable (`var`) |
 | `file` | read a file at `path` (typically outside the project). A plaintext file that is **git-tracked inside the project** is **refused** with remediation (FR-015); an external file, or a project-local file that is **untracked/gitignored**, is allowed. Detection boundary: only files inside the project tree and known to git are flagged. |
-| `keychain` | OS store — macOS `security find-generic-password -w`, Linux `secret-tool lookup` (by `service`+`account`) |
-| `encrypted` | run the operator's `decrypt` command on `path` (e.g. `age -d -i key`, `sops -d`); the file may be committed, the plaintext stays in memory |
+| `keychain` | OS store — macOS `security find-generic-password -w`, Linux `secret-tool lookup` (by `service`+`account`). On macOS this surfaces iCloud-synced generic passwords. |
+| `command` | run an operator-declared **`argv`** list and take its **stdout** — the generic resolver; covers every manager with a CLI |
+| `onepassword` | `op read op://{vault}/{item}/{field}` — assembled from the typed fields |
+| `bitwarden` | `bw get {field} {item}` — assembled from the typed fields |
+
+### Credential managers (Feature 008)
+
+The repository holds a **locator**; the secret is fetched **host-side at apply** from
+wherever it actually lives. This is git's credential-helper model:
+
+```yaml
+credentials:
+  # named managers — structured, typed fields
+  - { name: ANTHROPIC_API_KEY, source: onepassword, vault: Personal, item: anthropic, field: key }
+  - { name: GH_TOKEN,          source: bitwarden,   item: gh-token, field: password }
+  # generic resolver — any manager with a CLI, zero tool changes
+  - { name: DB_PASSWORD, source: command, argv: ["vault", "kv", "get", "-field=password", "secret/db"] }
+  - { name: API_KEY,     source: command, argv: ["pass", "show", "acme/api-key"] }
+```
+
+The resolver runs **directly — never through a shell** (no injection surface), with
+**stdin closed** (non-interactive: unlock the manager first, e.g. `op signin` / `bw
+unlock`) and a **30 s bound** so a wedged CLI can never hang an apply. A failure
+(missing binary, non-zero exit, timeout, empty or whitespace-only output) **aborts
+before any change**, names the credential, and carries a remediation hint — but the
+resolver's own **stderr is never echoed**, since it may contain secret material. A
+pipe/filter belongs in an operator wrapper script referenced by the `argv`, not inline.
+
+**Only `apply` resolves.** The read-only `plan`/`status` validate the schema but never
+invoke a resolver, so previewing a spec never triggers a manager prompt or a
+hardware-key touch. Resolution is also **not cached**: a credential declared in two
+environments is fetched twice (two touches) — deliberate, to keep the secret's
+in-memory lifetime short.
+
+**HW keys (YubiKey) are a *backing*, not a source** — a manager unlocked by the key, or
+an SSH key resident on it. Nothing extra to declare.
 
 **Delivery** reuses Feature 003's channels: a **provider API key** (name
 `ANTHROPIC_API_KEY`/`anthropic`, `OPENAI_API_KEY`/`openai`) is delivered **file-first**
@@ -118,12 +152,40 @@ identity (`--push-key`, ephemeral `/run`), `host_key` → the inbound sshd host 
 (`--host-key`, persisted to the `~/.ssh` volume), `authorized_key` → an inbound
 principal (`--authorized-key`, accumulates). The resolved key stays in memory then a
 0600 staged file; it never touches the project, logs, argv, or registry. A
-passphrase-protected private key is (correctly) refused for `push_key` — pre-decrypt
-via `source: encrypted`.
+passphrase-protected private key is (correctly) refused for `push_key` — store the
+unencrypted key in a manager and fetch it, rather than decrypting a committed file.
 
 ```yaml
 credentials:
-  - { name: git-push, source: encrypted, path: ./deploy.key.age, decrypt: "age -d -i ~/.age/key", target: push_key }
+  - { name: git-push, source: onepassword, vault: Infra, item: deploy-key, field: private_key, target: push_key }
+  - { name: git-push, source: command, argv: ["pass", "show", "infra/deploy-key"], target: push_key }
+```
+
+## Where secrets should live — the recommended taxonomy
+
+| Tier | Sources | Posture |
+|------|---------|---------|
+| ✅ **Recommended** | `onepassword`, `bitwarden`, `command` (any manager CLI), `keychain`, `env`, `file` *outside the project or untracked* | The secret lives in your OS keychain, a password manager, or a HW-key-backed store. **The repo holds only a locator** — safe to commit and review. |
+| ⛔ **Refused** | a plaintext secret **file tracked in git** inside the project | Blocked with remediation — the tool will not deploy it. |
+| 🚫 **Removed** | ~~`encrypted`~~ (age/sops on a committed ciphertext) | **Gone as of Feature 008.** Secrets do not belong in the git remote, even encrypted. |
+
+### Migrating off `encrypted`
+
+A spec still declaring `source: encrypted` is **refused** (naming the migration) by any
+command that loads it. Move the secret out of the repository:
+
+```bash
+# 1. decrypt once, locally
+age -d -i ~/.age/key ./secret.age            # or: sops -d ./secret.enc
+
+# 2. put it where it belongs — pick one
+op item create --category=password --title=acme-key password=<value>   # 1Password
+bw create item ...                                                     # Bitwarden
+security add-generic-password -s acme -a bot -w <value>                # macOS keychain
+
+# 3. point the spec at it, then delete the committed ciphertext
+#    - { name: K, source: onepassword, vault: Personal, item: acme-key, field: password }
+git rm ./secret.age
 ```
 
 **Notes.** All declared credentials are resolved **up front** — before any container
@@ -166,6 +228,10 @@ with read-only spec integrity (US1); credential resolution incl. SSH-key `target
 routing (US2 + T012a); field-level drift → converge + scoped teardown + partial-failure
 reporting (US3); declarative host provisioning with `destroy --deprovision` (US4). The
 real-Hetzner provisioned-host acceptance is opt-in/tokened (billable — never CI).
+
+**Feature 008 (credential managers)** layers on: the generic `command` resolver + named
+`onepassword`/`bitwarden` sources, and the **removal** of `encrypted` — see the taxonomy
+and migration above.
 
 See [`specs/006-agent-as-code/`](../specs/006-agent-as-code/) for the full spec,
 plan, and contract.
