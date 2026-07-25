@@ -103,14 +103,53 @@ def test_compose_up_exec_port_is_name_hash(wiz, capture_compose, monkeypatch, tm
     assert model["services"]["agent"]["ports"] == ["2204:2222"]
 
 
-def test_compose_up_exec_aborts_on_busy_port(wiz, capture_compose, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "port_free", lambda port: False)
+def test_compose_up_exec_waits_for_busy_port_then_proceeds(
+    wiz, capture_compose, monkeypatch, tmp_path
+):
+    """A busy port is a TRANSIENT teardown state, not a fatal error: the pre-check
+    cannot reserve the port, so it waits and then defers to the daemon (which is the
+    only component that can actually bind it). Previously this hard-failed, turning
+    an in-progress teardown into 'port is already in use — pick a different name'."""
+    waited = []
+    monkeypatch.setattr(wiz, "port_free", lambda port: False)  # busy the whole time
+    monkeypatch.setattr(wiz, "wait_port_released", lambda port, *a, **k: waited.append(port))
     monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
-    with pytest.raises(wiz.Fatal, match="port 2206 is already in use"):
-        wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
-    assert capture_compose == []  # no compose up attempted
-    assert wiz.read_state_port("local", "acme") is None  # no state written
+    wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
+    assert waited == [2206]  # it waited for the port rather than dying
+    assert capture_compose, "the deploy must still be attempted — the daemon decides"
+
+
+def test_wait_port_released_reports_timeout_instead_of_silent_giveup(wiz, monkeypatch, capsys):
+    """A silent give-up made the subsequent failure unattributable — the operator saw
+    'port in use' with no hint that teardown simply had not finished."""
+    monkeypatch.setattr(wiz, "port_free", lambda port: False)
+    assert wiz.wait_port_released(2206, timeout=0.01) is False
+    err = capsys.readouterr().err
+    assert "2206" in err and "still held" in err
+
+
+def test_port_free_uses_reuseaddr_matching_daemon_semantics(wiz):
+    """Probing WITHOUT SO_REUSEADDR reports 'in use' for a TIME_WAIT socket that a
+    daemon (which sets SO_REUSEADDR) would bind fine — a false negative that used to
+    become a hard failure. The probe must ask what the DAEMON can do."""
+    import socket
+
+    opts = []
+    real = socket.socket
+
+    class Probe(real):  # type: ignore[misc]
+        def setsockopt(self, level, optname, value):  # noqa: D102
+            opts.append((level, optname, value))
+            return super().setsockopt(level, optname, value)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(socket, "socket", Probe)
+    try:
+        wiz.port_free(0)  # port 0 always binds; we only care about the sockopt
+    finally:
+        monkey.undo()
+    assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in opts
 
 
 def test_compose_up_exec_failed_run_writes_no_state(wiz, monkeypatch, tmp_path):
