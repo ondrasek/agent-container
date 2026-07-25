@@ -53,6 +53,12 @@ never be handed a secret, and must never be left waiting on a prompt**.
   **All four targets implement it**: Claude Code, OpenAI Codex, OpenCode, and pi. So the tool
   authors **one standard-conformant skill**, and the only per-agent variable is the
   **discovery path** each agent scans — not the format.
+- Q: How does an agent switch the CLI into machine-readable mode? → A: **A per-command
+  `--json` flag**, extending the convention the three existing commands already use. No
+  global switch and no environment variable; an agent passes the flag on every call.
+- Q: Where does the skill install by default? → A: **Into the project** (the repo's agent
+  configuration), so it is reviewable and version-controlled; **`--user` opts in** to the
+  home-directory configuration instead.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -181,8 +187,10 @@ confirm no trace remains.
 
 ### Functional Requirements
 
-- **FR-001**: Every command MUST support a **machine-readable output mode** that emits
-  structured data, so an agent never parses human-formatted text.
+- **FR-001**: Every command MUST accept a **`--json` flag** that switches it to
+  machine-readable structured output, extending the convention the existing commands already
+  use. Mode is selected **per command invocation** — there is no global switch or environment
+  variable — so an agent passes the flag on every call.
 - **FR-002**: In machine-readable mode, human-oriented decoration (colour, progress,
   spinners, tables) MUST NOT appear in the parsed output stream.
 - **FR-003**: Every failure MUST carry a **stable identifier** for the failure class,
@@ -213,6 +221,10 @@ confirm no trace remains.
 - **FR-012a**: The skill definition MUST conform to the **Agent Skills open standard** — a
   folder containing a `SKILL.md` whose frontmatter carries at least `name` and `description`
   — so it is portable across every skills-compatible agent rather than bespoke per tool.
+- **FR-012b**: The skill MUST install into the **project's** agent configuration by default,
+  so it is reviewable and version-controlled alongside the code it describes; installing into
+  the **user's** home configuration MUST require an explicit opt-in. The chosen scope MUST be
+  stated in what the command reports (FR-016).
 - **FR-013**: Installing the skill MUST be **idempotent**: re-running it on an unmodified,
   current installation makes no change and reports that.
 - **FR-014**: The skill command MUST **never silently overwrite an operator's edits** to an
@@ -269,7 +281,11 @@ confirm no trace remains.
 ## Assumptions
 
 - **Machine-readable means the existing `--json` convention**, extended to every command
-  rather than the three that carry it today; a new output format is not introduced.
+  rather than the three that carry it today; a new output format is not introduced. Selecting
+  it **per invocation** (FR-001) accepts a known tradeoff: an agent that omits the flag gets
+  prose. That is tolerable because the omission is **self-evident** — the output simply fails
+  to parse as structured data — rather than silently yielding wrong values, and the
+  machine-readable help (FR-008) advertises the flag.
 - **Structured output goes to standard output; human and diagnostic text goes to standard
   error**, following the discipline Feature 005 established for its print/emit surface, so a
   parsing caller reads a clean stream.
@@ -281,10 +297,8 @@ confirm no trace remains.
 - **The agents that DRIVE the CLI and the agents that RUN INSIDE the container are the same
   four** — the container's agent set is being extended with opencode to match, so the two
   lists do not diverge.
-- **The skill installs into the project-local agent configuration by default**, with an
-  explicit opt-in for the user-level configuration — the project-local default keeps the
-  change reviewable and version-controllable, matching how the `specify` CLI seeds speckit
-  commands.
+- The skill's install scope is no longer an assumption — it is **FR-012b** (project by
+  default, `--user` to opt in).
 - **Non-interactive refusal of destructive actions already exists for some verbs**; this
   feature generalizes that behavior rather than inventing it.
 - This feature concerns the **host-side CLI only** and changes neither the container image
