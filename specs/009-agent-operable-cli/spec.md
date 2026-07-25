@@ -59,6 +59,11 @@ never be handed a secret, and must never be left waiting on a prompt**.
 - Q: Where does the skill install by default? → A: **Into the project** (the repo's agent
   configuration), so it is reviewable and version-controlled; **`--user` opts in** to the
   home-directory configuration instead.
+- Q: If `--json` is per-invocation, what stops an agent from forgetting it? → A: **The skill
+  enforces it.** The installed skill definition MUST instruct the agent to pass `--json` on
+  every invocation, and every command example it carries MUST include the flag. The skill is
+  what teaches the agent to call the tool, so that is where the convention is made binding —
+  rather than changing the CLI's default.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -159,6 +164,10 @@ confirm no trace remains.
    deleted and nothing the tool created is left behind.
 5. **Given** an unsupported or absent agent configuration, **When** an install is attempted,
    **Then** the tool refuses with a clear statement of what it looked for and where.
+6. **Given** the installed skill definition, **When** an agent reads it, **Then** it is
+   instructed to pass `--json` on every invocation, and **every command example in the skill
+   carries the flag** — so the machine-readable convention is enforced by the agent's own
+   instructions rather than left to recall.
 
 ---
 
@@ -225,6 +234,11 @@ confirm no trace remains.
   so it is reviewable and version-controlled alongside the code it describes; installing into
   the **user's** home configuration MUST require an explicit opt-in. The chosen scope MUST be
   stated in what the command reports (FR-016).
+- **FR-012c**: The skill definition MUST **enforce the machine-readable convention**: it MUST
+  instruct the agent to pass `--json` on **every** invocation, and **every command example it
+  contains MUST include the flag**. This is what makes the per-invocation choice in FR-001
+  workable — the agent's own instructions carry the convention, so it is not left to the
+  agent to remember.
 - **FR-013**: Installing the skill MUST be **idempotent**: re-running it on an unmodified,
   current installation makes no change and reports that.
 - **FR-014**: The skill command MUST **never silently overwrite an operator's edits** to an
@@ -282,10 +296,11 @@ confirm no trace remains.
 
 - **Machine-readable means the existing `--json` convention**, extended to every command
   rather than the three that carry it today; a new output format is not introduced. Selecting
-  it **per invocation** (FR-001) accepts a known tradeoff: an agent that omits the flag gets
-  prose. That is tolerable because the omission is **self-evident** — the output simply fails
-  to parse as structured data — rather than silently yielding wrong values, and the
-  machine-readable help (FR-008) advertises the flag.
+  it **per invocation** (FR-001) is made workable by **FR-012c**: the installed skill
+  instructs the agent to pass `--json` every time, so the convention lives in the agent's own
+  instructions rather than depending on recall. Should it still be omitted, the failure is
+  **self-evident** — the output does not parse as structured data — rather than silently
+  yielding wrong values.
 - **Structured output goes to standard output; human and diagnostic text goes to standard
   error**, following the discipline Feature 005 established for its print/emit surface, so a
   parsing caller reads a clean stream.
