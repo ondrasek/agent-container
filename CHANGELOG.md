@@ -2,6 +2,68 @@
 
 <!-- version list -->
 
+## v0.15.0 (2026-07-25)
+
+### Bug Fixes
+
+- **build**: Stop shipping operator secrets in the docker build context
+  ([`7e8e2bf`](https://github.com/ondrasek/agent-container/commit/7e8e2bfb31479ac4ecacece6abda0b36239e2fee))
+
+### Chores
+
+- Sync uv.lock to released version ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`707fcc8`](https://github.com/ondrasek/agent-container/commit/707fcc8932063b94f069871bb1d91a8b31606dec))
+
+### Documentation
+
+- **specs**: Add credentials requirements-quality checklist for Feature 008
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`05daf6d`](https://github.com/ondrasek/agent-container/commit/05daf6dc5d4d0a7ec0c4e8446b6d52c6345465db))
+
+- **specs**: Clarify Feature 008 credential-managers
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`c71dda1`](https://github.com/ondrasek/agent-container/commit/c71dda132580f73e6e9ee51f81cb785ddcebeee2))
+
+- **specs**: Plan Feature 008 credential-managers
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`51cf28b`](https://github.com/ondrasek/agent-container/commit/51cf28b196793a2f879ab7f6b0c248e5391a665a))
+
+- **specs**: Remediate analyze findings for Feature 008 credential-managers
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`c8ba535`](https://github.com/ondrasek/agent-container/commit/c8ba5359a5f527883c7f1c4f0426a818dbb1bd1b))
+
+- **specs**: Resolve all 9 checklist findings for Feature 008
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`2c0e634`](https://github.com/ondrasek/agent-container/commit/2c0e634cfb15494e5095632aad8cc7f625a02dd4))
+
+- **specs**: Specify Feature 008 credential-managers
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`d0cea0a`](https://github.com/ondrasek/agent-container/commit/d0cea0a80e0b8d6f8d0070b39ca645115a491018))
+
+- **specs**: Task list for Feature 008 credential-managers
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`9695530`](https://github.com/ondrasek/agent-container/commit/9695530e3d7237b3bb458d657b4706b760f640fe))
+
+- **specs**: Work through the 008 credentials requirements checklist
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`eb02706`](https://github.com/ondrasek/agent-container/commit/eb0270647c7ee3c0e571173945d6118dd2dc1a38))
+
+### Features
+
+- **cli**: Credential managers as first-class sources
+  ([#008](https://github.com/ondrasek/agent-container/pull/8),
+  [`b613b5b`](https://github.com/ondrasek/agent-container/commit/b613b5bc410448e0c834871a1a565f6791a99ff2))
+
+### Breaking Changes
+
+- **cli**: The `encrypted` credential source (age/sops decrypting a committed ciphertext) has been
+  REMOVED — secrets must not live in the git remote, even as ciphertext. A spec still declaring
+  `source: encrypted` is refused by any command that loads it, with a message naming the migration:
+  move the secret into a manager (source: onepassword | bitwarden | command), the OS keychain
+  (source: keychain), or a file outside the project / untracked (source: file). See
+  docs/agent-as-code.md for the migration recipe.
+
+
 ## v0.14.0 (2026-07-24)
 
 
