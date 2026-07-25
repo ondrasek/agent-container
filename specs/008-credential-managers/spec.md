@@ -174,19 +174,25 @@ the retained sources (`env`, `file`, `keychain`) still work.
   Constitution II/III) and captures its standard output as the secret value. Any pipe/filter
   is an operator wrapper script referenced by the argv, not an inline shell string.
 - **FR-002**: The resolver MUST run **host-side at apply time**, on the operator's machine
-  — never inside the container and never visible to the agent.
+  — never inside the container and never visible to the agent. Resolution happens **only on
+  `apply`**: the read-only `plan`/`status` commands MUST NOT invoke a resolver, so previewing
+  a spec never triggers a manager prompt or a hardware-key touch.
 - **FR-003**: A resolved secret value MUST NOT appear in the repository, in command
   arguments, in logs, or in the tool's stored state; it lives only in memory and in the
   existing private, per-deployment staged files (Constitution III, Least Exposure).
-- **FR-004**: A resolver failure (command missing, non-zero exit, empty when a value is
-  required) MUST cause the tool to **fail before making any change** and name the failing
-  credential and source (carrying over Feature 006's up-front resolution of all
-  credentials).
-- **FR-005**: Resolution MUST be **non-interactive** and bounded in time: the resolver
-  receives no interactive input and a resolver that does not complete promptly fails
-  rather than hanging the apply.
+- **FR-004**: A resolver failure (command missing, non-zero exit, or output that is **empty
+  or whitespace-only**) MUST cause the tool to **fail before making any change** and name the
+  failing credential and source (carrying over Feature 006's up-front resolution of all
+  credentials). Whitespace-only counts as empty because delivery strips a trailing newline —
+  a whitespace-only result would otherwise become a silently-injected empty secret.
+- **FR-005**: Resolution MUST be **non-interactive** and **bounded in time**: the resolver
+  receives no interactive input (its standard input is closed), and a resolver that has not
+  completed within **30 seconds** fails rather than hanging the apply.
 - **FR-006**: The tool MUST never echo a resolver's error-stream output (it may contain
-  secret material); failures are reported with a generic, secret-free message.
+  secret material); failures are reported with a generic, secret-free message. Because
+  suppressing that stream also suppresses the manager's own diagnostic, the message MUST
+  carry a **non-specific remediation hint** (e.g. that the manager may need unlocking or the
+  item may not exist) so a failure is still actionable.
 - **FR-007**: The tool MUST provide **named convenience sources** for at least **1Password**
   and **Bitwarden**, each accepting a small set of **structured typed fields** that the tool
   assembles into the correct (no-shell) argv invocation — **1Password**: `vault` / `item` /
@@ -197,16 +203,22 @@ the retained sources (`env`, `file`, `keychain`) still work.
   require changing the tool.
 - **FR-009**: The tool MUST **remove the encrypted-in-repo source** (decrypting a committed
   ciphertext file); a spec that still declares it MUST be refused before any change with a
-  message naming an actionable migration.
+  message naming an actionable migration. The removal MUST also be **announced to upgrading
+  operators** as a breaking change in the released changelog, not only in the refusal.
 - **FR-010**: The tool MUST retain the `env`, `file` (outside the tracked tree or
-  untracked), and `keychain` sources; `keychain` MUST continue to reach the macOS Keychain
-  (including iCloud-synced generic passwords) and the Linux Secret Service.
+  untracked), and `keychain` sources; `keychain` MUST continue to reach the platform
+  credential store on macOS and Linux exactly as in Feature 006 (no behavior change).
+  *Note (environmental, not a testable requirement): on macOS that store surfaces
+  iCloud-synced generic passwords, and on Linux it is the Secret Service.*
 - **FR-011**: A plaintext secret **file tracked in git inside the project** MUST remain
   refused (unchanged from Feature 006).
 - **FR-012**: The resolved secret MUST be delivered through the **existing runtime
   injection channels** (the file-first API-key channel, the per-deployment secrets
   env-file, or the SSH-key targets), staged as private (owner-only) files under the
-  operator's private state directory, regenerated each apply.
+  operator's private state directory, regenerated each apply. A resolver's **trailing
+  newline** (managers commonly emit one) MUST be **stripped** for the API-key and env-file
+  channels and **ensured** for SSH-key delivery, so a manager's output can never corrupt the
+  delivered value.
 - **FR-013**: The repository spec MUST express a credential only as a **locator** (which
   manager / item / field, or which resolver to run) and never as a value, so a spec is
   safe to commit and review.
@@ -265,6 +277,10 @@ the retained sources (`env`, `file`, `keychain`) still work.
   reached through the generic resolver until (optionally) named later.
 - No new third-party dependency is introduced in the tool: managers are **external CLIs the
   operator already has** (Constitution VI, Least Dependencies).
+- Resolution is **not de-duplicated or cached**: a credential declared in two environments is
+  resolved once per declaration, so a hardware-backed manager may prompt/touch more than once
+  per apply. Accepted deliberately — caching a secret across declarations would extend its
+  in-memory lifetime for a marginal convenience gain.
 
 ## Out of Scope
 

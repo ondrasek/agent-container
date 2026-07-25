@@ -49,8 +49,10 @@ the SSH channels. Unknown keys are rejected.
 
 ## 3. CLI / behavior
 
-- No new command or flag — the schema is consumed by the existing `apply`/`plan`/`status`
-  path (a credential is a locator the reconcile already resolves).
+- No new command or flag. The credential schema is **validated** by every command that loads
+  the spec (`apply`/`plan`/`status`), but a resolver is **invoked only by `apply`** — the
+  read-only commands never contact a manager, so a preview cannot trigger a manager prompt or
+  a hardware-key touch (FR-002).
 - A named manager the tool does not ship (`pass`, Vault, KeePassXC, cloud stores) is reached
   through the generic `command` source with **zero** tool change (FR-008/SC-004).
 - **Migration**: a spec still declaring `source: encrypted` is refused with an actionable
