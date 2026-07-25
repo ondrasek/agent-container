@@ -1432,3 +1432,86 @@ def test_declarative_provisioned_host_hetzner(acc):
         assert d.returncode == 0, f"destroy --deprovision failed:\n{d.stderr}"
         gone = acc.cli(["host", "show", hostname, "--json"], extra_env=tok)
         assert gone.returncode != 0  # host removed from the registry after deprovision
+
+
+# --- Feature 008: credential managers (real container) -----------------------
+# The generic `command` resolver exercises the whole manager path end-to-end with a
+# trivial resolver — no real manager CLI (and no account/secret) needed in CI.
+
+# NOTE: the resolver argv is a pure LOCATOR — `printenv <VAR>` names where the secret
+# lives, never the value itself (FR-013). Embedding the value here would put a secret in
+# the tracked spec, which is precisely what this feature exists to prevent.
+_CMD_CRED_PROJECT = """\
+environments:
+  - name: {name}
+    host: local
+    container:
+      mode: interactive
+      agent: claude
+      workspace: persistent
+      env_file: ./ci.env
+    credentials:
+      - {{ name: MYSECRET, source: command, argv: ["printenv", "RESOLVER_SRC_008"] }}
+"""
+
+
+def test_declarative_command_source_injects_without_plaintext(acc):
+    """T007 / SC-001+SC-002: a credential fetched by a resolver reaches the container,
+    no plaintext lands in the project, and a failing resolver aborts before any change."""
+    name = "aac008"
+    secret = "sk-from-resolver-008"
+    proj = acc.tmp / "cred008"
+    (proj / ".agent-container").mkdir(parents=True)
+    spec_file = proj / ".agent-container" / "project.yaml"
+    spec_file.write_text(_CMD_CRED_PROJECT.format(name=name))
+    (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+    acc.register(name)
+    # The secret lives ONLY in the operator's environment; the spec names the variable.
+    env = {"RESOLVER_SRC_008": secret}
+
+    r = acc.cli(["apply", "-y"], cwd=proj, extra_env=env)
+    assert r.returncode == 0, f"apply failed:\n{r.stderr}"
+    _wait_container_state(f"agent-container-{name}", "running")
+
+    # the resolver's value reached the container (trailing newline stripped, FR-012)...
+    got = _exec(name, ["printenv", "MYSECRET"])
+    assert got.returncode == 0 and got.stdout.strip() == secret
+    # ...and no plaintext anywhere in the tracked project or the tool's output (SC-001)
+    on_disk = [p for p in proj.rglob("*") if p.is_file() and secret in p.read_text(errors="ignore")]
+    assert on_disk == [], f"SC-001 breach: plaintext in project dir: {on_disk}"
+    assert secret not in r.stdout and secret not in r.stderr
+
+    # SC-002: a resolver that fails aborts before any change, naming the credential.
+    # Uses a FRESH environment: an already-matching one is an idempotent no-op that
+    # never re-resolves, so it could not exercise the failure path.
+    bad_name = "aac008b"
+    bad_proj = acc.tmp / "cred008bad"
+    (bad_proj / ".agent-container").mkdir(parents=True)
+    (bad_proj / ".agent-container" / "project.yaml").write_text(
+        _CMD_CRED_PROJECT.format(name=bad_name).replace(
+            '["printenv", "RESOLVER_SRC_008"]', '["printenv", "NO_SUCH_VAR_008"]'
+        )
+    )
+    (bad_proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+    acc.register(bad_name)
+    bad = acc.cli(["apply", "-y"], cwd=bad_proj, extra_env=env)
+    assert bad.returncode != 0, "a failing resolver must abort the apply"
+    assert "MYSECRET" in bad.stderr  # names the failing credential
+    assert "unlocked" in bad.stderr  # carries the remediation hint (FR-006)
+    assert _container_state(f"agent-container-{bad_name}") == ""  # nothing was created
+
+
+def test_declarative_encrypted_source_refused_with_migration(acc):
+    """T010 / SC-003: the removed `encrypted` source is refused before any change,
+    with an actionable migration rather than a generic enum error."""
+    proj = acc.tmp / "cred008mig"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "project.yaml").write_text(
+        "environments:\n  - name: aac008mig\n    host: local\n"
+        "    credentials:\n"
+        "      - { name: K, source: encrypted, path: ./k.age, decrypt: 'age -d' }\n"
+    )
+    r = acc.cli(["status"], cwd=proj)
+    assert r.returncode != 0
+    assert "REMOVED" in r.stderr and "onepassword" in r.stderr
+    assert "is not one of" not in r.stderr

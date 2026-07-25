@@ -122,8 +122,8 @@ def test_credential_validation(wiz):
     wiz.validate_credential({"name": "K", "source": "env", "var": "K"}, "w")  # ok
     with pytest.raises(wiz.Fatal, match="source='bad'"):
         wiz.validate_credential({"name": "K", "source": "bad"}, "w")
-    with pytest.raises(wiz.Fatal, match="requires 'decrypt'"):
-        wiz.validate_credential({"name": "K", "source": "encrypted", "path": "x"}, "w")
+    with pytest.raises(wiz.Fatal, match="requires 'account'"):
+        wiz.validate_credential({"name": "K", "source": "keychain", "service": "s"}, "w")
 
 
 def test_env_host_binding_referenced_vs_provisioned(wiz, tmp_path):
@@ -480,27 +480,22 @@ def test_resolve_credential_keychain(wiz, tmp_path, monkeypatch):
     assert wiz.resolve_credential_value(cred, tmp_path) == "kc-secret"
 
 
-def test_resolve_credential_encrypted_in_memory(wiz, tmp_path, monkeypatch):
+def test_resolve_credential_command_in_memory(wiz, tmp_path, monkeypatch):
+    # The generic resolver: the declared argv is run verbatim and its stdout is the
+    # secret. The VALUE never rides on argv — only the locator does (FR-013).
     import subprocess
 
-    root = tmp_path / "proj"
-    (root / ".agent-container").mkdir(parents=True)
-    (root / ".agent-container" / "s.age").write_text("ENCRYPTED-BYTES")
     seen = {}
 
     def fake_run(argv, **k):
         seen["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0, stdout="decrypted-secret")
+        return subprocess.CompletedProcess(argv, 0, stdout="resolved-secret\n")
 
     monkeypatch.setattr(wiz.subprocess, "run", fake_run)
-    cred = {
-        "name": "K",
-        "source": "encrypted",
-        "path": ".agent-container/s.age",
-        "decrypt": "age -d -i key",
-    }
-    assert wiz.resolve_credential_value(cred, root) == "decrypted-secret"
-    assert "decrypted-secret" not in " ".join(seen["argv"])  # secret never on argv
+    cred = {"name": "K", "source": "command", "argv": ["pass", "show", "acme/key"]}
+    assert wiz.resolve_credential_value(cred, tmp_path) == "resolved-secret\n"
+    assert seen["argv"] == ["pass", "show", "acme/key"]
+    assert "resolved-secret" not in " ".join(seen["argv"])  # secret never on argv
 
 
 def test_refuse_git_tracked_plaintext(wiz, tmp_path, monkeypatch):
@@ -875,3 +870,260 @@ def test_apply_threads_ssh_push_key_to_do_up(wiz, aac_env, tmp_path, monkeypatch
     wiz.do_aac_apply(yes=True)
     _name, kw = aac_env["up"][0]
     assert kw["push_key"] is not None and kw["push_key"].read_text().startswith("-----BEGIN KEY")
+
+
+# --- Feature 008: credential managers ----------------------------------------
+# The one audited resolver runner + the manager sources. Least exposure
+# (Constitution III) is pinned explicitly: no shell, stdin closed, bounded, and a
+# resolver's stderr must never reach the operator-visible message.
+
+
+def _fake_run(monkeypatch, wiz, *, rc=0, out="secret", err="", raises=None):
+    """Stub subprocess.run for the resolver, capturing how it was invoked."""
+    import subprocess
+
+    seen = {}
+
+    def fake(argv, **kw):
+        seen["argv"] = argv
+        seen["kw"] = kw
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(argv, rc, stdout=out, stderr=err)
+
+    monkeypatch.setattr(wiz.subprocess, "run", fake)
+    return seen
+
+
+def test_run_resolver_no_shell_stdin_closed_bounded(wiz, monkeypatch):
+    # T002: run the argv DIRECTLY (no shell), stdin closed, timeout applied.
+    seen = _fake_run(monkeypatch, wiz, out="v")
+    wiz._run_resolver(["op", "read", "op://a/b/c"], "K")
+    assert seen["argv"] == ["op", "read", "op://a/b/c"]
+    assert seen["kw"].get("shell") is None  # never shell=True (Constitution II/III)
+    assert seen["kw"]["stdin"] is wiz.subprocess.DEVNULL  # non-interactive (FR-005)
+    assert seen["kw"]["timeout"] == wiz.RESOLVER_TIMEOUT  # bounded (FR-005)
+
+
+def test_run_resolver_metacharacters_passed_literally(wiz, monkeypatch):
+    # A shell metacharacter in a locator is just a character — nothing interprets it.
+    seen = _fake_run(monkeypatch, wiz, out="v")
+    wiz._run_resolver(["pass", "show", "acme/key; rm -rf /"], "K")
+    assert seen["argv"][2] == "acme/key; rm -rf /"
+
+
+def test_run_resolver_timeout_dies(wiz, monkeypatch):
+    import subprocess
+
+    _fake_run(monkeypatch, wiz, raises=subprocess.TimeoutExpired("op", 30))
+    with pytest.raises(wiz.Fatal, match="did not finish within"):
+        wiz._run_resolver(["op", "read", "x"], "K")
+
+
+def test_run_resolver_missing_binary_dies(wiz, monkeypatch):
+    _fake_run(monkeypatch, wiz, raises=FileNotFoundError("no op"))
+    with pytest.raises(wiz.Fatal, match="could not be run"):
+        wiz._run_resolver(["op", "read", "x"], "K")
+
+
+def test_run_resolver_nonzero_dies(wiz, monkeypatch):
+    _fake_run(monkeypatch, wiz, rc=1, out="")
+    with pytest.raises(wiz.Fatal, match="exited 1"):
+        wiz._run_resolver(["op", "read", "x"], "K")
+
+
+def test_run_resolver_empty_and_whitespace_only_die(wiz, monkeypatch):
+    # FR-004: whitespace-only counts as empty — delivery strips the trailing newline,
+    # so it would otherwise become a silently-injected EMPTY secret (analyze C2).
+    for out in ("", "\n", "   \n\t "):
+        _fake_run(monkeypatch, wiz, out=out)
+        with pytest.raises(wiz.Fatal, match="produced no value"):
+            wiz._run_resolver(["op", "read", "x"], "K")
+
+
+def test_run_resolver_never_echoes_stderr(wiz, monkeypatch):
+    # FR-006 / Constitution III: a secret planted on the resolver's stderr must not
+    # reach the operator-visible message.
+    _fake_run(monkeypatch, wiz, rc=1, out="", err="FATAL: token sk-LEAKED-ON-STDERR")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz._run_resolver(["op", "read", "x"], "K")
+    assert "sk-LEAKED-ON-STDERR" not in str(e.value)
+
+
+def test_run_resolver_failure_carries_remediation_hint(wiz, monkeypatch):
+    # FR-006: suppressing the resolver's own diagnostic must not leave the operator
+    # without a clue — every failure carries a non-specific hint.
+    import subprocess
+
+    cases = [
+        dict(rc=1, out=""),
+        dict(out=""),
+        dict(raises=FileNotFoundError("x")),
+        dict(raises=subprocess.TimeoutExpired("op", 30)),
+    ]
+    for kw in cases:
+        _fake_run(monkeypatch, wiz, **kw)
+        with pytest.raises(wiz.Fatal) as e:
+            wiz._run_resolver(["op", "read", "x"], "K")
+        assert "unlocked" in str(e.value)  # the shared RESOLVER_HINT
+
+
+# --- schema validation (T005/T008/T010) --------------------------------------
+
+
+def test_command_argv_must_be_nonempty_string_list(wiz):
+    ok = {"name": "K", "source": "command", "argv": ["op", "read", "x"]}
+    wiz.validate_credential(ok, "w")
+    for bad in ("op read x", [], ["op", 3], {"a": 1}):
+        with pytest.raises(wiz.Fatal, match="argv"):
+            wiz.validate_credential({"name": "K", "source": "command", "argv": bad}, "w")
+    # argv missing entirely
+    with pytest.raises(wiz.Fatal, match="requires 'argv'"):
+        wiz.validate_credential({"name": "K", "source": "command"}, "w")
+
+
+def test_named_manager_required_fields(wiz):
+    wiz.validate_credential(
+        {"name": "K", "source": "onepassword", "vault": "v", "item": "i", "field": "f"}, "w"
+    )
+    wiz.validate_credential({"name": "K", "source": "bitwarden", "item": "i", "field": "f"}, "w")
+    with pytest.raises(wiz.Fatal, match="requires 'field'"):
+        wiz.validate_credential(
+            {"name": "K", "source": "onepassword", "vault": "v", "item": "i"}, "w"
+        )
+    with pytest.raises(wiz.Fatal, match="requires 'item'"):
+        wiz.validate_credential({"name": "K", "source": "bitwarden", "field": "password"}, "w")
+
+
+def test_named_manager_unknown_key_rejected(wiz):
+    with pytest.raises(wiz.Fatal, match="unknown credential key 'argv'"):
+        wiz.validate_credential(
+            {"name": "K", "source": "bitwarden", "item": "i", "field": "f", "argv": ["x"]}, "w"
+        )
+
+
+def test_encrypted_source_refused_with_migration(wiz, tmp_path):
+    # FR-009/SC-003: the removed source must give an ACTIONABLE migration, not the
+    # generic "not one of {…}" enum error.
+    cred = {"name": "K", "source": "encrypted", "path": "s.age", "decrypt": "age -d"}
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.validate_credential(cred, "w")
+    msg = str(e.value)
+    assert "REMOVED" in msg
+    assert "onepassword" in msg and "keychain" in msg  # names the migration targets
+    assert "is not one of" not in msg  # NOT the generic enum error
+    # and it is refused at spec-load time, before any action (FR-015)
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: acme\n    host: local\n    credentials:\n"
+        "      - { name: K, source: encrypted, path: s.age, decrypt: 'age -d' }\n",
+    )
+    with pytest.raises(wiz.Fatal, match="REMOVED"):
+        wiz.load_project_spec(root)
+
+
+def test_retained_sources_still_validate(wiz):
+    # Regression guard: 008 must not disturb the Feature 006 sources.
+    wiz.validate_credential({"name": "K", "source": "env", "var": "V"}, "w")
+    wiz.validate_credential({"name": "K", "source": "file", "path": "/x/k"}, "w")
+    wiz.validate_credential(
+        {"name": "K", "source": "keychain", "service": "s", "account": "a"}, "w"
+    )
+
+
+# --- resolver argv assembly (T005/T008) --------------------------------------
+
+
+def test_resolver_argv_assembly(wiz):
+    assert wiz.resolver_argv({"source": "command", "argv": ["a", "b"]}) == ["a", "b"]
+    assert wiz.resolver_argv(
+        {"source": "onepassword", "vault": "Personal", "item": "anthropic", "field": "key"}
+    ) == ["op", "read", "op://Personal/anthropic/key"]
+    assert wiz.resolver_argv({"source": "bitwarden", "item": "gh", "field": "password"}) == [
+        "bw",
+        "get",
+        "password",
+        "gh",
+    ]
+
+
+def test_named_sources_resolve_identically_to_command(wiz, tmp_path, monkeypatch):
+    # SC-005: a named reference resolves exactly as the equivalent generic resolver.
+    calls = []
+    monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: calls.append(argv) or "S")
+    named = {"name": "K", "source": "onepassword", "vault": "V", "item": "I", "field": "F"}
+    generic = {"name": "K", "source": "command", "argv": ["op", "read", "op://V/I/F"]}
+    assert wiz.resolve_credential_value(named, tmp_path) == "S"
+    assert wiz.resolve_credential_value(generic, tmp_path) == "S"
+    assert calls[0] == calls[1]  # identical invocation
+
+
+# --- FR-002: plan/status must never invoke a resolver ------------------------
+
+
+_CMD_SPEC = (
+    "environments:\n  - name: acme\n    host: local\n"
+    "    credentials:\n      - { name: MYSECRET, source: command, argv: ['printf', 'v'] }\n"
+)
+
+
+def test_plan_status_never_invokes_a_resolver(wiz, aac_env, tmp_path, monkeypatch):
+    # FR-002: a read-only preview must not contact the manager — otherwise `status`
+    # would trigger a manager prompt or a hardware-key touch.
+    root = _project(tmp_path, _CMD_SPEC)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    monkeypatch.setattr(
+        wiz, "_run_resolver", lambda *a, **k: pytest.fail("status must not resolve credentials")
+    )
+    wiz.do_aac_status()
+    assert aac_env["up"] == [] and aac_env["down"] == []
+
+
+def test_apply_resolves_and_delivers_command_credential(wiz, aac_env, tmp_path, monkeypatch):
+    root = _project(tmp_path, _CMD_SPEC)
+    monkeypatch.chdir(root)
+    (root / ".env").write_text("GH_TOKEN=x\n")
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: "sk-resolved\n")
+    wiz.do_aac_apply(yes=True)
+    _name, kw = aac_env["up"][0]
+    env_file = kw["env_file_override"]
+    assert env_file is not None and "MYSECRET=sk-resolved" in env_file.read_text()
+
+
+# --- T007a: delivery regression guard (FR-012) -------------------------------
+
+
+def test_delivery_routing_unchanged_for_new_sources(wiz, tmp_path, monkeypatch):
+    # FR-012: a value resolved from a NEW source still routes through the unchanged
+    # Feature 003 channels — provider name -> apikey FILE channel (never the env).
+    monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: "sk-ant\n")
+    creds = [{"name": "anthropic", "source": "command", "argv": ["op", "read", "x"]}]
+    configs, env_file, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert configs and configs[0][2] == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
+    assert env_file is None and ssh.push_key is None  # not the env/ssh channels
+
+
+def test_delivery_strips_trailing_newline_for_apikey_and_env(wiz, tmp_path, monkeypatch):
+    # FR-012: a manager's trailing newline must not corrupt the delivered value.
+    monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: "sk-value\n")
+    creds = [{"name": "anthropic", "source": "command", "argv": ["x"]}]
+    configs, _e, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert configs[0][1].read_text() == "sk-value"  # stripped
+    creds = [{"name": "MYVAR", "source": "onepassword", "vault": "v", "item": "i", "field": "f"}]
+    _c, env_file, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert env_file.read_text().rstrip("\n").endswith("MYVAR=sk-value")  # no stray newline
+
+
+def test_delivery_ensures_trailing_newline_for_ssh_target(wiz, tmp_path, monkeypatch):
+    # FR-012: SSH-key delivery needs the terminating newline ensured, not stripped.
+    monkeypatch.setattr(
+        wiz, "_run_resolver", lambda argv, name, **k: "-----BEGIN KEY-----\nabc\n-----END KEY-----"
+    )
+    creds = [
+        {"name": "gitpush", "source": "command", "argv": ["op", "read", "x"], "target": "push_key"}
+    ]
+    _c, _e, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert ssh.push_key is not None
+    assert ssh.push_key.read_text().endswith("-----END KEY-----\n")
