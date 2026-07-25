@@ -220,7 +220,7 @@ PEP 723 single-file script (`bin/agent-container`) and needs nothing but
 [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
-agent-container                # interactive menu: build, start, attach, logs, stop, purge
+agent-container                # guided wizard: state-aware — leads with the one best next step
 agent-container host add local --docker-context lima-docker --default  # register a host
 agent-container host ls        # list registered hosts (where containers run)
 agent-container host show hz1 --json   # one host's full record (driver/context/provisioning)
