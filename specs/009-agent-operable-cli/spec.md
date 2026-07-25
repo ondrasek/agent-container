@@ -35,6 +35,25 @@ Three gaps close here:
 The load-bearing constraint throughout: an agent is a **non-interactive caller that must
 never be handed a secret, and must never be left waiting on a prompt**.
 
+## Clarifications
+
+### Session 2026-07-25
+
+- Q: Which agents must be supported? → A: **Four** — Claude Code, pi-coding-agent, OpenAI
+  Codex, and **opencode** (replacing the earlier "Claude Code and PI initially" assumption).
+- Q: How is the machine-readable contract kept from silently breaking agents on upgrade? →
+  A: **Version the output** — every machine-readable payload carries a schema version an
+  agent can check, so the format can evolve and a breaking change is visible rather than
+  silent.
+- Q: The four agents store instructions differently — how does the skill command handle
+  that? → A: **They do not differ: skills are a published open standard.** The **Agent
+  Skills** format (originally by Anthropic, released as an open standard, adopted by 40+
+  platforms) defines a skill as a **folder containing `SKILL.md`** — YAML frontmatter with
+  required `name` and `description`, plus optional `scripts/`, `references/`, `assets/`.
+  **All four targets implement it**: Claude Code, OpenAI Codex, OpenCode, and pi. So the tool
+  authors **one standard-conformant skill**, and the only per-agent variable is the
+  **discovery path** each agent scans — not the format.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - An agent can drive the tool and recover from failure (Priority: P1)
@@ -172,9 +191,9 @@ confirm no trace remains.
   credential, port) where one applies.
 - **FR-005**: Every failure MUST carry a **suggested remediation** — the next command or
   action that would resolve it — in a form an agent can act on, wherever one exists.
-- **FR-006**: Failure identifiers and the structured output contract MUST remain **stable
-  across releases**, or be explicitly versioned, so an agent's handling does not break
-  silently on upgrade.
+- **FR-006**: Every machine-readable payload MUST carry an **explicit schema version** that
+  an agent can inspect, so the contract can evolve without silently breaking callers and a
+  breaking change is detectable rather than discovered at runtime.
 - **FR-007**: The tool MUST **never block on an interactive prompt** when not attached to an
   interactive terminal; it MUST instead refuse and state which flag authorizes the action.
 - **FR-008**: The tool MUST provide **machine-readable help**: the available commands, their
@@ -191,6 +210,9 @@ confirm no trace remains.
   (Constitution III, Least Exposure).
 - **FR-012**: The tool MUST provide a **`skill` command** that **installs**, **updates**, and
   **removes** a skill definition in the local agent configuration.
+- **FR-012a**: The skill definition MUST conform to the **Agent Skills open standard** — a
+  folder containing a `SKILL.md` whose frontmatter carries at least `name` and `description`
+  — so it is portable across every skills-compatible agent rather than bespoke per tool.
 - **FR-013**: Installing the skill MUST be **idempotent**: re-running it on an unmodified,
   current installation makes no change and reports that.
 - **FR-014**: The skill command MUST **never silently overwrite an operator's edits** to an
@@ -199,8 +221,11 @@ confirm no trace remains.
 - **FR-015**: Removing the skill MUST leave **no residue** from what the tool installed.
 - **FR-016**: The skill command MUST report **exactly what it wrote, changed, or removed, and
   where**.
-- **FR-017**: The skill command MUST support **more than one agent** and let the operator
-  choose the target when several are present, rather than guessing.
+- **FR-017**: The skill command MUST support the four named agents — **Claude Code,
+  pi-coding-agent, OpenAI Codex, and opencode** — and let the operator choose the target when
+  several are present, rather than guessing. Because all four consume the same standard
+  format, supporting a further agent MUST require only its **discovery path**, not a new
+  definition.
 - **FR-018**: An unsupported or absent agent configuration MUST cause a **clear refusal**
   naming what was looked for and where — never a partial or silent install.
 - **FR-019**: All existing human-facing behavior (the guided wizard, prose messages,
@@ -250,8 +275,12 @@ confirm no trace remains.
   parsing caller reads a clean stream.
 - **Errors keep their current human wording**; this feature *adds* the stable identifier and
   remediation rather than rewriting messages, so humans see no regression.
-- **Supported agent targets initially are Claude Code and PI** (both named in the request),
-  with the mechanism extensible to others (e.g. Codex) without redesign.
+- **Supported agent targets are Claude Code, pi-coding-agent, OpenAI Codex, and opencode**;
+  all four implement the Agent Skills open standard, so one standard-conformant definition
+  serves them all and adding another agent is a discovery path, not new content.
+- **The agents that DRIVE the CLI and the agents that RUN INSIDE the container are the same
+  four** — the container's agent set is being extended with opencode to match, so the two
+  lists do not diverge.
 - **The skill installs into the project-local agent configuration by default**, with an
   explicit opt-in for the user-level configuration — the project-local default keeps the
   change reviewable and version-controllable, matching how the `specify` CLI seeds speckit
