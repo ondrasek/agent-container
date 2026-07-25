@@ -42,8 +42,12 @@ The host-side executor shared by `command` / `onepassword` / `bitwarden`.
 | execution | `argv` run **directly** — no `/bin/sh`, no `shell=True` (II/III) |
 | input | `stdin=DEVNULL` — **non-interactive**, no TTY prompt (FR-005) |
 | bound | `timeout` seconds; `TimeoutExpired` → `die` (never hang the apply, FR-005) |
-| failure | missing binary / non-zero exit / empty-when-required → `die`, **generic + secret-free** message naming the credential; the resolver's **stderr is never echoed** (FR-004/006) |
-| output | stdout is the secret value, returned **in memory only** |
+| failure | missing binary / non-zero exit / **empty-or-whitespace-only** stdout → `die`, **generic + secret-free** message naming the credential; the resolver's **stderr is never echoed** (FR-004/006) |
+| output | stdout is the secret value, returned **in memory only**, unmodified — newline normalization belongs to delivery (apikey/env `rstrip`, SSH-key ensure-trailing) |
+
+**Emptiness rule**: the check tests the **stripped** output (`out.strip()`), because delivery
+strips a trailing newline for apikey/env channels — a whitespace-only result would otherwise
+become a silently-injected **empty secret**, defeating FR-004.
 
 `resolve_credential_value(cred, root)` dispatches: `command` → `_run_resolver(cred["argv"])`;
 `onepassword` → `_run_resolver(["op","read", f"op://{vault}/{item}/{field}"])`; `bitwarden`

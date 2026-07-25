@@ -34,9 +34,14 @@ the SSH channels. Unknown keys are rejected.
 
 - Runs the argv **host-side at apply**, **directly (no shell)**, **`stdin` closed**
   (non-interactive), **30 s-bounded** — a hung CLI fails, never hangs the apply (FR-002/005).
-- On missing binary / non-zero exit / timeout / empty-when-required → **fail before any
-  change**, naming the failing credential and source; the resolver's **stderr is never
-  echoed** (FR-004/006).
+- On missing binary / non-zero exit / timeout / **empty-or-whitespace-only** output → **fail
+  before any change**, naming the failing credential and source; the resolver's **stderr is
+  never echoed** (FR-004/006). The emptiness check tests the **stripped** output, so a
+  whitespace-only result cannot become an empty secret once delivery strips the newline.
+- Delivery is **unchanged** (Feature 003 channels, FR-012): a provider name → the apikey
+  file channel; an SSH `target` → the ssh channels; otherwise the per-deployment 0600
+  secrets env-file. A resolver's trailing newline is **stripped** for apikey/env and
+  **ensured** for SSH-key delivery.
 - The resolved value lives **only in memory** and the existing private 0600 staged files;
   it **never** appears in the repo, argv, logs, or the registry (Constitution III).
 - All credentials are resolved **up front** before any container deploys (FR-014, inherited);
