@@ -32,6 +32,21 @@ completions.
 - Q: Should the four agents that can *drive* the CLI and the agents that can *run inside* the
   container be the same list? → A: **Yes** — one consistent list of supported agents; this
   feature adds opencode to the container so the two do not diverge.
+- Q: opencode's config directory is nested (`~/.config/opencode`) while the other three
+  agents use flat `$HOME` directories — where should its persistent storage mount? → A: **At
+  opencode's own native location.** Anything an operator reads in opencode's documentation
+  then works verbatim inside the container, and no environment override is needed. The cost
+  is accepted knowingly: the volume layout has one nested path among three flat ones, which
+  **Feature 011 (filesystem layout) may revisit for all four agents together**.
+
+**Verified during clarification** (facts, not preferences — checked against opencode's
+documentation rather than assumed):
+
+- opencode **is installable at image build time by the same mechanism as the other three**
+  (a global npm package), so it needs no new install machinery and nothing at runtime.
+- Its configuration lives in **one directory**, and that directory is **overridable by an
+  environment variable** — the same lever Feature 003 already uses for the other agents'
+  ephemeral-credential redirect, so the existing credential machinery applies unchanged.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -146,7 +161,9 @@ freshly created environment has the full new set and also tears down completely.
 - **FR-005**: In non-interactive mode, opencode MUST run as the **main process**, with the
   environment's exit status reflecting the agent's outcome — identical to the other agents.
 - **FR-006**: opencode's configuration and credentials MUST **persist across restart and
-  recreation**, in the same manner as the other agents'.
+  recreation**, in the same manner as the other agents', with its persistent storage mounted
+  at **opencode's own native configuration location** — so guidance written for opencode
+  applies verbatim inside the container and no environment override is required.
 - **FR-007**: The per-container storage set MUST be updated to include opencode's, and every
   place that states the number or names of those volumes MUST be updated **consistently**.
 - **FR-008**: Full teardown MUST remove **every** volume the tool creates, including the new
@@ -191,8 +208,9 @@ freshly created environment has the full new set and also tears down completely.
 
 ## Assumptions
 
-- **opencode is installable at image build time** by the same mechanism as the existing
-  agents, and its configuration lives in a single directory that can be persisted.
+- **Verified, not assumed:** opencode is installable at image build time by the **same
+  mechanism as the existing agents**, and its configuration lives in a **single, persistable
+  directory** that an environment variable can relocate (see Clarifications).
 - **The volume-set growth (seven → eight) is an additive contract change**, handled the same
   way the workspace volume was made conditional: teardown tolerates absence, so no migration
   is required for existing environments.
