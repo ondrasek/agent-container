@@ -890,31 +890,53 @@ def image_exists(rt: str, tag: str) -> bool:
 
 
 def port_free(port: int) -> bool:
-    # Wildcard bind: `-p {port}:2222` publishes on ALL interfaces (parity with
-    # agent-container), so probe what will actually be bound, not just loopback.
+    """Can the DAEMON bind this port? (Not: can *we* bind it right now.)
+
+    Two details make this match what the container runtime will actually do:
+
+    * Wildcard bind — `-p {port}:2222` publishes on ALL interfaces, so probe what
+      will really be bound, not just loopback.
+    * SO_REUSEADDR — a server socket left in TIME_WAIT rejects a plain bind() but
+      is bindable by a listener that sets SO_REUSEADDR, which daemons (including
+      docker-proxy) do. Probing WITHOUT it reports "in use" for a port the daemon
+      would take happily — a false negative that used to become a hard failure.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("", port))
         return True
     except OSError:
         return False
 
 
-def wait_port_released(port: int, timeout: float = 30.0) -> None:
-    """Block until `port` is bindable again (or timeout elapses). `<rt> rm`
-    returns before the daemon has finished tearing down the published-port
-    forwarding, so an immediate `up` on the same name hits a false 'port in
-    use'. Making `down` wait keeps a down+up (recreate) cycle on one name
-    reliable. The ceiling is generous (30s) because a busy daemon — notably a
-    loaded CI runner tearing down many containers in one acceptance run — can be
-    slow to free the forward, and a premature return leaks a false 'port in use'
-    into the next deploy (an observed acceptance flake). Best-effort: on timeout
-    we simply return and let `up` report the real state."""
+def wait_port_released(port: int, timeout: float = 30.0, *, quiet: bool = False) -> bool:
+    """Block until `port` is bindable again; return whether it came free.
+
+    `<rt> rm` returns before the daemon has finished tearing down the published-port
+    forwarding, so an immediate `up` on the same name can see the port still held.
+    Waiting here keeps a down+up (recreate) cycle on one name reliable. The ceiling
+    is generous because a busy daemon — notably a loaded CI runner tearing down many
+    containers at once — can be slow to release the forward.
+
+    Best-effort by design: the caller proceeds either way (the daemon is the only
+    authority on whether the bind succeeds). But a timeout is REPORTED rather than
+    swallowed, so if the deploy then fails the operator can attribute it instead of
+    seeing an unexplained 'port in use'.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if port_free(port):
-            return
+            return True
         time.sleep(0.25)
+    if not quiet:
+        warn(
+            f"port {port} was still held after {timeout:g}s; continuing anyway — "
+            f"if the deploy fails on the port, the previous container's teardown "
+            f"had not finished (retry it) or something else holds the port "
+            f"(agent-container list)"
+        )
+    return False
 
 
 def write_state(host: str, name: str, port: int) -> None:
@@ -2778,11 +2800,19 @@ def compose_up_exec(
     spec = spec or ExecSpec()
     port = port_for_name(name)
     if not redeploy and host_is_local(host_rec) and not port_free(port):
-        die(
-            f"port {port} is already in use (port = 2200 + name hash; "
-            f"collisions are possible). Stop whatever holds it (agent-container list) "
-            f"or pick a different name."
-        )
+        # The port is busy RIGHT NOW — but this is a pre-check, not a reservation:
+        # we cannot hold the port between here and the daemon's bind, so failing
+        # here is a TOCTOU guess. Overwhelmingly the cause is the previous
+        # container of this same name still tearing down its published-port
+        # forwarding, which resolves on its own in a moment.
+        #
+        # So: WAIT for it rather than refusing, then proceed regardless and let the
+        # daemon — the only component that can actually bind it — be the authority.
+        # If something else genuinely holds the port, compose fails with its own
+        # precise error, exactly as it already does for remote hosts (which never
+        # ran this pre-check at all).
+        log(f"port {port} is busy; waiting for it to be released…")
+        wait_port_released(port)
     hk_file, ak_file = stage_ssh_injection(host_name, name, host_key, authorized_keys)
     injected = stage_push_injection(host_name, name, push_key, known_hosts)  # US1, ephemeral
     # US2 (T012): convention-discovered model/API key files, staged ephemerally to
