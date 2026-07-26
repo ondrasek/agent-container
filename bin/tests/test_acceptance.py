@@ -535,12 +535,13 @@ def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
     r = run_list()
     assert r.returncode == 0, r.stderr
     assert time.time() - t0 < 30, "list hung on the unreachable host"
-    rows = json.loads(r.stdout)
+    # Feature 009: --json payloads are wrapped in a versioned envelope.
+    rows = json.loads(r.stdout)["data"]["containers"]
     dead = [x for x in rows if x["host"] == "dead"]
     assert dead and all(x["status"] == "unreachable" for x in dead)  # never 'Up', never dropped
     assert any(x["name"] == "agent-container-acclist" for x in rows)  # local still listed
 
-    rows_local = json.loads(run_list("--local").stdout)
+    rows_local = json.loads(run_list("--local").stdout)["data"]["containers"]
     assert not any(x["status"] == "unreachable" for x in rows_local)  # --local never probes
 
 
