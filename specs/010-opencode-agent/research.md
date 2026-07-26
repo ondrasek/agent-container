@@ -167,7 +167,10 @@ One concrete stale artifact exists and must be fixed: a comment in `bin/agent-co
 
 ---
 
-## Required spec amendments (blocking `/speckit-tasks`)
+## Required spec amendments — **APPLIED 2026-07-26**
+
+All four landed in `spec.md`; the checklist re-validated at 16/16 and the spec remains free of
+implementation detail. Constitution V (Durable Spec) returns from **ATTENTION** to **PASS**.
 
 1. **Clarifications § Session 2026-07-26** — replace the "configuration lives in one directory,
    overridable by an environment variable" claim with the R1 finding (config and auth are split;

@@ -21,9 +21,14 @@ so the supported-agent list is **one list, used consistently** in both direction
 
 The change is deliberately unglamorous — opencode joins the existing per-agent machinery
 rather than getting a parallel path. What makes it non-trivial is that it **changes a pinned
-on-disk contract**: the per-container volume set grows from **seven to eight**, and that
+on-disk contract**: the per-container volume set grows from **seven to nine**, and that
 number is referenced by the design contract, a self-test, the teardown paths, and the shell
 completions.
+
+It grows by **two**, not one, because opencode is the only supported agent that **splits its
+configuration from its credentials** across two separate locations. Both must persist, so
+opencode gets two persistent stores while the other three get one each. That asymmetry is a
+property of opencode, not of this design.
 
 ## Clarifications
 
@@ -38,7 +43,7 @@ completions.
   agents use flat `$HOME` directories — where should its persistent storage mount? → A: **At
   opencode's own native location.** Anything an operator reads in opencode's documentation
   then works verbatim inside the container, and no environment override is needed. The cost
-  is accepted knowingly: the volume layout has one nested path among three flat ones, which
+  is accepted knowingly: the volume layout has nested paths among three flat ones, which
   **Feature 011 (filesystem layout) may revisit for all four agents together**.
 
 **Verified during clarification** (facts, not preferences — checked against opencode's
@@ -46,9 +51,26 @@ documentation rather than assumed):
 
 - opencode **is installable at image build time by the same mechanism as the other three**
   (a global npm package), so it needs no new install machinery and nothing at runtime.
-- Its configuration lives in **one directory**, and that directory is **overridable by an
-  environment variable** — the same lever Feature 003 already uses for the other agents'
-  ephemeral-credential redirect, so the existing credential machinery applies unchanged.
+
+### Correction (planning, 2026-07-26)
+
+An earlier bullet in this session recorded, as verified, that opencode's configuration "lives
+in one directory, overridable by an environment variable". **Planning research re-checked this
+against opencode's own documentation and found both halves false.** The claim is withdrawn and
+replaced by:
+
+- opencode keeps **configuration** and **credentials** in **two separate locations** — its
+  native configuration directory, and a distinct native data location where the credential
+  written by its interactive login is stored.
+- The environment variable in question does **not relocate** the configuration directory; it
+  adds an *additional search location*. The only variable that relocates anything names a
+  **single configuration file**, not a directory — so it would not carry the agent's
+  sub-directories (agents, commands, skills, themes) either.
+
+**Why this correction is load-bearing**: the single persistent store the original clarification
+approved would have kept configuration while **silently discarding the credential on every
+recreation** — and would have satisfied any check that only inspected the configuration file.
+The requirements below are written to the corrected facts (see FR-006).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -64,7 +86,8 @@ agent lists stay inconsistent, which is the problem being solved.
 
 **Independent Test**: Create an environment selecting opencode, in both interactive and
 non-interactive modes; confirm it starts, is reachable the same way the other agents are,
-and that its configuration survives a teardown-and-recreate cycle.
+and that both its configuration and a credential created by an interactive login survive a
+teardown-and-recreate cycle.
 
 **Acceptance Scenarios**:
 
@@ -74,8 +97,9 @@ and that its configuration survives a teardown-and-recreate cycle.
 2. **Given** an operator selects opencode, **When** the environment runs non-interactively,
    **Then** opencode runs as the main process and the environment's exit status reflects the
    agent's outcome, matching the other agents' behavior.
-3. **Given** opencode has been configured or authenticated inside a container, **When** the
-   container is torn down and recreated, **Then** that configuration persists.
+3. **Given** opencode has been configured **and** authenticated inside a container, **When**
+   the container is torn down and recreated, **Then** **both** the configuration and the
+   credential persist — checking only the configuration does not demonstrate this.
 4. **Given** an operator selects an agent, **When** they choose any of the four supported
    names, **Then** the tool accepts it — the accepted set is one list with no special cases.
 
@@ -124,7 +148,7 @@ freshly created environment has the full new set and also tears down completely.
 1. **Given** an environment created before this change, **When** the operator upgrades and
    uses it, **Then** it continues to work without manual migration.
 2. **Given** an environment created before this change, **When** it is fully torn down,
-   **Then** the absence of the new volume is tolerated and no error results.
+   **Then** the absence of the new volumes is tolerated and no error results.
 3. **Given** a newly created environment, **When** it is fully torn down, **Then** **every**
    volume the tool created is removed, leaving no orphaned storage.
 4. **Given** any place that states how many per-container volumes exist, **When** the change
@@ -162,16 +186,23 @@ freshly created environment has the full new set and also tears down completely.
   discoverable exactly as the other agents are.
 - **FR-005**: In non-interactive mode, opencode MUST run as the **main process**, with the
   environment's exit status reflecting the agent's outcome — identical to the other agents.
-- **FR-006**: opencode's configuration and credentials MUST **persist across restart and
-  recreation**, in the same manner as the other agents', with its persistent storage mounted
-  at **opencode's own native configuration location** — so guidance written for opencode
-  applies verbatim inside the container and no environment override is required.
-- **FR-007**: The per-container storage set MUST be updated to include opencode's, and every
+  **Contingency**: opencode's documentation does not state whether its non-interactive form
+  propagates a failing status. This MUST be established by running the real agent, not
+  assumed. If it proves to always report success, this requirement is unsatisfiable for
+  opencode and MUST be amended to say so — the validation MUST NOT be weakened to match.
+- **FR-006**: opencode's configuration **and** its credentials MUST **persist across restart
+  and recreation**, in the same manner as the other agents'. Because opencode keeps the two in
+  **separate locations**, this requires **both** to be persisted, each mounted at **opencode's
+  own native location** — so guidance written for opencode applies verbatim inside the
+  container and no environment override is required. Persisting only the configuration
+  location does **not** satisfy this requirement: the credential written by an interactive
+  login would be lost on recreation.
+- **FR-007**: The per-container storage set MUST be updated to include **both** of opencode's, and every
   place that states the number or names of those volumes MUST be updated **consistently**.
 - **FR-008**: Full teardown MUST remove **every** volume the tool creates, including the new
   one — no orphaned storage.
 - **FR-009**: Teardown of an environment created **before** this change MUST tolerate the
-  absence of the new volume and succeed without error or manual migration.
+  absence of the new volumes and succeed without error or manual migration.
 - **FR-010**: Credentials for opencode MUST be delivered through the **existing runtime
   injection channels**; no new secret path is introduced.
 - **FR-011**: No opencode credential value may appear in the project directory, the tool's
@@ -187,7 +218,8 @@ freshly created environment has the full new set and also tears down completely.
 - **Supported agent**: a selectable coding agent, identified by name; the set is one list
   consumed by the CLI, the container, the completions, and the docs.
 - **Per-agent persistent state**: the storage that keeps an agent's configuration and
-  credentials across recreation; each supported agent has one.
+  credentials across recreation. Three of the supported agents need one; opencode needs two,
+  because it stores its configuration and its credentials in separate locations.
 - **Per-container volume set**: the canonical, ordered set of storage the tool creates for an
   environment — a pinned contract used by teardown and asserted by the self-test.
 
@@ -213,9 +245,11 @@ freshly created environment has the full new set and also tears down completely.
 - **Verified, not assumed:** opencode is installable at image build time by the **same
   mechanism as the existing agents**, and its configuration lives in a **single, persistable
   directory** that an environment variable can relocate (see Clarifications).
-- **The volume-set growth (seven → eight) is an additive contract change**, handled the same
+- **The volume-set growth (seven → nine) is an additive contract change**, handled the same
   way the workspace volume was made conditional: teardown tolerates absence, so no migration
-  is required for existing environments.
+  is required for existing environments. It grows by two rather than one because opencode
+  stores configuration and credentials separately and both must persist (see FR-006 and the
+  planning correction under Clarifications).
 - **Interactive authentication inside the container remains a supported path** for opencode,
   as it is for the other agents, so the feature is useful before declared credentials land.
 - **Image growth from a fourth agent is acceptable**; the container is a development
