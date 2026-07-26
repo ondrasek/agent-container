@@ -87,6 +87,32 @@ Read the installed `SKILL.md`.
 **Expected**: it instructs the agent to pass `--json` on every invocation, and **every command
 example inside it carries the flag** — no example invokes the tool without it.
 
+## Validation results (T025)
+
+- **A — full lifecycle over `--json`** — automated in `test_acceptance.py::
+  test_agent_drives_full_lifecycle_over_json` (real container): `up`/`list`/`down` each emit
+  a parseable envelope with `schema`+`ok`, **stdout carries nothing but the envelope**, and
+  the whole journey runs non-interactively. **Green.**
+- **B — failures are actionable** — the same test forces an unknown host and asserts
+  `code: host_not_registered`, the `entity`, a `remedy`, `ok: false` and a non-zero exit;
+  `down --purge` without `-y` **refuses on a non-TTY** rather than hanging. **Green.**
+- **C — eval contract intact** — `test_shell_integration.py` asserts `host env`, `attach`
+  and `completions` do **not** accept `--json` and that the documented exclusion set covers
+  them, so Feature 005's empty-stdout-on-error rule is untouched. **Green.**
+- **D — `context` in four worlds** — hermetic (the 007 snapshot is pure): empty world →
+  empty collections and `ok: true`; a **registered but unreachable** host → `unusable`
+  (described, not absent) with a named problem; JSON-serializable in all cases. The
+  real-container case is covered by `test_context_and_skill_over_json`. **Green.**
+- **E — no secret in any payload** — `context` credentials are asserted to be **locators**
+  (`MY_SECRET_VAR`, `op://V/I/F`, the argv) with the secret value absent from the whole
+  serialized payload, and an env file appears as a **path** whose contents never load.
+  **Green.**
+- **F — skill lifecycle** — install → idempotent reinstall → **refuse on hand-edit** →
+  `--force` replaces → remove with **zero residue**, verified hermetically and against a
+  real invocation, for all four agents (claude/codex/opencode/pi). **Green.**
+- **G — the skill enforces `--json`** — asserted by parsing the rendered `SKILL.md`: every
+  `agent-container …` example line contains `--json`. **Green.**
+
 ## Success signal
 
 All scenarios pass: an agent completes a lifecycle on machine-readable output alone; failures
