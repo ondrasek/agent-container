@@ -32,6 +32,8 @@ completions.
 - Q: Should the four agents that can *drive* the CLI and the agents that can *run inside* the
   container be the same list? → A: **Yes** — one consistent list of supported agents; this
   feature adds opencode to the container so the two do not diverge.
+### Session 2026-07-26
+
 - Q: opencode's config directory is nested (`~/.config/opencode`) while the other three
   agents use flat `$HOME` directories — where should its persistent storage mount? → A: **At
   opencode's own native location.** Anything an operator reads in opencode's documentation
