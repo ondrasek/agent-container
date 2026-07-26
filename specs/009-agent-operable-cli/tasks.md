@@ -37,10 +37,10 @@ All implementation is in the one PEP 723 file **`bin/agent-container`**. Tasks t
 
 **Purpose**: the versioned envelope, the single emitter, and the failure descriptor — the substrate every user story consumes. **No user story can begin until this phase is complete.** `bin/agent-container` tasks are sequential; test tasks are `[P]`.
 
-- [ ] T002 [P] Write failing tests in `bin/tests/test_agent_interface.py` for the **envelope** (research R1): every payload carries `schema` = `agent-container/v1` and a boolean `ok`; **exactly one** of `data`/`error` is present; the envelope is the **only** thing on stdout (no colour/progress/table bleed, FR-002); and a success payload round-trips through `json.loads`.
-- [ ] T003 Add the envelope constants and the single emitter to `bin/agent-container`: a `SCHEMA_VERSION` constant and `emit_json(data=None, error=None)` writing exactly one JSON object to stdout. All `--json` output goes through this — no command formats its own payload (research R1/R2).
+- [ ] T002 [P] Write failing tests in `bin/tests/test_agent_interface.py` for the **envelope** (research R1): every payload carries `schema` = `agent-container/v1` and a boolean `ok` (FR-006); **exactly one** of `data`/`error` is present; the envelope is the **only** thing on stdout (no colour/progress/table bleed, FR-002); and a success payload round-trips through `json.loads`.
+- [ ] T003 Add the envelope constants and the single emitter to `bin/agent-container`: a `SCHEMA_VERSION` constant and `emit_json(data=None, error=None)` writing exactly one JSON object to stdout (FR-006). All `--json` output goes through this — no command formats its own payload (research R1/R2).
 - [ ] T004 [P] Write failing tests in `bin/tests/test_agent_interface.py` for the **failure descriptor** (data-model): `die()` accepts optional `code`/`entity`/`remedy` and `Fatal` carries them; a `die()` with no code yields the documented generic `unspecified` code (research R4) so existing call sites keep working; the human `message` is preserved unchanged (FR-019).
-- [ ] T005 Extend `die()`/`Fatal` in `bin/agent-container` with optional `code`, `entity`, `remedy` (defaults preserving today's behavior), and render a **FailureDescriptor** from the existing `cli()` chokepoint when the invocation is in `--json` mode: envelope with `ok: false` on **stdout**, human prose still on **stderr**, exit non-zero (contract §1–2).
+- [ ] T005 Extend `die()`/`Fatal` in `bin/agent-container` with optional `code`, `entity`, `remedy` (defaults preserving today's behavior), and render a **FailureDescriptor** from the existing `cli()` chokepoint when the invocation is in `--json` mode: envelope with `ok: false` on **stdout**, human prose still on **stderr**, exit non-zero. Carries the stable code (FR-003), the affected entity (FR-004) and the remedy (FR-005); see contract §1–2.
 
 **Checkpoint**: any command can emit a versioned success or failure payload. User stories can begin.
 
@@ -53,7 +53,8 @@ All implementation is in the one PEP 723 file **`bin/agent-container`**. Tasks t
 **Independent Test**: drive a full lifecycle with `--json` only; force each defined failure class and confirm a stable code + entity + remedy and a non-zero exit, with no blocking (quickstart A/B/C).
 
 - [ ] T006 [P] [US1] Write failing tests in `bin/tests/test_agent_interface.py`: a representative command emits a valid envelope under `--json`; **`--json` is accepted by every command** (introspect the command tree and assert the option exists on each, so a newly added command cannot silently miss it); human decoration never appears on stdout in JSON mode (FR-002).
-- [ ] T007 [US1] Add the `--json` option to the remaining commands in `bin/agent-container` (20 of 23 lack it) and route each one's machine-readable branch through `emit_json` — keeping the existing human rendering behind the non-JSON branch, exactly as `do_host_ls`/`do_host_show`/`do_list` already do (FR-001/002, research R2).
+- [ ] T007 [US1] Add the `--json` option to the remaining commands in `bin/agent-container` (20 of 23 lack it) and route each one's machine-readable branch through `emit_json` — keeping the existing human rendering behind the non-JSON branch, exactly as `do_host_ls`/`do_host_show`/`do_list` already do (FR-001, FR-002; research R2).
+- [ ] T007a [P] [US1] **Additive guarantee (FR-019 / SC-008)** — write tests in `bin/tests/test_agent_interface.py` asserting that **without** `--json` a representative set of commands still produce their existing human rendering on stdout and prose on stderr, and that the wizard and prompts are untouched. This feature edits all 23 commands, so the human-output regression surface is broad; SC-008 must be verified deliberately, not left to the gate. *(analyze M1.)*
 - [ ] T008 [P] [US1] Write failing tests in `bin/tests/test_agent_interface.py` for the **non-interactive guarantee**: with no interactive terminal, a destructive command **refuses and names the authorizing flag** rather than prompting, and never blocks (FR-007, SC-003) — generalizing today's `down`/`wipe`/`host rm --destroy` behavior.
 - [ ] T009 [US1] Generalize the non-interactive refusal in `bin/agent-container` so **no** command path can block on a prompt when stdin/stdout is not a TTY; each refusal names the flag that authorizes it (FR-007).
 - [ ] T010 [US1] Enumerate the **defined failure classes** and annotate their `die()` call sites with `code`/`entity`/`remedy` in `bin/agent-container` — at minimum: no host registered, host unreachable, port unavailable, credential missing/unresolvable, invalid spec, container absent, image absent. Document the code set (contract §2). Un-annotated sites keep the generic `unspecified` code (research R4).
@@ -61,6 +62,7 @@ All implementation is in the one PEP 723 file **`bin/agent-container`**. Tasks t
 - [ ] T012 [P] [US1] **Constitution III guard** — write tests in `bin/tests/test_agent_interface.py` asserting that with a credential configured through each supported source, the resolved secret value appears in **no** `--json` payload and in **no** failure descriptor (SC-005). This is the load-bearing gate and must not be deferred.
 - [ ] T013 [US1] Add **machine-readable help** to `bin/agent-container` by introspecting the existing Typer command tree (names, parameters, help text) into the envelope — never a hand-maintained catalogue, which would drift (FR-008, research R8).
 - [ ] T014 [P] [US1] **Eval-contract regression guard** in `bin/tests/test_shell_integration.py`: `host env` and `attach --print`/`--ssh-config` still produce **empty stdout + non-zero** on error and do **not** accept `--json` (research R3, quickstart C). This is the one place the two output disciplines meet — assert it rather than assume it.
+- [ ] T014a [P] [US1] **Acceptance in `bin/tests/test_acceptance.py`** (real container, quickstart A/B): drive a full lifecycle with `--json` only — `up` → `list` → `down --purge -y` — asserting **every** payload parses as JSON, carries `schema` + `ok`, and that **stdout contains nothing but the envelope** (SC-001); then force a failure (e.g. an unknown host) and assert a parseable descriptor with a stable `code`, a non-zero exit, and `ok: false` (SC-002). Also assert a destructive command **refuses without `-y`** on the non-TTY subprocess rather than hanging (SC-003). *(plan.md promised this real-invocation test; it was missing from the task list — analyze H1. SC-001 is an end-to-end claim and was otherwise verified only by a manual quickstart run.)*
 
 **Checkpoint**: an agent can complete a full lifecycle on machine-readable output alone and recover from every defined failure — the shippable MVP.
 
@@ -73,7 +75,7 @@ All implementation is in the one PEP 723 file **`bin/agent-container`**. Tasks t
 **Independent Test**: request `context` in an empty world, a healthy one, a broken one, and inside a declarative project; confirm valid output in all four and no secret anywhere (quickstart D/E).
 
 - [ ] T015 [P] [US2] Write failing tests in `bin/tests/test_agent_interface.py`: `context` serializes a **constructed** Feature 007 snapshot (pure — no daemon) into the documented payload (target, stages with tri-state status, hosts, environments, conventions, credentials, problems, next_step); an **empty world** yields empty collections and `ok: true`, **not** an error; an **unreachable host** appears as a described state rather than failing the call (FR-010, SC-004); `unusable` remains distinct from `absent`.
-- [ ] T016 [US2] Add the `context` command to `bin/agent-container` as a **serializer over the existing Feature 007 engine** (`build_snapshot` → `assess_stages` → `recommend_next_step`), extended with Feature 006 project conventions (governing `.agent-container/`, applicable env-file **path**) and Feature 008 credential **locators**; bounded to the active target so cost does not scale with host count (research R5).
+- [ ] T016 [US2] Add the `context` command to `bin/agent-container` as a **serializer over the existing Feature 007 engine** (`build_snapshot` → `assess_stages` → `recommend_next_step`), satisfying FR-009, extended with Feature 006 project conventions (governing `.agent-container/`, applicable env-file **path**) and Feature 008 credential **locators**; bounded to the active target so cost does not scale with host count (research R5).
 - [ ] T017 [P] [US2] Write failing tests in `bin/tests/test_agent_interface.py`: the `context` payload names credential **locators only** (source kind + reference) and **never a resolved value** (FR-011); an env-file appears as a **path**, never its contents.
 
 **Checkpoint**: an agent orients itself in one call, in any state, with no secret exposure.
@@ -123,7 +125,7 @@ All implementation is in the one PEP 723 file **`bin/agent-container`**. Tasks t
 
 - Setup: T001 `[P]`.
 - Foundational: T002 ∥ T004 (tests); impl T003→T005 sequential.
-- US1: T006 ∥ T008 ∥ T011 ∥ T012 ∥ T014 (tests, and T014 is a different module); impl T007→T009→T010→T013 sequential.
+- US1: T006 ∥ T007a ∥ T008 ∥ T011 ∥ T012 ∥ T014 ∥ T014a (tests; T014 and T014a are different modules); impl T007→T009→T010→T013 sequential.
 - US2: T015 ∥ T017; impl T016.
 - US3: T018 ∥ T020; impl T019→T021 sequential.
 - Polish: T023 ∥ T024; T022/T025 sequential (gate, then record).
@@ -132,7 +134,7 @@ All implementation is in the one PEP 723 file **`bin/agent-container`**. Tasks t
 
 ### MVP first (US1 — the agent-drivable CLI)
 
-1. Phase 1 Setup → 2. Phase 2 Foundational (envelope + emitter + failure descriptor) → 3. Phase 3 US1 (`--json` everywhere, non-blocking refusals, failure codes, machine-readable help) → **STOP & VALIDATE** an agent completes a lifecycle on machine-readable output alone, every defined failure is actionable, **no secret appears in any payload**, and the Feature 005 eval contract is intact (quickstart A/B/C) → ship. This alone makes the existing 23 commands agent-operable.
+1. Phase 1 Setup → 2. Phase 2 Foundational (envelope + emitter + failure descriptor) → 3. Phase 3 US1 (`--json` everywhere, non-blocking refusals, failure codes, machine-readable help) → **STOP & VALIDATE** with the real-container acceptance (T014a) an agent completes a lifecycle on machine-readable output alone, every defined failure is actionable, **no secret appears in any payload**, and the Feature 005 eval contract is intact (quickstart A/B/C) → ship. This alone makes the existing 23 commands agent-operable.
 
 ### Incremental delivery
 
