@@ -19,8 +19,8 @@ written by `opencode auth login` live in `~/.local/share/opencode/auth.json`. Mo
 volume the clarification approved would have persisted config while **silently losing credentials
 on every recreate** — passing any test that only inspected `opencode.json`. The design therefore
 uses **two** native mounts, taking the per-container volume set from **seven to nine**, not to
-eight. Four spec amendments follow from this and are listed in [research.md](./research.md);
-they should land before `/speckit-tasks`.
+eight. The four spec amendments that follow from this **landed in `spec.md` on 2026-07-26**
+(listed in [research.md](./research.md)).
 
 ## Technical Context
 
@@ -55,7 +55,7 @@ acceptance tier — see Constraints.
 - Deterministic identity (container name, port, existing volume names) must not change.
 
 **Scale/Scope**: one agent added. Touches `bin/agent-container`, `entrypoint.sh`, `Dockerfile`,
-`completions/`, `CLAUDE.md`, `docs/execution.md`, and three test modules.
+`completions/`, `CLAUDE.md`, `docs/`, and nine test modules.
 
 ## Constitution Check
 
@@ -65,12 +65,12 @@ acceptance tier — see Constraints.
 | **II. Least Privilege, Immutable Runtime** | Deps baked at build; nothing installed at runtime | **PASS** — `npm install -g opencode-ai` in the existing build layer (R4). R3 adds the dev-owned mount-point dirs, which exists *because* of this principle |
 | **III. Least Exposure** | No secret on argv, in the image, or on a durable volume beyond operator-interactive login | **PASS**, and *improves* on the other agents — an injected key reaches opencode via the process environment only and is never written to the auth store, so opencode needs no ephemeral-`$HOME` redirect at all (R6) |
 | **IV. Deterministic Identity** | Names derived, never stored | **PASS** — both new volume names derive from `<name>`; container name and port unchanged |
-| **V. Durable Spec, Disposable Code** | Spec is the durable artifact | **ATTENTION** — the spec currently records a false verified fact. Four amendments in research.md must land, or the durable artifact is wrong |
+| **V. Durable Spec, Disposable Code** | Spec is the durable artifact | **PASS** (was ATTENTION) — the spec recorded a false verified fact; the four corrections landed 2026-07-26, checklist re-validated 16/16 |
 | **VI. Least Dependencies** | Justify every new dependency | **PASS** — no new host dependency. FR-002 is met with a parsing test rather than build-time codegen precisely to avoid one (R7) |
 | **VII. Continuous Deployment** | Gate green; Conventional Commits | **PASS** — `feat` scope, cuts a minor release |
 
-**No unjustified violations.** The one **ATTENTION** is a spec-correctness action, not a design
-compromise.
+**No unjustified violations.** The one former **ATTENTION** was a spec-correctness action, since
+resolved — not a design compromise.
 
 ## Project Structure
 
@@ -78,7 +78,7 @@ compromise.
 
 ```text
 specs/010-opencode-agent/
-├── spec.md              # requires 4 amendments (research.md § Required spec amendments)
+├── spec.md              # 4 amendments applied 2026-07-26
 ├── plan.md              # this file
 ├── research.md          # Phase 0 — includes the CRITICAL R1 correction
 ├── data-model.md        # Phase 1 — supported-agent + volume-set contracts
@@ -95,9 +95,15 @@ bin/agent-container          # AGENTS (canonical list); opencode_volume_name,
                              #   opencode_data_volume_name; all_volume_mounts;
                              #   per_container_volumes; --agent help; stale "seven" comment
 bin/tests/
-├── test_agent_execution.py  # dispatch + agent-list cross-file agreement (FR-002)
-├── test_agent_as_code.py    # volume-set contract (FR-007/FR-008)
-└── test_acceptance.py       # real-container: run/exit-status, persistence, FR-009 upgrade
+├── test_execution.py           # --agent selection surface (FR-001/FR-014)
+├── test_pure_logic.py          # agent-list cross-file agreement (FR-002)
+├── test_compose.py             # nine-volume declaration (FR-007)
+├── test_lifecycle.py           # pre-upgrade teardown tolerance (FR-009)
+├── test_credentialing.py       # env-only key delivery (FR-010/FR-011)
+├── test_completions.sh         # --agent value completion (FR-013)
+├── test_entrypoint_execution.sh    # dispatch + stale-image preflight (FR-005/FR-012)
+├── test_entrypoint_tmux_layout.sh  # opencode window (FR-004)
+└── test_acceptance.py          # real-container: exit status, persistence, zero orphans
 entrypoint.sh                # opencode dispatch, binary preflight (FR-012), tmux window
 Dockerfile                   # npm layer + dev-owned mount-point dirs (R3/R4)
 completions/                 # --agent value completion (FR-013 — net-new, see R8)

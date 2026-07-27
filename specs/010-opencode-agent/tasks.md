@@ -1,0 +1,183 @@
+# Tasks: opencode as a Supported Agent
+
+**Feature**: 010-opencode-agent | **Branch**: `010-opencode-agent` | **Date**: 2026-07-27
+
+**Input**: [spec.md](./spec.md) · [plan.md](./plan.md) · [research.md](./research.md) ·
+[data-model.md](./data-model.md) · [contracts/agent-contract.md](./contracts/agent-contract.md) ·
+[quickstart.md](./quickstart.md)
+
+**Tests are included** — Constitution V (Durable Spec, Disposable Code) makes hermetic,
+contract-pinned testing mandatory for this project, and the plan pins two facts that are only
+answerable at the acceptance tier.
+
+---
+
+## Phase 1: Setup & load-bearing verification
+
+**These two tasks resolve facts the design depends on. They come first because T001 can
+invalidate a requirement.**
+
+- [ ] T001 Probe `opencode run`'s exit status: build a throwaway image adding `npm i -g opencode-ai`, run `opencode run` with a task that MUST fail (no credential configured), and record the exit status. Write the finding into `specs/010-opencode-agent/research.md` under R5. **DECISION GATE**: if it exits 0 on failure, STOP — amend FR-005 in `specs/010-opencode-agent/spec.md` to say the guarantee is unsatisfiable for opencode, and drop the exit-status assertion from T018. Do NOT weaken the assertion to match the behaviour.
+- [ ] T002 Probe rootless mount-point ownership: mount two named volumes at `/home/dev/.config/opencode` and `/home/dev/.local/share/opencode` in the throwaway image from T001 and confirm `dev` can write to both. Record the result in `specs/010-opencode-agent/research.md` under R3. This is what makes T004 concrete rather than defensive.
+
+---
+
+## Phase 2: Foundational (blocking prerequisites for all user stories)
+
+**Every user story below depends on this phase. All tasks in `bin/agent-container` are
+sequential — it is a single file.**
+
+- [ ] T003 [P] Add `&& npm i -g opencode-ai \` to the Layer 3 agent-CLI install in `Dockerfile` (line ~54-57), keeping the existing `npm cache clean --force` last.
+- [ ] T004 In `Dockerfile` (line ~169-171), add `/home/dev/.config/opencode` and `/home/dev/.local/share/opencode` to the `mkdir -p`, the `chown -R dev:dev`, and the `chmod 0700` lists; update the volume-listing comment at line ~140 from `{claude,codex,pi,shellenv,tmux}` to include both opencode volumes, and add a comment recording the verified paths (config vs. auth store) in the style of the existing `piConfig` note at line ~146.
+- [ ] T005 Add `"opencode"` to `AGENTS` in `bin/agent-container` (line ~347).
+- [ ] T006 Add `opencode_volume_name(name)` → `agent-container-<name>-opencode` and `opencode_data_volume_name(name)` → `agent-container-<name>-opencode-data` to `bin/agent-container` (beside the other `*_volume_name` functions, line ~186-210), each with a doctest matching the existing style.
+- [ ] T007 Extend `all_volume_mounts` and `per_container_volumes` in `bin/agent-container` (line ~246-280) to append `<...>-opencode:/home/dev/.config/opencode` and `<...>-opencode-data:/home/dev/.local/share/opencode`, and update BOTH doctests to the nine-volume lists. `other_container_volumes` derives from `per_container_volumes` and needs no edit — confirm this rather than assume it.
+- [ ] T008 Update the stale count in the `compose down` comment in `bin/agent-container` (line ~2839, "`--volumes` also drops the seven named volumes") and grep the file for any other numeric volume-count claim.
+
+---
+
+## Phase 3: User Story 1 — Run opencode inside a container (P1) 🎯 MVP
+
+**Goal**: opencode launches interactively in its own window and headlessly as PID 1, is
+selectable everywhere an agent is, and both kinds of its state survive recreation.
+
+**Independent test**: create an environment with `--agent opencode` in both modes; confirm it
+starts, `attach` lands on its window, the headless exit status propagates, and that **both**
+`opencode.json` and the credential from `opencode auth login` survive a down/up cycle.
+
+### Tests for US1
+
+- [ ] T009 [P] [US1] In `bin/tests/test_execution.py`, assert `--agent opencode` is accepted, an invalid value is rejected host-side naming all four, and the omitted-`--agent` default is still `claude` (contract C1, FR-001/FR-014).
+- [ ] T010 [P] [US1] In `bin/tests/test_pure_logic.py`, add the cross-file agreement test: parse `AGENTS` from `bin/agent-container`, the dispatch `case` arms from `entrypoint.sh`, and the `npm i -g` agent packages from `Dockerfile`, and assert the three sets describe the same four agents (contract C8, FR-002). Name the failure message so drift says *which* file disagrees.
+- [ ] T011 [P] [US1] In `bin/tests/test_completions.sh`, assert completing a value for `--agent` offers exactly `claude codex pi opencode` in both bash and zsh (contract C2, FR-013 — net-new, see research R8).
+
+### Implementation for US1
+
+- [ ] T012 [US1] In `entrypoint.sh` `run_headless_agent()`, add `opencode) exec opencode run "${t}" ;;` and update the fallback `die` text from `choose claude|codex|pi` to include opencode (line ~443).
+- [ ] T013 [US1] In `entrypoint.sh`, add a `require_agent_binary()` preflight used by both the headless and interactive paths: if `command -v "<agent>"` fails, `die` with a message naming `agent-container redeploy <name>` as the remedy (contract C4, FR-012). Write it once for all four agents — a stale image must never surface as `exec: opencode: not found` / exit 127.
+- [ ] T014 [US1] In `entrypoint.sh`, include `opencode` in the interactive tmux agent-window creation and update the window-name comment (line ~513-524) so `attach` lands on it exactly as for the other three (FR-004).
+- [ ] T015 [US1] Update the `--agent` option help in `bin/agent-container` (line ~5342) to `claude | codex | pi | opencode`.
+- [ ] T016 [P] [US1] Add `--agent` value completion offering the four names to `completions/agent-container.bash` and `completions/agent-container.zsh` (FR-013; none exists today for any agent).
+- [ ] T017 [US1] Extend `bin/tests/test_entrypoint_execution.sh` (headless dispatch resolves to `opencode run`, preflight fires with an actionable message when the binary is absent) and `bin/tests/test_entrypoint_tmux_layout.sh` (an `opencode` window is created and named).
+- [ ] T018 [US1] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S1 (interactive window + `attach`), S2 (headless exit status — assertion shape set by T001's outcome), and S3 (**both** `~/.config/opencode/opencode.json` **and** `~/.local/share/opencode/auth.json` survive down/up). S3 MUST assert both paths — checking only the config file is exactly the failure the original single-volume design would have hidden (research R1).
+
+**Checkpoint**: US1 alone is a shippable increment — opencode runs, persists, and is selectable.
+
+---
+
+## Phase 4: User Story 2 — Credentials reach opencode by the same rules (P2)
+
+**Goal**: an injected opencode key arrives through Feature 003's existing channels and lands
+nowhere new.
+
+**Independent test**: supply a key through the supported channel, confirm the agent can use it,
+and confirm the value appears in no project file, no command output, and no tool state.
+
+**Depends on**: Phase 3 (the agent must run before a credential can reach it).
+
+- [ ] T019 [P] [US2] In `bin/tests/test_credentialing.py`, assert an injected opencode key is exported into the container environment only — never on argv, never written to either opencode volume, never in emitted output (contract C7, FR-010/FR-011).
+- [ ] T020 [US2] In `entrypoint.sh`, beside the existing Codex/pi blocks (line ~297-345), export the provider key from `INJECT_APIKEY_DIR` into the process environment for opencode, with a log line stating the key is ephemeral and neither opencode volume is written. **No `$HOME`/config redirect is needed** — the redirect exists for codex/pi solely to keep an injected key out of their auth store, and an env-delivered key never reaches opencode's (research R6). Do not add one for symmetry.
+- [ ] T021 [US2] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S7: with a key injected, the value appears nowhere in the project directory or output, and the operator's local key file remains the sole durable copy.
+
+---
+
+## Phase 5: User Story 3 — The volume-set change is safe for existing environments (P2)
+
+**Goal**: nine volumes are created and removed cleanly, and an environment created on the old
+seven still tears down.
+
+**Independent test**: tear down a pre-upgrade (seven-volume) environment with the new code and
+confirm success with no error; tear down a freshly created one and confirm zero orphans.
+
+**Depends on**: Phase 2. Independent of Phases 3 and 4.
+
+- [ ] T022 [P] [US3] In `bin/tests/test_compose.py`, assert the generated compose model declares all nine volumes under `--workspace persistent` and the eight non-workspace volumes under `bind`/`ephemeral` (contract C5, FR-007; the workspace volume stays conditional per Feature 004).
+- [ ] T023 [P] [US3] In `bin/tests/test_lifecycle.py`, assert teardown of an environment whose volume set is the **old seven** succeeds with the new code — the two absent volumes are tolerated, no error, no migration (contract C5, FR-009). This is the feature's headline risk; do not skip it because the label-based `compose down --volumes` is *expected* to already handle it.
+- [ ] T024 [US3] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S4 (`wipe` leaves zero `agent-container-<name>-*` volumes) and S5 (pre-upgrade teardown succeeds).
+- [ ] T025 [P] [US3] Sweep every stale statement of the volume count or names and update it (FR-007): `CLAUDE.md` (the Feature 003/004 decision lines naming "Seven per-container volumes"), `docs/execution.md`, `docs/credentials.md`, and any remaining code comments. Finish with `grep -rniE "seven per-container|seven named|seven volumes" .` returning nothing.
+
+---
+
+## Phase 6: Polish & cross-cutting concerns
+
+- [ ] T026 [P] Update `docs/execution.md` for four agents: the `--agent` values, opencode's headless form, and its **two** persistent locations with the reason they differ from the other three.
+- [ ] T027 [P] Add a `docs/credentials.md` note that opencode's injected key is environment-delivered with no redirect, and that its on-volume `auth.json` is operator-interactive-login only.
+- [ ] T028 Run `scripts/quality-gate.sh` and fix everything it reports (ruff · ty · bandit · vulture · xenon · refurb · self-test · pytest · shell suites). The `per_container_volumes` doctest is the self-test's nine-volume contract check.
+- [ ] T029 Run the full acceptance suite (`pytest -m acceptance bin/tests`) — **not just the new tests**. Changing a shared contract like the volume set is exactly the case where a pre-existing test parses the old shape.
+- [ ] T030 Run quickstart Tier 3: create, attach, and wipe an environment for each of `claude`, `codex`, `pi` and confirm launch, persistence, and teardown are unchanged (SC-007, FR-014).
+
+---
+
+## Dependencies
+
+```text
+Phase 1 (T001-T002)  ── verification; T001 can amend FR-005
+        │
+Phase 2 (T003-T008)  ── foundational; blocks everything
+        │
+        ├── Phase 3 US1 (T009-T018)  🎯 MVP
+        │        │
+        │        └── Phase 4 US2 (T019-T021)   needs a running agent
+        │
+        └── Phase 5 US3 (T022-T025)  independent of US1/US2
+                 │
+Phase 6 (T026-T030) ── after all stories
+```
+
+**Story independence**: US1 and US3 can proceed in parallel once Phase 2 lands. US2 requires US1.
+
+**File-based serialization**: T005-T008 all edit `bin/agent-container` → strictly sequential.
+T012-T014 all edit `entrypoint.sh` → strictly sequential. T018, T021, T024 all edit
+`test_acceptance.py` → sequential relative to each other.
+
+## Parallel execution examples
+
+**Phase 2** — different files:
+
+```text
+T003 → T004                  (Dockerfile, sequential)
+T005 → T006 → T007 → T008    (bin/agent-container, sequential)
+```
+
+The Dockerfile pair and the `bin/agent-container` chain run in parallel with each other.
+
+**Phase 3 tests** — three different files, fully parallel:
+
+```text
+T009 (test_execution.py)  ‖  T010 (test_pure_logic.py)  ‖  T011 (test_completions.sh)
+```
+
+**Phase 5** — independent of Phase 3/4 entirely:
+
+```text
+T022 (test_compose.py)  ‖  T023 (test_lifecycle.py)  ‖  T025 (docs/comment sweep)
+```
+
+## Implementation strategy
+
+**MVP = Phase 1 + Phase 2 + Phase 3 (US1).** That delivers a runnable, persistent, selectable
+opencode — the whole point of the feature — with interactive login as the credential path.
+
+**Increment 2 = Phase 4 (US2)**: declared-credential injection. The agent is useful without it.
+
+**Increment 3 = Phase 5 (US3)**: the upgrade-safety guarantee. Independent of the others, but
+**must not be deferred past the release** — it is the contract change this feature carries, and
+FR-009 protects every existing environment.
+
+**Two tasks can change the spec rather than the code**: T001 (if `opencode run` never fails) and,
+in principle, T002. Treat a surprising result there as a finding to record, not an obstacle to
+route around.
+
+## Task summary
+
+| Phase | Story | Tasks | Count |
+|---|---|---|---|
+| 1 Setup & verification | — | T001-T002 | 2 |
+| 2 Foundational | — | T003-T008 | 6 |
+| 3 User Story 1 | US1 (P1) | T009-T018 | 10 |
+| 4 User Story 2 | US2 (P2) | T019-T021 | 3 |
+| 5 User Story 3 | US3 (P2) | T022-T025 | 4 |
+| 6 Polish | — | T026-T030 | 5 |
+| **Total** | | | **30** |
+
+Parallelizable: 11 tasks marked `[P]`.
