@@ -439,7 +439,16 @@ def test_dockerfile_installs_exactly_the_canonical_agents(wiz):
 
 
 def test_completions_offer_exactly_the_canonical_agents(wiz):
-    """FR-013: the tool and its completions must not disagree."""
+    """FR-013: the tool and its completions must not disagree.
+
+    Asserts the list is both DECLARED and WIRED. Declaring it is not enough: a
+    review of this feature caught a zsh script that declared the list but never
+    referenced it from the `up` stanza, so `--agent` completed nothing — and an
+    earlier version of this very test passed, because it only looked for the
+    declaration. The bash side is additionally exercised by invoking the real
+    completion in test_completions.sh; zsh has no such harness, which is exactly
+    why the wiring check matters here.
+    """
     for fname in ("agent-container.bash", "agent-container.zsh"):
         body = (_ROOT / "completions" / fname).read_text()
         m = re.search(r"_agent_container_agents=[\"']([^\"']+)[\"']", body)
@@ -448,6 +457,36 @@ def test_completions_offer_exactly_the_canonical_agents(wiz):
         assert offered == _canonical_agents(wiz), (
             f"{fname} disagrees with AGENTS: only in completions="
             f"{offered - _canonical_agents(wiz)}, only in AGENTS={_canonical_agents(wiz) - offered}"
+        )
+        # Referenced somewhere OTHER than its own assignment, and reachable from
+        # a `--agent` completion arm.
+        uses = [
+            ln
+            for ln in body.splitlines()
+            if "_agent_container_agents" in ln and not re.match(r"\s*_agent_container_agents=", ln)
+        ]
+        assert uses, (
+            f"{fname} declares the agent list but never uses it (--agent would complete nothing)"
+        )
+        assert "--agent" in body, f"{fname} never offers the --agent option at all"
+
+
+def test_orchestration_templates_mount_the_full_volume_set(wiz):
+    """FR-007: 'every place that states the number or names of those volumes'
+    includes the hand-maintained templates in orchestration/, which claim volume
+    parity with the CLI. They are not generated, so nothing else catches drift —
+    an operator following a stale template silently loses opencode's state.
+    """
+    expected = set(wiz.per_container_volumes("PLACEHOLDER"))
+    for fname, pattern in (
+        ("compose.yaml", r"agent-container-\$\{AGENT_CONTAINER_NAME:-default\}-([a-z-]+):/"),
+        ("agent-container.container", r"Volume=agent-container-\$\{NAME\}-([a-z-]+):/"),
+    ):
+        body = (_ROOT / "orchestration" / fname).read_text()
+        mounted = {f"agent-container-PLACEHOLDER-{m}" for m in re.findall(pattern, body)}
+        assert mounted == expected, (
+            f"orchestration/{fname} is out of sync with per_container_volumes(): "
+            f"missing={sorted(expected - mounted)}, extra={sorted(mounted - expected)}"
         )
 
 

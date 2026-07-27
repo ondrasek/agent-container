@@ -100,8 +100,11 @@ _agent-container() {
                         '--context[Docker build context (repo checkout)]:directory:_files -/' \
                         '1:tag:'
                     ;;
-                up)
+                up|redeploy)
                     _arguments \
+                        "--agent[Primary agent to run]:agent:(${=_agent_container_agents})" \
+                        '--mode[Execution mode]:mode:(interactive headless)' \
+                        '--workspace[Workspace backing]:workspace:(persistent bind ephemeral)' \
                         '--host[Deploy to this registered host]:host:' \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \

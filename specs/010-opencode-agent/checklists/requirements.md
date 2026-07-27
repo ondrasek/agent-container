@@ -33,10 +33,12 @@
 
 - Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`
 - **The risk in this feature is not the agent — it is the contract change.** The
-  per-container volume set grows from seven to eight, and that count is pinned in the design
-  contract, a self-test, the teardown paths, and the shell completions. US3 exists solely to
-  make that independently testable, and FR-009 (teardown tolerates the missing volume on
-  pre-upgrade environments) is the requirement most likely to be forgotten.
+  per-container volume set grows from seven to **nine** — opencode splits configuration from
+  credentials and needs **two** volumes — and that count is pinned in the design contract, a
+  self-test, the teardown paths, the shell completions, and the manual `orchestration/`
+  templates. US3 exists solely to make that independently testable, and FR-009 (teardown
+  tolerates the **missing volumes** on pre-upgrade environments) is the requirement most
+  likely to be forgotten.
 - The single-sourcing requirement (FR-002) is deliberately stated as a *requirement* rather
   than left to implementation, because four separate hard-coded agent lists is exactly how
   the CLI and its completions drift apart.

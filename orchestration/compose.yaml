@@ -19,7 +19,7 @@
 # Volume parity with the CLI: this template mounts the SAME seven per-container
 # named volumes that `agent-container up` mounts (workspace + the five agent /
 # shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
-# `codex login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH
+# `codex login` / `opencode auth login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH
 # identity (host key + authorized_keys) persist across `down`/`up` on this path
 # too. Keep this list in sync with `all_volume_mounts()` in bin/agent-container.
 #
@@ -42,6 +42,8 @@ services:
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-claude:/home/dev/.claude"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-codex:/home/dev/.codex"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-pi:/home/dev/.pi"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-opencode:/home/dev/.config/opencode"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-opencode-data:/home/dev/.local/share/opencode"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:/home/dev/.agent-container"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:/home/dev/.config/tmux"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-ssh:/home/dev/.ssh"
@@ -61,6 +63,10 @@ volumes:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-codex"
   agent-container-${AGENT_CONTAINER_NAME:-default}-pi:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-pi"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-opencode:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-opencode"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-opencode-data:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-opencode-data"
   agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv"
   agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:

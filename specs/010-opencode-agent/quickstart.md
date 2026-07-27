@@ -59,10 +59,12 @@ echo "exit=$?"
 
 **Expected**: the CLI's exit status equals the agent's.
 
-**This scenario is also the probe for research R5** — whether `opencode run` returns non-zero at
-all is undocumented. Run it once with a task that must fail (e.g. no credential configured) and
-confirm a non-zero status. **If it exits 0 on failure, stop and amend FR-005** rather than
-weakening the test to match.
+**Resolved by research R5** — `opencode run` does propagate a failing status.
+
+**Do not use "no credential configured" as the failing case.** opencode **succeeds** (exit 0)
+with no credential, via a built-in default model; that observation would wrongly suggest FR-005
+is unsatisfiable. The failing case is a **present-but-invalid** key
+(`ANTHROPIC_API_KEY=sk-ant-invalid…`), which exits 1.
 
 ### S3 — Both kinds of state survive recreation (US1, C6)
 

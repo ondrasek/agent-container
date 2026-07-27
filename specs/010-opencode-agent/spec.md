@@ -246,8 +246,10 @@ freshly created environment has the full new set and also tears down completely.
 ## Assumptions
 
 - **Verified, not assumed:** opencode is installable at image build time by the **same
-  mechanism as the existing agents**, and its configuration lives in a **single, persistable
-  directory** that an environment variable can relocate (see Clarifications).
+  mechanism as the existing agents**. Its persistent state lives in **two** separate native
+  locations — configuration in one, credentials and session history in the other — and the
+  environment variable that was believed to relocate the configuration does not (see the
+  **Correction** under Clarifications; the earlier single-directory claim is withdrawn).
 - **The volume-set growth (seven → nine) is an additive contract change**, handled the same
   way the workspace volume was made conditional: teardown tolerates absence, so no migration
   is required for existing environments. It grows by two rather than one because opencode
