@@ -60,14 +60,21 @@ __agent_container_names() {
     compadd -a names
 }
 
-# Feature 010 FR-013 / FR-002: the supported-agent list. Kept as ONE assignment
-# so the hermetic agreement test can parse it and fail if it drifts from AGENTS
-# in bin/agent-container (the canonical source).
-_agent_container_agents="claude codex pi opencode"
-
 _agent-container() {
     local context state state_descr line
     typeset -A opt_args
+    # Feature 010 FR-013 / FR-002: the supported-agent list, ONE assignment so the
+    # hermetic agreement test can parse it and fail if it drifts from AGENTS in
+    # bin/agent-container (the canonical source). Local by preference, not by
+    # necessity — a file-level global also works (verified).
+    #
+    # Expand it as ${_agent_container_agents}, NEVER ${=...}. The split flag turns
+    # this ONE _arguments spec into four malformed words, and `--agent` then
+    # silently completes nothing while `--mode` (a literal list) still works. The
+    # declaration and the reference both look correct, so neither a grep-based
+    # test nor reading the diff catches it — only executing the completion does,
+    # which is what the zsh pty test in bin/tests/test_completions.sh exists for.
+    local _agent_container_agents="claude codex pi opencode"
     local -a cmds
     cmds=(
         'build:Build the image at the repo root'
@@ -113,7 +120,7 @@ _agent-container() {
                     ;;
                 up|redeploy)
                     _arguments \
-                        "--agent[Primary agent to run]:agent:(${=_agent_container_agents})" \
+                        "--agent[Primary agent to run]:agent:(${_agent_container_agents})" \
                         '--mode[Execution mode]:mode:(interactive headless)' \
                         '--workspace[Workspace backing]:workspace:(persistent bind ephemeral)' \
                         '--host[Deploy to this registered host]:host:' \
