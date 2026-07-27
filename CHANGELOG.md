@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.17.0 (2026-07-27)
+
+### Documentation
+
+- Prune CLAUDE.md back under its token budget
+  ([#010](https://github.com/ondrasek/agent-container/pull/10),
+  [`bf28c8f`](https://github.com/ondrasek/agent-container/commit/bf28c8fc0527a070d1f7cfc63433bb237169869c))
+
+
 ## v0.16.0 (2026-07-26)
 
 ### Bug Fixes
