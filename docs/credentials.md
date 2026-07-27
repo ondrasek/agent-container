@@ -36,7 +36,7 @@ identity — it is distinct from every outbound/ephemeral credential below (SC-0
 | `GIT_USER_EMAIL`     | Becomes `user.email` in `~/.gitconfig`.                                                                         |
 | `ANTHROPIC_API_KEY`  | Claude Code authentication (layered fallback; the file-first channel is preferred — see below).                 |
 | `OPENAI_API_KEY`     | Codex (`@openai/codex`) authentication (layered fallback).                                                      |
-| (other provider keys) | `pi-coding-agent` is multi-provider; add whichever provider keys you point pi at (e.g. `GOOGLE_API_KEY`).      |
+| (other provider keys) | `pi-coding-agent` and `opencode` are multi-provider; add whichever provider keys you point them at (e.g. `GOOGLE_API_KEY`). |
 | `SSH_PUSH_KEY_B64`   | base64 of an unencrypted **outbound** SSH push key (Feature 003). Ephemeral — consumed at boot, **never** persisted. Env-file parity for `up --push-key`. |
 | `PUSH_KNOWN_HOSTS`   | `known_hosts` lines for the push remote, so outbound push never stalls on unknown-host verification. Env-file parity for `up --known-hosts`. |
 
@@ -197,6 +197,7 @@ automatically — one file per provider:
 | **Claude Code** | an `apiKeyHelper` is written into the fresh canonical `settings.json` that `cat`s the injected key at `INJECT_APIKEY_DIR/anthropic`; the `~/.claude` volume never receives the key | interactive `/login` OAuth persists on `~/.claude` |
 | **Codex** | `CODEX_HOME` is redirected to an ephemeral `/run` dir + `codex login --with-api-key` reads the injected file on **stdin** (or `OPENAI_API_KEY` in the in-container env); the `-codex` volume is never written | interactive `codex login` persists on `~/.codex` |
 | **pi-coding-agent** | `PI_CODING_AGENT_DIR` is redirected to an ephemeral `/run` dir (or the provider key in the in-container env); the `-pi` volume is never written | interactive `/login` persists on `~/.pi` |
+| **opencode** | The provider key is delivered **in the in-container env only** — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, read from the ephemeral injected file. **No `$HOME`/config redirect**, and none should be added: the redirect exists for Codex/pi purely to keep an injected key out of their on-volume auth store, and opencode (verified by running it) never writes an env-supplied key to `~/.local/share/opencode/auth.json`. Env delivery alone is strictly *less* exposure here | interactive `opencode auth login` persists on `~/.local/share/opencode` |
 
 A non-interactive `login` that writes the **persistent** per-agent volume is
 **not** a permitted tool default (SC-004). On-volume `auth.json` arises **only**
@@ -266,7 +267,7 @@ formalizes the whole-directory model on top of this thin manifest.
 | Token in image layers                    | Not possible              | `.env` is injected at runtime, not built in.                                                            |
 | Token in container logs                  | Operator responsibility   | Don't `echo $GH_TOKEN`. Entrypoint scripts avoid logging env contents.                                  |
 | Long-lived broad-scope PAT               | Mitigated by hygiene      | Use `repo`-scoped PATs with explicit expiration. Rotate.                                                |
-| Agent OAuth credential on a named volume | **Accepted**              | Interactive `claude`/`codex`/`pi` login persists to a per-container volume (inside the Lima VM on macOS). Restrict access to the runtime's volume storage. `down --purge` deletes it. |
+| Agent OAuth credential on a named volume | **Accepted**              | Interactive `claude`/`codex`/`pi`/`opencode` login persists to a per-container volume (inside the Lima VM on macOS). Restrict access to the runtime's volume storage. `down --purge` deletes it. |
 | Tool-injected push key / API-key file    | **Eliminated by design**  | Delivered under `/run/agent-container/…` (ephemeral); never copied to a volume (FR-012). Vanishes with the container; the operator's local copy is the sole durable copy (SC-004). |
 
 If hardening the HTTPS path is needed later, the upgrade path is: switch `GH_TOKEN` to a compose `secrets:` block (or `podman secret` on the VPS), keep `.env` for non-secret config, and read `/run/secrets/gh-token` in the entrypoint instead of `$GH_TOKEN`. One-line change in the helper. (The SSH push key already rides the ephemeral-config channel.)

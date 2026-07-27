@@ -72,8 +72,8 @@ If you need to override (e.g. you already have something on 2218), edit the stat
 
 ## Volume layout
 
-- **Seven named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume `-shellenv` (`~/.agent-container`), the tmux-config volume `-tmux` (`~/.config/tmux`), and the SSH volume `-ssh` (`~/.ssh` — `authorized_keys` and the host key under `hostkeys/`, so SSH identity is stable across recreation).
-- The volumes **survive `agent-container down`** — only `down --purge` removes them (all seven).
+- **Nine named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`) and opencode's **two**, `-opencode` (`~/.config/opencode`) and `-opencode-data` (`~/.local/share/opencode`) — it is the one agent that splits configuration from credentials — the shell-env volume `-shellenv` (`~/.agent-container`), the tmux-config volume `-tmux` (`~/.config/tmux`), and the SSH volume `-ssh` (`~/.ssh` — `authorized_keys` and the host key under `hostkeys/`, so SSH identity is stable across recreation).
+- The volumes **survive `agent-container down`** — only `down --purge` removes them (all nine).
 - Hard constraint: **the container is ephemeral**. The volume is for **scratch + uncommitted work in flight**, not durable state. Every agent commits and pushes; if you lose the volume, you lose only un-pushed work.
 
 ## `.env` file lookup
@@ -87,6 +87,30 @@ If you need to override (e.g. you already have something on 2218), edit the stat
 The chosen path is printed at startup. If none exists, `up` fails fast with all three paths listed.
 
 This composes cleanly with the credential contract: see [`credentials.md`](credentials.md).
+
+## Concurrency: one advisory lock per (host, container)
+
+Every **mutating** verb (`up`, `down`, `stop`, `start`, `redeploy`, `wipe`, `purge`, `keys`) takes
+an **fcntl advisory lock** on `<state>/<host>/<name>.lock` before touching anything. It is
+**non-blocking**: a second invocation against the same container on the same host **fails fast**
+rather than queueing, so two concurrent `up`s can never interleave a compose write.
+
+Read-only verbs (`list`, `logs`, `plan`, `status`) **never** lock — they must stay usable while a
+deploy is in flight.
+
+If you add a mutating verb, take the lock. This is the invariant that keeps parallel containers
+(hard constraint 3) from corrupting each other's generated compose file and port state.
+
+## Sidecar services
+
+An operator override file — `./agent-container.<name>.services.yaml`, falling back to
+`~/.config/agent-container/<name>.services.yaml` — is merged as a **second `-f`** on every compose
+call, so the agent container and its helpers share one project and one lifecycle (`down` tears
+both down).
+
+It is validated: **`services:` only**, and it **must not redefine the `agent` service**. On the
+create path an invalid override is fatal; on teardown it is resolved leniently and ignored with a
+warning, because a broken override must never block a teardown.
 
 ## State on the host
 
@@ -129,7 +153,7 @@ AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_PORT=2218 docker compose up -d
 AGENT_CONTAINER_NAME=alpha docker compose down
 ```
 
-The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of six per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
+The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of nine per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
 
 `agent-container` does not use compose — it calls the runtime directly. Compose is offered for operators who prefer that interface.
 
@@ -139,7 +163,7 @@ SSH **host key** and the operator's **`~/.ssh/authorized_keys`** live on the `-s
 
 ## Constraints satisfied
 
-- **Ephemeral containers** — all seven per-container volumes persist across `down`/`up`; `--purge` removes them. The container itself is disposable — durable state lives in git (commit + push), not the volumes.
+- **Ephemeral containers** — all nine per-container volumes persist across `down`/`up`; `--purge` removes them. The container itself is disposable — durable state lives in git (commit + push), not the volumes.
 - **No VSCode coupling** — no `.devcontainer/`, no editor assumptions. SSH + tmux is the contract.
 - **Parallel-safe** — `agent-container up alpha` and `agent-container up bravo` run side by side with distinct names, ports, and volumes.
 - **No baked secrets** — `.env` is read at run time, not at build time.

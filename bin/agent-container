@@ -329,6 +329,27 @@ def pi_volume_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}-pi"
 
 
+def opencode_volume_name(name: str) -> str:
+    """opencode's CONFIG volume (~/.config/opencode).
+
+    >>> opencode_volume_name("acme")
+    'agent-container-acme-opencode'
+    """
+    return f"{CONTAINER_PREFIX}{name}-opencode"
+
+
+def opencode_data_volume_name(name: str) -> str:
+    """opencode's DATA volume (~/.local/share/opencode) — auth.json + session db.
+
+    opencode is the only agent that splits config from credentials (it follows
+    XDG), so it is the only one with two volumes. See docs/execution.md.
+
+    >>> opencode_data_volume_name("acme")
+    'agent-container-acme-opencode-data'
+    """
+    return f"{CONTAINER_PREFIX}{name}-opencode-data"
+
+
 def shellenv_volume_name(name: str) -> str:
     """
     >>> shellenv_volume_name("acme")
@@ -359,19 +380,21 @@ def ssh_volume_name(name: str) -> str:
 
 
 def all_volume_mounts(name: str) -> list[str]:
-    """The seven per-container '-v' volume args, in the canonical fixed order
+    """The nine per-container '-v' volume args, in the canonical fixed order
     (workspace, claude, codex, pi, shellenv, tmux, ssh). pi-coding-agent's
     config/auth dir is ~/.pi (verified from
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
     """
     return [
         f"{volume_name(name)}:/workspace",
         f"{claude_volume_name(name)}:/home/dev/.claude",
         f"{codex_volume_name(name)}:/home/dev/.codex",
         f"{pi_volume_name(name)}:/home/dev/.pi",
+        f"{opencode_volume_name(name)}:/home/dev/.config/opencode",
+        f"{opencode_data_volume_name(name)}:/home/dev/.local/share/opencode",
         f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
         f"{ssh_volume_name(name)}:/home/dev/.ssh",
@@ -382,13 +405,15 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
     """
     return [
         volume_name(name),
         claude_volume_name(name),
         codex_volume_name(name),
         pi_volume_name(name),
+        opencode_volume_name(name),
+        opencode_data_volume_name(name),
         shellenv_volume_name(name),
         tmux_volume_name(name),
         ssh_volume_name(name),
@@ -396,19 +421,19 @@ def per_container_volumes(name: str) -> list[str]:
 
 
 def other_container_volumes(name: str) -> list[str]:
-    """The six NON-workspace per-container volume names (Feature 004). The
+    """The eight NON-workspace per-container volume names (Feature 004). The
     workspace volume is mode-dependent (persistent only), so bind/ephemeral
-    deployments declare only these six in the compose model's `volumes:`.
+    deployments declare only these eight in the compose model's `volumes:`.
 
     >>> other_container_volumes("acme")
-    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
     """
     ws = volume_name(name)
     return [v for v in per_container_volumes(name) if v != ws]
 
 
 def other_volume_mounts(name: str) -> list[str]:
-    """The six non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
+    """The eight non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
     the leading workspace mount, which the workspace mode selects separately."""
     ws_prefix = f"{volume_name(name)}:"
     return [m for m in all_volume_mounts(name) if not m.startswith(ws_prefix)]
@@ -464,7 +489,7 @@ INJECT_TASK_PATH = "/run/agent-container/task"
 # execution mode, and the workspace mode. These are non-secret and travel as
 # compose environment (mode/agent/repo) — the task travels as an injected file.
 EXEC_MODES = ("interactive", "headless")
-AGENTS = ("claude", "codex", "pi")
+AGENTS = ("claude", "codex", "pi", "opencode")
 WORKSPACE_MODES = ("persistent", "bind", "ephemeral")
 
 
@@ -2166,7 +2191,7 @@ def driver_reachable_address(host: dict) -> str:
 # --- compose generation (Feature 001) ----------------------------------------
 # The per-container deployment is a generated, inspectable compose project,
 # emitted as JSON (a valid YAML subset) so no YAML dependency is needed. It
-# declares the seven named volumes and expresses injected SSH identity as compose
+# declares the nine named volumes and expresses injected SSH identity as compose
 # `secrets` (private host key) / `configs` (public authorized_keys) referencing
 # LOCAL files, so the material transfers over a remote context (a bind would
 # resolve empty on the remote). No secret value is ever written inline — only
@@ -2217,7 +2242,7 @@ def build_compose_model(
     port = port_for_name(name)
     # Feature 004: the /workspace mount is workspace-mode dependent. Default (and
     # every pre-004 caller) → the persistent named volume; ephemeral → nothing
-    # mounted (None); bind → the caller's '<abs>:/workspace'. The other six volumes
+    # mounted (None); bind → the caller's '<abs>:/workspace'. The other eight volumes
     # are always mounted.
     ws = (
         f"{volume_name(name)}:/workspace"
@@ -2237,7 +2262,7 @@ def build_compose_model(
     if env_file is not None:
         service["env_file"] = [str(env_file)]
     # The workspace named volume is declared ONLY in persistent mode (Constitution
-    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other six are
+    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other eight are
     # always declared. `--purge`/`wipe` tolerate the workspace volume's absence.
     declared = (
         per_container_volumes(name) if declare_workspace_volume else other_container_volumes(name)
@@ -2976,7 +3001,7 @@ def down_container(
                 warn(f"ignoring sidecar override for teardown ({e})")
                 override = None
             # compose down removes the container (+ networks); --volumes also drops
-            # the seven named volumes; --rmi local also removes the locally-built
+            # the nine named volumes; --rmi local also removes the locally-built
             # image (wipe). Without those, volumes/image are preserved.
             query(
                 driver_down_argv(
@@ -5506,7 +5531,7 @@ def up(
         "headless (agent runs the task as the container's workload and exits).",
     ),
     agent: str = typer.Option(
-        "claude", "--agent", help="Primary agent to run: claude | codex | pi."
+        "claude", "--agent", help="Primary agent to run: claude | codex | pi | opencode."
     ),
     task: str | None = typer.Option(
         None,
@@ -5608,7 +5633,7 @@ def down(
     purge: bool = typer.Option(
         False,
         "--purge",
-        help="Also delete all seven per-container volumes (workspace + agent logins, shell env, tmux config, ssh).",
+        help="Also delete all nine per-container volumes (workspace + agent logins, shell env, tmux config, ssh).",
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
     as_json: bool = JSON_OPT,

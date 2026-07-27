@@ -4,33 +4,70 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project intent
 
-Build a **containerized development environment** designed to run remotely (e.g., Hetzner VPS) as an always-on container that the user attaches to and detaches from over SSH. Inside, multiple AI coding agents (Claude Code, Codex, pi-coding-agent) and editors (nvim) run under tmux. Multiple such containers may run in parallel, each holding working copies of one or more git repositories.
+Build a **containerized development environment** designed to run remotely (e.g., Hetzner VPS) as an always-on container that the user attaches to and detaches from over SSH. Inside, AI coding agents (Claude Code, Codex, pi-coding-agent, opencode) and editors (nvim) run under tmux. Multiple such containers may run in parallel, each holding working copies of one or more git repositories.
 
 ## Hard constraints
 
-These are load-bearing design decisions, not preferences:
+Load-bearing design decisions, not preferences:
 
-1. **No reliance on container persistence.** Every agent must `commit` AND `push` every change. The container is treated as ephemeral; if it dies, no work is lost. Any feature or workflow that depends on uncommitted state is wrong by construction.
-2. **Editor-agnostic, not VSCode-locked.** The user explicitly rejected devcontainers because tooling support outside VSCode is nonexistent. Do not introduce `.devcontainer/` configs or any design that assumes a VSCode client. SSH + tmux is the canonical attach path.
-3. **Multiple parallel containers.** Naming, port allocation, volume mounts, and git identity must all support N containers running simultaneously on the same host without collision.
-4. **Push auth must work non-interactively.** Agents commit autonomously, so SSH keys / git credentials inside the container must be configured to push without prompts. Never embed long-lived secrets in the image — inject at runtime.
+1. **No reliance on container persistence.** Every agent must `commit` AND `push` every change.
+   The container is ephemeral; if it dies, no work is lost. Any feature that depends on
+   uncommitted state is wrong by construction.
+2. **Editor-agnostic, not VSCode-locked.** Devcontainers were explicitly rejected — tooling
+   outside VSCode is nonexistent. No `.devcontainer/`, no design assuming a VSCode client.
+   SSH + tmux is the canonical attach path.
+3. **Multiple parallel containers.** Naming, ports, volumes and git identity must all support N
+   containers on one host without collision.
+4. **Push auth must work non-interactively.** Agents commit autonomously, so git credentials
+   inside the container must push without prompts. Never embed long-lived secrets in the image —
+   inject at runtime.
 
 ## Decisions
 
-- **Runtime + base image:** Podman + `debian:12-slim`. See [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
-- **Rootless container, no runtime apt:** no `sudo`/root at runtime — `sshd` runs as `dev` on port **2222** (host maps `<hostport>:2222`), host key + `authorized_keys` on the dev-owned `~/.ssh` volume. **All system deps are baked at build time; agents never `apt install` at runtime** — add packages to the `Dockerfile`.
-- **SSH identity persists + is injectable:** the `-ssh` volume keeps a stable host key + `authorized_keys` across recreation. Inject via env-file, `up --host-key/--authorized-key`, or `keys <name>` (live). Seven per-container volumes: `workspace, claude, codex, pi, shellenv, tmux, ssh`.
-- **CLI:** one tool, `agent-container` (`bin/agent-container`) — a PEP 723 uv script (Typer+questionary+rich) covering the whole lifecycle plus the wizard. **Multi-host (specs/001):** a *host* is a named runtime target in `~/.config/agent-container/hosts.json`; `up`/`down` take `--host`. **Server↔container lifecycles are separate:** `host rm` removes only the registration; `host rm --destroy` is **fail-closed** — refused unless tool-created AND a *provably-successful* listing shows it empty (an unreachable daemon refuses, never reads as empty), and the entry is kept if the delete fails. **Run mechanism is compose** (Compose v2): `up` generates a per-host compose file and runs it **on the host** (builds there, no registry); injected identity rides as compose configs (remote-context-safe). On-disk contract — `agent-container-<name>`, `2200 + name-hash` port, per-host `<host>/<name>.port`, deterministic volume names — is single-sourced here; completions read the same state. Runtime default is platform-aware; override `AGENT_CONTAINER_RUNTIME`.
-- **Lifecycle verbs (specs/002):** `stop`/`start` (keep container+volumes), `redeploy` (rebuild+recreate, **deliberately non-idempotent** — the idempotent no-op stays `up`), `wipe` (+volumes+local image, behind `-y`/TTY confirm). Every mutating verb takes a per-`(host,name)` **fcntl lock** (non-blocking → fail-fast); read-only `list`/`logs` never lock. `list` is **live-reconciled** and **fail-closed** (a failed enumeration renders `unreachable`, never "zero containers"). **Sidecars:** an operator override file merged as a 2nd `-f` so agent+helpers share one lifecycle; `services:`-only, must not redefine `agent`.
-- **Agent credentialing (specs/003):** runtime-injected, **least-exposure**. A tool-injected secret rides a compose `config` under `/run/agent-container/…` and is **never** copied to a volume — it vanishes with the container; never on argv, never baked; a missing referenced file `die`s **before** compose. **Push key** (`--push-key`) wires `git core.sshCommand`; **distinct** from the inbound sshd host key, never on the `~/.ssh` volume. **File-first API keys** (`./agent-container.<name>.<provider>.key`) via an `apiKeyHelper`/ephemeral `$HOME` so `auth.json` never lands on the agent volume. Canonical config copied fresh each boot; rotate = local edit + `redeploy`. Docs: [`docs/credentials.md`](docs/credentials.md).
-- **Agent execution (specs/004):** `up`/`redeploy` own what runs inside. **`--mode interactive|headless`** — interactive = sshd+tmux + the agent in its own window (`restart: unless-stopped`); headless = the agent as PID 1 and **the container exits with the agent's code** (`restart: on-failure`). **`--agent`** + **`--task <text|@file>`** (ephemeral injected file; never argv/env). **`--foreground`** (headless-only) makes the CLI exit = agent exit. **`--workspace persistent|bind|ephemeral`** — the workspace volume is **conditional** (persistent only; `--purge`/`wipe` tolerate its absence). **`--repo`** clone-on-start: SSH URL + no push key = **fail fast**; rides `AGENT_CONTAINER_CLONE_URL`, **distinct** from `AGENT_CONTAINER_REPO` (build-context override). `attach` probes `tmux has-session` first. Docs: [`docs/execution.md`](docs/execution.md).
-- **Shell integration (specs/005):** a **print/emit** surface, host-side only. One **`ShellAction`** is computed per operation then either **rendered** for a dialect (`--shell posix|fish|pwsh`) or **executed** — so print==execute can't drift. `attach --print`/`--ssh-config`, `host env` (+`--unset`). **Eval contract:** stdout is config-only (humans→stderr), any error → **empty stdout + non-zero** (`eval` runs nothing), registry-only, and **no secret on stdout**. Docs: [`docs/shell-integration.md`](docs/shell-integration.md).
-- **Agent-as-code (specs/006):** a **declarative** `.agent-container/` directory as desired state, reconciled by **driving the existing imperative internals** — **additive** (no marker up the tree ⇒ today's behavior). Discovery walks **upward**; YAML via **`yaml.safe_load` ONLY** (PyYAML, a recorded Constitution-VI deviation), **validated before any action** (die naming file+field, no partial change). Verbs `apply`/`plan`/`status`/`destroy`; **idempotent**; **ownership from the deterministic identity — no state file**; spec wins for its scope. **Spec integrity (FR-020):** read **only** host-side and delivered **read-only via compose `configs`** (remote-context-safe), so an agent can't re-govern itself; refuse-if-writable. **US3** field-level drift → announced recreate; per-env **partial failure** reports and exits non-zero. **US4** `host: {provision: hetzner,…}` provisions+registers before deploy, **idempotent (no double-bill)**; `destroy --deprovision` removes a spec-created host only. Credential `target: push_key|host_key|authorized_key` → 003 ssh channels. Docs: [`docs/agent-as-code.md`](docs/agent-as-code.md).
-- **Guided wizard (specs/007):** the no-arg wizard is **state-aware**. A **pure recommendation engine** (`build_snapshot → assess_stages → recommend_next_step`/`valid_actions`, no I/O, hermetically tested) drives a thin shell. It assesses a **single active target** (**bounded probing** — never all hosts) across `runtime/host/image/credentials/container/running` as a **tri-state** (absent | present | **unusable**), leads with the **one** next step + reason + **secret-free** equivalent command, and re-evaluates after each action. Credentials are **soft** (never gate a local start); a hard-unmet action is **withheld** from `valid_actions` (which always includes `quit`). Reuses the existing `wiz_*` handlers.
-- **Credential managers (specs/008):** the repo holds a **locator, never a value**. Sources `env`/`file`/`keychain` + **`command`** (an operator **argv list** run **directly — no shell**; covers any manager CLI, zero tool change) + **`onepassword`**/**`bitwarden`** (typed fields → the same argv). **`encrypted` (committed ciphertext) REMOVED** — refused naming the migration (breaking, pre-1.0). One audited **`_run_resolver`**: host-side, **stdin closed**, **30 s bound**, fails on empty-**or-whitespace-only**, and the resolver's **stderr is NEVER echoed** (though the message carries a remediation hint). **Only `apply` resolves** — `plan`/`status` never invoke a resolver; resolution is **not cached**. Docs: [`docs/agent-as-code.md`](docs/agent-as-code.md).
-- **Agent-operable CLI (specs/009):** the tool is drivable by an AI agent, not just a human. **Per-invocation `--json`** on every command emits **one versioned envelope** on stdout — `{schema: agent-container/v1, ok, data|error}` — from a **single emitter**; `schema` is the compatibility surface (adding a field/code is additive; renaming bumps it). **Failures carry a stable `code`+`entity`+`remedy`**, rendered at the ONE existing `die`→`Fatal`→`cli()` chokepoint (un-annotated sites use `unspecified`). In JSON mode a child's stdout is **redirected to stderr** (`run_child`) — a build log on stdout makes the payload unparseable. **Excluded from `--json`:** `host env`/`completions`/`attach` (stdout is `eval`'d or streamed — the 005 contract) and `menu`; the set is test-asserted. **`context`** is a *serializer over the 007 pure engine* + 006 conventions + 008 credential **locators — never values**. **`skill install|update|remove`** writes an **Agent Skills open-standard** `SKILL.md` (all four agents share it; a target is only a discovery path), **project scope by default**, idempotent, **refuses to clobber operator edits**, no residue; its examples all carry `--json`. Docs: [`docs/agent-interface.md`](docs/agent-interface.md).
-- **Packaging + release:** ships to PyPI as the `agent_container` module via a hatchling `force-include` wheel (`bin/agent-container` → `agent_container/__init__.py`; completions → `agent_container/completions/*` package data). `REPO_ROOT` resolves location-independently (`AGENT_CONTAINER_REPO` → `Dockerfile`+`completions/` marker → `None`) so a **non-editable** PyPI install works standalone (`up/down/list/attach/logs/purge/completions`); only `build` needs a checkout (via `AGENT_CONTAINER_REPO`/`--context`). `uv tool install --editable .` remains the dev path. Licensed **MIT** ([`LICENSE`](LICENSE)).
-- **CI/CD — Continuous Deployment:** `ci.yml` runs `quality-gate` (= `scripts/quality-gate.sh`) · `test` (pinned 3.14 pytest) · `commits` (Conventional Commits, PRs) · `build` · `acceptance` (real containers). Targets **Python ≥ 3.14** (the operator-machine floor, not the container's). On a **merge to `main` once `ci` passes**, **python-semantic-release** computes the bump from Conventional Commits (`feat`→minor, `fix`→patch, breaking→minor pre-1.0; docs/ci/chore/test/style cut **no** release), bumps `pyproject.toml`+`CHANGELOG.md`, tags, and publishes to PyPI via **OIDC Trusted Publishing**. **Every substantive merge to main is a release** — no manual tagging. (The workflow stays named `publish.yml` to match the PyPI Trusted Publisher binding.)
+Load-bearing invariants only. **Per-feature detail lives in `docs/` and `specs/<NNN>-*/`** — read
+those before changing behaviour in that area; do not re-summarise them here.
+
+- **Runtime + base image:** Podman + `debian:12-slim` ([ADR 0001](docs/decisions/0001-runtime-and-base-image.md)).
+  Stay Podman-compatible — never depend on Docker Desktop-only behaviour.
+- **On-disk identity contract (Constitution IV) — derived, never stored.** Container
+  `agent-container-<name>`; port `2200 + (ASCII-sum of name mod 100)`; per-host state at
+  `$XDG_STATE_HOME/agent-container/<host>/<name>.*`; **nine** per-container volumes —
+  `workspace, claude, codex, pi, opencode, opencode-data, shellenv, tmux, ssh`. The workspace
+  volume is **conditional** (persistent mode only) and teardown tolerates any volume's absence.
+  The completions read these same files. Changing any of this is a migration, not an edit.
+- **Run mechanism is compose** (Compose v2), generated and run **on the target host** — the build
+  context and every injected file travel to that daemon. A **host bind fails over a remote
+  context**: injected material must ride the compose `configs`/`secrets` channel. Easy to
+  reintroduce; the 001/003 lesson.
+- **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, never on
+  argv, never printed. Tool-injected secrets land under `/run/agent-container/…` and are **never**
+  copied to a volume; a referenced-but-missing file must `die` **before** compose. An on-volume
+  `auth.json` is **operator-interactive-login only**. Rotate = edit locally + `redeploy`.
+- **The supported-agent list is single-sourced.** `AGENTS` in `bin/agent-container` is canonical;
+  a hermetic test parses `entrypoint.sh`, the `Dockerfile`, both completions, the `--agent` help
+  and `docs/execution.md`, failing on drift. A sibling test pins the completions' command list to
+  the CLI's registered commands. Adding an agent or a command → both tests name what to update.
+- **A named volume's mount point must exist in the image, dev-owned** — otherwise the runtime
+  creates it `root:root` and the rootless user cannot write it, even under a dev-owned parent.
+  `opencode` is the only agent with two volumes (XDG splits config from credentials).
+- **Packaging:** ships to PyPI as the `agent_container` module (hatchling `force-include`);
+  `REPO_ROOT` resolves location-independently, so a non-editable install works standalone — only
+  `build` needs a checkout. **PyYAML is the one third-party dependency** (a recorded Constitution
+  VI deviation); `yaml.safe_load` **only**. MIT.
+- **Every substantive merge to `main` is a release.** Once `ci` passes, python-semantic-release
+  computes the bump from Conventional Commits (`feat`→minor, `fix`→patch, breaking→minor pre-1.0;
+  docs/ci/chore/test/style cut none), tags, and publishes via OIDC Trusted Publishing. No manual
+  tagging. (The workflow stays named `publish.yml` to match the PyPI binding.)
+
+### Where the detail lives
+
+`docs/orchestration.md` (hosts, compose/quadlet, lifecycle, volumes · specs/001,002) ·
+`docs/credentials.md` (injection channels, credential managers · specs/003,008) ·
+`docs/execution.md` (modes, `--agent`/`--task`/`--workspace`, clone-on-start · specs/004,010) ·
+`docs/shell-integration.md` (`attach --print`, `host env`, eval contract · specs/005) ·
+`docs/agent-as-code.md` (declarative `.agent-container/` · specs/006,008) ·
+`docs/agent-interface.md` (`--json` envelope, `context`, `skill` · specs/009) ·
+specs/007 (guided wizard).
 
 ## Architecture (keep these layers separate)
 
@@ -43,11 +80,28 @@ Don't bake host-specific orchestration into the image.
 
 ## Conventions for future work
 
-- The container is **rootless by decision** (see Decisions): no `sudo`/root at runtime, sshd as `dev` on port 2222. Keep it that way — don't reintroduce root-only steps; bake deps at build. Also avoid features that only work on Docker Desktop (stay Podman-compatible).
-- Treat the **commit-and-push discipline** as a property of the agent configuration, not something to enforce via git hooks alone (hooks can be bypassed; the agents themselves should be configured to push).
-- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of truth for the fast checks (ruff check+format · **ty** · **bandit** (`-ll`) · **vulture** · **xenon** (rank B / CC≤10) · **refurb** · `--self-test` · hermetic pytest · shell suites). The **ty** step self-heals a corrupted volatile-`$TMPDIR` cache venv (rebuild+retry once). The local Claude Code **Stop hook** runs it and feeds failures back (`exit 2`); the **CI `quality-gate` job** runs the *same* script as a hard gate. It excludes the slow **acceptance** layer (CI-only: `pytest -m acceptance bin/tests`; on macOS+Lima its work dir must be Lima-shared). A gate failure blocks the release (Principle VII).
-- **Conventional Commits are mandatory** — the CD pipeline (Principle VII) reads them to compute releases. Enforced three ways: (1) a local `commit-msg` hook (`.githooks/`, via `git config core.hooksPath .githooks` — run once per clone) that runs `commitizen` (`cz check`); (2) the `commits` CI job validating a PR's commits; (3) a GitHub **ruleset** rejecting non-conforming commits on push to `main` (`.github/conventional-commits-ruleset.json`; apply with `gh api -X POST /repos/ondrasek/agent-container/rulesets --input .github/conventional-commits-ruleset.json`). Types: `feat`/`fix`/`docs`/`style`/`refactor`/`perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING CHANGE` for breaking). Merge/revert messages pass. `--no-verify` bypasses the local hook only.
-- When proposing a tool or dependency, justify it against the constraints above — especially the "not VSCode-locked" one.
+- **Rootless by decision**: no `sudo`/root at runtime, sshd as `dev` on 2222. **Bake every system
+  dep at build time — agents never `apt install` at runtime.** Add packages to the `Dockerfile`.
+- Treat **commit-and-push** as a property of the agent configuration, not something enforced by
+  git hooks alone (hooks can be bypassed).
+- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of truth
+  for the fast checks (ruff check+format · ty · bandit `-ll` · vulture · xenon rank B/CC≤10 ·
+  refurb · `--self-test` · hermetic pytest · shell suites). The local Stop hook runs it and feeds
+  failures back (`exit 2`); the CI `quality-gate` job runs the *same* script as a hard gate. It
+  **excludes** the slow acceptance tier — that is CI-authoritative (`pytest -m acceptance
+  bin/tests`; on macOS+Lima the work dir must be Lima-shared). A gate failure blocks the release.
+- **Run the full suite, not just your new tests.** Changing a shared contract is exactly when a
+  pre-existing test still pins the old shape.
+- **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: a
+  local `commit-msg` hook (`.githooks/`, `git config core.hooksPath .githooks`, run once per
+  clone) running `cz check`; the `commits` CI job; and a GitHub ruleset on `main`
+  (`.github/conventional-commits-ruleset.json`). Types: `feat`/`fix`/`docs`/`style`/`refactor`/
+  `perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING CHANGE`). `--no-verify` bypasses
+  the local hook only.
+- When proposing a tool or dependency, justify it against the constraints above — especially
+  "not VSCode-locked" and Constitution VI (least dependencies).
+- **Keep this file under 2000 tokens.** It is loaded every session. New feature detail belongs in
+  `docs/` and `specs/`, with at most a one-line invariant here.
 
 ## Out of scope (don't add unless asked)
 

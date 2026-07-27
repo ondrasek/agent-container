@@ -8,6 +8,7 @@ behavior (stop→start→redeploy→wipe, volume preservation) is the acceptance
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -333,3 +334,56 @@ def test_down_container_clears_state_when_host_unreachable(wiz, monkeypatch):
     wiz.down_container("vps", dict(H), "acme", purge=False)
     assert wiz.read_state_port("vps", "acme") is None  # state cleared despite the dead host
     assert any("clearing local state anyway" in m for m in warned)
+
+
+# --- Feature 010 US3: the seven -> nine volume-set change is upgrade-safe -----
+
+# The volume set that existed BEFORE Feature 010. An environment created on this
+# set must still tear down cleanly under the new code (FR-009, SC-005).
+_PRE_010_SUFFIXES = ("workspace", "claude", "codex", "pi", "shellenv", "tmux", "ssh")
+
+
+def test_teardown_of_a_pre_upgrade_environment_tolerates_the_missing_volumes(wiz, monkeypatch):
+    """FR-009 — the feature's headline risk. An environment created on the OLD
+    seven-volume set is torn down by code that knows about nine. The two it has
+    never heard of must be tolerated, with no error and no manual migration.
+
+    Written even though `compose down --volumes` reconciles by project label and
+    `query()` ignores exit status, because 'expected to already work' is exactly
+    the reasoning that lets a regression through.
+    """
+    existing = {f"agent-container-legacy-{s}" for s in _PRE_010_SUFFIXES}
+    attempted: list[str] = []
+
+    def fake_query(argv, timeout=None):
+        # Model a daemon that fails on `volume rm` for a volume it does not have.
+        if "volume" in argv and "rm" in argv:
+            vol = argv[-1]
+            attempted.append(vol)
+            if vol not in existing:
+                return subprocess.CompletedProcess(argv, 1, "", f"no such volume: {vol}\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "host_container_names", lambda *a, **k: {"agent-container-legacy"})
+    monkeypatch.setattr(wiz, "wait_port_released", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "query", fake_query)
+    wiz.write_state("local", "legacy", 2250)
+
+    wiz.down_container("local", dict(H), "legacy", purge=True)  # must not raise
+
+    # All nine were attempted — the two absent ones did not abort the teardown.
+    assert set(attempted) == set(wiz.per_container_volumes("legacy"))
+    assert "agent-container-legacy-opencode" in attempted
+    assert "agent-container-legacy-opencode-data" in attempted
+    assert wiz.read_state_port("local", "legacy") is None  # state cleared
+
+
+def test_fresh_teardown_targets_every_volume_the_tool_creates(wiz):
+    """FR-008: no orphaned storage — the purge list is exactly the created set,
+    and it now includes both of opencode's."""
+    created = set(wiz.per_container_volumes("acme"))
+    assert len(created) == 9
+    assert {"agent-container-acme-opencode", "agent-container-acme-opencode-data"} <= created
+    # The pre-010 set is a strict subset: nothing was renamed or dropped (FR-014).
+    assert {f"agent-container-acme-{s}" for s in _PRE_010_SUFFIXES} < created

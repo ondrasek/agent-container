@@ -534,3 +534,46 @@ def test_per_repo_deploy_key_is_just_a_narrower_push_key(wiz, monkeypatch, tmp_p
     by_name = {e[0]: e for e in entries}
     assert by_name["push_key"][2] == wiz.INJECT_PUSH_KEY_PATH  # identical ephemeral target
     assert by_name["push_key"][1].read_bytes() == deploy_key.read_bytes()
+
+
+# --- Feature 010 US2: opencode credentials ride the EXISTING channels --------
+
+
+def test_opencode_key_is_never_inlined_in_the_compose_descriptor(wiz, tmp_path):
+    """FR-011 / Constitution III. The compose descriptor is exactly where an
+    env-delivered secret leaks (it is written to disk and read by `inspect`), so
+    the key must ride as a FILE reference, never as bytes or an `environment:`
+    value."""
+    key = tmp_path / "acme.anthropic.key"
+    key.write_bytes(b"sk-ant-OPENCODE-SECRET-BYTES")
+    model = wiz.build_compose_model(
+        "acme", tmp_path / "repo",
+        environment=wiz.ExecSpec(agent="opencode").compose_environment(),
+        injected_configs=[("anthropic_key", key, "/run/agent-container/apikeys/anthropic")],
+    )  # fmt: skip
+    blob = json.dumps(model)
+    assert "sk-ant-OPENCODE-SECRET-BYTES" not in blob
+    env = model["services"]["agent"].get("environment", {})
+    assert not any("sk-ant" in str(v) for v in env.values())
+    # The agent selection itself is not a secret and SHOULD be present.
+    assert env.get("AGENT_CONTAINER_AGENT") == "opencode"
+
+
+def test_opencode_key_discovery_uses_the_shared_convention(wiz, tmp_path):
+    """FR-010: no bespoke path for opencode — the same
+    `./agent-container.<name>.<provider>.key` convention as the other agents."""
+    (tmp_path / "agent-container.acme.anthropic.key").write_text("A")
+    assert set(wiz.discover_apikey_files("acme", cwd=tmp_path)) == {"anthropic"}
+
+
+def test_entrypoint_gives_opencode_no_home_redirect(wiz):
+    """Research R6, asserted structurally so a later 'symmetry' refactor cannot
+    quietly add one. codex/pi are redirected only to keep an injected key off
+    their volume; opencode never writes an env-supplied key to its auth store
+    (verified against the real binary), so a redirect would add machinery and
+    exposure surface, not remove it."""
+    body = (Path(__file__).resolve().parents[2] / "entrypoint.sh").read_text()
+    assert "CODEX_HOME" in body and "PI_CODING_AGENT_DIR" in body  # the two that DO redirect
+    assert "OPENCODE_CONFIG_DIR" not in body
+    assert "OPENCODE_CONFIG" not in body
+    assert "XDG_DATA_HOME" not in body

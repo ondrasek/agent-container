@@ -60,6 +60,11 @@ __agent_container_names() {
     compadd -a names
 }
 
+# Feature 010 FR-013 / FR-002: the supported-agent list. Kept as ONE assignment
+# so the hermetic agreement test can parse it and fail if it drifts from AGENTS
+# in bin/agent-container (the canonical source).
+_agent_container_agents="claude codex pi opencode"
+
 _agent-container() {
     local context state state_descr line
     typeset -A opt_args
@@ -68,13 +73,24 @@ _agent-container() {
         'build:Build the image at the repo root'
         'host:Manage deployment hosts (add, ls)'
         'up:Start a container (detached)'
+        'redeploy:Rebuild the image on the host and recreate (volumes preserved)'
+        'stop:Stop a container, keeping it and its volumes'
+        'start:Start a previously stopped container'
         'keys:Inject SSH host key / authorized keys into a running container'
         'down:Stop and remove a container'
         'purge:Stop, remove, and delete all per-container volumes'
+        'wipe:Remove the container, its volumes, and the locally-built image'
         'list:List containers (plus stale state files)'
         'attach:Attach via ssh + tmux (local state or hosts.conf)'
         'logs:Tail container logs'
+        'plan:Show the plan for the declarative spec (no mutation)'
+        'apply:Converge the declarative spec'
+        'status:Report declarative spec drift'
+        'destroy:Remove resources owned by the declarative spec'
         'menu:Interactive wizard'
+        'context:Print agent-friendly context about this environment'
+        'skill:Create, update, or remove the agent skill definition'
+        'commands:Print the machine-readable command tree'
         'completions:Print a checked-in completion script'
     )
 
@@ -95,8 +111,11 @@ _agent-container() {
                         '--context[Docker build context (repo checkout)]:directory:_files -/' \
                         '1:tag:'
                     ;;
-                up)
+                up|redeploy)
                     _arguments \
+                        "--agent[Primary agent to run]:agent:(${=_agent_container_agents})" \
+                        '--mode[Execution mode]:mode:(interactive headless)' \
+                        '--workspace[Workspace backing]:workspace:(persistent bind ephemeral)' \
                         '--host[Deploy to this registered host]:host:' \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
