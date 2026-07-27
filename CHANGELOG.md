@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.17.1 (2026-07-27)
+
+### Bug Fixes
+
+- **completions**: Zsh --agent completed nothing; test by executing
+  ([#010](https://github.com/ondrasek/agent-container/pull/10),
+  [`04c0f8b`](https://github.com/ondrasek/agent-container/commit/04c0f8b35ee51dbe0797131fe2269fbb1f56619e))
+
+
 ## v0.17.0 (2026-07-27)
 
 ### Documentation
