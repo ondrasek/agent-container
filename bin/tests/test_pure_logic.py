@@ -509,3 +509,34 @@ def test_docs_and_help_name_exactly_the_canonical_agents(wiz):
         f"docs/execution.md disagrees with AGENTS: only in docs={documented - agents}, "
         f"only in AGENTS={agents - documented}"
     )
+
+
+def test_completions_offer_every_cli_command(wiz):
+    """The completions' top-level command lists must match the CLI's registered
+    commands.
+
+    Added after a review found `redeploy` missing from both scripts: eight
+    commands (redeploy/stop/start/wipe from Feature 002, plan/apply/status/
+    destroy from Feature 006) had silently accumulated as drift, because nothing
+    compared the two. Same failure mode as the agent list, one level up.
+    """
+    registered = {c.name or c.callback.__name__ for c in wiz.app.registered_commands}
+    # `host` is a Typer sub-app (a group), not a command — it still appears at the
+    # top level for the user, so the completions must offer it.
+    registered |= {g.name or g.typer_instance.info.name for g in wiz.app.registered_groups}
+    registered = {n.replace("_", "-") for n in registered if n}
+
+    bash = (_ROOT / "completions" / "agent-container.bash").read_text()
+    m = re.search(r'subcommands="([^"]+)"', bash)
+    assert m, "bash completion has no subcommands list"
+    offered_bash = {w for w in m.group(1).split() if not w.startswith("-")}
+
+    zsh = (_ROOT / "completions" / "agent-container.zsh").read_text()
+    block = zsh.split("cmds=(", 1)[1].split("\n    )", 1)[0]
+    offered_zsh = set(re.findall(r"^\s+'([a-z-]+):", block, re.M))
+
+    for label, offered in (("bash", offered_bash), ("zsh", offered_zsh)):
+        assert offered == registered, (
+            f"{label} completion is out of sync with the CLI: "
+            f"missing={sorted(registered - offered)}, unknown={sorted(offered - registered)}"
+        )

@@ -16,12 +16,16 @@
 # env file) is parameterized, so running compose twice with different env values
 # yields two fully non-colliding stacks.
 #
-# Volume parity with the CLI: this template mounts the SAME seven per-container
-# named volumes that `agent-container up` mounts (workspace + the five agent /
+# Volume parity with the CLI: this template mounts the SAME nine per-container
+# named volumes that `agent-container up` mounts (workspace + the agent config /
 # shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
-# `codex login` / `opencode auth login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH
-# identity (host key + authorized_keys) persist across `down`/`up` on this path
-# too. Keep this list in sync with `all_volume_mounts()` in bin/agent-container.
+# `codex login` / `opencode auth login`, `~/.agent-container/env`, `~/.config/tmux`,
+# and the SSH identity (host key + authorized_keys) persist across `down`/`up` on
+# this path too. opencode has TWO volumes: it follows XDG and splits configuration
+# (~/.config/opencode) from credentials + session history (~/.local/share/opencode).
+# This list is kept in sync with `all_volume_mounts()` in bin/agent-container by a
+# test (bin/tests/test_pure_logic.py) — these templates are hand-maintained, so
+# nothing else would catch drift.
 #
 # The container is rootless (sshd runs as dev on port 2222); the host port is
 # operator-chosen, mapped to 2222.
