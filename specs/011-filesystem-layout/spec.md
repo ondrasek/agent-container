@@ -21,7 +21,7 @@ does my configuration live?" has to know which of these is meant:
 | `/workspace/.agent-container/` | delivered spec | a read-only copy of the marker | container |
 | `~/.agent-container/` | shell env | persistent shell environment | container |
 | `/run/agent-container/` | injected secrets | ephemeral, vanish with the container | container |
-| `~/.config/agent-container/` | host configuration | host registry + per-environment config | operator's machine |
+| `~/.config/agent-container/` | **user configuration** | host registry + user-level defaults | operator's machine |
 | `$XDG_STATE_HOME/agent-container/<host>/` | derived host state | ports, locks, generated compose files | operator's machine |
 
 Only the first two are related. The rest share a name and nothing else. The **Name** column is
@@ -182,6 +182,12 @@ confirm the documentation shows one authoritative map with no stale names.
   credential files, sidecar overrides) MUST live under the **project config directory
   `.agent-container/`** — which already holds the declarative spec — and it MUST be the only
   tool-owned entry in the **project root**.
+- **FR-001a**: After consolidation the **same filename MUST identify the same thing at both
+  levels** — `.agent-container/<name>.env` at project level and
+  `~/.config/agent-container/<name>.env` at user level, differing only by directory. Today
+  the two levels use *different* names (`agent-container.<name>.env` vs `<name>.env`), which
+  hides the fact that they are one layered configuration. Dropping the now-redundant
+  `agent-container.` prefix is what makes the layering legible.
 - **FR-002**: No tool-owned file may remain loose in the project root once a project adopts
   the new layout.
 - **FR-003**: The previous layout MUST **not** be supported. There is **no dual lookup and no
@@ -202,7 +208,7 @@ confirm the documentation shows one authoritative map with no stale names.
   message naming what was expected and where.
 - **FR-009**: Each distinct location MUST be **distinguishable by name alone**, and the
   documentation MUST use one term per location: **project root** (the operator's directory),
-  **project config** (`.agent-container/` within it), **host configuration** (per operator
+  **project config** (`.agent-container/` within it), **user configuration** (per operator
   machine), **derived host state**, and the three in-container locations. "Project directory"
   is ambiguous between the first two and MUST NOT be used. Concretely,
   the in-container **persistent shell-env directory is renamed `~/.agent-container` →
@@ -235,15 +241,24 @@ confirm the documentation shows one authoritative map with no stale names.
   devcontainer's, `.agent-container/` this tool's. In prose it is simply **"the
   `.agent-container` directory"**, the way one says "the `.github` directory".
 
-  It pairs with **host configuration** by scope, which is the distinction that matters:
+  It pairs with **user configuration** by scope, which is the distinction that matters:
   `.agent-container/` is **per project** and travels with the repository;
-  `~/.config/agent-container/` is **per operator machine** and does not.
+  `~/.config/agent-container/` is **per operator machine** and does not. Same schema, two
+  levels; project wins.
 
   (`PROJECT_MARKER` remains the right name for the *code constant* — the directory's
   existence is what discovery keys on — but that is its role in one algorithm, not what the
   directory is.)
-- **Host configuration**: the operator machine's own settings (the host registry), distinct
-  from any project.
+- **User configuration** (`~/.config/agent-container/`): the operator's machine-wide settings.
+  Two kinds live here, and the earlier name "host configuration" described only the first:
+  the **host registry** (`hosts.json` — genuinely about hosts, and has no project-level
+  counterpart by design), and **user-level defaults for any environment**
+  (`<name>.env`, `<name>.<provider>.key`, `<name>.config/`, `<name>.services.yaml`).
+
+  The second kind is the same schema as project config, one scope up — the tool resolves
+  **project first, user as fallback**, the layering Claude Code and similar tools use. So
+  project config and user configuration are **two levels of one configuration**, not two
+  different configurations.
 - **Derived host state**: values the tool computes and caches per host (ports, locks,
   generated compose files) — reproducible, never authored by hand.
 - **Image sources**: the `Dockerfile` and the files it consumes; together they are the build
