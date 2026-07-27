@@ -336,6 +336,7 @@ def acc(_image):
         cli=cli,
         register=started.append,  # ensure a declaratively-applied container is torn down
         tmp=work,
+        state_dir=state_dir,
     )
 
     for name in dict.fromkeys(started):  # dedupe, preserve order
@@ -408,10 +409,10 @@ def test_env_file_injection(acc):
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
 
-def test_purge_removes_all_seven_volumes(acc):
+def test_purge_removes_all_nine_volumes(acc):
     laptop = _gen_keypair(acc.tmp / "laptop")
     acc.up("accpurge", authorized_key=[laptop.with_suffix(".pub")])
-    assert len(acc.volumes_of("accpurge")) == 7
+    assert len(acc.volumes_of("accpurge")) == 9  # Feature 010: 7 -> 9
     acc.down("accpurge", purge=True)
     assert acc.volumes_of("accpurge") == []
 
@@ -535,12 +536,13 @@ def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
     r = run_list()
     assert r.returncode == 0, r.stderr
     assert time.time() - t0 < 30, "list hung on the unreachable host"
-    rows = json.loads(r.stdout)
+    # Feature 009: --json payloads are wrapped in a versioned envelope.
+    rows = json.loads(r.stdout)["data"]["containers"]
     dead = [x for x in rows if x["host"] == "dead"]
     assert dead and all(x["status"] == "unreachable" for x in dead)  # never 'Up', never dropped
     assert any(x["name"] == "agent-container-acclist" for x in rows)  # local still listed
 
-    rows_local = json.loads(run_list("--local").stdout)
+    rows_local = json.loads(run_list("--local").stdout)["data"]["containers"]
     assert not any(x["status"] == "unreachable" for x in rows_local)  # --local never probes
 
 
@@ -1515,3 +1517,198 @@ def test_declarative_encrypted_source_refused_with_migration(acc):
     assert r.returncode != 0
     assert "REMOVED" in r.stderr and "onepassword" in r.stderr
     assert "is not one of" not in r.stderr
+
+
+# --- Feature 009: the agent-operable surface (real container) -----------------
+# T014a — plan.md promised a real-invocation test; the analyze pass found it
+# missing from the task list. SC-001 ("an agent completes a full lifecycle using
+# ONLY machine-readable output") is an end-to-end claim and cannot be proven by
+# hermetic units alone.
+
+
+def _json_cli(acc, argv, **kw):
+    """Run the real CLI with --json and return (parsed_stdout, CompletedProcess)."""
+    r = acc.cli([*argv, "--json"], **kw)
+    try:
+        return json.loads(r.stdout), r
+    except json.JSONDecodeError as e:  # stdout must ALWAYS be a clean envelope
+        raise AssertionError(
+            f"stdout did not parse as JSON for {argv}: {e}\nstdout={r.stdout!r}\nstderr={r.stderr[-500:]!r}"
+        ) from None
+
+
+def test_agent_drives_full_lifecycle_over_json(acc):
+    """SC-001/SC-002/SC-003: a full lifecycle on machine-readable output alone."""
+    name = "acc009"
+    acc.register(name)
+    env_file = acc.tmp / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+
+    # up --json: valid envelope, nothing but the envelope on stdout (FR-002)
+    payload, r = _json_cli(acc, ["up", name, "--env-file", str(env_file)])
+    assert r.returncode == 0, r.stderr
+    assert payload["schema"] == "agent-container/v1" and payload["ok"] is True
+    _wait_container_state(f"agent-container-{name}", "running")
+
+    # list --json: the environment is visible to an agent
+    payload, r = _json_cli(acc, ["list"])
+    assert r.returncode == 0 and payload["ok"] is True
+
+    # a failure yields a PARSEABLE descriptor with a stable code (SC-002)
+    payload, r = _json_cli(acc, ["stop", name, "--host", "nosuchhost009"])
+    assert r.returncode != 0
+    assert payload["ok"] is False
+    err = payload["error"]
+    assert err["code"] == "host_not_registered"  # branch on the CODE, not the message
+    assert err["entity"] == "nosuchhost009" and err["remedy"]
+
+    # SC-003: a destructive command refuses on a non-TTY rather than hanging
+    r = acc.cli(["down", name, "--purge"])  # no -y, not a terminal
+    assert r.returncode != 0 and "-y" in r.stderr
+
+    # tear down with explicit authorization
+    payload, r = _json_cli(acc, ["down", name, "--purge", "-y"])
+    assert r.returncode == 0 and payload["ok"] is True
+    _wait_container_state(f"agent-container-{name}", "")
+
+
+def test_context_and_skill_over_json(acc):
+    """The two new commands work against a real environment; context leaks nothing."""
+    payload, r = _json_cli(acc, ["context"])
+    assert r.returncode == 0 and payload["ok"] is True
+    data = payload["data"]
+    assert {"target", "stages", "hosts", "conventions", "next_step"} <= set(data)
+
+    # skill installs into a scratch PROJECT dir, is idempotent, and removes cleanly
+    proj = acc.tmp / "skillproj"
+    proj.mkdir()
+    payload, r = _json_cli(acc, ["skill", "install"], cwd=proj)
+    assert r.returncode == 0 and payload["data"]["changed"] is True
+    skill_md = proj / ".claude" / "skills" / "agent-container" / "SKILL.md"
+    assert skill_md.is_file()
+    body = skill_md.read_text()
+    assert body.startswith("---\n") and "name: agent-container" in body
+    # FR-012c: every example in the shipped skill carries --json
+    examples = [ln.strip() for ln in body.splitlines() if ln.strip().startswith("agent-container ")]
+    assert examples and all("--json" in e for e in examples)
+
+    payload, _ = _json_cli(acc, ["skill", "install"], cwd=proj)
+    assert payload["data"]["changed"] is False  # idempotent
+    payload, _ = _json_cli(acc, ["skill", "remove"], cwd=proj)
+    assert payload["data"]["changed"] is True
+    assert not skill_md.exists()
+
+
+# --- Feature 010: opencode as a fourth agent (real container) ----------------
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "pi", "opencode"])
+def test_every_supported_agent_launches_in_its_own_tmux_window(acc, agent):
+    """US1 acceptance 1+4 / FR-004 / SC-007. Parametrised over ALL FOUR rather
+    than opencode alone: FR-014 requires the existing three be unchanged, and
+    SC-007 had no acceptance coverage otherwise. One list, no special cases."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    name = f"acc10w{agent[:4]}"
+    acc.up(name, agent=agent, authorized_key=[laptop.with_suffix(".pub")])
+    windows = _exec(name, ["tmux", "list-windows", "-t", "main", "-F", "#{window_name}"])
+    assert agent in windows.stdout.split(), windows.stdout
+    acc.down(name, purge=True)
+    assert acc.volumes_of(name) == []  # FR-008: no orphaned storage, any agent
+
+
+def test_opencode_headless_propagates_the_agent_exit_code(acc):
+    """US1 acceptance 2 / FR-005. Probed against the real binary first (research
+    R5): with a PRESENT-but-invalid key opencode fails and exits non-zero. Note
+    the negative case is the meaningful one — with NO key opencode SUCCEEDS via a
+    default model, which is why the FR-005 probe had to be split in two."""
+    r = acc.up(
+        "acc10hl",
+        mode="headless",
+        agent="opencode",
+        task="print ok",
+        foreground=True,
+        wait=False,
+        env_extra=["ANTHROPIC_API_KEY=sk-ant-invalid-acceptance-000"],
+    )
+    assert r.returncode != 0, f"expected the agent's failure to surface:\n{r.stdout}\n{r.stderr}"
+
+
+def test_opencode_persists_config_and_credentials_across_recreate(acc):
+    """US1 acceptance 3 / FR-006 / SC-002. Asserts BOTH native locations. Checking
+    only the config file is exactly the failure the discarded single-volume design
+    would have hidden (research R1), so this test is worthless if it drifts to one
+    path. Also confirms the sibling tmux mount under ~/.config is undisturbed."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    acc.up("acc10per", agent="opencode", authorized_key=[laptop.with_suffix(".pub")])
+    marks = {
+        "/home/dev/.config/opencode/acceptance.marker": "CONFIG",
+        "/home/dev/.local/share/opencode/auth.json": '{"acceptance":"CREDENTIAL"}',
+        "/home/dev/.config/tmux/acceptance.marker": "TMUX",  # sibling mount, must survive too
+    }
+    for path, body in marks.items():
+        w = _exec("acc10per", ["bash", "-lc", f"printf '%s' {body!r} > {path}"])
+        assert w.returncode == 0, f"could not write {path} as dev (rootless ownership?): {w.stderr}"
+
+    acc.down("acc10per")  # NOT --purge: volumes must survive
+    acc.up("acc10per", agent="opencode", authorized_key=[laptop.with_suffix(".pub")])
+
+    for path, body in marks.items():
+        got = _exec("acc10per", ["cat", path])
+        assert got.returncode == 0, f"{path} did not survive recreation: {got.stderr}"
+        assert body in got.stdout, f"{path} content changed: {got.stdout!r}"
+
+
+def test_pre_upgrade_environment_still_starts_and_tears_down(acc):
+    """US3 acceptance 1+2 / FR-009 / SC-005 — the feature's headline risk.
+
+    Simulates an environment created BEFORE this change by deleting the two new
+    volumes from a live deployment, then exercises the paths an upgrading operator
+    actually takes: `up` again (must still start) and `down --purge` (must tolerate
+    the absence). No manual migration anywhere.
+    """
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    acc.up("acc10leg", authorized_key=[laptop.with_suffix(".pub")])
+    acc.down("acc10leg")  # keep volumes, drop the container
+
+    for suffix in ("opencode", "opencode-data"):
+        subprocess.run(
+            [RUNTIME, "volume", "rm", f"agent-container-acc10leg-{suffix}"],
+            capture_output=True,
+            text=True,
+        )
+    remaining = acc.volumes_of("acc10leg")
+    assert len(remaining) == 7, f"expected the pre-010 set, got {remaining}"
+
+    # 1. It must still come up on the upgraded code.
+    acc.up("acc10leg", authorized_key=[laptop.with_suffix(".pub")])
+    assert _exec("acc10leg", ["true"]).returncode == 0
+
+    # 2. And tear down completely, with no orphan and no error.
+    acc.down("acc10leg", purge=True)
+    assert acc.volumes_of("acc10leg") == []
+
+
+def test_opencode_injected_key_never_lands_on_a_volume(acc):
+    """US2 / FR-011 / Constitution III. The key reaches the agent through the env
+    only; it must appear on neither opencode volume (the on-volume auth.json is
+    operator-interactive-login only) nor in the generated compose descriptor."""
+    secret = "sk-ant-acceptance-SECRET-000"
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    acc.up(
+        "acc10sec",
+        agent="opencode",
+        authorized_key=[laptop.with_suffix(".pub")],
+        env_extra=[f"ANTHROPIC_API_KEY={secret}"],
+    )
+    # Sanity: the key really did reach the agent's environment, so the assertions
+    # below are testing containment rather than passing because nothing was there.
+    got = _exec("acc10sec", ["bash", "-lc", 'printf %s "${ANTHROPIC_API_KEY:-}"'])
+    assert got.stdout.strip() == secret, "key never reached the container env"
+
+    for mount in ("/home/dev/.config/opencode", "/home/dev/.local/share/opencode"):
+        hit = _exec("acc10sec", ["bash", "-lc", f"grep -rl {secret!r} {mount} 2>/dev/null || true"])
+        assert hit.stdout.strip() == "", f"secret found on {mount}: {hit.stdout}"
+
+    compose = list((acc.state_dir / "agent-container" / "local").glob("acc10sec.compose.yaml"))
+    for f in compose:
+        assert secret not in f.read_text(), f"secret inlined in {f}"

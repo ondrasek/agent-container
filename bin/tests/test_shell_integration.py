@@ -244,3 +244,27 @@ def test_no_secret_in_host_env_output(wiz, make_registry, capsys):
     out = capsys.readouterr().out
     assert "SUPER-SECRET-TOKEN" not in out and "PRIVATE" not in out
     assert out == "export DOCKER_CONTEXT=agent-container-hz1\n"
+
+
+# --- Feature 009 regression guard: the eval contract survives --json ----------
+# This is the ONE place the two output disciplines meet. Feature 005 requires
+# EMPTY stdout on error so `eval $(…)` runs nothing; Feature 009 wants a parseable
+# failure. They only avoid colliding because no eval surface accepts --json —
+# which is true by construction, so it is asserted here rather than assumed.
+
+
+def test_eval_surfaces_do_not_accept_json(wiz):
+    import inspect
+
+    for name in ("host_env", "attach", "completions"):
+        fn = getattr(wiz, name, None)
+        if fn is None:
+            continue
+        assert "as_json" not in inspect.signature(fn).parameters, (
+            f"{name} is an eval surface: adding --json would make `eval $(...)` "
+            f"execute a JSON envelope (Feature 005 contract)"
+        )
+
+
+def test_no_json_exclusion_set_documents_the_eval_surfaces(wiz):
+    assert {"host env", "completions", "attach"} <= set(wiz.NO_JSON_COMMANDS)

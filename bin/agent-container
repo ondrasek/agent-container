@@ -31,7 +31,9 @@ import atexit
 import contextlib
 import fcntl
 import hashlib
+import inspect
 import json
+import operator
 import os
 import re
 import shlex
@@ -139,12 +141,130 @@ def eprint(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+# --- Feature 009: the agent-facing machine-readable surface ------------------
+# An AI agent drives this CLI, so alongside the human surface every command can
+# emit ONE versioned JSON envelope on stdout. Two disciplines are load-bearing:
+#   * the envelope carries a SCHEMA version an agent can check, so the contract
+#     can evolve without silently breaking callers (FR-006);
+#   * NO secret value may ever appear in a payload (Constitution III) — state is
+#     described by locators (a variable name, a path, a manager reference).
+# Human prose keeps going to stderr, unchanged, so interactive use is untouched
+# (FR-019). JSON mode is opt-in PER INVOCATION via each command's --json flag.
+
+SCHEMA_VERSION = "agent-container/v1"
+FAILURE_CODE_UNSPECIFIED = "unspecified"  # documented default for un-annotated die() sites
+_JSON_MODE = False
+
+# Commands that deliberately do NOT take --json, and why. Each one's stdout is
+# already a contract that JSON would break:
+#   host env / completions — their stdout is EVAL'd by a shell; wrapping it in an
+#     envelope would make `eval $(…)` execute JSON (Feature 005 contract, R3).
+#   attach                 — hands the terminal to ssh/tmux; there is no payload,
+#     and its --print/--ssh-config forms are eval surfaces too.
+#   menu                   — the interactive wizard; a TUI has no machine output.
+# The test suite asserts this set is exactly these four, so a new command cannot
+# quietly opt out of the machine-readable surface.
+NO_JSON_COMMANDS = frozenset({"host env", "completions", "attach", "menu"})
+
+# One shared Option object, reused as the default for every command's `as_json`
+# parameter — the flag is per-command (clarified), but its declaration is not
+# copy-pasted 20 times.
+JSON_OPT = typer.Option(False, "--json", help="Emit machine-readable JSON (agent-facing).")
+
+
+def run_child(argv: list[str]) -> subprocess.CompletedProcess:
+    """Run a child process with INHERITED stdio, except that in JSON mode its
+    stdout is redirected to stderr.
+
+    Build/compose output must keep streaming so the operator sees progress, but in
+    machine-readable mode our stdout belongs to the envelope alone (FR-002) — a
+    BuildKit log printed there makes the payload unparseable. Progress is
+    diagnostic output, and diagnostics go to stderr by contract.
+    """
+    if json_mode():
+        return subprocess.run(argv, stdout=sys.stderr)
+    return subprocess.run(argv)
+
+
+def emit_action(command: str, **fields: object) -> None:
+    """Emit an action command's result — a no-op unless --json was passed, so the
+    human path is byte-for-byte unchanged (FR-019). Fields are LOCATORS and status
+    only; never a secret value (Constitution III)."""
+    if json_mode():
+        emit_json({"command": command} | fields)
+
+
+def set_json_mode(on: bool) -> None:
+    """Enable machine-readable output for this invocation (each command's --json)."""
+    global _JSON_MODE
+    _JSON_MODE = on
+
+
+def json_mode() -> bool:
+    return _JSON_MODE
+
+
+def emit_json(data: object = None, error: dict | None = None) -> None:
+    """Write EXACTLY ONE envelope to stdout — the single emitter every command
+    routes through, so 23 commands cannot drift into 23 payload shapes (R1).
+
+    >>> import io, contextlib
+    >>> buf = io.StringIO()
+    >>> with contextlib.redirect_stdout(buf):
+    ...     emit_json({"hello": "world"})
+    >>> json.loads(buf.getvalue()) == {
+    ...     "schema": "agent-container/v1", "ok": True, "data": {"hello": "world"}}
+    True
+    """
+    env: dict = {"schema": SCHEMA_VERSION, "ok": error is None}
+    if error is None:
+        env["data"] = data if data is not None else {}
+    else:
+        env["error"] = error
+    print(json.dumps(env, indent=2, default=str))
+
+
 class Fatal(Exception):
-    """Fatal error; CLI exits 1, wizard prints and returns to the menu."""
+    """Fatal error; CLI exits 1, wizard prints and returns to the menu.
+
+    Carries the optional structured metadata an agent branches on (FR-003/004/005):
+    a STABLE `code` naming the failure class independently of the message wording,
+    the affected `entity`, and a `remedy`. All optional so the ~100 existing die()
+    sites keep working and are annotated incrementally (research R4).
+    """
+
+    def __init__(
+        self,
+        msg: str,
+        *,
+        code: str = FAILURE_CODE_UNSPECIFIED,
+        entity: str | None = None,
+        remedy: str | None = None,
+    ) -> None:
+        super().__init__(msg)
+        self.code = code
+        self.entity = entity
+        self.remedy = remedy
+
+    def descriptor(self) -> dict:
+        """The FailureDescriptor an agent parses. `code` is the parsing surface;
+        `message` is for humans and is never required for a decision."""
+        return {
+            "code": self.code,
+            "entity": self.entity,
+            "message": str(self),
+            "remedy": self.remedy,
+        }
 
 
-def die(msg: str) -> NoReturn:  # cli() turns Fatal into exit 1
-    raise Fatal(msg)
+def die(
+    msg: str,
+    *,
+    code: str = FAILURE_CODE_UNSPECIFIED,
+    entity: str | None = None,
+    remedy: str | None = None,
+) -> NoReturn:  # cli() turns Fatal into exit 1
+    raise Fatal(msg, code=code, entity=entity, remedy=remedy)
 
 
 # --- pure helpers ------------------------------------------------------------
@@ -209,6 +329,27 @@ def pi_volume_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}-pi"
 
 
+def opencode_volume_name(name: str) -> str:
+    """opencode's CONFIG volume (~/.config/opencode).
+
+    >>> opencode_volume_name("acme")
+    'agent-container-acme-opencode'
+    """
+    return f"{CONTAINER_PREFIX}{name}-opencode"
+
+
+def opencode_data_volume_name(name: str) -> str:
+    """opencode's DATA volume (~/.local/share/opencode) — auth.json + session db.
+
+    opencode is the only agent that splits config from credentials (it follows
+    XDG), so it is the only one with two volumes. See docs/execution.md.
+
+    >>> opencode_data_volume_name("acme")
+    'agent-container-acme-opencode-data'
+    """
+    return f"{CONTAINER_PREFIX}{name}-opencode-data"
+
+
 def shellenv_volume_name(name: str) -> str:
     """
     >>> shellenv_volume_name("acme")
@@ -239,19 +380,21 @@ def ssh_volume_name(name: str) -> str:
 
 
 def all_volume_mounts(name: str) -> list[str]:
-    """The seven per-container '-v' volume args, in the canonical fixed order
+    """The nine per-container '-v' volume args, in the canonical fixed order
     (workspace, claude, codex, pi, shellenv, tmux, ssh). pi-coding-agent's
     config/auth dir is ~/.pi (verified from
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
     """
     return [
         f"{volume_name(name)}:/workspace",
         f"{claude_volume_name(name)}:/home/dev/.claude",
         f"{codex_volume_name(name)}:/home/dev/.codex",
         f"{pi_volume_name(name)}:/home/dev/.pi",
+        f"{opencode_volume_name(name)}:/home/dev/.config/opencode",
+        f"{opencode_data_volume_name(name)}:/home/dev/.local/share/opencode",
         f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
         f"{ssh_volume_name(name)}:/home/dev/.ssh",
@@ -262,13 +405,15 @@ def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
     >>> per_container_volumes("acme")
-    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
     """
     return [
         volume_name(name),
         claude_volume_name(name),
         codex_volume_name(name),
         pi_volume_name(name),
+        opencode_volume_name(name),
+        opencode_data_volume_name(name),
         shellenv_volume_name(name),
         tmux_volume_name(name),
         ssh_volume_name(name),
@@ -276,19 +421,19 @@ def per_container_volumes(name: str) -> list[str]:
 
 
 def other_container_volumes(name: str) -> list[str]:
-    """The six NON-workspace per-container volume names (Feature 004). The
+    """The eight NON-workspace per-container volume names (Feature 004). The
     workspace volume is mode-dependent (persistent only), so bind/ephemeral
-    deployments declare only these six in the compose model's `volumes:`.
+    deployments declare only these eight in the compose model's `volumes:`.
 
     >>> other_container_volumes("acme")
-    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
     """
     ws = volume_name(name)
     return [v for v in per_container_volumes(name) if v != ws]
 
 
 def other_volume_mounts(name: str) -> list[str]:
-    """The six non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
+    """The eight non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
     the leading workspace mount, which the workspace mode selects separately."""
     ws_prefix = f"{volume_name(name)}:"
     return [m for m in all_volume_mounts(name) if not m.startswith(ws_prefix)]
@@ -344,7 +489,7 @@ INJECT_TASK_PATH = "/run/agent-container/task"
 # execution mode, and the workspace mode. These are non-secret and travel as
 # compose environment (mode/agent/repo) — the task travels as an injected file.
 EXEC_MODES = ("interactive", "headless")
-AGENTS = ("claude", "codex", "pi")
+AGENTS = ("claude", "codex", "pi", "opencode")
 WORKSPACE_MODES = ("persistent", "bind", "ephemeral")
 
 
@@ -1060,7 +1205,9 @@ def do_host_ls(as_json: bool) -> None:
     hosts = registry_hosts(reg)
     default = default_host_name(reg)
     if as_json:
-        print(json.dumps({"default": default, "hosts": hosts}, indent=2))
+        # Routed through the single emitter so this pre-009 payload also carries
+        # the schema version — 3 commands must not speak a different dialect (FR-006).
+        emit_json({"default": default, "hosts": hosts})
         return
     if not hosts:
         log("no hosts registered (add one: agent-container host add <name> --docker-context <ctx>)")
@@ -1087,10 +1234,15 @@ def do_host_show(name: str, as_json: bool) -> None:
     reg = load_registry()
     h = get_host(reg, name)
     if h is None:
-        die(f"no host named '{name}' (see: agent-container host ls)")
+        die(
+            f"no host named '{name}' (see: agent-container host ls)",
+            code="host_not_registered",
+            entity=name,
+            remedy="agent-container host ls",
+        )
     is_default = default_host_name(reg) == name
     if as_json:
-        print(json.dumps({"name": name, "default": is_default, **h}, indent=2))
+        emit_json({"name": name, "default": is_default, **h})
         return
     prov = h.get("provisioning")
     table = Table(show_header=False, box=None, pad_edge=False)
@@ -1117,7 +1269,12 @@ def cli_host_rm(name: str, destroy: bool, yes: bool) -> None:
     reg = load_registry()
     h = get_host(reg, name)
     if h is None:
-        die(f"no host named '{name}' (see: agent-container host ls)")
+        die(
+            f"no host named '{name}' (see: agent-container host ls)",
+            code="host_not_registered",
+            entity=name,
+            remedy="agent-container host ls",
+        )
     if destroy:
         if not h.get("created_by_tool"):
             die(
@@ -2034,7 +2191,7 @@ def driver_reachable_address(host: dict) -> str:
 # --- compose generation (Feature 001) ----------------------------------------
 # The per-container deployment is a generated, inspectable compose project,
 # emitted as JSON (a valid YAML subset) so no YAML dependency is needed. It
-# declares the seven named volumes and expresses injected SSH identity as compose
+# declares the nine named volumes and expresses injected SSH identity as compose
 # `secrets` (private host key) / `configs` (public authorized_keys) referencing
 # LOCAL files, so the material transfers over a remote context (a bind would
 # resolve empty on the remote). No secret value is ever written inline — only
@@ -2085,7 +2242,7 @@ def build_compose_model(
     port = port_for_name(name)
     # Feature 004: the /workspace mount is workspace-mode dependent. Default (and
     # every pre-004 caller) → the persistent named volume; ephemeral → nothing
-    # mounted (None); bind → the caller's '<abs>:/workspace'. The other six volumes
+    # mounted (None); bind → the caller's '<abs>:/workspace'. The other eight volumes
     # are always mounted.
     ws = (
         f"{volume_name(name)}:/workspace"
@@ -2105,7 +2262,7 @@ def build_compose_model(
     if env_file is not None:
         service["env_file"] = [str(env_file)]
     # The workspace named volume is declared ONLY in persistent mode (Constitution
-    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other six are
+    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other eight are
     # always declared. `--purge`/`wipe` tolerate the workspace volume's absence.
     declared = (
         per_container_volumes(name) if declare_workspace_volume else other_container_volumes(name)
@@ -2207,7 +2364,7 @@ def do_build(tag: str, context: Path | None = None) -> None:
     rt = detect_runtime()
     log(f"building image '{tag}' with {rt} from {ctx}")
     # Inherited stdio: layer progress must stream, never capture.
-    rc = subprocess.run([rt, "build", "-t", tag, str(ctx)]).returncode
+    rc = run_child([rt, "build", "-t", tag, str(ctx)]).returncode
     if rc != 0:
         die(f"build failed (exit {rc})")
 
@@ -2260,7 +2417,12 @@ def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
                 # registration — matching the no-`--host` behavior and keeping a
                 # declarative `host: local` spec portable to a fresh checkout.
                 return DEFAULT_HOST, implicit_local_host()
-            die(f"no host named '{host_name}' (see: agent-container host ls)")
+            die(
+                f"no host named '{host_name}' (see: agent-container host ls)",
+                code="host_not_registered",
+                entity=host_name,
+                remedy="agent-container host ls",
+            )
         return host_name, h
     default = default_host_name(reg)
     if default is not None:
@@ -2289,7 +2451,11 @@ def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, s
         # A wedged-but-bound forward times out here; a spawn failure raises OSError.
         # Convert to Fatal so lifecycle callers (do_up/down/redeploy) fail-closed
         # via the normal die() path instead of an uncaught TimeoutExpired traceback.
-        die(f"could not list containers on the host: {e}")
+        die(
+            f"could not list containers on the host: {e}",
+            code="host_unreachable",
+            remedy="agent-container host ls",
+        )
     if r.returncode != 0:
         die(f"could not list containers on the host: {r.stderr.strip() or f'exit {r.returncode}'}")
     rows = []
@@ -2724,7 +2890,7 @@ def compose_up_exec(
         argv = driver_redeploy_argv(host_rec, project, compose_file, override)
     else:
         argv = driver_up_argv(host_rec, project, compose_file, override, foreground=foreground)
-    rc = subprocess.run(argv).returncode  # inherited stdio: build output streams
+    rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
         # The container's exit code IS the agent result — surface it as our own.
         write_state(host_name, name, port)
@@ -2835,7 +3001,7 @@ def down_container(
                 warn(f"ignoring sidecar override for teardown ({e})")
                 override = None
             # compose down removes the container (+ networks); --volumes also drops
-            # the seven named volumes; --rmi local also removes the locally-built
+            # the nine named volumes; --rmi local also removes the locally-built
             # image (wipe). Without those, volumes/image are preserved.
             query(
                 driver_down_argv(
@@ -2970,7 +3136,7 @@ def do_stop(name: str, host: str | None = None) -> None:
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
         argv = driver_stop_argv(host_rec, compose_project(name), compose_file, override)
-        if subprocess.run(argv).returncode != 0:
+        if run_child(argv).returncode != 0:
             die("compose stop failed")
     log(f"stopped {container_name(name)} on {host_name} (resume: agent-container start {name})")
 
@@ -2981,12 +3147,17 @@ def do_start(name: str, host: str | None = None) -> None:
     host_name, host_rec = resolve_deploy_host(host)
     compose_file = compose_file_path(host_name, name)
     if not compose_file.is_file():
-        die(f"no deployment named '{name}' on {host_name} (deploy it: agent-container up {name})")
+        die(
+            f"no deployment named '{name}' on {host_name} (deploy it: agent-container up {name})",
+            code="container_absent",
+            entity=name,
+            remedy=f"agent-container up {name}",
+        )
     override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
         argv = driver_start_argv(host_rec, compose_project(name), compose_file, override)
-        if subprocess.run(argv).returncode != 0:
+        if run_child(argv).returncode != 0:
             die(
                 f"compose start failed — if the deployment was disposed, run: agent-container up {name}"
             )
@@ -3189,7 +3360,7 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
     rt = detect_runtime()
     rows = gather_rows(rt, local_only)
     if as_json:
-        print(json.dumps(rows, indent=2))
+        emit_json({"containers": rows})
         return
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     for col in ("NAME", "HOST", "PORT", "IMAGE", "STATUS", "UPTIME"):
@@ -3627,7 +3798,7 @@ def do_logs(name: str, follow: bool) -> int:
     rt = detect_runtime()
     argv = [rt, "logs"] + (["-f"] if follow else []) + [container_name(name)]
     try:
-        return subprocess.run(argv).returncode  # inherited stdio
+        return run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     except KeyboardInterrupt:
         return 130
 
@@ -5106,9 +5277,18 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
     if not todo:
         log("no changes — every declared environment already matches the spec")
         return
-    if not yes and is_tty():
+    if not yes:
         # Surface the detail (a to-be-provisioned host is a BILLABLE allocation).
         what = ", ".join(f"{p[1]} ({p[5] or p[4]})" for p in todo)
+        if not is_tty():
+            # FR-007: never proceed unauthorized just because nobody can be asked.
+            # A non-interactive caller (an agent, CI) must pass -y explicitly —
+            # `apply` can create containers and PROVISION BILLABLE hosts.
+            die(
+                f"refusing to apply {len(todo)} change(s) without -y/--yes on a non-TTY: {what}",
+                code="confirmation_required",
+                remedy="agent-container apply -y",
+            )
         if not questionary.confirm(f"apply {len(todo)} change(s): {what}?", default=False).ask():
             log("aborted")
             return
@@ -5193,9 +5373,18 @@ def do_aac_destroy(
     if deprovision and not os.environ.get("HCLOUD_TOKEN"):
         if any(isinstance(e.get("host"), dict) for e in environments):
             die("--deprovision needs HCLOUD_TOKEN in the environment")
-    if not yes and is_tty():
+    if not yes:
         names = ", ".join(e["name"] for e in environments)
         extra = " and DEPROVISION their spec-created hosts" if deprovision else ""
+        if not is_tty():
+            # FR-007: previously this SKIPPED the confirmation on a non-TTY and tore
+            # everything down unauthorized — worse than blocking. Refuse instead.
+            die(
+                f"refusing to destroy {names}{extra} without -y/--yes on a non-TTY",
+                code="confirmation_required",
+                entity=names,
+                remedy="agent-container destroy -y",
+            )
         if not questionary.confirm(
             f"destroy the declared environment(s): {names}{extra}?", default=False
         ).ask():
@@ -5285,9 +5474,12 @@ def build(
         help="Docker build context (repo checkout). Defaults to AGENT_CONTAINER_REPO "
         "or the auto-detected checkout; required when installed from PyPI.",
     ),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Build the image from a repo checkout (streams build output)."""
+    set_json_mode(as_json)
     do_build(tag, context)
+    emit_action("build", tag=tag)
 
 
 @app.command()
@@ -5339,7 +5531,7 @@ def up(
         "headless (agent runs the task as the container's workload and exits).",
     ),
     agent: str = typer.Option(
-        "claude", "--agent", help="Primary agent to run: claude | codex | pi."
+        "claude", "--agent", help="Primary agent to run: claude | codex | pi | opencode."
     ),
     task: str | None = typer.Option(
         None,
@@ -5369,11 +5561,13 @@ def up(
         help="Headless only: stream the run attached and return control (with the "
         "agent's exit code) on completion. Default headless is detached.",
     ),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Start container agent-container-NAME.
 
     Default: an interactive claude session on a persistent workspace (attach with
     `agent-container attach NAME`). Use --mode headless for a one-shot job."""
+    set_json_mode(as_json)
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
     spec = ExecSpec(
@@ -5396,6 +5590,15 @@ def up(
         known_hosts,
         spec=spec,
     )
+    emit_action(
+        "up",
+        name=name,
+        host=host or DEFAULT_HOST,
+        port=port_for_name(name),
+        mode=spec.mode,
+        agent=spec.agent,
+        workspace=spec.workspace,
+    )
 
 
 @app.command()
@@ -5413,9 +5616,12 @@ def keys(
         help="Append an SSH public key to authorized_keys in the running "
         "container (repeatable; deduped; persists on the ~/.ssh volume).",
     ),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Inject SSH host key / authorized keys into a RUNNING container (no recreate)."""
+    set_json_mode(as_json)
     cli_keys(name, host_key, authorized_key or [])
+    emit_action("keys", name=name)
 
 
 @app.command()
@@ -5427,30 +5633,39 @@ def down(
     purge: bool = typer.Option(
         False,
         "--purge",
-        help="Also delete all seven per-container volumes (workspace + agent logins, shell env, tmux config, ssh).",
+        help="Also delete all nine per-container volumes (workspace + agent logins, shell env, tmux config, ssh).",
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Stop and remove container agent-container-NAME (dispose; volumes kept unless --purge)."""
+    set_json_mode(as_json)
     cli_down(name, purge, yes, host)
+    emit_action("down", name=name, host=host, purged=purge)
 
 
 @app.command()
 def stop(
     name: str = typer.Argument(..., help="Container short name."),
     host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Stop (pause/reclaim) agent-container-NAME — retained with its volumes; `start` resumes it."""
+    set_json_mode(as_json)
     do_stop(name, host)
+    emit_action("stop", name=name, host=host)
 
 
 @app.command()
 def start(
     name: str = typer.Argument(..., help="Container short name."),
     host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Start a stopped agent-container-NAME (no rebuild, no recreate)."""
+    set_json_mode(as_json)
     do_start(name, host)
+    emit_action("start", name=name, host=host)
 
 
 @app.command()
@@ -5488,10 +5703,12 @@ def redeploy(
     foreground: bool = typer.Option(
         False, "--foreground", help="Headless: stream the run attached (as for `up`)."
     ),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Rebuild the image and recreate agent-container-NAME, preserving its volumes.
     Deliberately non-idempotent: always rebuilds + recreates, even with no change.
     May change mode/agent/workspace/repo."""
+    set_json_mode(as_json)
     if env_file is not None and not env_file.is_file():
         raise typer.BadParameter(f"--env-file {env_file} does not exist")
     spec = ExecSpec(
@@ -5521,18 +5738,24 @@ def wipe(
     name: str = typer.Argument(..., help="Container short name."),
     host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """WIPE agent-container-NAME: remove the container, its volumes, AND its built image (confirmed)."""
+    set_json_mode(as_json)
     do_wipe(name, yes, host)
+    emit_action("wipe", name=name, host=host)
 
 
 @app.command()
 def purge(
     name: str = typer.Argument(..., help="Container short name."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Sugar for: down NAME --purge."""
+    set_json_mode(as_json)
     cli_down(name, purge=True, yes=yes)
+    emit_action("purge", name=name)
 
 
 @app.command(name="list")
@@ -5546,6 +5769,7 @@ def list_cmd(
 ) -> None:
     """List agent-container containers, reconciled live against each registered
     host (a --local view skips remote queries)."""
+    set_json_mode(as_json)
     do_list(as_json, local_only)
 
 
@@ -5606,9 +5830,11 @@ def host_add(
         help="Operator SSH PUBLIC key to authorize on the new server "
         "(default: ~/.ssh/id_ed25519.pub).",
     ),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Register a container-runtime host (where `up --host NAME` deploys), or
     provision a cloud server with --provider hetzner --create."""
+    set_json_mode(as_json)
     cli_host_add(
         name,
         driver,
@@ -5630,6 +5856,7 @@ def host_ls(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """List registered hosts (name, driver, context, address, default)."""
+    set_json_mode(as_json)
     do_host_ls(as_json)
 
 
@@ -5639,6 +5866,7 @@ def host_show(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """Show one host's full record (driver, context, address, provisioning state)."""
+    set_json_mode(as_json)
     do_host_show(name, as_json)
 
 
@@ -5651,10 +5879,13 @@ def host_rm(
         help="Also deprovision the cloud server (tool-created hosts only; irreversible).",
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Remove a host from the registry. With --destroy also deallocate its cloud
     server — refused if the server still hosts containers or the tool didn't create it."""
+    set_json_mode(as_json)
     cli_host_rm(name, destroy, yes)
+    emit_action("host rm", name=name, destroyed=destroy)
 
 
 @host_app.command("env")
@@ -5722,9 +5953,15 @@ def attach(
 def logs(
     name: str = typer.Argument(..., help="Container short name."),
     no_follow: bool = typer.Option(False, "--no-follow", help="Print logs without following."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Tail container logs."""
-    raise typer.Exit(do_logs(name, follow=not no_follow))
+    set_json_mode(as_json)
+    rc = do_logs(name, follow=not no_follow)
+    # The log STREAM itself is the container's own output and is not wrapped; the
+    # envelope reports the outcome so an agent can tell success from failure.
+    emit_action("logs", name=name, exit_code=rc)
+    raise typer.Exit(rc)
 
 
 @app.command()
@@ -5744,27 +5981,34 @@ def apply(
         None, "--host", help="Override the host for every environment (default: the spec's host)."
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Reconcile the `.agent-container/` project: discover → validate → plan → converge.
 
     Idempotent — an already-satisfied spec makes no changes. The governing spec is
     delivered read-only into the container (FR-020)."""
+    set_json_mode(as_json)
     do_aac_apply(host, yes)
+    emit_action("apply", host=host)
 
 
 @app.command()
 def plan(
     host: str | None = typer.Option(None, "--host", help="Override the host for the plan."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Show the per-environment reconcile plan (absent/matching/drifted); mutate nothing."""
+    set_json_mode(as_json)
     do_aac_status(host)
 
 
 @app.command()
 def status(
     host: str | None = typer.Option(None, "--host", help="Override the host for the status."),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Alias of `plan` — the current state of each declared environment vs the spec."""
+    set_json_mode(as_json)
     do_aac_status(host)
 
 
@@ -5778,11 +6022,372 @@ def destroy(
         help="Also deprovision each spec-PROVISIONED host (US4). A referenced host is "
         "never touched; requires HCLOUD_TOKEN.",
     ),
+    as_json: bool = JSON_OPT,
 ) -> None:
     """Remove ONLY the resources the `.agent-container/` spec declares and owns
     (by deterministic identity). A referenced host is never deprovisioned; a
     spec-provisioned host is deprovisioned only with --deprovision."""
+    set_json_mode(as_json)
     do_aac_destroy(host, yes, deprovision)
+    emit_action("destroy", host=host, deprovisioned=deprovision)
+
+
+# --- Feature 009: the `context` surface --------------------------------------
+# One call an agent loads as context. Deliberately a SERIALIZER over the Feature
+# 007 recommendation engine rather than a second assessment path: 007 already
+# computes stages, hosts, problems and the suggested next step, and it is PURE —
+# so this cannot disagree with the wizard, and it is testable from a constructed
+# snapshot with no daemon (research R5).
+
+
+def credential_locators(root: Path | None) -> list[dict]:
+    """Describe declared credentials as LOCATORS — which source, which reference.
+    NEVER resolves a value: `context` must not be able to leak a secret even by
+    accident (FR-011, Constitution III). Resolution happens only at `apply`."""
+    if root is None:
+        return []
+    out: list[dict] = []
+    try:
+        environments = load_project_spec(root)
+    except Fatal:
+        return []  # an invalid spec is reported elsewhere; context still describes the world
+    for env in environments:
+        for cred in env.get("credentials") or []:
+            src = cred.get("source")
+            # The reference is the LOCATOR only: a variable name, a path, a vault
+            # coordinate — never the value behind it.
+            ref = {
+                "env": cred.get("var"),
+                "file": cred.get("path"),
+                "keychain": f"{cred.get('service')}/{cred.get('account')}",
+                "command": " ".join(cred.get("argv") or []),
+                "onepassword": f"op://{cred.get('vault')}/{cred.get('item')}/{cred.get('field')}",
+                "bitwarden": f"{cred.get('item')}/{cred.get('field')}",
+            }.get(str(src))
+            out.append(
+                {
+                    "environment": env.get("name"),
+                    "name": cred.get("name"),
+                    "source": src,
+                    "reference": ref,
+                    "target": cred.get("target"),
+                }
+            )
+    return out
+
+
+def build_agent_context(rt: str, selected_host: str | None = None) -> dict:
+    """Assemble the `context` payload. Valid in EVERY state — an empty world gives
+    empty collections and an unreachable host is a described state, never a failed
+    call (FR-010)."""
+    target = resolve_active_target(rt, selected_host)
+    snap = build_snapshot(rt, target)
+    rec = recommend_next_step(snap)
+    root = find_project_root()
+    reg = load_registry()
+    hosts = [
+        {"name": hname, "driver": hrec.get("driver"), "context": hrec.get("context")}
+        for hname, hrec in sorted(registry_hosts(reg).items())
+    ]
+    return {
+        "target": {"host": target.host_name, "container": target.container_name},
+        "stages": [
+            {"key": s.key, "status": s.status, "detail": s.detail, "hard": s.hard}
+            for s in snap.stages
+        ],
+        "hosts": hosts,
+        "environments": [{"name": n, "status": st} for n, st in snap.containers],
+        "conventions": {
+            # Paths only — an env file's CONTENTS are never read into the payload.
+            "project_root": str(root) if root else None,
+            "env_file": str(resolve_env_file(target.container_name))
+            if target.container_name and resolve_env_file(target.container_name)
+            else None,
+        },
+        "credentials": credential_locators(root),
+        "problems": snap.problems.copy(),
+        "orphan_volumes": snap.orphan_volumes.copy(),
+        "next_step": {
+            "kind": rec.kind,
+            "reason": rec.reason,
+            "command": rec.equivalent_cmd,
+            "destructive": rec.destructive,
+        },
+    }
+
+
+@app.command("commands")
+def commands_cmd(
+    as_json: bool = JSON_OPT,
+) -> None:
+    """List every command, its arguments and its effect — machine-readable help.
+
+    Derived by INTROSPECTING the real command tree, so it cannot drift from the
+    commands that actually exist (FR-008); a hand-maintained catalogue would."""
+    set_json_mode(as_json)
+    cmds = []
+    for cmd in app.registered_commands:
+        name = cmd.name or getattr(cmd.callback, "__name__", "?")
+        params = []
+        for p in inspect.signature(cmd.callback).parameters.values() if cmd.callback else []:
+            default = p.default
+            decls = getattr(default, "param_decls", None)
+            params.append(
+                {
+                    "name": p.name,
+                    "flags": list(decls) if decls else [],
+                    "required": getattr(default, "default", None) is ...,
+                    "help": getattr(default, "help", None),
+                }
+            )
+        cmds.append(
+            {
+                "name": name,
+                "summary": (cmd.callback.__doc__ or "").strip().splitlines()[0]
+                if cmd.callback and cmd.callback.__doc__
+                else None,
+                "json": "as_json"
+                in (inspect.signature(cmd.callback).parameters if cmd.callback else {}),
+                "params": params,
+            }
+        )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "commands": sorted(cmds, key=operator.itemgetter("name")),
+    }
+    if as_json:
+        emit_json(payload)
+        return
+    for c in payload["commands"]:
+        console.print(f"{c['name']:<12} {c['summary'] or ''}")
+
+
+@app.command()
+def context(
+    host: str | None = typer.Option(None, "--host", help="Describe this host instead."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Print what the tool knows: hosts, environments, conventions and the next step.
+
+    Designed to be loaded as context by an AI agent (`--json`). Credentials appear
+    as LOCATORS only — never a secret value."""
+    set_json_mode(as_json)
+    ctx = build_agent_context(detect_runtime(), host)
+    if as_json:
+        emit_json(ctx)
+        return
+    console.print(f"target: {ctx['target']['host']} / {ctx['target']['container'] or '-'}")
+    console.print("  ".join(f"{s['key']}={s['status']}" for s in ctx["stages"]))
+    for p in ctx["problems"]:
+        console.print(f"[red]![/red] {p}")
+    console.print(f"next: {ctx['next_step']['kind']} — {ctx['next_step']['reason']}")
+
+
+# --- Feature 009: the `skill` command ----------------------------------------
+# Installs an Agent Skills (agentskills.io) conformant definition so an agent has
+# a documented way to invoke this tool. The format is an OPEN STANDARD all four
+# supported agents implement, so there is ONE definition and a target is only a
+# DISCOVERY PATH — adding an agent is a row here, not new content (FR-017).
+# The template is an EMBEDDED constant, not package data: package data exists only
+# in a wheel install and would break `uv run --script` (research R6).
+
+SKILL_NAME = "agent-container"
+SKILL_MARKER = "x-agent-container-checksum"  # drift detector; extra frontmatter keys are allowed
+
+# agent -> (project-relative dir, home-relative dir). All four consume the same
+# SKILL.md standard; only the location differs.
+SKILL_TARGETS: dict[str, tuple[str, str]] = {
+    "claude": (".claude/skills", ".claude/skills"),
+    "codex": (".codex/skills", ".codex/skills"),
+    "opencode": (".opencode/skills", ".config/opencode/skills"),
+    "pi": (".pi/skills", ".pi/skills"),
+}
+
+# EVERY example below carries --json (FR-012c): the flag is per-invocation, so the
+# skill is what makes the convention binding rather than leaving it to recall.
+SKILL_BODY = """\
+## Purpose
+
+`agent-container` manages containerized development environments (create, attach,
+inspect, tear down) on local or remote hosts.
+
+## Always pass `--json`
+
+Every command accepts `--json`, which emits ONE envelope on stdout:
+
+    {"schema": "agent-container/v1", "ok": true, "data": {...}}
+    {"schema": "agent-container/v1", "ok": false, "error": {"code": "...", "entity": "...", "message": "...", "remedy": "..."}}
+
+ALWAYS pass `--json`. Without it the output is prose meant for humans and will not
+parse. Check `schema` before relying on field names, and branch on `error.code` —
+never on `error.message`, whose wording may change.
+
+## Start here
+
+Load the current state before acting:
+
+    agent-container context --json
+
+It returns the hosts, environments, applicable conventions, and a suggested
+`next_step`. Credentials appear as locators only, never as values.
+
+## Common operations
+
+    agent-container list --json
+    agent-container up <name> --json
+    agent-container logs <name> --no-follow --json
+    agent-container stop <name> --json
+    agent-container start <name> --json
+    agent-container down <name> --purge -y --json
+
+## Rules
+
+- Destructive commands (`down`, `wipe`, `purge`, `destroy`) require `-y` when not
+  attached to a terminal; without it they refuse rather than prompting.
+- On failure, read `error.remedy` — it names the command that resolves the problem.
+- Never put a secret on the command line; credentials are injected at runtime from
+  the sources the spec declares.
+"""
+
+
+def render_skill() -> str:
+    """Render the standard-conformant SKILL.md (frontmatter + body + checksum)."""
+    digest = body_digest(SKILL_BODY)
+    return (
+        "---\n"
+        f"name: {SKILL_NAME}\n"
+        "description: >-\n"
+        "  Manage containerized development environments with agent-container —\n"
+        "  create, attach to, inspect and tear down containers on local or remote\n"
+        "  hosts. Use when the task involves agent-container or its environments.\n"
+        f"{SKILL_MARKER}: {digest}\n"
+        "---\n\n"
+        f"{SKILL_BODY}"
+    )
+
+
+def skill_dir(agent: str, user_scope: bool) -> Path:
+    """Where the skill goes for `agent`. Project scope is the DEFAULT so the
+    definition is reviewable and version-controlled with the code (FR-012b)."""
+    if agent not in SKILL_TARGETS:
+        die(
+            f"unknown agent '{agent}' (supported: {', '.join(sorted(SKILL_TARGETS))})",
+            code="agent_unsupported",
+            entity=agent,
+        )
+    proj, home = SKILL_TARGETS[agent]
+    base = Path.home() / home if user_scope else Path.cwd() / proj
+    return base / SKILL_NAME
+
+
+def body_digest(body: str) -> str:
+    return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def read_installed(skill_md: Path) -> tuple[str | None, str | None]:
+    """Return (recorded_marker, digest_of_the_body_actually_on_disk).
+
+    Two comparisons matter and they are NOT the same:
+      * recorded marker vs the on-disk body's digest  → did the OPERATOR edit it?
+      * recorded marker vs the current template digest → is it a STALE version?
+    Hashing the template instead of the file would detect a stale version while
+    silently missing hand edits — the exact case FR-014 exists to prevent.
+    """
+    try:
+        text = skill_md.read_text()
+    except OSError:
+        return None, None
+    marker = None
+    parts = text.split("---\n", 2)  # ['', frontmatter, body]
+    if len(parts) < 3:
+        return None, None  # not our shape -> treat as foreign
+    for line in parts[1].splitlines():
+        if line.startswith(f"{SKILL_MARKER}:"):
+            marker = line.split(":", 1)[1].strip()
+    return marker, body_digest(parts[2].lstrip("\n"))
+
+
+def do_skill(action: str, agent: str, user_scope: bool, force: bool) -> None:
+    d = skill_dir(agent, user_scope)
+    md = d / "SKILL.md"
+    scope = "user" if user_scope else "project"
+    rendered = render_skill()
+    current = body_digest(SKILL_BODY)
+
+    if action == "remove":
+        if not md.is_file():
+            log(f"skill not installed for {agent} ({scope}): {md}")
+            emit_action("skill", action="remove", agent=agent, scope=scope, changed=False)
+            return
+        md.unlink()
+        # Remove only the directory WE created, and only if we left it empty.
+        with contextlib.suppress(OSError):
+            d.rmdir()
+        log(f"removed {md}")
+        emit_action("skill", action="remove", agent=agent, scope=scope, path=str(md), changed=True)
+        return
+
+    if md.is_file():
+        marker, on_disk = read_installed(md)
+        if marker is None and not force:
+            die(
+                f"{md} exists but was not written by this tool (no {SKILL_MARKER} marker) — "
+                f"refusing to overwrite. Re-run with --force to replace it.",
+                code="skill_foreign",
+                entity=str(md),
+                remedy="agent-container skill install --force",
+            )
+        if marker != on_disk and not force:
+            # The file no longer hashes to what we recorded => hand-edited.
+            die(
+                f"{md} has been modified since it was installed — refusing to overwrite your "
+                f"edits. Re-run with --force to replace it.",
+                code="skill_modified",
+                entity=str(md),
+                remedy="agent-container skill install --force",
+            )
+        # No-op only when it is OURS, UNMODIFIED and CURRENT — and never under
+        # --force, which must always rewrite (otherwise --force silently does nothing
+        # for a hand-edited file whose frontmatter marker still reads as current).
+        if marker == current == on_disk and not force:
+            log(f"skill already current for {agent} ({scope}): {md}")
+            emit_action(
+                "skill", action=action, agent=agent, scope=scope, path=str(md), changed=False
+            )
+            return
+
+    d.mkdir(parents=True, exist_ok=True)
+    md.write_text(rendered)
+    log(f"wrote {md}")
+    emit_action("skill", action=action, agent=agent, scope=scope, path=str(md), changed=True)
+
+
+@app.command()
+def skill(
+    action: str = typer.Argument(..., help="install | update | remove"),
+    agent: str = typer.Option(
+        "claude", "--agent", help="claude | codex | opencode | pi (the skill is identical)."
+    ),
+    user_scope: bool = typer.Option(
+        False, "--user", help="Install into the home config instead of this project."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Replace a modified/foreign definition (never silent)."
+    ),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Install, update or remove the agent-container skill in a local agent config.
+
+    Writes an Agent Skills standard SKILL.md. Project scope by default; --user for
+    the home configuration. Never overwrites your edits without --force."""
+    set_json_mode(as_json)
+    if action not in ("install", "update", "remove"):
+        die(
+            f"unknown action '{action}' (use: install | update | remove)",
+            code="bad_argument",
+            entity=action,
+        )
+    do_skill(action, agent, user_scope, force)
 
 
 def _completion_script(shell: str) -> str:
@@ -5873,6 +6478,12 @@ def cli() -> None:
     try:
         app()
     except Fatal as e:
+        # THE chokepoint: every failure in the tool arrives here, so the structured
+        # rendering is a single site rather than ~100 call sites (research R4).
+        # In JSON mode the descriptor goes to stdout as the envelope (an agent has
+        # one stream to read); the human line still goes to stderr either way.
+        if json_mode():
+            emit_json(error=e.descriptor())
         eprint(f"[agent-container] FATAL: {e}")
         sys.exit(1)
 

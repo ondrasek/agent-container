@@ -83,7 +83,7 @@ def test_workspace_ephemeral_omits_mount_and_volume(wiz):
     assert wiz.volume_name("acme") not in m["volumes"]  # workspace volume NOT declared (FR-013)
     # The other six volumes are still mounted + declared.
     assert set(m["volumes"]) == set(wiz.other_container_volumes("acme"))
-    assert len(m["volumes"]) == 6
+    assert len(m["volumes"]) == 8  # Feature 010: eight non-workspace volumes
 
 
 def test_workspace_bind_mounts_local_dir_without_declaring_volume(wiz):
@@ -93,7 +93,7 @@ def test_workspace_bind_mounts_local_dir_without_declaring_volume(wiz):
     svc = m["services"]["agent"]
     assert "/host/work:/workspace" in svc["volumes"]
     assert wiz.volume_name("acme") not in m["volumes"]
-    assert len(m["volumes"]) == 6
+    assert len(m["volumes"]) == 8  # Feature 010: eight non-workspace volumes
 
 
 def test_environment_threaded_into_service(wiz):
@@ -437,3 +437,26 @@ def test_ephemeral_warns_about_durability(up_env, capture_compose, monkeypatch, 
     _in_workdir(monkeypatch, tmp_path)
     wiz.do_up("acme", spec=wiz.ExecSpec(workspace="ephemeral"))
     assert "ephemeral" in capsys.readouterr().err.lower()  # FR-015 surfaced at deploy
+
+
+# --- Feature 010: opencode as a fourth supported agent -----------------------
+
+
+def test_opencode_is_an_accepted_agent(wiz):
+    """FR-001: opencode is accepted wherever an agent is selected; FR-014: the
+    existing three and the default are untouched."""
+    for a in ("claude", "codex", "pi", "opencode"):
+        wiz.ExecSpec(agent=a).validate()  # must not raise
+    assert wiz.ExecSpec().agent == "claude"  # default unchanged
+    with pytest.raises(wiz.Fatal):
+        wiz.ExecSpec(agent="opencode-ai").validate()  # near-miss still rejected
+
+
+def test_agent_rejection_names_every_valid_value(wiz):
+    """FR-001: an invalid --agent fails host-side naming the whole accepted set,
+    so the operator never has to guess which four exist."""
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.ExecSpec(agent="gpt").validate()
+    msg = str(ei.value)
+    for a in wiz.AGENTS:
+        assert a in msg, f"rejection message omits '{a}': {msg}"

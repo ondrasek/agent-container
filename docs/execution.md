@@ -37,7 +37,7 @@ deployment has already **exited**, a re-`up` reports the prior exit status/code
 (retrievable via `list`/`logs`) rather than silently resurrecting the job — use
 `redeploy` (deliberately non-idempotent) to run the task again.
 
-## Agent — `--agent claude|codex|pi` (default `claude`) + `--task`
+## Agent — `--agent claude|codex|pi|opencode` (default `claude`) + `--task`
 
 One primary agent per deployment. `--task <text|@file>` seeds it at launch
 (interactive) or is the job to run (headless); it is delivered as an **injected
@@ -47,6 +47,39 @@ reads that file and passes the task to the agent in-container (so it does appear
 in the *container's* process table for the agent invocation, e.g. `claude -p
 "<task>"`). You can still start additional processes by hand inside an
 interactive session.
+
+The supported agents are
+<!-- agents:begin -->
+`claude` (Claude Code), `codex` (OpenAI Codex), `pi` (pi-coding-agent), and
+`opencode`.
+<!-- agents:end -->
+This is one list: the same four can also *drive* the CLI from outside (Feature
+009). A hermetic test parses this block, `AGENTS` in `bin/agent-container`, the
+dispatch in `entrypoint.sh`, the `Dockerfile`, and the shell completions, and
+fails if any of them disagree.
+
+| Agent | Headless form | Persistent state |
+|---|---|---|
+| `claude` | `claude -p "<task>"` | `~/.claude` |
+| `codex` | `codex exec "<task>"` | `~/.codex` |
+| `pi` | `pi -p "<task>"` | `~/.pi` |
+| `opencode` | `opencode run "<task>"` | `~/.config/opencode` **and** `~/.local/share/opencode` |
+
+**opencode is the one agent with two volumes.** It follows XDG and splits
+configuration (`~/.config/opencode`) from credentials and session history
+(`~/.local/share/opencode/auth.json`, `opencode.db`), and both must survive
+recreation. Its runtime locks (`~/.local/state/opencode`) and cache are
+deliberately *not* persisted — carrying a stale lock across a recreate would be a
+self-inflicted failure.
+
+**opencode interactive runs are not task-seeded.** Its TUI positional argument is
+a *project directory*, not a message (`opencode [project]`), so a `--task` passed
+there would be misread as a path. The task is delivered for `--mode headless`; in
+an interactive session the entrypoint logs a note and you paste it in.
+
+Selecting an agent that is missing from the running image (an image built before
+that agent was added) fails with a message naming `agent-container redeploy
+<name>` as the remedy, rather than a bare `command not found`.
 
 ## Sessions — detach / reattach / dead-session
 
@@ -68,7 +101,7 @@ Selects what is mounted at `/workspace`:
 | **bind** | a local directory (`--workspace-dir`) | edits the operator's own filesystem | **local hosts only** (a remote host refuses it) |
 | **ephemeral** | nothing (the container's writable layer) | **gone on teardown** | any |
 
-The workspace named volume exists **only** in persistent mode; the other six
+The workspace named volume exists **only** in persistent mode; the other eight
 per-container volumes and the name/port identity are unchanged, and pre-004 /
 default deployments are persistent — so no existing deployment's identity changes.
 `--purge`/`wipe` tolerate the workspace volume's absence.

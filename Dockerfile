@@ -54,6 +54,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm i -g @anthropic-ai/claude-code \
     && npm i -g @openai/codex \
     && npm i -g --ignore-scripts @earendil-works/pi-coding-agent \
+    && npm i -g opencode-ai \
     && npm cache clean --force
 
 # --- Layer 4: Neovim from upstream stable tarball ---------------------------
@@ -137,7 +138,7 @@ RUN mkdir -p /etc/ssh /run/sshd \
 
 # --- Layer 5b: per-container volume mount points + persistent shell env -----
 # Each of these dirs is the mount point of a per-container named volume
-# (agent-container-<name>-{claude,codex,pi,shellenv,tmux}). Pre-creating them dev-owned
+# (agent-container-<name>-{claude,codex,pi,opencode,opencode-data,shellenv,tmux}). Pre-creating them dev-owned
 # (uid 1000) BEFORE the USER switch means a fresh, empty named volume
 # initializes dev-owned too — the runtime seeds a new volume from the image
 # directory's contents AND ownership/permissions. Without this the volume
@@ -146,6 +147,20 @@ RUN mkdir -p /etc/ssh /run/sshd \
 # pi-coding-agent's config/auth dir is ~/.pi (verified: package.json piConfig
 # .configDir = ".pi"; dist/config.js getAgentDir() -> ~/.pi/agent, auth.json
 # at ~/.pi/agent/auth.json). Overridable at runtime via PI_CODING_AGENT_DIR.
+#
+# opencode is the one agent that SPLITS config from credentials (it follows XDG),
+# so it gets TWO volumes (verified against opencode.ai/docs AND by running it):
+#   ~/.config/opencode      -> opencode.jsonc (the file it CREATES; opencode.json
+#                              is the documented name and is also read),
+#                              agents/, commands/, skills/, themes/
+#   ~/.local/share/opencode -> auth.json (from `opencode auth login`) + opencode.db
+# Deliberately NOT persisted: ~/.local/state/opencode/locks (a stale lock carried
+# across a recreate is a self-inflicted failure) and ~/.cache/opencode (regenerated).
+# NOTE ~/.local is chowned RECURSIVELY below: `mkdir -p .../.local/share/opencode`
+# also creates ~/.local and ~/.local/share, and chowning only the leaf leaves both
+# root-owned. Verified: without this, dev cannot write EITHER mount point — not even
+# ~/.config/opencode, whose parent is already dev-owned (a new mount point does not
+# inherit the parent's ownership).
 # The credential dirs are 0700; .agent-container (shell env) and .config/tmux (tmux.conf
 # + tpm plugins) are non-secret and 0755. ~/.config/tmux is XDG-standard: tmux
 # 3.x on debian:12 reads ~/.config/tmux/tmux.conf, so persisting that dir on its
@@ -166,9 +181,9 @@ RUN mkdir -p /etc/ssh /run/sshd \
 # (e.g. for `pip install --user` tools). This bash_profile->profile->bashrc chain
 # is load-bearing for login-shell panes; do not "simplify" it away.
 RUN set -eux; \
-    mkdir -p /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.agent-container /home/dev/.config/tmux; \
-    chown -R dev:dev /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.agent-container /home/dev/.config; \
-    chmod 0700 /home/dev/.claude /home/dev/.codex /home/dev/.pi; \
+    mkdir -p /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.agent-container /home/dev/.config/tmux /home/dev/.config/opencode /home/dev/.local/share/opencode; \
+    chown -R dev:dev /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.agent-container /home/dev/.config /home/dev/.local; \
+    chmod 0700 /home/dev/.claude /home/dev/.codex /home/dev/.pi /home/dev/.config/opencode /home/dev/.local/share/opencode; \
     chmod 0755 /home/dev/.agent-container /home/dev/.config/tmux; \
     HOOK='if [ -f "$HOME/.agent-container/env" ]; then set -a; . "$HOME/.agent-container/env"; set +a; fi'; \
     printf '\n# agent-container: source persistent shell env if present (guarded)\n%s\n' "$HOOK" >> /home/dev/.bashrc; \

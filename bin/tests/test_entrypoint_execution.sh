@@ -17,7 +17,7 @@
 # Mechanics: tmux is a dispatcher recording new-session/new-window/select-window
 # and modelling has-session + list-windows; sshd/tail are recorder/immediate-exit
 # stubs; git models config set/get of core.sshCommand + records `clone` (creating
-# a .git so idempotency is testable); claude/codex/pi are recorder stubs that exit
+# a .git so idempotency is testable); claude/codex/pi/opencode are recorder stubs that exit
 # with a chosen code (headless exit-code propagation). AGENT_CONTAINER_* hooks
 # redirect HOME, the inject dir, and the workspace into tmpdirs.
 
@@ -120,7 +120,7 @@ chmod +x "${STUB}/tmux"
 
 # Agent recorder stubs. Exit code is read from AGENT_CONTAINER_STUB_STATE/agentrc
 # (default 0) so the headless exit-code test can force a non-zero result.
-for a in claude codex pi; do
+for a in claude codex pi opencode; do
 cat > "${STUB}/${a}" <<EOF
 #!/usr/bin/env bash
 printf '${a} %s\n' "\$*" >> "\${AGENT_CONTAINER_AGENT_CAPTURE}"
@@ -223,6 +223,57 @@ mkdir -p "${WORKSPACE}/.git"   # already a working copy
 run_entry AGENT_CONTAINER_MODE=interactive AGENT_CONTAINER_AGENT=claude \
           AGENT_CONTAINER_CLONE_URL=https://github.com/you/repo.git
 if git_has 'clone '; then bad "US4: must skip clone when /workspace already has .git"; else ok; fi
+
+# --- Feature 010 US1: opencode is dispatched like the other three ------------
+reset
+run_entry AGENT_CONTAINER_MODE=interactive AGENT_CONTAINER_AGENT=opencode
+if cap_has 'new-window -t main -n opencode'; then ok; else bad "010: agent window 'opencode' created"; fi
+if cap_has 'select-window -t main:opencode'; then ok; else bad "010: attach lands on the opencode window"; fi
+
+# Headless uses `opencode run <task>` (the documented non-interactive form) and
+# propagates the agent's exit code (FR-005, verified against the real binary).
+reset
+printf 'run the tests' > "${INJECTDIR}/task"
+printf '7' > "${STATE}/agentrc"
+run_entry AGENT_CONTAINER_MODE=headless AGENT_CONTAINER_AGENT=opencode
+check_eq "010: headless container exits with opencode's code" "7" "$?"
+if agent_has 'opencode run run the tests'; then ok; else bad "010: headless opencode invoked as 'run <task>'"; fi
+
+# The TUI positional is a PROJECT DIRECTORY, not a message — passing the task
+# there would be read as a path, so interactive opencode must launch UNSEEDED.
+reset
+printf 'fix the bug' > "${INJECTDIR}/task"
+run_entry AGENT_CONTAINER_MODE=interactive AGENT_CONTAINER_AGENT=opencode
+if cap_has 'new-window -t main -n opencode opencode'; then ok; else bad "010: interactive opencode launches unseeded"; fi
+if cap_has 'fix the bug'; then bad "010: task must NOT be passed to opencode's TUI (read as a project path)"; else ok; fi
+
+# --- Feature 010 FR-012: a stale image names the remedy, not exit 127 --------
+# Move the stub aside (an image built before opencode landed), then restore it.
+#
+# PATH is pinned to the stub dir + the system dirs ONLY. run_entry exports PATH
+# before applying kv args, so this override wins. It is load-bearing for
+# HERMETICITY (Constitution V): a developer machine may well have the real agent
+# installed (homebrew/npm land in /opt/homebrew/bin or /usr/local/bin), and
+# without the pin this case would pass in CI and fail locally — the worst kind of
+# environment-dependent test.
+reset
+mv "${STUB}/opencode" "${STUB}/.opencode.hidden"
+run_entry PATH="${STUB}:/usr/bin:/bin" AGENT_CONTAINER_MODE=headless AGENT_CONTAINER_AGENT=opencode
+rc=$?
+mv "${STUB}/.opencode.hidden" "${STUB}/opencode"
+if [[ "${rc}" -ne 0 && "${rc}" -ne 127 ]]; then ok; else bad "010: missing agent must die cleanly (got ${rc})"; fi
+if grep -q 'redeploy' "${LOG}"; then ok; else bad "010: stale-image message must name 'redeploy' as the remedy (log: $(tr '\n' '|' < "${LOG}" | tail -c 300))"; fi
+
+# --- Feature 010: an UNKNOWN agent says so, rather than blaming the image -----
+# Review catch: with the preflight ordered first, AGENT_CONTAINER_AGENT=gpt
+# reported "not installed in this image — run redeploy", sending the operator to
+# rebuild an image that was never the problem.
+reset
+run_entry AGENT_CONTAINER_MODE=headless AGENT_CONTAINER_AGENT=gpt
+rc=$?
+if [[ "${rc}" -ne 0 ]]; then ok; else bad "010: unknown agent must fail"; fi
+if grep -q "unknown agent" "${LOG}"; then ok; else bad "010: unknown agent must say 'unknown agent'"; fi
+if grep -q 'redeploy' "${LOG}"; then bad "010: unknown agent must NOT blame the image"; else ok; fi
 
 # --- summary -----------------------------------------------------------------
 note ""

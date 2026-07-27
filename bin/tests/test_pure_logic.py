@@ -6,6 +6,9 @@ the shell completions read the same state files, so do not 'fix' them casually.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 # --- port hash: 2200 + (sum of char codes mod 100) ---------------------------
@@ -379,3 +382,161 @@ def test_migrate_flat_state_is_idempotent_and_nondestructive(wiz):
 def test_migrate_flat_state_noop_without_state_dir(wiz):
     # Must not raise when STATE_DIR does not exist yet.
     wiz.migrate_flat_state()
+
+
+# --- Feature 010 FR-002: the supported-agent list is single-sourced ----------
+#
+# AGENTS in bin/agent-container is CANONICAL. The same set is independently
+# encoded in entrypoint.sh (dispatch), the Dockerfile (npm installs), the shell
+# completions, and the docs. True single-sourcing across Python + shell +
+# Dockerfile would need build-time codegen (a new dependency, a new failure
+# mode) for a list that changes about once a year, so this is DETECTION, not
+# prevention: drift is a red gate rather than a production surprise.
+
+_ROOT = Path(__file__).resolve().parents[2]
+
+# Dockerfile ships npm PACKAGES, whose names do not match the agent names. This
+# mapping is itself a fourth encoding of the list, so an unmapped package is a
+# hard failure — a rename must never silently drop an agent from the check.
+_NPM_PACKAGE_TO_AGENT = {
+    "@anthropic-ai/claude-code": "claude",
+    "@openai/codex": "codex",
+    "@earendil-works/pi-coding-agent": "pi",
+    "opencode-ai": "opencode",
+}
+
+
+def _canonical_agents(wiz) -> set[str]:
+    return set(wiz.AGENTS)
+
+
+def test_entrypoint_dispatch_matches_canonical_agent_list(wiz):
+    """FR-002: entrypoint.sh's headless dispatch covers exactly AGENTS."""
+    body = (_ROOT / "entrypoint.sh").read_text()
+    block = body.split("run_headless_agent()", 1)[1].split("\n}", 1)[0]
+    arms = set(re.findall(r"^\s*([a-z][a-z0-9-]*)\)\s*exec ", block, re.M))
+    assert arms == _canonical_agents(wiz), (
+        f"entrypoint.sh disagrees with AGENTS: only in entrypoint={arms - _canonical_agents(wiz)}, "
+        f"only in AGENTS={_canonical_agents(wiz) - arms}"
+    )
+
+
+def test_dockerfile_installs_exactly_the_canonical_agents(wiz):
+    """FR-002/FR-003: every agent is baked, and nothing extra is."""
+    body = (_ROOT / "Dockerfile").read_text()
+    pkgs = set(re.findall(r"npm i -g (?:--ignore-scripts )?(\S+)", body))
+    unmapped = pkgs - set(_NPM_PACKAGE_TO_AGENT)
+    assert not unmapped, (
+        f"Dockerfile installs npm package(s) with no agent mapping: {unmapped}. "
+        "Add them to _NPM_PACKAGE_TO_AGENT (or drop them) — an unmapped package "
+        "would silently disappear from this check."
+    )
+    installed = {_NPM_PACKAGE_TO_AGENT[p] for p in pkgs}
+    assert installed == _canonical_agents(wiz), (
+        f"Dockerfile disagrees with AGENTS: only in Dockerfile="
+        f"{installed - _canonical_agents(wiz)}, only in AGENTS={_canonical_agents(wiz) - installed}"
+    )
+
+
+def test_completions_offer_exactly_the_canonical_agents(wiz):
+    """FR-013: the tool and its completions must not disagree.
+
+    Asserts the list is both DECLARED and WIRED. Declaring it is not enough: a
+    review of this feature caught a zsh script that declared the list but never
+    referenced it from the `up` stanza, so `--agent` completed nothing — and an
+    earlier version of this very test passed, because it only looked for the
+    declaration. The bash side is additionally exercised by invoking the real
+    completion in test_completions.sh; zsh has no such harness, which is exactly
+    why the wiring check matters here.
+    """
+    for fname in ("agent-container.bash", "agent-container.zsh"):
+        body = (_ROOT / "completions" / fname).read_text()
+        m = re.search(r"_agent_container_agents=[\"']([^\"']+)[\"']", body)
+        assert m, f"{fname} does not declare the agent list for --agent completion"
+        offered = set(m.group(1).split())
+        assert offered == _canonical_agents(wiz), (
+            f"{fname} disagrees with AGENTS: only in completions="
+            f"{offered - _canonical_agents(wiz)}, only in AGENTS={_canonical_agents(wiz) - offered}"
+        )
+        # Referenced somewhere OTHER than its own assignment, and reachable from
+        # a `--agent` completion arm.
+        uses = [
+            ln
+            for ln in body.splitlines()
+            if "_agent_container_agents" in ln and not re.match(r"\s*_agent_container_agents=", ln)
+        ]
+        assert uses, (
+            f"{fname} declares the agent list but never uses it (--agent would complete nothing)"
+        )
+        assert "--agent" in body, f"{fname} never offers the --agent option at all"
+
+
+def test_orchestration_templates_mount_the_full_volume_set(wiz):
+    """FR-007: 'every place that states the number or names of those volumes'
+    includes the hand-maintained templates in orchestration/, which claim volume
+    parity with the CLI. They are not generated, so nothing else catches drift —
+    an operator following a stale template silently loses opencode's state.
+    """
+    expected = set(wiz.per_container_volumes("PLACEHOLDER"))
+    for fname, pattern in (
+        ("compose.yaml", r"agent-container-\$\{AGENT_CONTAINER_NAME:-default\}-([a-z-]+):/"),
+        ("agent-container.container", r"Volume=agent-container-\$\{NAME\}-([a-z-]+):/"),
+    ):
+        body = (_ROOT / "orchestration" / fname).read_text()
+        mounted = {f"agent-container-PLACEHOLDER-{m}" for m in re.findall(pattern, body)}
+        assert mounted == expected, (
+            f"orchestration/{fname} is out of sync with per_container_volumes(): "
+            f"missing={sorted(expected - mounted)}, extra={sorted(mounted - expected)}"
+        )
+
+
+def test_docs_and_help_name_exactly_the_canonical_agents(wiz):
+    """FR-002 names FOUR consumers — CLI, container, completions, and the
+    DOCUMENTATION. SC-003 claims zero discrepancies *verified*, so docs cannot
+    be the one consumer nothing checks."""
+    agents = _canonical_agents(wiz)
+
+    help_text = (_ROOT / "bin" / "agent-container").read_text()
+    m = re.search(r'help="Primary agent to run: ([^."]+)\.?"', help_text)
+    assert m, "--agent help string not found"
+    assert {a.strip() for a in m.group(1).split("|")} == agents
+
+    doc = (_ROOT / "docs" / "execution.md").read_text()
+    m = re.search(r"<!-- agents:begin -->(.*?)<!-- agents:end -->", doc, re.S)
+    assert m, "docs/execution.md is missing the agents:begin/end marker block"
+    documented = set(re.findall(r"`([a-z][a-z0-9-]*)`", m.group(1)))
+    assert documented == agents, (
+        f"docs/execution.md disagrees with AGENTS: only in docs={documented - agents}, "
+        f"only in AGENTS={agents - documented}"
+    )
+
+
+def test_completions_offer_every_cli_command(wiz):
+    """The completions' top-level command lists must match the CLI's registered
+    commands.
+
+    Added after a review found `redeploy` missing from both scripts: eight
+    commands (redeploy/stop/start/wipe from Feature 002, plan/apply/status/
+    destroy from Feature 006) had silently accumulated as drift, because nothing
+    compared the two. Same failure mode as the agent list, one level up.
+    """
+    registered = {c.name or c.callback.__name__ for c in wiz.app.registered_commands}
+    # `host` is a Typer sub-app (a group), not a command — it still appears at the
+    # top level for the user, so the completions must offer it.
+    registered |= {g.name or g.typer_instance.info.name for g in wiz.app.registered_groups}
+    registered = {n.replace("_", "-") for n in registered if n}
+
+    bash = (_ROOT / "completions" / "agent-container.bash").read_text()
+    m = re.search(r'subcommands="([^"]+)"', bash)
+    assert m, "bash completion has no subcommands list"
+    offered_bash = {w for w in m.group(1).split() if not w.startswith("-")}
+
+    zsh = (_ROOT / "completions" / "agent-container.zsh").read_text()
+    block = zsh.split("cmds=(", 1)[1].split("\n    )", 1)[0]
+    offered_zsh = set(re.findall(r"^\s+'([a-z-]+):", block, re.M))
+
+    for label, offered in (("bash", offered_bash), ("zsh", offered_zsh)):
+        assert offered == registered, (
+            f"{label} completion is out of sync with the CLI: "
+            f"missing={sorted(registered - offered)}, unknown={sorted(offered - registered)}"
+        )

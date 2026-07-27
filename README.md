@@ -221,6 +221,8 @@ PEP 723 single-file script (`bin/agent-container`) and needs nothing but
 
 ```bash
 agent-container                # guided wizard: state-aware — leads with the one best next step
+agent-container context --json # what an AI AGENT reads: state + suggested next step
+agent-container skill install  # teach your agent (claude|codex|opencode|pi) to drive this tool
 agent-container host add local --docker-context lima-docker --default  # register a host
 agent-container host ls        # list registered hosts (where containers run)
 agent-container host show hz1 --json   # one host's full record (driver/context/provisioning)

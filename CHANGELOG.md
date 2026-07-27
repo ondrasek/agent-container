@@ -2,6 +2,83 @@
 
 <!-- version list -->
 
+## v0.17.1 (2026-07-27)
+
+### Bug Fixes
+
+- **completions**: Zsh --agent completed nothing; test by executing
+  ([#010](https://github.com/ondrasek/agent-container/pull/10),
+  [`04c0f8b`](https://github.com/ondrasek/agent-container/commit/04c0f8b35ee51dbe0797131fe2269fbb1f56619e))
+
+
+## v0.17.0 (2026-07-27)
+
+### Documentation
+
+- Prune CLAUDE.md back under its token budget
+  ([#010](https://github.com/ondrasek/agent-container/pull/10),
+  [`bf28c8f`](https://github.com/ondrasek/agent-container/commit/bf28c8fc0527a070d1f7cfc63433bb237169869c))
+
+
+## v0.16.0 (2026-07-26)
+
+### Bug Fixes
+
+- **cli**: Stop turning an in-progress teardown into a fatal port error
+  ([`ab190e5`](https://github.com/ondrasek/agent-container/commit/ab190e53859d2dfd282eb197c2f5025280137c9c))
+
+- **test**: Update the list --json acceptance to the versioned envelope
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`5c79814`](https://github.com/ondrasek/agent-container/commit/5c79814bb5a54481eae8803a719bb1097a5e07da))
+
+### Chores
+
+- Sync uv.lock to released version
+  ([`29781a2`](https://github.com/ondrasek/agent-container/commit/29781a2ef228d32f0ff604e9db43c36904945ad7))
+
+### Documentation
+
+- **specs**: Clarify Feature 009 agent-operable-cli
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`126ab30`](https://github.com/ondrasek/agent-container/commit/126ab3084df5bba8bdcdc299e780de2a28de12e0))
+
+- **specs**: Plan Feature 009 agent-operable-cli
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`a8cf78e`](https://github.com/ondrasek/agent-container/commit/a8cf78ee3ccabdea9e40c99eeca9512e0bb0c8e3))
+
+- **specs**: Remediate analyze findings for Feature 009
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`210419e`](https://github.com/ondrasek/agent-container/commit/210419ed21e8d1bc5eb4104b9e8d5f9bcc930738))
+
+- **specs**: Second clarify pass on Feature 009 agent-operable-cli
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`107fa9f`](https://github.com/ondrasek/agent-container/commit/107fa9f39d21140ba520c525dd4c6b49a5e027ef))
+
+- **specs**: Specify Feature 009 agent-operable-cli
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`0a4fc33`](https://github.com/ondrasek/agent-container/commit/0a4fc330c148e05b2e4c725daf804223f62eff6a))
+
+- **specs**: Task list for Feature 009 agent-operable-cli
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`6baf17b`](https://github.com/ondrasek/agent-container/commit/6baf17ba7d21ab8064fad8ea959303c77e2c4d55))
+
+- **specs**: The skill enforces --json on every invocation
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`596dbb6`](https://github.com/ondrasek/agent-container/commit/596dbb6df3746aa5fb51ef8a5360d23578a523d6))
+
+### Features
+
+- **cli**: Agent-operable CLI — versioned JSON, coded failures, context, skill
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`d610998`](https://github.com/ondrasek/agent-container/commit/d610998afded50f834f2aa3bdb31c3c00cc2e1fc))
+
+### Breaking Changes
+
+- **cli**: `list --json`, `host ls --json` and `host show --json` now wrap their payload in the
+  versioned envelope; the record moves under `data` and carries `schema`/`ok`. Read `.data` to get
+  the previous shape.
+
+
 ## v0.15.0 (2026-07-25)
 
 ### Bug Fixes
