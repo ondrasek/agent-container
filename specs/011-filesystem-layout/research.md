@@ -11,8 +11,7 @@ Every finding below was checked against the code, not inferred from the spec.
 `_is_repo_checkout()` decides what a checkout *is*:
 
 ```python
-return (base / "Dockerfile").is_file() and (
-    base / "completions" / "agent-container.bash").is_file()
+return (base / "Dockerfile").is_file() and (base / "completions" / "agent-container.bash").is_file()
 ```
 
 Moving `Dockerfile` into `image/` **invalidates the marker**, and the blast radius is larger than
