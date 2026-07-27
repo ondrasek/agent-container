@@ -150,7 +150,9 @@ RUN mkdir -p /etc/ssh /run/sshd \
 #
 # opencode is the one agent that SPLITS config from credentials (it follows XDG),
 # so it gets TWO volumes (verified against opencode.ai/docs AND by running it):
-#   ~/.config/opencode      -> opencode.jsonc, agents/, commands/, skills/, themes/
+#   ~/.config/opencode      -> opencode.jsonc (the file it CREATES; opencode.json
+#                              is the documented name and is also read),
+#                              agents/, commands/, skills/, themes/
 #   ~/.local/share/opencode -> auth.json (from `opencode auth login`) + opencode.db
 # Deliberately NOT persisted: ~/.local/state/opencode/locks (a stale lock carried
 # across a recreate is a self-inflicted failure) and ~/.cache/opencode (regenerated).

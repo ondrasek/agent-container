@@ -18,7 +18,7 @@ The Session 2026-07-26 clarification records, as a *verified* fact:
 
 | What | Path | Persists what |
 |---|---|---|
-| Config | `~/.config/opencode/` | `opencode.json`, `tui.json`, `agents/`, `commands/`, `modes/`, `plugins/`, `skills/`, `themes/` |
+| Config | `~/.config/opencode/` | `opencode.json` (opencode writes `opencode.jsonc` by default — see R3a; both are read), `tui.json`, `agents/`, `commands/`, `modes/`, `plugins/`, `skills/`, `themes/` |
 | Data | `~/.local/share/opencode/auth.json` | credentials written by `opencode auth login` |
 
 And `OPENCODE_CONFIG_DIR` does **not** relocate the config — it adds an *additional search
@@ -103,7 +103,7 @@ Enumerated by running the agent and diffing `$HOME`, rather than trusting docume
 
 | Path | Persisted? | Contents |
 |---|---|---|
-| `~/.config/opencode/` | **yes — volume** | `opencode.jsonc`, `.gitignore` |
+| `~/.config/opencode/` | **yes — volume** | `opencode.jsonc`, `.gitignore` — note the **`.jsonc`** extension is what it actually creates, though its documentation names `opencode.json`; both are read |
 | `~/.local/share/opencode/` | **yes — volume** | `auth.json`, `opencode.db` (+`-wal`/`-shm`) session store, `log/`, `repos/` |
 | `~/.local/state/opencode/locks/` | **no — deliberately** | runtime lock files with heartbeats |
 | `~/.cache/opencode/` | no | `models.json`, empty `bin/` — regenerated on demand |

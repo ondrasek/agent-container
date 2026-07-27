@@ -297,7 +297,7 @@ fi
 # Codex — redirect CODEX_HOME to an EPHEMERAL dir so an api-key login writes
 # auth.json THERE, never onto the -codex volume (H1). Try the non-interactive
 # api-key login reading the injected file on STDIN; if that codex build lacks it,
-# fall back to OPENAI_API_KEY in the in-container env (FR-006 fallback — never on
+# fall back to OPENAI_API_KEY in the in-container env (003 FR-006 fallback — never on
 # argv, never on a volume). CODEX_HOME is only redirected when a key is injected, so
 # without one an operator's interactive `codex login` still persists on the volume.
 if [[ -f "${_openai_key}" ]]; then
@@ -351,7 +351,7 @@ if [[ "${_any_apikey}" -eq 1 ]]; then
     log "pi: PI_CODING_AGENT_DIR redirected to an ephemeral dir (the -pi volume is never written)"
 fi
 
-# In-container env delivery (FR-006 fallback) for agents without a non-interactive
+# In-container env delivery (003 FR-006 fallback) for agents without a non-interactive
 # file-auth path (pi; codex if its api-key login was unavailable; opencode always).
 # Read from the ephemeral injected file into the env — never argv, never a volume,
 # never baked.
@@ -457,11 +457,18 @@ build_interactive_cmd() {
 }
 
 # Headless: exec the agent's non-interactive form as PID 1's workload so the
-# CONTAINER exits with the agent's exit code (FR-002). The task (possibly empty)
+# CONTAINER exits with the agent's exit code (004 FR-002). The task (possibly empty)
 # is read from the injected file. Uses `exec` — the agent replaces this entrypoint.
 run_headless_agent() {
     local a="$1" t=""
     [[ -f "${TASK_FILE}" ]] && t="$(cat "${TASK_FILE}")"
+    # Validate the NAME before probing for the binary. Reversed, an unknown agent
+    # such as 'gpt' would report "not installed in this image — run redeploy",
+    # sending the operator to rebuild an image that was never the problem.
+    case "${a}" in
+        claude|codex|pi|opencode) ;;
+        *) die "headless mode: unknown agent '${a}' (choose claude|codex|pi|opencode)" ;;
+    esac
     require_agent_binary "${a}"
     case "${a}" in
         claude) exec claude -p "${t}" ;;

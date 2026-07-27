@@ -55,7 +55,7 @@ order:
 
 | # | Volume suffix | Mount | Holds |
 |---|---|---|---|
-| 8 | **`-opencode`** | `/home/dev/.config/opencode` | `opencode.json`, `tui.json`, `agents/`, `commands/`, `modes/`, `plugins/`, `skills/`, `themes/` |
+| 8 | **`-opencode`** | `/home/dev/.config/opencode` | `opencode.jsonc` (created by opencode; the documented `opencode.json` is also read), `tui.json`, `agents/`, `commands/`, `modes/`, `plugins/`, `skills/`, `themes/` |
 | 9 | **`-opencode-data`** | `/home/dev/.local/share/opencode` | `auth.json` — written **only** by operator-interactive `opencode auth login` |
 
 **Naming**: `agent-container-<name>-opencode` and `agent-container-<name>-opencode-data`, derived

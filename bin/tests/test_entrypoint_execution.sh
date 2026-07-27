@@ -264,6 +264,17 @@ mv "${STUB}/.opencode.hidden" "${STUB}/opencode"
 if [[ "${rc}" -ne 0 && "${rc}" -ne 127 ]]; then ok; else bad "010: missing agent must die cleanly (got ${rc})"; fi
 if grep -q 'redeploy' "${LOG}"; then ok; else bad "010: stale-image message must name 'redeploy' as the remedy (log: $(tr '\n' '|' < "${LOG}" | tail -c 300))"; fi
 
+# --- Feature 010: an UNKNOWN agent says so, rather than blaming the image -----
+# Review catch: with the preflight ordered first, AGENT_CONTAINER_AGENT=gpt
+# reported "not installed in this image — run redeploy", sending the operator to
+# rebuild an image that was never the problem.
+reset
+run_entry AGENT_CONTAINER_MODE=headless AGENT_CONTAINER_AGENT=gpt
+rc=$?
+if [[ "${rc}" -ne 0 ]]; then ok; else bad "010: unknown agent must fail"; fi
+if grep -q "unknown agent" "${LOG}"; then ok; else bad "010: unknown agent must say 'unknown agent'"; fi
+if grep -q 'redeploy' "${LOG}"; then bad "010: unknown agent must NOT blame the image"; else ok; fi
+
 # --- summary -----------------------------------------------------------------
 note ""
 note "test_entrypoint_execution.sh: ${pass} passed, ${fail} failed"
