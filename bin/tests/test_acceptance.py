@@ -536,12 +536,13 @@ def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
     r = run_list()
     assert r.returncode == 0, r.stderr
     assert time.time() - t0 < 30, "list hung on the unreachable host"
-    rows = json.loads(r.stdout)
+    # Feature 009: --json payloads are wrapped in a versioned envelope.
+    rows = json.loads(r.stdout)["data"]["containers"]
     dead = [x for x in rows if x["host"] == "dead"]
     assert dead and all(x["status"] == "unreachable" for x in dead)  # never 'Up', never dropped
     assert any(x["name"] == "agent-container-acclist" for x in rows)  # local still listed
 
-    rows_local = json.loads(run_list("--local").stdout)
+    rows_local = json.loads(run_list("--local").stdout)["data"]["containers"]
     assert not any(x["status"] == "unreachable" for x in rows_local)  # --local never probes
 
 
@@ -1516,6 +1517,86 @@ def test_declarative_encrypted_source_refused_with_migration(acc):
     assert r.returncode != 0
     assert "REMOVED" in r.stderr and "onepassword" in r.stderr
     assert "is not one of" not in r.stderr
+
+
+# --- Feature 009: the agent-operable surface (real container) -----------------
+# T014a — plan.md promised a real-invocation test; the analyze pass found it
+# missing from the task list. SC-001 ("an agent completes a full lifecycle using
+# ONLY machine-readable output") is an end-to-end claim and cannot be proven by
+# hermetic units alone.
+
+
+def _json_cli(acc, argv, **kw):
+    """Run the real CLI with --json and return (parsed_stdout, CompletedProcess)."""
+    r = acc.cli([*argv, "--json"], **kw)
+    try:
+        return json.loads(r.stdout), r
+    except json.JSONDecodeError as e:  # stdout must ALWAYS be a clean envelope
+        raise AssertionError(
+            f"stdout did not parse as JSON for {argv}: {e}\nstdout={r.stdout!r}\nstderr={r.stderr[-500:]!r}"
+        ) from None
+
+
+def test_agent_drives_full_lifecycle_over_json(acc):
+    """SC-001/SC-002/SC-003: a full lifecycle on machine-readable output alone."""
+    name = "acc009"
+    acc.register(name)
+    env_file = acc.tmp / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
+
+    # up --json: valid envelope, nothing but the envelope on stdout (FR-002)
+    payload, r = _json_cli(acc, ["up", name, "--env-file", str(env_file)])
+    assert r.returncode == 0, r.stderr
+    assert payload["schema"] == "agent-container/v1" and payload["ok"] is True
+    _wait_container_state(f"agent-container-{name}", "running")
+
+    # list --json: the environment is visible to an agent
+    payload, r = _json_cli(acc, ["list"])
+    assert r.returncode == 0 and payload["ok"] is True
+
+    # a failure yields a PARSEABLE descriptor with a stable code (SC-002)
+    payload, r = _json_cli(acc, ["stop", name, "--host", "nosuchhost009"])
+    assert r.returncode != 0
+    assert payload["ok"] is False
+    err = payload["error"]
+    assert err["code"] == "host_not_registered"  # branch on the CODE, not the message
+    assert err["entity"] == "nosuchhost009" and err["remedy"]
+
+    # SC-003: a destructive command refuses on a non-TTY rather than hanging
+    r = acc.cli(["down", name, "--purge"])  # no -y, not a terminal
+    assert r.returncode != 0 and "-y" in r.stderr
+
+    # tear down with explicit authorization
+    payload, r = _json_cli(acc, ["down", name, "--purge", "-y"])
+    assert r.returncode == 0 and payload["ok"] is True
+    _wait_container_state(f"agent-container-{name}", "")
+
+
+def test_context_and_skill_over_json(acc):
+    """The two new commands work against a real environment; context leaks nothing."""
+    payload, r = _json_cli(acc, ["context"])
+    assert r.returncode == 0 and payload["ok"] is True
+    data = payload["data"]
+    assert {"target", "stages", "hosts", "conventions", "next_step"} <= set(data)
+
+    # skill installs into a scratch PROJECT dir, is idempotent, and removes cleanly
+    proj = acc.tmp / "skillproj"
+    proj.mkdir()
+    payload, r = _json_cli(acc, ["skill", "install"], cwd=proj)
+    assert r.returncode == 0 and payload["data"]["changed"] is True
+    skill_md = proj / ".claude" / "skills" / "agent-container" / "SKILL.md"
+    assert skill_md.is_file()
+    body = skill_md.read_text()
+    assert body.startswith("---\n") and "name: agent-container" in body
+    # FR-012c: every example in the shipped skill carries --json
+    examples = [ln.strip() for ln in body.splitlines() if ln.strip().startswith("agent-container ")]
+    assert examples and all("--json" in e for e in examples)
+
+    payload, _ = _json_cli(acc, ["skill", "install"], cwd=proj)
+    assert payload["data"]["changed"] is False  # idempotent
+    payload, _ = _json_cli(acc, ["skill", "remove"], cwd=proj)
+    assert payload["data"]["changed"] is True
+    assert not skill_md.exists()
 
 
 # --- Feature 010: opencode as a fourth agent (real container) ----------------

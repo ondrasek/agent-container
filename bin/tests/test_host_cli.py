@@ -64,16 +64,20 @@ def test_host_add_podman_needs_connection(wiz):
 
 
 def test_host_ls_json_shows_default(wiz, capsys):
+    # Feature 009: machine-readable payloads are wrapped in a VERSIONED envelope
+    # (FR-006), so the record now lives under `data` and carries `schema`/`ok`.
     wiz.cli_host_add("local", "docker", "lima-docker", None, True)
     wiz.do_host_ls(as_json=True)
-    out = json.loads(capsys.readouterr().out)
+    env = json.loads(capsys.readouterr().out)
+    assert env["schema"] == wiz.SCHEMA_VERSION and env["ok"] is True
+    out = env["data"]
     assert out["default"] == "local"
     assert out["hosts"]["local"]["context"] == "lima-docker"
 
 
 def test_host_ls_empty_is_not_an_error(wiz, capsys):
     wiz.do_host_ls(as_json=True)
-    out = json.loads(capsys.readouterr().out)
+    out = json.loads(capsys.readouterr().out)["data"]
     assert out == {"default": None, "hosts": {}}
 
 
@@ -100,7 +104,7 @@ def _tool_hz_host(name="hz1", **prov):
 def test_host_show_json_emits_record(make_registry, capsys):
     wiz = make_registry({"default": "hz1", "hosts": {"hz1": _tool_hz_host()}})
     wiz.do_host_show("hz1", as_json=True)
-    out = json.loads(capsys.readouterr().out)
+    out = json.loads(capsys.readouterr().out)["data"]
     assert out["name"] == "hz1"
     assert out["default"] is True
     assert out["driver"] == "docker"

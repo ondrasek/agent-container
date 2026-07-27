@@ -88,6 +88,9 @@ _agent-container() {
         'status:Report declarative spec drift'
         'destroy:Remove resources owned by the declarative spec'
         'menu:Interactive wizard'
+        'context:Print agent-friendly context about this environment'
+        'skill:Create, update, or remove the agent skill definition'
+        'commands:Print the machine-readable command tree'
         'completions:Print a checked-in completion script'
     )
 
