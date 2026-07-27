@@ -88,6 +88,30 @@ The chosen path is printed at startup. If none exists, `up` fails fast with all 
 
 This composes cleanly with the credential contract: see [`credentials.md`](credentials.md).
 
+## Concurrency: one advisory lock per (host, container)
+
+Every **mutating** verb (`up`, `down`, `stop`, `start`, `redeploy`, `wipe`, `purge`, `keys`) takes
+an **fcntl advisory lock** on `<state>/<host>/<name>.lock` before touching anything. It is
+**non-blocking**: a second invocation against the same container on the same host **fails fast**
+rather than queueing, so two concurrent `up`s can never interleave a compose write.
+
+Read-only verbs (`list`, `logs`, `plan`, `status`) **never** lock — they must stay usable while a
+deploy is in flight.
+
+If you add a mutating verb, take the lock. This is the invariant that keeps parallel containers
+(hard constraint 3) from corrupting each other's generated compose file and port state.
+
+## Sidecar services
+
+An operator override file — `./agent-container.<name>.services.yaml`, falling back to
+`~/.config/agent-container/<name>.services.yaml` — is merged as a **second `-f`** on every compose
+call, so the agent container and its helpers share one project and one lifecycle (`down` tears
+both down).
+
+It is validated: **`services:` only**, and it **must not redefine the `agent` service**. On the
+create path an invalid override is fatal; on teardown it is resolved leniently and ignored with a
+warning, because a broken override must never block a teardown.
+
 ## State on the host
 
 | Path                                            | Purpose                              | In repo? |
