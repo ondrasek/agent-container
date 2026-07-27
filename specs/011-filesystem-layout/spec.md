@@ -15,16 +15,18 @@ The tool's on-disk layout grew one feature at a time, and it shows. Two concrete
 **1. The name `agent-container` identifies six unrelated things.** An operator asking "where
 does my configuration live?" has to know which of these is meant:
 
-| Location | What it holds | Side |
-|----------|---------------|------|
-| `.agent-container/` | the declarative project spec | operator's repo |
-| `/workspace/.agent-container/` | a read-only delivered copy of that spec | container |
-| `~/.agent-container/` | the persistent shell-env directory | container |
-| `/run/agent-container/` | ephemeral injected secrets | container |
-| `~/.config/agent-container/` | host registry + per-environment config | operator's machine |
-| `$XDG_STATE_HOME/agent-container/<host>/` | ports, locks, generated compose files | operator's machine |
+| Location | Name | What it holds | Side |
+|----------|------|---------------|------|
+| `.agent-container/` | **project marker** | the spec + every per-environment file | project root |
+| `/workspace/.agent-container/` | delivered spec | a read-only copy of the marker | container |
+| `~/.agent-container/` | shell env | persistent shell environment | container |
+| `/run/agent-container/` | injected secrets | ephemeral, vanish with the container | container |
+| `~/.config/agent-container/` | host configuration | host registry + per-environment config | operator's machine |
+| `$XDG_STATE_HOME/agent-container/<host>/` | derived host state | ports, locks, generated compose files | operator's machine |
 
-Only the first two are related. The rest share a name and nothing else.
+Only the first two are related. The rest share a name and nothing else. The **Name** column is
+the vocabulary this feature settles on (FR-009); the directory holding the marker is the
+**project root**, never "the project directory".
 
 **2. The project root is littered.** Per-environment conventions are loose dotted files
 beside the code — `agent-container.<name>.env`, `agent-container.<name>.<provider>.key`,
@@ -49,12 +51,12 @@ obvious home**, without changing what the tool *does*.
 ### Session 2026-07-26
 
 - Q: What should change? → A: **All three**: consolidate the project-root convention files
-  into the project directory; move the image sources out of the repo root; and rename the
+  into the project marker; move the image sources out of the repo root; and rename the
   in-container/host locations so `agent-container` stops meaning six different things.
 
 ### Session 2026-07-27
 
-- Q: What is the single project directory called? → A: **Keep `.agent-container/`** and move
+- Q: What is the project marker called? → A: **Keep `.agent-container/`** and move
   the loose dotted files into it. It is already the project marker and the most-referenced
   name; FR-009's ambiguity is resolved by renaming the *other* locations, not this one.
 - Q: Where do the image sources move to? → A: **`image/`** — it names the artifact, not a
@@ -70,7 +72,7 @@ obvious home**, without changing what the tool *does*.
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - One directory per project (Priority: P1)
+### User Story 1 - One marker directory per project root (Priority: P1)
 
 An operator opens a repository that uses the tool and finds **one** directory holding
 everything the tool cares about — the spec, the per-environment env files, the credential
@@ -177,8 +179,9 @@ confirm the documentation shows one authoritative map with no stale names.
 ### Functional Requirements
 
 - **FR-001**: All per-environment files a project owns (spec, environment variables,
-  credential files, sidecar overrides) MUST live under the **single project directory
-  `.agent-container/`** — the directory that already holds the declarative spec.
+  credential files, sidecar overrides) MUST live under the **project marker
+  `.agent-container/`** — the directory that already holds the declarative spec — and it MUST
+  be the only tool-owned entry in the **project root**.
 - **FR-002**: No tool-owned file may remain loose in the project root once a project adopts
   the new layout.
 - **FR-003**: The previous layout MUST **not** be supported. There is **no dual lookup and no
@@ -197,7 +200,11 @@ confirm the documentation shows one authoritative map with no stale names.
   construction, not by an allowlist that must be maintained in step with the Dockerfile.
 - **FR-008**: Building against a layout that lacks the image sources MUST fail with a clear
   message naming what was expected and where.
-- **FR-009**: Each distinct location MUST be **distinguishable by name alone**. Concretely,
+- **FR-009**: Each distinct location MUST be **distinguishable by name alone**, and the
+  documentation MUST use one term per location: **project root** (the operator's directory),
+  **project marker** (`.agent-container/` within it), **host configuration**, **derived host
+  state**, and the three in-container locations. "Project directory" is ambiguous between the
+  first two and MUST NOT be used. Concretely,
   the in-container **persistent shell-env directory is renamed `~/.agent-container` →
   `~/.agent-env`**. Two locations deliberately keep the `agent-container` name because it is
   correct for them: `/workspace/.agent-container` (the project's own spec, delivered
@@ -217,8 +224,13 @@ confirm the documentation shows one authoritative map with no stale names.
 
 ### Key Entities *(include if feature involves data)*
 
-- **Project directory**: the single directory in an operator's repository holding everything
-  the tool owns for that project — spec and per-environment files.
+- **Project root**: the directory an operator's project lives in — the nearest ancestor of the
+  working directory that contains the project marker. It holds the operator's own code; the
+  tool owns nothing in it except the marker. Named to match the shipped implementation, where
+  discovery walks up from `cwd` and returns this directory as `root`.
+- **Project marker** (`.agent-container/`): the single directory *inside* the project root
+  holding everything the tool owns for that project — the declarative spec and every
+  per-environment file. Named to match `PROJECT_MARKER` in `bin/agent-container`.
 - **Host configuration**: the operator machine's own settings (the host registry), distinct
   from any project.
 - **Derived host state**: values the tool computes and caches per host (ports, locks,
