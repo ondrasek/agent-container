@@ -260,6 +260,46 @@ test_tool
 note "--- security: no code execution from hostile names ---"
 test_security_no_exec
 
+# --- F5: EXECUTE the zsh completion through a pty (Feature 010) --------------
+# Grepping the script is not enough. A review found `--agent` completing nothing
+# in zsh while the list was correctly declared AND referenced, so both the
+# structural test and the reviewer's read of the diff passed. Two separate
+# defects hid behind that: the list was a file-level global (empty under the
+# #compdef autoload path), and the spec used "${=var}", whose split flag breaks
+# ONE _arguments spec into four malformed words. Only running it catches either.
+if command -v zsh >/dev/null 2>&1; then
+    note "--- zsh completion, executed via pty ---"
+    zsh_complete() {  # <line-to-complete> -> the completed buffer
+        zsh -f -c '
+            zmodload zsh/zpty 2>/dev/null || exit 0
+            zpty z zsh -f
+            zpty -w z "fpath=('"${REPO_ROOT}"'/completions \$fpath); autoload -Uz compinit; compinit -u"
+            zpty -w z "source '"${REPO_ROOT}"'/completions/agent-container.zsh"
+            zpty -w z "zstyle \":completion:*\" completer _complete; PROMPT=\"RDY>\""
+            sleep 0.5
+            zpty -w -n z "'"$1"'"$'"'"'\t'"'"'
+            sleep 1.5
+            out=""
+            for i in {1..25}; do
+                if zpty -r -t z chunk 2>/dev/null; then out+="$chunk"; else sleep 0.15; fi
+            done
+            print -r -- "$out" | tr -d "\r" | sed "s/\x1b\[[0-9;?]*[a-zA-Z]//g" | tail -1
+        ' 2>/dev/null
+    }
+    for probe in "up:op:opencode" "up:cod:codex" "redeploy:op:opencode"; do
+        verb="${probe%%:*}"; rest="${probe#*:}"; pre="${rest%%:*}"; want="${rest##*:}"
+        got="$(zsh_complete "agent-container ${verb} box --agent ${pre}")"
+        if [[ "${got}" == *"--agent ${want}"* ]]; then
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1))
+            note "FAIL: zsh '${verb} --agent ${pre}<TAB>' should complete to '${want}', got: ${got}"
+        fi
+    done
+else
+    note "--- zsh completion pty test SKIPPED (no zsh) ---"
+fi
+
 note "--- zsh name gatherers ---"
 test_zsh_names
 
