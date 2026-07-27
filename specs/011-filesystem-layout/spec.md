@@ -52,6 +52,22 @@ obvious home**, without changing what the tool *does*.
   into the project directory; move the image sources out of the repo root; and rename the
   in-container/host locations so `agent-container` stops meaning six different things.
 
+### Session 2026-07-27
+
+- Q: What is the single project directory called? → A: **Keep `.agent-container/`** and move
+  the loose dotted files into it. It is already the project marker and the most-referenced
+  name; FR-009's ambiguity is resolved by renaming the *other* locations, not this one.
+- Q: Where do the image sources move to? → A: **`image/`** — it names the artifact, not a
+  runtime. `docker/` would encode exactly the Docker coupling ADR 0001 rejects, and the
+  directory becoming the build context makes FR-007 true by construction.
+- Q: How far do the in-container renames go? → A: **Only the persistent shell-env directory**
+  (`~/.agent-container` → `~/.agent-env`). `/run/agent-container` is already unambiguous by
+  its `/run` prefix, and `/workspace/.agent-container` *should* echo the project name because
+  it is literally that spec delivered read-only.
+- Q: For how long must the previous layout keep working? → A: **It must not.** Backward
+  compatibility is **not wanted**: the old implementation is removed immediately, in the same
+  change. This is a **hard cut**, not a deprecation — see the Migration posture below.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - One directory per project (Priority: P1)
@@ -66,8 +82,8 @@ first. It also shrinks the surface that the build-context allowlist and the
 git-tracked-secret refusal have to defend, because everything the tool owns is in one place.
 
 **Independent Test**: In a project using the current scattered layout, adopt the new layout
-and confirm every environment still deploys identically; then confirm a project using the
-*old* layout still works, and that the operator is told how to migrate.
+and confirm every environment still deploys identically; then confirm a project left in the
+*old* layout is refused with a message naming every file that must move.
 
 **Acceptance Scenarios**:
 
@@ -75,9 +91,10 @@ and confirm every environment still deploys identically; then confirm a project 
    the operator deploys, **Then** the tool finds them and the result is identical to the old
    layout — same identity, same runtime behavior.
 2. **Given** a project still using the old scattered layout, **When** the operator deploys,
-   **Then** it continues to work and the operator is told, once and clearly, how to migrate.
-3. **Given** both layouts are present for the same environment, **When** the tool resolves a
-   file, **Then** the precedence is defined, documented, and reported — never a silent pick.
+   **Then** the tool **refuses** with a message naming each superseded file and where it now
+   belongs — it does not deploy a half-configured environment.
+3. **Given** a credential file left in a superseded location, **When** the operator deploys,
+   **Then** the tool refuses rather than starting an agent without that credential.
 4. **Given** a consolidated project, **When** the operator inspects it, **Then** no
    tool-owned file remains loose in the project root.
 
@@ -138,18 +155,20 @@ confirm the documentation shows one authoritative map with no stale names.
 
 - **A pre-existing environment is used after upgrade** — it must keep working, with no
   manual migration and no orphaned container, volume or state file.
-- **Both old and new layouts present for one environment** — precedence must be defined and
-  **reported**, never a silent pick.
-- **A file exists only in the old location** — found, used, and the migration announced once,
-  not on every command.
+- **Both old and new layouts present for one environment** — the superseded file is reported
+  and the command refuses; there is no precedence rule to get wrong.
+- **A file exists only in the old location** — refused with an actionable message. It is
+  **never** silently ignored, because the set includes credential files and an ignored key
+  means an agent running without the credential the operator thinks it has.
 - **Teardown of a pre-upgrade environment** — must remove everything the tool created,
   including anything recorded under a superseded path.
 - **A remote host built from an older layout** — a clear, actionable failure, never an
   obscure "file not found" from the build.
 - **A project vendored/copied to a new path** — the layout is location-independent; nothing
   may depend on an absolute path.
-- **Migration is interrupted** (if any migration writes) — the project must be left in a
-  working state, never half-moved.
+- **Migration is operator-performed** — the tool never writes to an operator's project to
+  migrate it, so there is no half-moved state to recover from. It detects, refuses, and
+  explains.
 - **The declarative spec's in-container delivery** — its read-only integrity guarantee must
   survive the rename unchanged.
 
@@ -158,24 +177,31 @@ confirm the documentation shows one authoritative map with no stale names.
 ### Functional Requirements
 
 - **FR-001**: All per-environment files a project owns (spec, environment variables,
-  credential files, sidecar overrides) MUST live under a **single project directory**.
+  credential files, sidecar overrides) MUST live under the **single project directory
+  `.agent-container/`** — the directory that already holds the declarative spec.
 - **FR-002**: No tool-owned file may remain loose in the project root once a project adopts
   the new layout.
-- **FR-003**: A project using the **previous** layout MUST continue to work without manual
-  migration.
-- **FR-004**: When both layouts could supply the same file, precedence MUST be **defined,
-  documented, and reported** — never a silent choice.
-- **FR-005**: The tool MUST tell the operator how to migrate, **once and actionably**, rather
-  than on every invocation.
-- **FR-006**: The image sources (`Dockerfile` and its supporting files) MUST live in their
-  own directory, not the repository root.
+- **FR-003**: The previous layout MUST **not** be supported. There is **no dual lookup and no
+  precedence rule** — the old resolution code is removed in the same change, not deprecated.
+- **FR-004**: A tool-owned file found **only** in a superseded location MUST cause a **clear,
+  actionable failure** naming both the path found and the path expected. It MUST NOT be
+  silently ignored. This is the load-bearing requirement of the hard cut: the superseded
+  conventions include **credential files** (`agent-container.<name>.<provider>.key`) and
+  environment files, so silently ignoring one would start an agent **unauthenticated** while
+  the operator believes a key was injected (Constitution III).
+- **FR-005**: The failure MUST be **actionable** — it names the exact move required (`old
+  path` → `new path`), so the operator can comply without consulting documentation.
+- **FR-006**: The image sources (`Dockerfile`, `entrypoint.sh` and anything the build
+  consumes) MUST live in **`image/`**, not the repository root.
 - **FR-007**: The build context MUST contain **only** the image sources — narrow by
   construction, not by an allowlist that must be maintained in step with the Dockerfile.
 - **FR-008**: Building against a layout that lacks the image sources MUST fail with a clear
   message naming what was expected and where.
-- **FR-009**: Each distinct location (project spec, host configuration, derived host state,
-  in-container spec, in-container persistent state, in-container ephemeral secrets) MUST be
-  **distinguishable by name alone**.
+- **FR-009**: Each distinct location MUST be **distinguishable by name alone**. Concretely,
+  the in-container **persistent shell-env directory is renamed `~/.agent-container` →
+  `~/.agent-env`**. Two locations deliberately keep the `agent-container` name because it is
+  correct for them: `/workspace/.agent-container` (the project's own spec, delivered
+  read-only) and `/run/agent-container` (already unambiguous — `/run` denotes ephemeral).
 - **FR-010**: The tool's **deterministic identity** — container name, port, and volume names
   — MUST be **unchanged** by this feature (Constitution IV).
 - **FR-011**: Environments created **before** this change MUST continue to run, attach and
@@ -209,7 +235,11 @@ confirm the documentation shows one authoritative map with no stale names.
 - **SC-001**: A project using the new layout has **zero** tool-owned files loose in its root.
 - **SC-002**: An environment created before this change continues to run, attach and tear
   down after upgrade — 100% of runs, with **zero** orphaned containers, volumes or state
-  files.
+  files. (Identity is untouched, so this holds despite the hard cut: only *file locations*
+  change, never the volume names the tool owns.)
+- **SC-002a**: A project left in the superseded layout is **refused**, naming every file that
+  must move — 100% of runs, with **zero** cases of a superseded credential file being
+  silently ignored.
 - **SC-003**: Container name, port and volume names are **byte-identical** before and after
   this change — verified for a corpus of environment names.
 - **SC-004**: The image builds successfully from the new location on both a local and a
@@ -226,12 +256,13 @@ confirm the documentation shows one authoritative map with no stale names.
 - **Identity is untouchable.** The deterministic identity is the tool's ownership mechanism;
   this feature moves files only. Any change that would alter an identity is out of scope by
   construction.
-- **Backward compatibility is required, not optional.** The previous layout keeps working;
-  this is a reorganization with a migration path, not a hard cut like the `encrypted` source
-  removal — because unlike a credential source, an operator cannot see that their layout is
-  "wrong" until something breaks.
-- **Migration is operator-driven.** The tool detects and guides; it does not silently move
-  an operator's files.
+- **This is a hard cut, like the `encrypted` source removal.** Backward compatibility is
+  explicitly **not wanted** (Session 2026-07-27): the old resolution code is deleted in the
+  same change, so no dual-lookup path, precedence rule or deprecation window is carried. The
+  risk that an operator "cannot see their layout is wrong until something breaks" is answered
+  by **refusing loudly** (FR-004) rather than by supporting both.
+- **Migration is operator-performed.** The tool detects and refuses with an actionable
+  message; it never writes to an operator's project to migrate it.
 - **The three changes can land independently** and are ordered by risk: consolidation first
   (highest value, contained), image sources next (build risk), renames last (most invasive).
 - The container image remains **rootless and immutable at runtime**; nothing here changes
