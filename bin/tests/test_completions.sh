@@ -84,7 +84,23 @@ test_tool() {
     # shellcheck disable=SC1090
     source "${script}"
 
-    # 1) name gathering: state ∪ hosts, deduped/sorted
+    # --- Feature 010 FR-013: --agent offers exactly the four supported agents.
+    # Asserted by INVOKING the completion, not by reading its source — the
+    # declaration is separately checked against AGENTS in test_pure_logic.py.
+    run_comp "${func}" "${tool}" up box --agent ""
+    for a in claude codex pi opencode; do
+        assert_has "${tool}: --agent offers ${a}" "${a}" "${COMPREPLY[@]}"
+    done
+    assert_lacks "${tool}: --agent offers nothing extra" "gpt" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" up box --agent "op"
+    assert_has "${tool}: --agent prefix-filters to opencode" "opencode" "${COMPREPLY[@]}"
+    assert_lacks "${tool}: --agent prefix 'op' excludes claude" "claude" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" redeploy box --agent ""
+    assert_has "${tool}: redeploy --agent offers opencode too" "opencode" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" up box --mode ""
+    assert_has "${tool}: --mode offers headless" "headless" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" up box --workspace ""
+    assert_has "${tool}: --workspace offers ephemeral" "ephemeral" "${COMPREPLY[@]}"
     local got; got="$("${names_func}")"
     for n in acme blog my-box vps; do
         assert_has "${tool}:names" "${n}" ${got}

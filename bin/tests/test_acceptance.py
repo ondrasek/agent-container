@@ -408,10 +408,10 @@ def test_env_file_injection(acc):
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
 
-def test_purge_removes_all_seven_volumes(acc):
+def test_purge_removes_all_nine_volumes(acc):
     laptop = _gen_keypair(acc.tmp / "laptop")
     acc.up("accpurge", authorized_key=[laptop.with_suffix(".pub")])
-    assert len(acc.volumes_of("accpurge")) == 7
+    assert len(acc.volumes_of("accpurge")) == 9  # Feature 010: 7 -> 9
     acc.down("accpurge", purge=True)
     assert acc.volumes_of("accpurge") == []
 

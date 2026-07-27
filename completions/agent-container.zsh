@@ -60,6 +60,11 @@ __agent_container_names() {
     compadd -a names
 }
 
+# Feature 010 FR-013 / FR-002: the supported-agent list. Kept as ONE assignment
+# so the hermetic agreement test can parse it and fail if it drifts from AGENTS
+# in bin/agent-container (the canonical source).
+_agent_container_agents="claude codex pi opencode"
+
 _agent-container() {
     local context state state_descr line
     typeset -A opt_args

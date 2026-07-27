@@ -82,6 +82,41 @@ the precedent. `~/.local/share` does **not**.
 **Decision**: the Dockerfile MUST create `~/.config/opencode` and `~/.local/share/opencode`
 owned by `dev`, in the same layer that creates the other agents' directories.
 
+**VERIFIED 2026-07-27 (T002) — this is mandatory, not defensive.** Without the pre-created
+dev-owned directories, Docker created **both** mount points `root:root` and `dev` could write to
+**neither**:
+
+```text
+drwxr-xr-x 2 root root /home/dev/.config/opencode        WRITE config: FAIL
+drwxr-xr-x 3 root root /home/dev/.local                  WRITE data:   FAIL
+drwxr-xr-x 2 root root /home/dev/.local/share/opencode   WRITE sibling: FAIL
+```
+
+Note this bit **even `~/.config/opencode`**, whose parent `~/.config` is already dev-owned — the
+runtime does not inherit the parent's ownership for a new mount point. With the fix (both dirs
+created + `chown -R dev:dev /home/dev/.local`) all three writes succeed. Analysis finding U2 was
+correct about the mechanism and understated the blast radius.
+
+### R3a — What opencode actually writes (analysis finding C4)
+
+Enumerated by running the agent and diffing `$HOME`, rather than trusting documentation:
+
+| Path | Persisted? | Contents |
+|---|---|---|
+| `~/.config/opencode/` | **yes — volume** | `opencode.jsonc`, `.gitignore` |
+| `~/.local/share/opencode/` | **yes — volume** | `auth.json`, `opencode.db` (+`-wal`/`-shm`) session store, `log/`, `repos/` |
+| `~/.local/state/opencode/locks/` | **no — deliberately** | runtime lock files with heartbeats |
+| `~/.cache/opencode/` | no | `models.json`, empty `bin/` — regenerated on demand |
+| `~/.npm/_cacache/` | no | npm's own cache, unrelated |
+
+**The two-mount design is confirmed correct and sufficient.** Two consequences worth stating:
+
+1. `~/.local/state/opencode/locks` **must not** be persisted — carrying a stale lock (with a
+   dead heartbeat) across a recreate is a failure mode we would be creating for ourselves.
+2. The session database lives on the data volume, so conversation history survives recreation
+   alongside the credential. That is a bonus, not a requirement, but it means the data volume is
+   larger and more interesting than "just `auth.json`".
+
 ---
 
 ## R4 — Install mechanism (FR-003)
@@ -97,12 +132,30 @@ other agent CLIs. No new install machinery; nothing fetched at runtime (Constitu
 scripting, automation … without launching the full TUI"). Dispatch becomes
 `opencode) exec opencode run "${t}" ;;`, matching `claude -p` / `codex exec` / `pi -p`.
 
-**NOT VERIFIED — must be proven, not assumed**: opencode's docs **do not state** whether
-`opencode run` exits non-zero on failure. FR-005 requires the container's exit status to reflect
-the agent's outcome, so this is load-bearing. It is resolved by an **acceptance-tier probe
-against the real image**, not by a documentation claim. If `opencode run` turns out to always
-exit 0, FR-005 is unsatisfiable as written and the spec must say so rather than the tests
-pretending otherwise.
+**VERIFIED 2026-07-27 (T001a) — opencode 1.18.6, two probes, bounded timeout:**
+
+| Probe | Command | Result |
+|---|---|---|
+| (a) no credential | `opencode run "say hi"` | **exit 0** — it *succeeded*, answering via a built-in default model (`big-pickle`) |
+| (b) credential present but invalid | same, with `ANTHROPIC_API_KEY=sk-ant-invalid…` | **exit 1**, `Error: invalid x-api-key` |
+
+**FR-005 is satisfiable — decision gate PASSES.** `opencode run` propagates a failing status.
+
+**The two-probe split was load-bearing.** The original single probe ("run with no credential
+configured") would have observed **exit 0** and concluded FR-005 was unsatisfiable — a false
+FAIL that would have amended a perfectly good requirement out of the spec. It measured the
+wrong thing, exactly as analysis finding U1 predicted, and the failure direction happened to be
+the opposite of the one predicted.
+
+**No hang, no TTY needed.** Both probes completed well inside the timeout with no pty attached,
+so the "must fail rather than hang" edge case is not triggered by opencode's normal paths. The
+bounded-timeout assertion stays in the tests as cheap insurance, not as a live concern.
+
+**Unrelated finding worth the operator's attention**: probe (a) shows opencode **works with no
+operator-supplied credential at all**, reaching a default provider over the network. That is not
+a secret-exposure issue (no credential is involved), but it does mean an opencode container
+makes outbound model calls the operator never configured. Recorded here rather than silently
+absorbed; see the summary note for Feature 011 / operator docs.
 
 ---
 

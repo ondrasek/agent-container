@@ -174,7 +174,7 @@ def test_compose_up_exec_threads_binds_into_volumes(wiz, capture_compose, monkey
     ]
     assert "/abs/host:/opt/data" in vols
     assert "agent-container-acme-workspace:/workspace" in vols
-    assert len(vols) == 7 + 1
+    assert len(vols) == 9 + 1  # Feature 010: nine per-container volumes
 
 
 # --- bind-mount resolution (--mount) -----------------------------------------

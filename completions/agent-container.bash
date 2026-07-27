@@ -80,6 +80,11 @@ _agent_container_filedir() {
     fi
 }
 
+# Feature 010 FR-013 / FR-002: the supported-agent list. Kept as ONE assignment
+# so the hermetic agreement test can parse it and fail if it drifts from AGENTS
+# in bin/agent-container (the canonical source).
+_agent_container_agents="claude codex pi opencode"
+
 _agent_container() {
     local cur prev words cword
     if declare -F _init_completion >/dev/null 2>&1; then
@@ -111,7 +116,19 @@ _agent_container() {
 
     COMPREPLY=()
     case "${sub}" in
-        up)
+        up|redeploy)
+            if [[ "${prev}" == "--agent" ]]; then
+                COMPREPLY=( $(compgen -W "${_agent_container_agents}" -- "${cur}") )
+                return 0
+            fi
+            if [[ "${prev}" == "--mode" ]]; then
+                COMPREPLY=( $(compgen -W "interactive headless" -- "${cur}") )
+                return 0
+            fi
+            if [[ "${prev}" == "--workspace" ]]; then
+                COMPREPLY=( $(compgen -W "persistent bind ephemeral" -- "${cur}") )
+                return 0
+            fi
             if [[ "${prev}" == "--mount" ]]; then
                 _agent_container_filedir d       # --mount takes a directory
                 return 0
@@ -121,7 +138,7 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --mount --env-file --host-key --authorized-key" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --mount --env-file --host-key --authorized-key --agent --mode --workspace" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names       # arbitrary name; union is fine

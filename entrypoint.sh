@@ -408,12 +408,23 @@ fi
 
 # --- Feature 004: execution mode + per-agent invocation ---------------------
 # AGENT_CONTAINER_MODE (default interactive) selects the container's shape.
-# AGENT_CONTAINER_AGENT (claude|codex|pi) names the primary agent; when UNSET the
+# AGENT_CONTAINER_AGENT (claude|codex|pi|opencode) names the primary agent; when UNSET the
 # pre-004 bare-shell layout is preserved (no agent auto-launched). The optional
 # initial/headless task arrives as an EPHEMERAL injected file (never argv/env).
 AGENT_CONTAINER_MODE="${AGENT_CONTAINER_MODE:-interactive}"
 AGENT_CONTAINER_AGENT="${AGENT_CONTAINER_AGENT:-}"
 TASK_FILE="${INJECT_DIR}/task"
+
+# Feature 010 FR-012: fail CLEARLY when the selected agent is not in this image
+# (an image built before the agent was added). Without this the failure surfaces
+# as `exec: <agent>: not found` / exit 127, which names no remedy. Checked for the
+# SELECTED agent only — preflighting all four would make a partially-stale image
+# refuse to start entirely, which is a worse outcome than the one being fixed.
+require_agent_binary() {
+    local a="$1"
+    command -v "${a}" >/dev/null 2>&1 && return 0
+    die "agent '${a}' is not installed in this image (built before it was added). Rebuild the image and recreate: agent-container redeploy <name>"
+}
 
 # Interactive launch command for the tmux window: the agent, seeded with the task.
 # The task text is kept out of the host-side compose model and read from the
@@ -426,6 +437,12 @@ build_interactive_cmd() {
         claude) [[ -f "${TASK_FILE}" ]] && echo "claude \"\$(cat ${TASK_FILE})\"" || echo "claude" ;;
         codex)  [[ -f "${TASK_FILE}" ]] && echo "codex \"\$(cat ${TASK_FILE})\""  || echo "codex" ;;
         pi)     [[ -f "${TASK_FILE}" ]] && echo "pi \"\$(cat ${TASK_FILE})\""      || echo "pi" ;;
+        # opencode's TUI positional is a PROJECT DIRECTORY, not a message
+        # (`opencode [project]`), so the task must NOT be passed as an argument —
+        # `opencode "fix the bug"` would be read as a path. The task is delivered
+        # for headless runs only; interactive opencode starts unseeded and the
+        # operator pastes the task. Verified against `opencode --help` (1.18.6).
+        opencode) echo "opencode" ;;
         *) echo "" ;;
     esac
 }
@@ -436,11 +453,15 @@ build_interactive_cmd() {
 run_headless_agent() {
     local a="$1" t=""
     [[ -f "${TASK_FILE}" ]] && t="$(cat "${TASK_FILE}")"
+    require_agent_binary "${a}"
     case "${a}" in
         claude) exec claude -p "${t}" ;;
         codex)  exec codex exec "${t}" ;;
         pi)     exec pi -p "${t}" ;;
-        *) die "headless mode: unknown agent '${a}' (choose claude|codex|pi)" ;;
+        # `opencode run` is the documented non-interactive form. VERIFIED to
+        # propagate a failing exit status (research R5), which FR-005 requires.
+        opencode) exec opencode run "${t}" ;;
+        *) die "headless mode: unknown agent '${a}' (choose claude|codex|pi|opencode)" ;;
     esac
 }
 
@@ -518,11 +539,15 @@ if [[ -n "${AGENT_CONTAINER_AGENT}" ]]; then
     if tmux list-windows -t main -F '#{window_name}' 2>/dev/null | grep -qxF "${AGENT_CONTAINER_AGENT}"; then
         log "agent window '${AGENT_CONTAINER_AGENT}' already present, leaving it alone"
     else
+        require_agent_binary "${AGENT_CONTAINER_AGENT}"
+        if [[ "${AGENT_CONTAINER_AGENT}" == "opencode" && -f "${TASK_FILE}" ]]; then
+            log "NOTE: opencode's interactive TUI takes a project directory, not a message, so the injected task is NOT seeded into the session; paste it in, or use --mode headless where the task IS delivered."
+        fi
         launch_cmd="$(build_interactive_cmd "${AGENT_CONTAINER_AGENT}")"
         if [[ -n "${launch_cmd}" ]]; then
             tmux new-window -t main -n "${AGENT_CONTAINER_AGENT}" "${launch_cmd}"
-            # Land an attach on the agent window (by name; the names claude/codex/pi
-            # are never index-ambiguous).
+            # Land an attach on the agent window (by name; the names
+            # claude/codex/pi/opencode are never index-ambiguous).
             tmux select-window -t "main:${AGENT_CONTAINER_AGENT}"
             log "launched agent '${AGENT_CONTAINER_AGENT}' in a tmux window (attach lands here)"
         fi

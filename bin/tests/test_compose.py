@@ -26,9 +26,9 @@ def test_model_has_service_build_restart_port(wiz):
 
 def test_model_declares_seven_named_volumes(wiz):
     m = wiz.build_compose_model("acme", "/repo")
-    # Top-level named volumes: exactly the seven per-container volumes.
+    # Top-level named volumes: exactly the nine per-container volumes.
     assert set(m["volumes"].keys()) == set(wiz.per_container_volumes("acme"))
-    assert len(m["volumes"]) == 7
+    assert len(m["volumes"]) == 9
     # Each volume pins its `name` so compose does NOT project-prefix it — the
     # deterministic identity contract (Constitution IV) must be the real volume name.
     for vn in wiz.per_container_volumes("acme"):
