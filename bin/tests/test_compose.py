@@ -96,3 +96,34 @@ def test_write_compose_file_lands_under_host_state_dir(wiz, tmp_path):
     assert p.is_file()
     assert json.loads(p.read_text()) == m
     assert p.read_text().endswith("\n")
+
+
+# --- Feature 010 FR-007: the compose model declares the NINE-volume set ------
+
+
+def test_compose_declares_both_opencode_volumes_at_their_native_paths(wiz):
+    """FR-006/FR-007. opencode is the one agent with two volumes: it follows XDG
+    and splits config from credentials. Both mount at opencode's OWN paths, so
+    guidance written for opencode applies verbatim inside the container."""
+    m = wiz.build_compose_model("acme", "/repo")
+    vols = m["services"]["agent"]["volumes"]
+    assert "agent-container-acme-opencode:/home/dev/.config/opencode" in vols
+    assert "agent-container-acme-opencode-data:/home/dev/.local/share/opencode" in vols
+    assert len(m["volumes"]) == 9
+    # Deterministic identity (Constitution IV): both names pin `name`.
+    for v in ("agent-container-acme-opencode", "agent-container-acme-opencode-data"):
+        assert m["volumes"][v] == {"name": v}
+
+
+def test_non_persistent_workspace_still_declares_both_opencode_volumes(wiz):
+    """The workspace volume stays conditional (Feature 004); opencode's two are
+    unconditional, so bind/ephemeral declares eight."""
+    for kwargs in (
+        {"workspace_mount": "/host/w:/workspace", "declare_workspace_volume": False},
+        {"workspace_mount": None, "declare_workspace_volume": False},
+    ):
+        m = wiz.build_compose_model("acme", "/repo", **kwargs)
+        assert len(m["volumes"]) == 8
+        assert wiz.volume_name("acme") not in m["volumes"]
+        assert "agent-container-acme-opencode" in m["volumes"]
+        assert "agent-container-acme-opencode-data" in m["volumes"]

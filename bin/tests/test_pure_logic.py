@@ -6,6 +6,9 @@ the shell completions read the same state files, so do not 'fix' them casually.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 # --- port hash: 2200 + (sum of char codes mod 100) ---------------------------
@@ -389,9 +392,6 @@ def test_migrate_flat_state_noop_without_state_dir(wiz):
 # Dockerfile would need build-time codegen (a new dependency, a new failure
 # mode) for a list that changes about once a year, so this is DETECTION, not
 # prevention: drift is a red gate rather than a production surprise.
-
-import re
-from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 

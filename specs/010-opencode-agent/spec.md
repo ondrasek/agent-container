@@ -211,7 +211,10 @@ freshly created environment has the full new set and also tears down completely.
   actionable message** naming the remedy.
 - **FR-013**: Shell completions MUST offer all four agent names.
 - **FR-014**: Behavior for the three existing agents MUST be **unchanged** — this feature is
-  additive.
+  additive. **One declared exception**: the stale-image preflight required by FR-012 is written
+  once for all agents, so the existing three also gain an actionable message where they
+  previously surfaced an obscure "command not found". This is a deliberate, non-regressive
+  improvement on an already-failing path — no successful path changes.
 
 ### Key Entities *(include if feature involves data)*
 

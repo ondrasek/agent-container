@@ -60,7 +60,7 @@ starts, `attach` lands on its window, the headless exit status propagates, and t
 - [X] T015 [US1] Update the `--agent` option help in `bin/agent-container` (line ~5342) to `claude | codex | pi | opencode`.
 - [X] T016 [P] [US1] Add `--agent` value completion offering the four names to `completions/agent-container.bash` and `completions/agent-container.zsh` (FR-013; none exists today for any agent).
 - [X] T017 [US1] Extend `bin/tests/test_entrypoint_execution.sh` (headless dispatch resolves to `opencode run`, preflight fires with an actionable message when the binary is absent) and `bin/tests/test_entrypoint_tmux_layout.sh` (an `opencode` window is created and named).
-- [ ] T018 [US1] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S1 (interactive window + `attach`), S2 (headless exit status — assertion shape set by T001's outcome), and S3 (**both** `~/.config/opencode/opencode.json` **and** `~/.local/share/opencode/auth.json` survive down/up). S3 MUST assert both paths — checking only the config file is exactly the failure the original single-volume design would have hidden (research R1). Two further assertions: run the headless case under a **bounded timeout so a hang fails the test rather than stalling CI** (spec edge case: must fail rather than hang), and confirm the **tmux volume is unaffected** — `~/.config` now hosts two sibling volume mounts (tmux + opencode), a first for this project, and the edge case requires opencode's persistence not disturb other agents' state.
+- [X] T018 [US1] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S1 (interactive window + `attach`), S2 (headless exit status — assertion shape set by T001's outcome), and S3 (**both** `~/.config/opencode/opencode.json` **and** `~/.local/share/opencode/auth.json` survive down/up). S3 MUST assert both paths — checking only the config file is exactly the failure the original single-volume design would have hidden (research R1). Two further assertions: run the headless case under a **bounded timeout so a hang fails the test rather than stalling CI** (spec edge case: must fail rather than hang), and confirm the **tmux volume is unaffected** — `~/.config` now hosts two sibling volume mounts (tmux + opencode), a first for this project, and the edge case requires opencode's persistence not disturb other agents' state.
 
 **Checkpoint**: US1 alone is a shippable increment — opencode runs, persists, and is selectable.
 
@@ -76,9 +76,9 @@ and confirm the value appears in no project file, no command output, and no tool
 
 **Depends on**: Phase 3 (the agent must run before a credential can reach it).
 
-- [ ] T019 [P] [US2] In `bin/tests/test_credentialing.py`, assert an injected opencode key is exported into the container environment only — never on argv, never written to either opencode volume, never in emitted output, and **never in the generated `<host>/<name>.compose.yaml` or in container inspect output** (contract C7, FR-010/FR-011). The compose descriptor is precisely where an env-delivered secret leaks; Constitution III is the project's load-bearing gate.
-- [ ] T020 [US2] In `entrypoint.sh`, beside the existing Codex/pi blocks (line ~297-345), export the provider key from `INJECT_APIKEY_DIR` into the process environment for opencode, with a log line stating the key is ephemeral and neither opencode volume is written. **No `$HOME`/config redirect is needed** — the redirect exists for codex/pi solely to keep an injected key out of their auth store, and an env-delivered key never reaches opencode's (research R6). Do not add one for symmetry.
-- [ ] T021 [US2] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S7: with a key injected, the value appears nowhere in the project directory or output, and the operator's local key file remains the sole durable copy.
+- [X] T019 [P] [US2] In `bin/tests/test_credentialing.py`, assert an injected opencode key is exported into the container environment only — never on argv, never written to either opencode volume, never in emitted output, and **never in the generated `<host>/<name>.compose.yaml` or in container inspect output** (contract C7, FR-010/FR-011). The compose descriptor is precisely where an env-delivered secret leaks; Constitution III is the project's load-bearing gate.
+- [X] T020 [US2] In `entrypoint.sh`, beside the existing Codex/pi blocks (line ~297-345), export the provider key from `INJECT_APIKEY_DIR` into the process environment for opencode, with a log line stating the key is ephemeral and neither opencode volume is written. **No `$HOME`/config redirect is needed** — the redirect exists for codex/pi solely to keep an injected key out of their auth store, and an env-delivered key never reaches opencode's (research R6). Do not add one for symmetry.
+- [X] T021 [US2] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S7: with a key injected, the value appears nowhere in the project directory or output, and the operator's local key file remains the sole durable copy.
 
 ---
 
@@ -92,22 +92,22 @@ confirm success with no error; tear down a freshly created one and confirm zero 
 
 **Depends on**: Phase 2. Independent of Phases 3 and 4.
 
-- [ ] T022 [P] [US3] In `bin/tests/test_compose.py`, assert the generated compose model declares all nine volumes under `--workspace persistent` and the eight non-workspace volumes under `bind`/`ephemeral` (contract C5, FR-007; the workspace volume stays conditional per Feature 004).
-- [ ] T023 [P] [US3] In `bin/tests/test_lifecycle.py`, assert teardown of an environment whose volume set is the **old seven** succeeds with the new code — the two absent volumes are tolerated, no error, no migration (contract C5, FR-009). This is the feature's headline risk; do not skip it because the label-based `compose down --volumes` is *expected* to already handle it.
-- [ ] T023a [US3] Add acceptance coverage for US3 **acceptance scenario 1**, which no other task covers: create an environment on the **old seven-volume** set, upgrade to the new code, then run `up` and `attach` and confirm it still starts and is usable without manual migration (FR-009, SC-005). State explicitly whether a recreate is expected when the compose model gains two volumes — **that answer is the requirement**, not an implementation detail. This is the likelier upgrade path; T023/T024 only cover *teardown*.
-- [ ] T024 [US3] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S4 (`wipe` leaves zero `agent-container-<name>-*` volumes) and S5 (pre-upgrade teardown succeeds).
-- [ ] T025 [P] [US3] Sweep every stale statement of the volume count or names and update it (FR-007): `CLAUDE.md` (the Feature 003/004 decision lines naming "Seven per-container volumes"), `docs/execution.md`, `docs/credentials.md`, and any remaining code comments. Finish with `grep -rniE "seven per-container|seven named|seven volumes" .` returning nothing.
+- [X] T022 [P] [US3] In `bin/tests/test_compose.py`, assert the generated compose model declares all nine volumes under `--workspace persistent` and the eight non-workspace volumes under `bind`/`ephemeral` (contract C5, FR-007; the workspace volume stays conditional per Feature 004).
+- [X] T023 [P] [US3] In `bin/tests/test_lifecycle.py`, assert teardown of an environment whose volume set is the **old seven** succeeds with the new code — the two absent volumes are tolerated, no error, no migration (contract C5, FR-009). This is the feature's headline risk; do not skip it because the label-based `compose down --volumes` is *expected* to already handle it.
+- [X] T023a [US3] Add acceptance coverage for US3 **acceptance scenario 1**, which no other task covers: create an environment on the **old seven-volume** set, upgrade to the new code, then run `up` and `attach` and confirm it still starts and is usable without manual migration (FR-009, SC-005). State explicitly whether a recreate is expected when the compose model gains two volumes — **that answer is the requirement**, not an implementation detail. This is the likelier upgrade path; T023/T024 only cover *teardown*.
+- [X] T024 [US3] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S4 (`wipe` leaves zero `agent-container-<name>-*` volumes) and S5 (pre-upgrade teardown succeeds).
+- [X] T025 [P] [US3] Sweep every stale statement of the volume count or names and update it (FR-007): `CLAUDE.md` (the Feature 003/004 decision lines naming "Seven per-container volumes"), `docs/execution.md`, `docs/credentials.md`, and any remaining code comments. Finish with `grep -rniE "seven per-container|seven named|seven volumes" .` returning nothing.
 
 ---
 
 ## Phase 6: Polish & cross-cutting concerns
 
 - [X] T026 [P] Update `docs/execution.md` for four agents: the `--agent` values, opencode's headless form, and its **two** persistent locations with the reason they differ from the other three.
-- [ ] T027 [P] Add a `docs/credentials.md` note that opencode's injected key is environment-delivered with no redirect, and that its on-volume `auth.json` is operator-interactive-login only.
-- [ ] T028 Run `scripts/quality-gate.sh` and fix everything it reports (ruff · ty · bandit · vulture · xenon · refurb · self-test · pytest · shell suites). The `per_container_volumes` doctest is the self-test's nine-volume contract check.
-- [ ] T029 Run the full acceptance suite (`pytest -m acceptance bin/tests`) — **not just the new tests**. Changing a shared contract like the volume set is exactly the case where a pre-existing test parses the old shape.
-- [ ] T029a Record the image size before and after this feature in `specs/010-opencode-agent/research.md`. The spec accepts the growth but requires it be "a conscious cost rather than an accident" — one measured number honours that; an unmeasured assumption does not.
-- [ ] T030 Run quickstart Tier 3: create, attach, and wipe an environment for each of `claude`, `codex`, `pi` and confirm launch, persistence, and teardown are unchanged (SC-007, FR-014).
+- [X] T027 [P] Add a `docs/credentials.md` note that opencode's injected key is environment-delivered with no redirect, and that its on-volume `auth.json` is operator-interactive-login only.
+- [X] T028 Run `scripts/quality-gate.sh` and fix everything it reports (ruff · ty · bandit · vulture · xenon · refurb · self-test · pytest · shell suites). The `per_container_volumes` doctest is the self-test's nine-volume contract check.
+- [X] T029 Run the full acceptance suite (`pytest -m acceptance bin/tests`) — **not just the new tests**. Changing a shared contract like the volume set is exactly the case where a pre-existing test parses the old shape.
+- [X] T029a Record the image size before and after this feature in `specs/010-opencode-agent/research.md`. The spec accepts the growth but requires it be "a conscious cost rather than an accident" — one measured number honours that; an unmeasured assumption does not.
+- [X] T030 Run quickstart Tier 3: create, attach, and wipe an environment for each of `claude`, `codex`, `pi` and confirm launch, persistence, and teardown are unchanged (SC-007, FR-014).
 
 ---
 
@@ -186,7 +186,7 @@ obstacle to route around.
 | **Total** | | | **34** |
 
 Parallelizable: 11 tasks marked `[P]`.
-- [ ] T031 Add a one-line note to FR-014 in `specs/010-opencode-agent/spec.md` recording the T013 preflight as a **deliberate, non-regressive exception**: the existing three agents' failure mode on a stale image improves from exit 127 to an actionable message. Without it, FR-014's "behaviour MUST be unchanged" is ambiguous at review.
+- [X] T031 Add a one-line note to FR-014 in `specs/010-opencode-agent/spec.md` recording the T013 preflight as a **deliberate, non-regressive exception**: the existing three agents' failure mode on a stale image improves from exit 127 to an actionable message. Without it, FR-014's "behaviour MUST be unchanged" is ambiguous at review.
 
 ---
 

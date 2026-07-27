@@ -124,6 +124,22 @@ Enumerated by running the agent and diffing `$HOME`, rather than trusting docume
 **Decision**: `npm install -g opencode-ai` in the existing Dockerfile npm layer, alongside the
 other agent CLIs. No new install machinery; nothing fetched at runtime (Constitution II).
 
+**MEASURED 2026-07-27 (T029a) — image growth is now a number, not an assumption:**
+
+| Image | Size |
+|---|---|
+| pre-Feature-010 (three agents) | **2.07 GB** |
+| post-Feature-010 (four agents) | **2.34 GB** |
+| **delta** | **+270 MB (+13%)** |
+
+The spec accepts the growth but asks that it be "a conscious cost rather than an accident". It
+is now recorded rather than presumed. A fifth agent would cost roughly the same again, which is
+the number to weigh if that is ever proposed.
+
+**Caveat worth noting**: opencode fetches into `~/.cache/opencode` at runtime (`models.json`, an
+empty `bin/`). That is the agent's own behaviour, not our package manager, and the same is true
+of the other three — but it does mean the baked image is not the whole story for egress.
+
 ---
 
 ## R5 — Headless invocation (FR-005)

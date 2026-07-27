@@ -352,8 +352,17 @@ if [[ "${_any_apikey}" -eq 1 ]]; then
 fi
 
 # In-container env delivery (FR-006 fallback) for agents without a non-interactive
-# file-auth path (pi; codex if its api-key login was unavailable). Read from the
-# ephemeral injected file into the env — never argv, never a volume, never baked.
+# file-auth path (pi; codex if its api-key login was unavailable; opencode always).
+# Read from the ephemeral injected file into the env — never argv, never a volume,
+# never baked.
+#
+# Feature 010 / research R6: opencode needs NO ephemeral-$HOME redirect. codex and
+# pi are redirected purely to keep an injected key out of their on-volume auth
+# store; opencode reads ANTHROPIC_API_KEY / OPENAI_API_KEY straight from the env
+# and — VERIFIED by running it — never writes an env-supplied key to
+# ~/.local/share/opencode/auth.json. So env delivery alone is STRICTLY LESS
+# exposure here, not more. Do not add a redirect for symmetry. The on-volume
+# auth.json stays operator-interactive-login only, as for the other three.
 # Do NOT clobber a value the operator already set via .env (that layer wins).
 if [[ -f "${_anthropic_key}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
     ANTHROPIC_API_KEY="$(cat "${_anthropic_key}")"
