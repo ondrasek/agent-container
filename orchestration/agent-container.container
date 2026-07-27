@@ -15,7 +15,7 @@
 # PublishPort, Volume, EnvironmentFile) is unique per substitution. Two
 # instantiations with different ${NAME} produce two non-colliding units.
 #
-# Volume parity with the CLI: this template mounts the SAME seven per-container
+# Volume parity with the CLI: this template mounts the SAME nine per-container
 # named volumes that `agent-container up` mounts (workspace + the five agent /
 # shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
 # `codex login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH

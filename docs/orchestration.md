@@ -73,7 +73,7 @@ If you need to override (e.g. you already have something on 2218), edit the stat
 ## Volume layout
 
 - **Nine named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`) and opencode's **two**, `-opencode` (`~/.config/opencode`) and `-opencode-data` (`~/.local/share/opencode`) — it is the one agent that splits configuration from credentials — the shell-env volume `-shellenv` (`~/.agent-container`), the tmux-config volume `-tmux` (`~/.config/tmux`), and the SSH volume `-ssh` (`~/.ssh` — `authorized_keys` and the host key under `hostkeys/`, so SSH identity is stable across recreation).
-- The volumes **survive `agent-container down`** — only `down --purge` removes them (all seven).
+- The volumes **survive `agent-container down`** — only `down --purge` removes them (all nine).
 - Hard constraint: **the container is ephemeral**. The volume is for **scratch + uncommitted work in flight**, not durable state. Every agent commits and pushes; if you lose the volume, you lose only un-pushed work.
 
 ## `.env` file lookup
@@ -129,7 +129,7 @@ AGENT_CONTAINER_NAME=alpha AGENT_CONTAINER_PORT=2218 docker compose up -d
 AGENT_CONTAINER_NAME=alpha docker compose down
 ```
 
-The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of six per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
+The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of nine per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
 
 `agent-container` does not use compose — it calls the runtime directly. Compose is offered for operators who prefer that interface.
 
