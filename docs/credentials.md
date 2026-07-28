@@ -186,7 +186,7 @@ Drop a per-provider key file next to your `.env` (or under
 automatically — one file per provider:
 
 ```
-./agent-container.<name>.<provider>.key    →  ~/.config/agent-container/<name>.<provider>.key
+~/.config/agent-container/<name>.<provider>.key    →  ~/.config/agent-container/<name>.<provider>.key
 #   <provider> ∈ anthropic | openai | <provider>   (lower-case)
 ```
 
@@ -224,7 +224,7 @@ per-agent **canonical manifest** (US3):
 Discovery mirrors the `.env`/sidecar convention (project-local first):
 
 ```
-./agent-container.<name>.config/…   →  ~/.config/agent-container/<name>.config/…
+.agent-container/<name>.config/…   →  ~/.config/agent-container/<name>.config/…
 ```
 
 **Secret-bearing config (FR-009):** a config file that *carries* a secret (e.g. an

@@ -107,15 +107,15 @@ write it.
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] T032 [P] Write the single authoritative layout map (FR-014) in `docs/` covering all five locations with the settled vocabulary — **project root**, **project config**, **user configuration**, **derived host state**, **image sources** — plus the two configuration levels and the three in-container paths.
-- [ ] T033 [P] Update `docs/credentials.md`, `docs/execution.md`, `docs/orchestration.md` and `docs/agent-as-code.md` for the new paths, and `README.md` for `image/` and repeatable `-e`.
-- [ ] T033a [P] Write **operator-facing migration notes** in `docs/` — the one thing a reader needs to act on, since the hard cut breaks every existing project: what moved where (a table), that plaintext project-local keys are **gone** rather than relocated (FR-001f) and what to use instead, that `./.env` is no longer read and `-e` is the replacement, and that the tool refuses rather than guessing. FR-005 makes the *tool* actionable; nothing so far makes the *docs* actionable, and the tool's message is seen only by someone already blocked.
-- [ ] T034 [P] Update `CLAUDE.md`: the layout statement and the `image/` location. It is at **1999/2000 tokens** — trim an equivalent amount, do not let it drift.
-- [ ] T035 Verify the vocabulary swept: `grep -rn "project directory" docs/ CLAUDE.md README.md` returns nothing, and superseded path names appear only in migration notes (SC-005, SC-006).
-- [ ] T036 Run `scripts/quality-gate.sh` and fix everything it reports.
-- [ ] T037 Run the **full** acceptance suite (`pytest -m acceptance bin/tests`), not just the new tests. This feature changes a shared contract, which is exactly when a pre-existing test still pins the old shape.
-- [ ] T038 Confirm the identity lock (T002) still passes and diff against the T001 baseline. **If any name differs, the feature is wrong** regardless of everything else.
-- [ ] T039 Commit with `!`/`BREAKING CHANGE` (research R8). Pre-1.0 this cuts a **minor**, so the version will understate the change — say so in the body, and state the migration in one line an operator can act on.
+- [X] T032 [P] Write the single authoritative layout map (FR-014) in `docs/` covering all five locations with the settled vocabulary — **project root**, **project config**, **user configuration**, **derived host state**, **image sources** — plus the two configuration levels and the three in-container paths.
+- [X] T033 [P] Update `docs/credentials.md`, `docs/execution.md`, `docs/orchestration.md` and `docs/agent-as-code.md` for the new paths, and `README.md` for `image/` and repeatable `-e`.
+- [X] T033a [P] Write **operator-facing migration notes** in `docs/` — the one thing a reader needs to act on, since the hard cut breaks every existing project: what moved where (a table), that plaintext project-local keys are **gone** rather than relocated (FR-001f) and what to use instead, that `./.env` is no longer read and `-e` is the replacement, and that the tool refuses rather than guessing. FR-005 makes the *tool* actionable; nothing so far makes the *docs* actionable, and the tool's message is seen only by someone already blocked.
+- [X] T034 [P] Update `CLAUDE.md`: the layout statement and the `image/` location. It is at **1999/2000 tokens** — trim an equivalent amount, do not let it drift.
+- [X] T035 Verify the vocabulary swept: `grep -rn "project directory" docs/ CLAUDE.md README.md` returns nothing, and superseded path names appear only in migration notes (SC-005, SC-006).
+- [X] T036 Run `scripts/quality-gate.sh` and fix everything it reports.
+- [X] T037 Run the **full** acceptance suite (`pytest -m acceptance bin/tests`), not just the new tests. This feature changes a shared contract, which is exactly when a pre-existing test still pins the old shape.
+- [X] T038 Confirm the identity lock (T002) still passes and diff against the T001 baseline. **If any name differs, the feature is wrong** regardless of everything else.
+- [X] T039 Commit with `!`/`BREAKING CHANGE` (research R8). Pre-1.0 this cuts a **minor**, so the version will understate the change — say so in the body, and state the migration in one line an operator can act on.
 
 ---
 

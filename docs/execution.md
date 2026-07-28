@@ -73,7 +73,7 @@ deliberately *not* persisted — carrying a stale lock across a recreate would b
 self-inflicted failure.
 
 **opencode interactive runs are not task-seeded.** Its TUI positional argument is
-a *project directory*, not a message (`opencode [project]`), so a `--task` passed
+a *project path*, not a message (`opencode [project]`), so a `--task` passed
 there would be misread as a path. The task is delivered for `--mode headless`; in
 an interactive session the entrypoint logs a note and you paste it in.
 

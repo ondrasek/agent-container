@@ -1,6 +1,6 @@
 # Agent-as-Code — declarative `.agent-container/` projects (Feature 006)
 
-Alongside the imperative CLI, a **`.agent-container/` project directory** can *be*
+Alongside the imperative CLI, a **`.agent-container/` project config directory** can *be*
 the desired state for one or more agent environments. Run the tool inside such a
 directory and it **discovers → validates → plans → reconciles** reality to the
 spec. This is the "as code" model (Compose/Terraform-adjacent): the directory is a
@@ -9,7 +9,7 @@ single, portable, reviewable, version-controllable source of truth.
 **Additive**: with no `.agent-container/` up the tree, the tool behaves exactly as
 it does today — the declarative verbs are inert.
 
-## The project directory
+## The project config directory
 
 Discovery walks **upward** from the working directory to the nearest ancestor
 containing a `.agent-container/` directory; that ancestor is the project root (the
@@ -75,7 +75,7 @@ binding, credentials, container config) and push that back. Two guarantees:
    context**). Kernel-enforced for every uid; the rootless agent cannot modify them.
 
 The tool **refuses to deploy** a configuration that would expose the spec writable
-(e.g. a `bind` workspace over the project directory) — use `persistent`/`ephemeral`
+(e.g. a `bind` workspace over the project config directory) — use `persistent`/`ephemeral`
 for a self-hosting repo.
 
 > **Scope of the in-container guarantee.** The read-only delivery protects the
@@ -193,7 +193,7 @@ is deployed — so a missing source never leaves an earlier environment partiall
 applied. Resolved values are staged as 0600 files under your private state dir
 (`$XDG_STATE_HOME`), the same posture as the Feature 003 injected material; they are
 regenerated each `apply`. Don't both declare a provider credential *and* drop a
-convention `agent-container.<name>.<provider>.key` file for the same provider — they
+convention `~/.config/agent-container/<name>.<provider>.key` file for the same provider — they
 target the same in-container path.
 
 ## Host binding — referenced vs provisioned (US4)
