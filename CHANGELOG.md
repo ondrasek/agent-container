@@ -2,6 +2,112 @@
 
 <!-- version list -->
 
+## v0.18.0 (2026-07-28)
+
+### Bug Fixes
+
+- **cli**: Widen build_compose_model's env_file annotation
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`bd63e84`](https://github.com/ondrasek/agent-container/commit/bd63e840e7f9e4caf404c996d85f6a4f045d61ed))
+
+### Code Style
+
+- **specs**: Format the python excerpt in 011 research
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`b503d73`](https://github.com/ondrasek/agent-container/commit/b503d73714f8f5dd309e686234b6ae34985d87c6))
+
+### Documentation
+
+- One authoritative layout map, and retire "project directory"
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`b51d07d`](https://github.com/ondrasek/agent-container/commit/b51d07d73cf624dec602e28c654feed1ff6ff6bd))
+
+- **specs**: Clarify Feature 011 filesystem-layout
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`ea65a19`](https://github.com/ondrasek/agent-container/commit/ea65a19ecc3e727980b113c48bc77130eb69ca95))
+
+- **specs**: Drop the bare ./.env from env resolution
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`fb53a9c`](https://github.com/ondrasek/agent-container/commit/fb53a9c3e677b5d7c46adfb3054c9fff79e498a0))
+
+- **specs**: Fix the remaining analyze findings for Feature 011
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`0400c1e`](https://github.com/ondrasek/agent-container/commit/0400c1e37d2e0ab4d667753c50a87db834d071a2))
+
+- **specs**: Keep plaintext credentials out of the project config dir
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`5bc4eaa`](https://github.com/ondrasek/agent-container/commit/5bc4eaac124b21cb2ff3143659829765c0b83b5a))
+
+- **specs**: Name .agent-container for what it holds, not what it marks
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`9da6d6a`](https://github.com/ondrasek/agent-container/commit/9da6d6a99ed3e1145f9dc8aca27657ccb9ed9543))
+
+- **specs**: Plan Feature 011 filesystem-layout
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`016b908`](https://github.com/ondrasek/agent-container/commit/016b908d68e9c321e1804a192ec420e7dcdd2253))
+
+- **specs**: Repeatable -e/--env-file, stacking in order
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`6269754`](https://github.com/ondrasek/agent-container/commit/6269754606674fbcf6e21b6d4d654b3ed5603092))
+
+- **specs**: Settle project root vs project marker vocabulary
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`cb4a336`](https://github.com/ondrasek/agent-container/commit/cb4a336d6665b9b9e9d9b702d3ccf892e790afbd))
+
+- **specs**: State FR-011 as derived from identity, not promised separately
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`faad955`](https://github.com/ondrasek/agent-container/commit/faad95544c62fba875e18d67fbad0d0872bf5eb6))
+
+- **specs**: Task list for Feature 011 filesystem-layout
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`977771d`](https://github.com/ondrasek/agent-container/commit/977771d632f089a8276f24b8b0ce452939620824))
+
+- **specs**: User configuration, not host configuration
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`608c8a5`](https://github.com/ondrasek/agent-container/commit/608c8a528fbc3f0199f9e9432c78f5857bada361))
+
+### Features
+
+- **build**: Move the image sources into image/
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`4871d19`](https://github.com/ondrasek/agent-container/commit/4871d1940b44f324da7d724cb0811b0e33725581))
+
+- **cli**: -e/--env-file is repeatable and stacks in order
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`4273204`](https://github.com/ondrasek/agent-container/commit/4273204bc5afed39227ba388f104e64d592dee75))
+
+- **cli**: Refuse the pre-011 layout instead of ignoring it
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`0dc72a5`](https://github.com/ondrasek/agent-container/commit/0dc72a562db6beb6e537b4e5b503182451f20a44))
+
+- **cli**: Resolve per-environment files from .agent-container/
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`803cf3e`](https://github.com/ondrasek/agent-container/commit/803cf3e0b2db3530b13e9830e25c14812cea83b8))
+
+- **container**: Rename the shell-env directory to ~/.agent-env
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`f6a84b7`](https://github.com/ondrasek/agent-container/commit/f6a84b721b7d586d93f03df8c403f1908c3b475d))
+
+### Testing
+
+- **acceptance**: Cover the new layout against real containers
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`b0ff950`](https://github.com/ondrasek/agent-container/commit/b0ff950c0435e685b87c845feaf03a3868353c3d))
+
+- **cli**: Enforce that every short flag has a long form
+  ([`8d5228b`](https://github.com/ondrasek/agent-container/commit/8d5228bed11fb31c2f4a07e279f629a50b1686e1))
+
+### Breaking Changes
+
+- Completes Feature 011. Projects on the pre-011 layout are refused with every file that must move
+  named; there is no compatibility mode. Container names, ports and volume names are unchanged, so
+  environments already running stay findable and tear down cleanly -- only file locations moved.
+
+- **container**: The persistent shell environment mounts at /home/dev/.agent-env instead of
+  /home/dev/.agent-container. Shell snippets referring to the old path by name need updating; the
+  file itself is not lost.
+
+
 ## v0.17.1 (2026-07-27)
 
 ### Bug Fixes
