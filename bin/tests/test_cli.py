@@ -339,3 +339,44 @@ def test_build_without_image_sources_fails_actionably(wiz, tmp_path, monkeypatch
         wiz.do_build("x:y")
     msg = str(ei.value)
     assert "image/Dockerfile" in msg, f"the message must name what is missing: {msg}"
+
+
+def test_build_inside_a_pre011_checkout_names_the_move(wiz, tmp_path, monkeypatch):
+    """Post-release fix. Research R1 predicted this failure verbatim:
+
+        "a stale marker degrades to 'no checkout reachable' — build fails with a
+         message about a missing checkout while standing INSIDE one."
+
+    It shipped anyway, because T018 exercised the AGENT_CONTAINER_REPO path — which
+    does name image/Dockerfile — and not the bare-cwd path, which does not. Telling
+    an operator to "run from a checkout" while they are standing in one is useless
+    advice; the message must name what actually changed.
+    """
+    old = tmp_path / "old-checkout"
+    (old / "completions").mkdir(parents=True)
+    (old / "Dockerfile").write_text("FROM debian\n")
+    (old / "completions" / "agent-container.bash").write_text("# complete\n")
+    monkeypatch.chdir(old)
+    monkeypatch.delenv("AGENT_CONTAINER_REPO", raising=False)
+    monkeypatch.setattr(wiz, "REPO_ROOT", None)
+
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.do_build("x:y")
+    msg = str(ei.value)
+    assert "image/" in msg, f"the message must name the move: {msg}"
+    assert "before v0.18.0" in msg
+    assert "run from a checkout" not in msg, "must not tell them to do what they are doing"
+
+
+def test_build_outside_any_checkout_still_says_so(wiz, tmp_path, monkeypatch):
+    """The upgraded message must not swallow the ordinary case: someone genuinely
+    outside a checkout still gets the generic guidance, now naming what is looked
+    for."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENT_CONTAINER_REPO", raising=False)
+    monkeypatch.setattr(wiz, "REPO_ROOT", None)
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.do_build("x:y")
+    msg = str(ei.value)
+    assert "image/Dockerfile" in msg
+    assert "AGENT_CONTAINER_REPO" in msg

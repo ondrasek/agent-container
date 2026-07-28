@@ -97,6 +97,44 @@ def _is_repo_checkout(base: Path) -> bool:
     ).is_file()
 
 
+def _looks_like_pre011_checkout(base: Path) -> bool:
+    """A checkout from BEFORE Feature 011 moved the image sources into `image/`.
+
+    Feature 011 changed the checkout marker from `Dockerfile` to `image/Dockerfile`.
+    Without this, an operator standing inside their own (stale) checkout is told
+    "no repo checkout ... run from a checkout" — which research R1 predicted
+    verbatim and which is useless advice to someone already in one. Detecting the
+    old shape lets the message name the actual problem.
+    """
+    return (base / "Dockerfile").is_file() and (
+        base / "completions" / "agent-container.bash"
+    ).is_file()
+
+
+def _pre011_checkout_near(start: Path) -> Path | None:
+    """The nearest ancestor of `start` that is a pre-011 checkout, if any."""
+    for base in (start, *start.parents):
+        if _looks_like_pre011_checkout(base):
+            return base
+    return None
+
+
+def _no_checkout_message(extra: str = "") -> str:
+    """The 'no checkout' diagnostic, upgraded when a STALE one is what we found."""
+    stale = _pre011_checkout_near(Path.cwd())
+    if stale is not None:
+        return (
+            f"{stale} looks like an agent-container checkout from before v0.18.0: the image "
+            "sources moved to image/ (Dockerfile, entrypoint.sh, .dockerignore). "
+            "Pull the latest revision, or move them yourself: git mv Dockerfile entrypoint.sh "
+            ".dockerignore image/"
+        )
+    return (
+        "no repo checkout for the docker build context (expected image/Dockerfile); "
+        "run from a checkout, set AGENT_CONTAINER_REPO=<checkout>, or pass --context <dir>" + extra
+    )
+
+
 def _find_repo_root() -> Path | None:
     """Locate the repo checkout in a way that survives a non-editable install.
 
@@ -2474,10 +2512,7 @@ def do_build(tag: str, context: Path | None = None) -> None:
         else:
             ctx = REPO_ROOT
     if ctx is None:
-        die(
-            "no repo checkout for the docker build context; run from a checkout, "
-            "set AGENT_CONTAINER_REPO=<checkout>, or pass --context <dir>"
-        )
+        die(_no_checkout_message(), remedy="see the path named above")
     # Feature 011 FR-006/FR-007: the context is `image/`, not the checkout root.
     # Narrow BY CONSTRUCTION — the directory boundary is the guarantee, rather
     # than a .dockerignore allowlist that must be maintained in step with the
@@ -2511,10 +2546,7 @@ def resolve_build_context() -> Path:
         return base / "image"
     if REPO_ROOT is not None:
         return REPO_ROOT / "image"
-    die(
-        "no repo checkout for the compose build context; run from a checkout "
-        "or set AGENT_CONTAINER_REPO=<checkout>"
-    )
+    die(_no_checkout_message(), remedy="see the path named above")
 
 
 def host_is_local(host: dict) -> bool:
