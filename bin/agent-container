@@ -2263,7 +2263,7 @@ def build_compose_model(
     build_context: Path | str,
     host_key_file: Path | None = None,
     authorized_keys_file: Path | None = None,
-    env_file: Path | None = None,
+    env_file: Path | list[Path] | None = None,
     extra_mounts: list[str] | None = None,
     injected_configs: list[tuple[str, Path, str]] | None = None,
     *,
