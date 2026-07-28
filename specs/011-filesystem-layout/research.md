@@ -36,7 +36,7 @@ was chosen over a generic `Dockerfile` + `completions/` because unrelated trees 
 
 ---
 
-## R2 (OPEN QUESTION) — `./.env` is not a tool-owned file
+## R2 (DECIDED, reversing an earlier recommendation) — the bare `./.env` is dropped
 
 Four project-level resolution sites move into `.agent-container/`:
 
@@ -45,27 +45,51 @@ Four project-level resolution sites move into `.agent-container/`:
 | 693 | `cwd / f"agent-container.{name}.<provider>.key"` | `.agent-container/<name>.<provider>.key` |
 | 738 | `cwd / f"agent-container.{name}.config"` | `.agent-container/<name>.config/` |
 | 2007 | `cwd / f"agent-container.{name}.services.yaml"` | `.agent-container/<name>.services.yaml` |
-| 662 | **`cwd / ".env"`** | **← see below** |
+| 662 | `cwd / ".env"` | **removed — see below** |
 
-The first three carry the `agent-container.` prefix: unambiguously this tool's. The fourth does
-not. `./.env` is a **shared ecosystem convention** — Docker Compose reads it, as do direnv,
-dotenv libraries and most application frameworks.
+**Decision (operator, 2026-07-28)**: the tool **stops reading the bare `./.env`**. A bare
+`.env` in a project root is a shared ecosystem convention that belongs to whoever put it there;
+claiming it is not conventional behaviour for a tool like this. An operator who wants an
+agent-container env file puts it in an agent-container location — project or user level.
 
-**Decision**: `./.env` **stays where it is** and continues to be read.
+**I had recommended the opposite** (keep reading it, on the grounds that it is not tool-owned).
+That reasoning was half right and led to the wrong conclusion: `./.env` not being ours is
+precisely the argument for **not reading** it, not for continuing to.
 
-**Rationale**: FR-002 says no *tool-owned* file may remain loose in the project root. `./.env` is
-not tool-owned — the tool is one of several readers. Moving it would mean either abandoning a
-convention operators already rely on, or worse, having the tool refuse to start (FR-004) because
-of a file that Docker Compose put there legitimately. The hard-cut refusal must fire **only** on
-the three prefixed names, never on `.env`.
+The resulting chain is symmetric, which the old one was not:
 
-**Alternative considered and rejected**: treat `./.env` as tool-owned and require
-`.agent-container/.env`. Cleaner on paper, but it makes the tool hostile to every other tool
-sharing the directory, and FR-004's refusal would then trigger on a file the operator never
-created for us.
+| Level | Per-environment | Shared default |
+|---|---|---|
+| **Project** | `.agent-container/<name>.env` | `.agent-container/.env` |
+| **User** | `~/.config/agent-container/<name>.env` | `~/.config/agent-container/.env` |
 
-**This is the one decision in the plan a reviewer should challenge if they disagree** — it is the
-difference between "the tool tidies its own files" and "the tool claims the project root".
+The two user-level entries already satisfied the requirement and are unchanged. Only the bare
+`./.env` is removed, and a project-level shared default is added so both levels have the same
+two slots.
+
+### R2a — Dropping it silently would be the same bug FR-004 exists to prevent
+
+The env file carries `GH_TOKEN`, git identity and provider API keys. So "stop reading `./.env`"
+cannot mean "ignore it": an operator who relies on it today would get an agent deployed **without
+their token or keys**, with nothing said — exactly the failure mode that justified the loud
+refusal for `*.key` files.
+
+But refusing on **any** `./.env` is also wrong: Compose projects legitimately have one that was
+never meant for us, and refusing would make the tool hostile to the directory it shares.
+
+**Decision**: refuse **only when the tool would otherwise start with no env file at all while a
+`./.env` sits in the project root.** That is precisely the "you believe this is being used and it
+is not" case.
+
+| `./.env` | an agent-container env file resolves | Behaviour |
+|---|---|---|
+| present | **no** | **refuse** — name it, and name where it belongs |
+| present | yes | ignore silently — the stray `.env` is someone else's business |
+| absent | either | unaffected |
+
+**Alternative considered and rejected**: warn instead of refuse. A warning on a deploy that then
+proceeds is how a missing `GH_TOKEN` becomes a push failure twenty minutes later, inside a
+container, in an agent's log.
 
 ---
 

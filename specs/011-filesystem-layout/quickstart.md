@@ -76,11 +76,20 @@ without the credential. Silent success here is the failure this whole requiremen
 prevent.
 
 ```bash
-printf 'FOO=bar\n' > ./.env
+rm -f .agent-container/dev.env                 # no agent-container env resolves
+printf 'GH_TOKEN=x\n' > ./.env
 agent-container up dev
 ```
 
-**Expected**: **no refusal** — `.env` is not tool-owned.
+**Expected**: **refuses** — otherwise the token silently never reaches the container.
+
+```bash
+printf 'FOO=bar\n' > .agent-container/dev.env  # an agent-container env DOES resolve
+agent-container up dev
+```
+
+**Expected**: **deploys, no refusal** — the stray `./.env` may be Compose's and is not ours to
+complain about.
 
 ### S5 — The build context contains only the image sources (US2, C4)
 

@@ -49,9 +49,14 @@ legible as one configuration at two scopes.
 are a property of the operator's machine, not of a project. It has no project-level counterpart
 and this feature does not add one.
 
-**Not tool-owned**: `./.env` stays in the project root and continues to be read. It is a shared
-ecosystem convention (Compose reads it too), so FR-002 does not apply and the FR-004 refusal must
-**not** fire on it (research R2).
+**The bare `./.env` is no longer read** (research R2). A `.env` in a project root belongs to
+whoever put it there; an agent-container env file goes in an agent-container location. Both
+levels therefore have the same two slots — `<name>.env` and a shared `.env` default:
+
+| Level | Per-environment | Shared default |
+|---|---|---|
+| **Project** | `.agent-container/<name>.env` | `.agent-container/.env` |
+| **User** | `~/.config/agent-container/<name>.env` | `~/.config/agent-container/.env` |
 
 ---
 
@@ -59,7 +64,7 @@ ecosystem convention (Compose reads it too), so FR-002 does not apply and the FR
 
 | # | What | From | To | Risk |
 |---|---|---|---|---|
-| 1 | env file | `./agent-container.<name>.env` | `.agent-container/<name>.env` | low |
+| 1 | env file | `./agent-container.<name>.env`, `./.env` | `.agent-container/<name>.env` (+ `.agent-container/.env` default) | **conditional refusal** — a dropped `.env` strands `GH_TOKEN` and keys |
 | 2 | credential | `./agent-container.<name>.<provider>.key` | `.agent-container/<name>.<provider>.key` | **refusal must fire** — silently ignoring starts an unauthenticated agent |
 | 3 | agent config | `./agent-container.<name>.config/` | `.agent-container/<name>.config/` | low |
 | 4 | sidecars | `./agent-container.<name>.services.yaml` | `.agent-container/<name>.services.yaml` | low |
@@ -98,7 +103,7 @@ string** inside `all_volume_mounts` is expected to differ; every **name** must b
 | `./agent-container.<name>.config/` | **refused** |
 | `./agent-container.<name>.services.yaml` | **refused** |
 | `./Dockerfile`, `./entrypoint.sh` (as build inputs) | build fails, naming `image/` |
-| `./.env` | **NOT superseded** — still read, must never trigger the refusal |
+| `./.env` | **no longer read**. Refused **only** when no agent-container env file resolves at all (R2a) — otherwise ignored silently, since a stray `.env` may be Compose's |
 
 **State transition**: none. There is no migration state to model, because the tool never writes
 to an operator's project to migrate it — it detects, refuses and explains (FR-005). A refused

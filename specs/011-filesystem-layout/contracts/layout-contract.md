@@ -29,7 +29,7 @@ Resolution order for every per-environment file is **project, then user**:
 
 | Kind | Filename |
 |---|---|
-| env | `<name>.env` |
+| env | `<name>.env`, falling back to a shared `.env` at the same level |
 | credential | `<name>.<provider>.key` |
 | agent config | `<name>.config/` |
 | sidecars | `<name>.services.yaml` |
@@ -38,7 +38,10 @@ Resolution order for every per-environment file is **project, then user**:
 prefix is gone from the project level — inside `.agent-container/` there is nothing to
 disambiguate from.
 
-**`./.env` is unchanged**: still read from the project root, still not tool-owned.
+Full order: `.agent-container/<name>.env` → `.agent-container/.env` →
+`~/.config/agent-container/<name>.env` → `~/.config/agent-container/.env`.
+
+**The bare `./.env` is not in the chain.** It belongs to whoever put it there.
 
 ---
 
@@ -49,7 +52,8 @@ disambiguate from.
 | `./agent-container.<name>.env` present | any command resolving per-environment files | **refuse**, naming the file and its destination |
 | `./agent-container.<name>.<provider>.key` present | same | **refuse** — MUST NOT deploy an agent without the credential the operator believes is injected |
 | several superseded files present | same | **all** are listed in one message, not one per run |
-| `./.env` present | same | **no refusal** — it is not tool-owned |
+| `./.env` present **and** an agent-container env file resolves | same | **no refusal** — the stray `.env` is someone else's |
+| `./.env` present **and** no agent-container env file resolves | same | **refuse** — otherwise the operator's `GH_TOKEN` and keys vanish silently |
 | nothing superseded present | same | silent; no migration chatter |
 
 The refusal message names `old path` → `new path` for each offender (FR-005), so the operator can

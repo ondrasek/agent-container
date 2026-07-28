@@ -70,6 +70,13 @@ obvious home**, without changing what the tool *does*.
   compatibility is **not wanted**: the old implementation is removed immediately, in the same
   change. This is a **hard cut**, not a deprecation — see the Migration posture below.
 
+### Session 2026-07-28
+
+- Q: Should the tool keep reading the bare `./.env` in the project root? → A: **No.** It is not
+  a conventional thing for this tool to claim — a `.env` in a project root belongs to whoever
+  put it there. An operator who wants an agent-container env file puts it in an
+  agent-container location, at project or user level.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - One tool directory per project root (Priority: P1)
@@ -182,6 +189,16 @@ confirm the documentation shows one authoritative map with no stale names.
   credential files, sidecar overrides) MUST live under the **project config directory
   `.agent-container/`** — which already holds the declarative spec — and it MUST be the only
   tool-owned entry in the **project root**.
+- **FR-001b**: The tool MUST **stop reading the bare `./.env`** in the project root. Env-file
+  resolution MUST be **symmetric across the two levels** — a per-environment file and a shared
+  default at each: `.agent-container/<name>.env` → `.agent-container/.env` →
+  `~/.config/agent-container/<name>.env` → `~/.config/agent-container/.env`.
+- **FR-001c**: Removing `./.env` from the chain MUST NOT strand an operator silently. The env
+  file carries `GH_TOKEN`, git identity and provider keys, so when a `./.env` is present **and
+  no agent-container env file resolves at all**, the tool MUST **refuse** and name where the
+  file now belongs. When an agent-container env file *does* resolve, a stray `./.env` MUST be
+  ignored **silently** — it may belong to Docker Compose or another tool sharing the directory,
+  and refusing then would make the tool hostile to its neighbours.
 - **FR-001a**: After consolidation the **same filename MUST identify the same thing at both
   levels** — `.agent-container/<name>.env` at project level and
   `~/.config/agent-container/<name>.env` at user level, differing only by directory. Today

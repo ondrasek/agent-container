@@ -54,7 +54,9 @@ containers, CI-authoritative). The identity guarantee (SC-003) is already mechan
 - The new `~/.agent-env` mount point **must be pre-created dev-owned in the image** — Feature 010
   proved a volume mounted at an image-absent path comes up `root:root` and rootless cannot write
   it, even under a dev-owned parent.
-- `./.env` is **not** tool-owned and must keep working (research R2).
+- The bare `./.env` is **no longer read** (research R2). Dropping it silently would strand an
+  operator's `GH_TOKEN` and API keys, so it is refused **conditionally** — only when no
+  agent-container env file resolves at all (R2a).
 
 **Scale/Scope**: `bin/agent-container`, `entrypoint.sh`, `Dockerfile` → `image/`, the
 `orchestration/` templates, docs, and roughly ten test modules that reference the moved paths.
@@ -114,8 +116,10 @@ the `image/` move, the templates and the docs parallelise against it.
 1. **Update the checkout marker in the same commit as the move** (R1) — marker, `die` text and
    the packaging test's fixture. This is the highest-risk edit; a wrong marker makes the tool
    fail to recognise its own repo, and it cannot report that failure loudly.
-2. **`./.env` stays put and keeps working** (R2) — it is not tool-owned. The refusal fires only
-   on the three `agent-container.`-prefixed names.
+2. **The bare `./.env` is dropped** (R2) — it belongs to whoever put it there. Env files live
+   in agent-container locations at both levels, and the chain becomes symmetric
+   (`<name>.env` + `.env`, project then user). The conditional refusal (R2a) keeps the removal
+   from silently stranding a token.
 3. **The shell-env volume name does not change** (R3) — only its mount point. Existing contents
    reappear at the new path rather than being stranded.
 4. **Pre-create `~/.agent-env` dev-owned in the image** (R3) — the Feature 010 trap, and it fails
