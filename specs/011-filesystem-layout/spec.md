@@ -156,8 +156,8 @@ inside the container — because the names differ.
 touches in-container paths and the `.agent-container` name itself, so it must land after the two moves that
 carry their own migration. It is also the easiest to get wrong in a way that strands data.
 
-**Independent Test**: Confirm each renamed location is distinguishable by name alone;
-confirm an environment created before the rename still runs, attaches and tears down; and
+**Independent Test**: Confirm each renamed location is distinguishable by name alone; confirm
+the identity lock still passes (which is what keeps an existing environment findable); and
 confirm the documentation shows one authoritative map with no stale names.
 
 **Acceptance Scenarios**:
@@ -165,7 +165,8 @@ confirm the documentation shows one authoritative map with no stale names.
 1. **Given** the renamed layout, **When** an operator reads any tool-owned path, **Then**
    its role is unambiguous without consulting documentation.
 2. **Given** an environment created **before** the rename, **When** the operator uses it,
-   **Then** it continues to run, attach and tear down with no manual migration.
+   **Then** it remains findable and manageable — which follows from scenario 3 below, not
+   from a separate mechanism.
 3. **Given** the rename, **When** the tool computes any identity (container name, port,
    volume names), **Then** those values are **unchanged**.
 4. **Given** the documentation, **When** the layout is described, **Then** exactly one
@@ -182,8 +183,8 @@ confirm the documentation shows one authoritative map with no stale names.
 - **A file exists only in the old location** — refused with an actionable message. It is
   **never** silently ignored, because the set includes credential files and an ignored key
   means an agent running without the credential the operator thinks it has.
-- **Teardown of a pre-upgrade environment** — must remove everything the tool created,
-  including anything recorded under a superseded path.
+- **Teardown of a pre-upgrade environment** — removes everything the tool created, because the
+  volume names it enumerates are unchanged. No separate handling; the identity lock covers it.
 - **A remote host built from an older layout** — a clear, actionable failure, never an
   obscure "file not found" from the build.
 - **A project vendored/copied to a new path** — the layout is location-independent; nothing
@@ -264,8 +265,16 @@ confirm the documentation shows one authoritative map with no stale names.
   read-only) and `/run/agent-container` (already unambiguous — `/run` denotes ephemeral).
 - **FR-010**: The tool's **deterministic identity** — container name, port, and volume names
   — MUST be **unchanged** by this feature (Constitution IV).
-- **FR-011**: Environments created **before** this change MUST continue to run, attach and
-  tear down, with **no orphaned** container, volume or state file.
+- **FR-011**: Existing containers and volumes MUST remain **findable and manageable** by the
+  tool — run, attach, tear down, no orphans. This is **entirely a consequence of FR-010**:
+  identity is how the tool finds what it owns, so if no name changes, nothing is stranded.
+  It gets **no separate test**, because there is no separate mechanism — the identity lock is
+  the test. Stated as a derived property rather than an independent promise, so the spec does
+  not claim coverage it does not have.
+
+  Note this is *not* a backward-compatibility guarantee for the **layout**: the project-side
+  hard cut (FR-003) stands, and a project left in the old layout is refused (FR-004). The tool
+  is pre-1.0 and no layout compatibility is offered or expected.
 - **FR-012**: The declarative spec's **read-only in-container delivery** guarantee MUST be
   preserved unchanged through any rename.
 - **FR-013**: No credential value may be exposed by the reorganization; files that were
@@ -320,10 +329,10 @@ confirm the documentation shows one authoritative map with no stale names.
 ### Measurable Outcomes
 
 - **SC-001**: A project using the new layout has **zero** tool-owned files loose in its root.
-- **SC-002**: An environment created before this change continues to run, attach and tear
-  down after upgrade — 100% of runs, with **zero** orphaned containers, volumes or state
-  files. (Identity is untouched, so this holds despite the hard cut: only *file locations*
-  change, never the volume names the tool owns.)
+- **SC-002**: Zero orphaned containers, volumes or state files after this change — verified
+  **via SC-003** (identity is byte-identical), not by a separate migration run. Identity is the
+  only mechanism by which the tool finds what it owns, so an unchanged identity is the whole
+  guarantee.
 - **SC-002a**: A project left in the superseded layout is **refused**, naming every file that
   must move — 100% of runs, with **zero** cases of a superseded credential file being
   silently ignored.
