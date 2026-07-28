@@ -43,6 +43,19 @@ Full order: `.agent-container/<name>.env` → `.agent-container/.env` →
 
 **The bare `./.env` is not in the chain.** It belongs to whoever put it there.
 
+### C2a. Explicit env files (`-e`, repeatable)
+
+| Given | When | Then |
+|---|---|---|
+| `-e ~/.env` | `up` / `redeploy` | that file is used; the discovery chain is **not** consulted |
+| `-e a.env -e b.env` | same | both applied **in order**; `b.env` wins on conflicting keys |
+| `-e missing.env` | same | fails fast, naming the path |
+| any `-e`, remote host | same | works — compose reads `env_file` **client-side**, so the path never has to exist on the target daemon |
+| any `-e` | the artifact is generated | the path is referenced, **never** the values (Constitution III) |
+
+`-e` is the escape hatch for a file outside the project: the tool stops guessing at `./.env`
+and gains a way to be told.
+
 ---
 
 ## C3. The hard cut — refuse, never ignore

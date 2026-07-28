@@ -58,6 +58,11 @@ levels therefore have the same two slots — `<name>.env` and a shared `.env` de
 | **Project** | `.agent-container/<name>.env` | `.agent-container/.env` |
 | **User** | `~/.config/agent-container/<name>.env` | `~/.config/agent-container/.env` |
 
+**Explicit files outrank the whole chain.** `-e/--env-file` is repeatable and **stacks in order
+of occurrence** (later wins), replacing discovery entirely. That is what makes dropping the
+implicit `./.env` reasonable — an operator with an env file anywhere, `~/.env` included, names
+it: `agent-container up dev -e ~/.env`.
+
 ---
 
 ## E3. The move table

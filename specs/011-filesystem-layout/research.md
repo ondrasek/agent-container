@@ -91,6 +91,26 @@ is not" case.
 proceeds is how a missing `GH_TOKEN` becomes a push failure twenty minutes later, inside a
 container, in an agent's log.
 
+### R2b — Repeatable `-e` fits the existing machinery exactly
+
+Three facts checked in the code, not assumed:
+
+- **`-e` is free.** Short flags in use: `-a -C -d -f -i -L -N -o -p -q -R -s -t -T -w -y`.
+- **The compose model already emits a list**: `service["env_file"] = [str(env_file)]`. Stacking
+  means filling that list, and Compose's own `env_file:` semantics are exactly "apply in order,
+  later wins" — so the ordering requirement needs no logic of ours.
+- **It is remote-safe.** `build_compose_model`'s docstring records that `env_file` is *"read
+  client-side by compose and merged into the service environment"*. The file therefore never
+  has to exist on the target daemon, so `-e ~/.env` works against a remote host.
+
+`--env-file` already exists on `up` and `redeploy` as a single-valued "bypass resolution"
+option. Making it repeatable preserves that bypass meaning and adds ordering.
+
+**Decision**: explicit files **replace** the discovery chain rather than layering on top of it.
+Naming files is a statement that the operator is in control; silently merging discovered files
+underneath would make the effective environment depend on directory contents the operator was
+trying to bypass.
+
 ---
 
 ## R3 — The shell-env rename moves a mount point, never an identity

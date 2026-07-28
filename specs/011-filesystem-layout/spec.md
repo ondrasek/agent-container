@@ -76,6 +76,10 @@ obvious home**, without changing what the tool *does*.
   a conventional thing for this tool to claim — a `.env` in a project root belongs to whoever
   put it there. An operator who wants an agent-container env file puts it in an
   agent-container location, at project or user level.
+- Q: How does an operator use an env file that lives somewhere else entirely (e.g. `~/.env`)?
+  → A: **Explicitly, via a repeatable `-e`/`--env-file` option.** Multiple occurrences
+  **stack in order of occurrence**. This is the escape hatch that makes dropping the implicit
+  `./.env` reasonable: the tool stops *guessing*, and gains a way to be *told*.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -199,6 +203,15 @@ confirm the documentation shows one authoritative map with no stale names.
   file now belongs. When an agent-container env file *does* resolve, a stray `./.env` MUST be
   ignored **silently** — it may belong to Docker Compose or another tool sharing the directory,
   and refusing then would make the tool hostile to its neighbours.
+- **FR-001d**: The tool MUST accept a **repeatable** `-e`/`--env-file <path>` option wherever
+  an environment is created or recreated. Multiple occurrences MUST **stack in order of
+  occurrence**, with later files overriding earlier ones on conflicting keys. Explicitly named
+  files MUST **replace** the discovery chain — naming files is a statement that the operator is
+  in control — and each named file MUST exist, failing fast if not.
+- **FR-001e**: An explicitly named env file MUST be usable from **any** location, including
+  outside the project root (e.g. `~/.env`), and MUST work identically for local and remote
+  hosts. No secret value from it may be inlined into the generated deployment artifact
+  (Constitution III).
 - **FR-001a**: After consolidation the **same filename MUST identify the same thing at both
   levels** — `.agent-container/<name>.env` at project level and
   `~/.config/agent-container/<name>.env` at user level, differing only by directory. Today

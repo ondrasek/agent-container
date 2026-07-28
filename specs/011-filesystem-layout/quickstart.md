@@ -91,6 +91,30 @@ agent-container up dev
 **Expected**: **deploys, no refusal** — the stray `./.env` may be Compose's and is not ours to
 complain about.
 
+### S4a — An explicit env file, anywhere, stacking in order (C2a)
+
+```bash
+printf 'A=1\nB=1\n' > ~/.env
+printf 'B=2\n'       > /tmp/override.env
+agent-container up dev -e ~/.env -e /tmp/override.env
+```
+
+**Expected**: deploys with `A=1` and **`B=2`** — later `-e` wins. The discovery chain is not
+consulted. Repeat against a **remote** host: it must behave identically, because compose reads
+env files client-side.
+
+```bash
+agent-container up dev -e /tmp/nope.env
+```
+
+**Expected**: fails fast, naming the missing path.
+
+Then confirm no value leaked into the generated artifact:
+
+```bash
+grep -r "B=2" "$XDG_STATE_HOME/agent-container/"      # expect: no hits
+```
+
 ### S5 — The build context contains only the image sources (US2, C4)
 
 ```bash
