@@ -27,7 +27,7 @@ and this feature changes a pinned on-disk contract.
 
 **All three stories resolve files. They need one seam to resolve them *from*.**
 
-- [ ] T003 In `bin/agent-container`, make the project root available to the resolvers: `PROJECT_MARKER` (line ~4558) and `find_project_root` (line ~4592) are defined *after* the four resolvers that will need them (lines ~656–2010). Python resolves names at call time so no reordering is required — confirm that rather than assume it, and add a comment at `find_project_root` recording that the early resolvers depend on it.
+- [ ] T003 In `bin/agent-container`, make the project root available to the resolvers: `PROJECT_MARKER` (line ~4558) and `find_project_root` (line ~4592) are defined *after* the four resolvers that will need them (lines ~656–2010). Python resolves names at call time so no reordering is required — confirm that rather than assume it, and add a comment at `find_project_root` recording that the early resolvers depend on it. **If the confirmation fails**, move `PROJECT_MARKER` and `find_project_root` above `env_file_candidates` (line ~656) before starting T004 — a verification task must not be able to strand the design task that follows it.
 - [ ] T004 In `bin/agent-container`, add a single `project_config_dir(cwd) -> Path | None` helper returning `<project root>/.agent-container` (or `None` when no project root is found), with a doctest. Every resolver in Phase 3 uses it, so it exists once rather than four times.
 
 ---
@@ -47,6 +47,7 @@ a project left in the old layout is refused with every offending file named.
 - [ ] T007 [P] [US1] In `bin/tests/test_cli.py`, assert `-e/--env-file` is **repeatable**, that files stack **in order with later winning**, that explicit files **replace** the discovery chain, and that a missing path fails fast (contract C2a, FR-001d).
 - [ ] T008 [P] [US1] In `bin/tests/test_credentialing.py`, assert the refusal matrix (contract C3): each superseded `agent-container.<name>.*` name refuses and names its destination — for a `.key` the message names the **user-level** path and the locator sources, since there is no project-local destination (FR-001f); **all** offenders are listed in one message; and a `./.env` refuses **only** when no agent-container env file resolves, staying silent otherwise (FR-001c). The silent case is as load-bearing as the loud one — refusing on a Compose-owned `.env` is its own bug.
 - [ ] T009 [P] [US1] In `bin/tests/test_pure_logic.py`, assert project-root discovery walks **up** from a nested `cwd` and is location-independent (contract C1, FR-015).
+- [ ] T009a [P] [US1] In `bin/tests/test_pure_logic.py`, assert the **positive** property directly (FR-002, SC-001): for a consolidated fixture, **no** tool-owned entry remains in the project root — no `agent-container.*` file and no bare `.env` consumed by us. Today this is only implied by the refusal firing; a refusal test passes even if some other tool-owned name were left behind, because it only checks the names it knows to look for.
 
 ### Implementation for US1
 
@@ -57,6 +58,8 @@ a project left in the old layout is refused with every offending file named.
 - [ ] T014 [US1] Make `-e/--env-file` repeatable on `up` (line ~5492) and `redeploy` (line ~5676): `list[Path]`, each validated to exist, threaded into `build_compose_model`'s `env_file`. **The compose model already emits a list** (`service["env_file"] = [str(env_file)]`, line ~2263) and Compose applies it in order with later winning — so ordering needs no logic of ours (research R2b). Widen the parameter rather than adding a second one.
 - [ ] T015 [US1] Add the superseded-layout refusal to `bin/agent-container`: one check over the project root for `agent-container.<name>.*`, listing **every** offender with its destination, called from every command that resolves per-environment files. Include the conditional `./.env` case from FR-001c.
 - [ ] T016 [US1] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S2 (a consolidated project deploys), S3 (discovery from a subdirectory), S4 (refusal fires on a superseded credential; stays silent when an agent-container env resolves) and S4a (`-e` stacking, order, fail-fast, and **no value leaked into the generated artifact**).
+
+- [ ] T016a [US1] In `bin/tests/test_acceptance.py`, assert `-e` works when the host is **not** the default context, reusing the docker-context-as-remote pattern already used for `host env` (line ~1087): register a host on a non-default docker context and deploy with `-e <path outside the project>`. FR-001e's remote parity currently rests on a **docstring** claim — *"env_file is read client-side by compose"* (research R2b) — that nothing has run. That is the same shape as the `opencode run` exit-status assumption in Feature 010, which needed a real probe to get right; if compose ever resolved that path on the daemon instead, `-e` would silently break for every remote deployment.
 
 **Checkpoint**: US1 alone is shippable — the project root is clean and the layering is legible.
 
@@ -93,6 +96,7 @@ write it.
 **Depends on**: Phase 2. Independent of US1 and US2.
 
 - [ ] T026 [P] [US3] In `bin/tests/test_compose.py`, assert the shell-env mount is `agent-container-<name>-shellenv:/home/dev/.agent-env` — **name unchanged, path changed** (contract C5). The identity lock from T002 must still pass.
+- [ ] T026a [P] [US3] In `bin/tests/test_agent_as_code.py`, pin the delivered-spec contract that FR-012 requires survive the rename: `INJECT_AAC_DIR == "/workspace/.agent-container"` and its **read-only** delivery. FR-012 has no other task — it is currently covered only incidentally, by pre-existing assertions reached through the full-suite run (T037). An FR with no test of its own is invisible the day someone decides the delivered spec should be renamed too.
 - [ ] T027 [US3] Update the shell-env mount in `all_volume_mounts` (`bin/agent-container` line ~382) and its doctest, which pins the full mount string.
 - [ ] T028 [US3] In `image/Dockerfile`, create `/home/dev/.agent-env` **dev-owned** in the `mkdir -p` / `chown` / `chmod 0755` lists (line ~184) and update the two comments naming the old path. **Feature 010 proved this is mandatory, not defensive**: a volume mounted at a path the image does not create comes up `root:root` and rootless cannot write it — even under a dev-owned parent.
 - [ ] T029 [US3] In `image/entrypoint.sh`, update `AGENT_CONTAINER_ENV_FILE` (line ~74), the `mkdir -p` (line ~77) and the block comment describing the persistent shell env.
@@ -105,6 +109,7 @@ write it.
 
 - [ ] T032 [P] Write the single authoritative layout map (FR-014) in `docs/` covering all five locations with the settled vocabulary — **project root**, **project config**, **user configuration**, **derived host state**, **image sources** — plus the two configuration levels and the three in-container paths.
 - [ ] T033 [P] Update `docs/credentials.md`, `docs/execution.md`, `docs/orchestration.md` and `docs/agent-as-code.md` for the new paths, and `README.md` for `image/` and repeatable `-e`.
+- [ ] T033a [P] Write **operator-facing migration notes** in `docs/` — the one thing a reader needs to act on, since the hard cut breaks every existing project: what moved where (a table), that plaintext project-local keys are **gone** rather than relocated (FR-001f) and what to use instead, that `./.env` is no longer read and `-e` is the replacement, and that the tool refuses rather than guessing. FR-005 makes the *tool* actionable; nothing so far makes the *docs* actionable, and the tool's message is seen only by someone already blocked.
 - [ ] T034 [P] Update `CLAUDE.md`: the layout statement and the `image/` location. It is at **1999/2000 tokens** — trim an equivalent amount, do not let it drift.
 - [ ] T035 Verify the vocabulary swept: `grep -rn "project directory" docs/ CLAUDE.md README.md` returns nothing, and superseded path names appear only in migration notes (SC-005, SC-006).
 - [ ] T036 Run `scripts/quality-gate.sh` and fix everything it reports.
@@ -121,9 +126,9 @@ Phase 1 (T001-T002)   identity baseline + lock — before anything moves
         │
 Phase 2 (T003-T004)   the resolution seam
         │
-        ├── Phase 3 US1 (T005-T016)  🎯 MVP — consolidation, env chain, -e, refusal
+        ├── Phase 3 US1 (T005-T016a) 🎯 MVP — consolidation, env chain, -e, refusal
         ├── Phase 4 US2 (T017-T025)  image sources + the checkout marker
-        └── Phase 5 US3 (T026-T031)  shell-env rename
+        └── Phase 5 US3 (T026-T031)  shell-env rename + delivered-spec guard
                  │
 Phase 6 (T032-T039)   docs, gate, full acceptance, identity re-verify, breaking commit
 ```
@@ -170,10 +175,29 @@ the volume name never changes.
 |---|---|---|---|
 | 1 Setup & identity guard | — | T001-T002 | 2 |
 | 2 Foundational | — | T003-T004 | 2 |
-| 3 User Story 1 | US1 (P1) | T005-T016 | **12** |
+| 3 User Story 1 | US1 (P1) | T005-T016a | **14** |
 | 4 User Story 2 | US2 (P2) | T017-T025 | 9 |
-| 5 User Story 3 | US3 (P3) | T026-T031 | 6 |
-| 6 Polish | — | T032-T039 | 8 |
-| **Total** | | | **39** |
+| 5 User Story 3 | US3 (P3) | T026-T031 | 7 |
+| 6 Polish | — | T032-T039 | 9 |
+| **Total** | | | **43** |
 
-Parallelizable: 14 tasks marked `[P]`.
+Parallelizable: 17 tasks marked `[P]`.
+
+## Analysis remediation (2026-07-28)
+
+`/speckit-analyze` found 1 CRITICAL, 2 HIGH, 4 MEDIUM, 2 LOW. Outcomes:
+
+| Finding | Severity | Outcome |
+|---|---|---|
+| N1 — plaintext keys consolidated into the committed directory | CRITICAL | **Dissolved by design change.** Project-local key files dropped entirely (FR-001f), so there is nothing left to guard. T011 became a deletion |
+| C1 — pre-upgrade environments untested | HIGH | **Closed as a wording fix.** FR-011/SC-002 restated as derived from FR-010; no separate mechanism exists, so no separate test. Pre-1.0, no layout compatibility offered |
+| C2 — `-e` remote parity rests on a docstring | HIGH | **T016a** |
+| C3 — FR-012 has no task | MEDIUM | **T026a** |
+| C4 — FR-002/SC-001 asserted only indirectly | MEDIUM | **T009a** |
+| A1 — no operator-facing migration docs | MEDIUM | **T033a** |
+| I1 — T003's verification could strand T004 | MEDIUM | T003 given an explicit fallback |
+| D1, A2 | LOW | Not actioned — cosmetic |
+
+Two of these exist because a **claim** stood in for a **check**: C2 (a docstring) and C4 (a
+refusal test that would pass for the wrong reason). That is the recurring shape in this
+codebase, and it is why both fixes are assertions rather than notes.
