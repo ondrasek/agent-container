@@ -597,7 +597,8 @@ def test_apply_preserves_convention_env_as_merge_base(wiz, aac_env, tmp_path, mo
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     wiz.do_aac_apply(yes=True)
     _name, kw = aac_env["up"][0]
-    merged = kw["env_file_override"].read_text()
+    (merged_path,) = kw["env_file_override"]  # Feature 011: a list of one here
+    merged = merged_path.read_text()
     assert "GH_TOKEN=from-dotenv" in merged and "OTHER=sk-live" in merged
 
 
@@ -1088,7 +1089,7 @@ def test_apply_resolves_and_delivers_command_credential(wiz, aac_env, tmp_path, 
     monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: "sk-resolved\n")
     wiz.do_aac_apply(yes=True)
     _name, kw = aac_env["up"][0]
-    env_file = kw["env_file_override"]
+    (env_file,) = kw["env_file_override"]  # Feature 011: a list of one here
     assert env_file is not None and "MYSECRET=sk-resolved" in env_file.read_text()
 
 

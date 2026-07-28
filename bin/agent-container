@@ -680,6 +680,26 @@ def env_file_candidates(name: str, cwd: Path) -> list[Path]:
     return [*out, CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
 
 
+def _resolve_env_files(name: str, override: list[Path] | None) -> list[Path]:
+    """The env files for this deployment (Feature 011 FR-001d).
+
+    Explicit `-e` files REPLACE the discovery chain and are applied in the order
+    given, later winning — naming files is a statement that the operator is in
+    control, so merging discovered files underneath would make the effective
+    environment depend on directory contents they were bypassing.
+    """
+    if override:
+        return list(override)
+    found = resolve_env_file(name)
+    if found is None:
+        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
+        die(
+            f"no env file found. Looked in: {cands}",
+            remedy="create one of those paths, or name a file explicitly with -e/--env-file",
+        )
+    return [found]
+
+
 def resolve_env_file(name: str) -> Path | None:
     # Secret hygiene: only existence checks; contents are never read.
     for candidate in env_file_candidates(name, Path.cwd()):
@@ -2289,7 +2309,11 @@ def build_compose_model(
     if environment:  # Feature 004 non-secret settings (mode/agent/clone-url)
         service["environment"] = dict(environment)
     if env_file is not None:
-        service["env_file"] = [str(env_file)]
+        # Feature 011 FR-001d: one path or many. Compose applies `env_file:` in
+        # order with LATER entries winning, which is exactly the stacking `-e`
+        # promises — so ordering needs no logic here, only the list.
+        files = [env_file] if isinstance(env_file, Path) else list(env_file)
+        service["env_file"] = [str(f) for f in files]
     # The workspace named volume is declared ONLY in persistent mode (Constitution
     # IV refinement, FR-013): bind/ephemeral must NOT create it. The other eight are
     # always declared. `--purge`/`wipe` tolerate the workspace volume's absence.
@@ -2773,11 +2797,16 @@ def is_ssh_git_url(url: str) -> bool:
     return url.startswith("ssh://") or bool(re.match(r"^[^/@]+@[^/:]+:", url))
 
 
-def env_file_defines(env_file: Path | None, key: str) -> bool:
+def env_file_defines(env_file: Path | list[Path] | None, key: str) -> bool:
     """Best-effort: does `env_file` define a non-empty `key`? Only for the clone
     fail-fast pre-check — the entrypoint does the authoritative in-container check."""
     if env_file is None:
         return False
+    files = [env_file] if isinstance(env_file, Path) else list(env_file)
+    return any(_one_env_file_defines(f, key) for f in files)
+
+
+def _one_env_file_defines(env_file: Path, key: str) -> bool:
     try:
         for raw in env_file.read_text().splitlines():
             line = raw.strip()
@@ -2791,7 +2820,9 @@ def env_file_defines(env_file: Path | None, key: str) -> bool:
     return False
 
 
-def clone_credential_precheck(spec: ExecSpec, env_file: Path | None, push_key: Path | None) -> None:
+def clone_credential_precheck(
+    spec: ExecSpec, env_file: Path | list[Path] | None, push_key: Path | None
+) -> None:
     """Fail fast (FR-014) when an SSH-URL clone-on-start has no push key: refuse
     BEFORE creating an empty-workspace container. https:// needs no key (GH_TOKEN
     is always present); bind is never cloned. The entrypoint re-checks in-container."""
@@ -2829,7 +2860,7 @@ def compose_up_exec(
     host_name: str,
     host_rec: dict,
     name: str,
-    env_file: Path,
+    env_file: Path | list[Path],
     mounts: list[str],
     host_key: Path | None,
     authorized_keys: list[Path],
@@ -2938,7 +2969,7 @@ def compose_up_exec(
 def do_up(
     name: str,
     host: str | None = None,
-    env_file_override: Path | None = None,
+    env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
@@ -2972,10 +3003,7 @@ def do_up(
             f"container {cname} exists but is not running on {host_name}. Run: agent-container down {name}{hflag}"
         )
 
-    env_file = env_file_override or resolve_env_file(name)
-    if env_file is None:
-        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
-        die(f"no .env found. Looked in: {cands}")
+    env_file = _resolve_env_files(name, env_file_override)
 
     # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
     # container is created; https:// uses GH_TOKEN and needs none.
@@ -3199,7 +3227,7 @@ def do_start(name: str, host: str | None = None) -> None:
 def do_redeploy(
     name: str,
     host: str | None = None,
-    env_file_override: Path | None = None,
+    env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
@@ -3220,10 +3248,7 @@ def do_redeploy(
     ensure_tunnel(host_rec)
     if container_name(name) not in host_container_names(host_rec, include_stopped=True):
         warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
-    env_file = env_file_override or resolve_env_file(name)
-    if env_file is None:
-        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
-        die(f"no .env found. Looked in: {cands}")
+    env_file = _resolve_env_files(name, env_file_override)
     clone_credential_precheck(spec, env_file, push_key)
     with deployment_lock(host_name, name):
         compose_up_exec(
@@ -5387,7 +5412,7 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
             do_up(
                 name,
                 host=host_name,
-                env_file_override=env_file,
+                env_file_override=[env_file] if env_file else None,
                 spec=spec,
                 extra_injected_configs=aac,
                 push_key=ssh.push_key,
@@ -5538,8 +5563,12 @@ def up(
     host: str | None = typer.Option(
         None, "--host", help="Deploy to this registered host (default: the registry default)."
     ),
-    env_file: Path | None = typer.Option(
-        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    env_file: list[Path] = typer.Option(
+        None,
+        "-e",
+        "--env-file",
+        help="Env file to load; repeatable, applied in order (later wins). "
+        "Bypasses env-file resolution; each path must exist.",
     ),
     mount: list[str] = typer.Option(
         None,
@@ -5618,8 +5647,9 @@ def up(
     Default: an interactive claude session on a persistent workspace (attach with
     `agent-container attach NAME`). Use --mode headless for a one-shot job."""
     set_json_mode(as_json)
-    if env_file is not None and not env_file.is_file():
-        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
+        if not _ef.is_file():
+            raise typer.BadParameter(f"--env-file {_ef} does not exist")
     spec = ExecSpec(
         mode=mode,
         agent=agent,
@@ -5722,8 +5752,12 @@ def start(
 def redeploy(
     name: str = typer.Argument(..., help="Container short name."),
     host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
-    env_file: Path | None = typer.Option(
-        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    env_file: list[Path] = typer.Option(
+        None,
+        "-e",
+        "--env-file",
+        help="Env file to load; repeatable, applied in order (later wins). "
+        "Bypasses env-file resolution; each path must exist.",
     ),
     mount: list[str] = typer.Option(
         None, "--mount", help="Bind-mount a host dir (repeatable), as for `up`."
@@ -5759,8 +5793,9 @@ def redeploy(
     Deliberately non-idempotent: always rebuilds + recreates, even with no change.
     May change mode/agent/workspace/repo."""
     set_json_mode(as_json)
-    if env_file is not None and not env_file.is_file():
-        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
+        if not _ef.is_file():
+            raise typer.BadParameter(f"--env-file {_ef} does not exist")
     spec = ExecSpec(
         mode=mode,
         agent=agent,

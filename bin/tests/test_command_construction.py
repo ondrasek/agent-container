@@ -288,7 +288,7 @@ def test_do_up_dies_without_env_file(up_env, capture_compose, monkeypatch, tmp_p
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
-    with pytest.raises(wiz.Fatal, match="no .env found"):
+    with pytest.raises(wiz.Fatal, match="no env file found"):
         wiz.do_up("acme")
     assert capture_compose == []
 

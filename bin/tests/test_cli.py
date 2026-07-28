@@ -215,3 +215,60 @@ def test_script_fatal_exits_one_via_uv(tmp_path):
     assert proc.returncode == 1
     assert "FATAL: no local state for acme" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+# --- Feature 011: repeatable -e/--env-file (FR-001d, contract C2a) -----------
+
+
+def test_env_file_option_is_repeatable_and_stacks_in_order(wiz, tmp_path):
+    """Multiple `-e` stack in the order given, later winning on conflicting keys.
+
+    The ordering is not logic of ours: the compose model emits `env_file:` as a
+    list and Compose applies it in order with later entries winning (research
+    R2b). This asserts the list reaches the model in the order the operator gave
+    — reversing it would silently invert precedence.
+    """
+    a, b = tmp_path / "a.env", tmp_path / "b.env"
+    a.write_text("A=1\nB=1\n")
+    b.write_text("B=2\n")
+    model = wiz.build_compose_model("acme", tmp_path / "repo", env_file=[a, b])
+    assert model["services"]["agent"]["env_file"] == [str(a), str(b)]
+
+
+def test_single_env_file_still_accepted_as_a_bare_path(wiz, tmp_path):
+    """Widening the parameter must not break the single-file callers (the
+    declarative path passes one)."""
+    a = tmp_path / "a.env"
+    a.write_text("A=1\n")
+    assert wiz.build_compose_model("acme", tmp_path / "repo", env_file=a)["services"]["agent"][
+        "env_file"
+    ] == [str(a)]
+
+
+def test_explicit_env_files_replace_the_discovery_chain(wiz, tmp_path, monkeypatch):
+    """FR-001d: naming files is a statement that the operator is in control, so
+    discovered files are NOT merged underneath — that would make the effective
+    environment depend on directory contents they were bypassing."""
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    (root / ".agent-container" / "acme.env").write_text("DISCOVERED=1\n")
+    explicit = tmp_path / "explicit.env"
+    explicit.write_text("EXPLICIT=1\n")
+    monkeypatch.chdir(root)
+    assert wiz._resolve_env_files("acme", [explicit]) == [explicit]
+    assert wiz._resolve_env_files("acme", None) == [
+        root.resolve() / ".agent-container" / "acme.env"
+    ]
+
+
+def test_env_file_outside_the_project_is_usable(wiz, tmp_path, monkeypatch):
+    """FR-001e: `-e ~/.env` — an env file anywhere. This is the escape hatch that
+    makes dropping the implicit `./.env` reasonable: the tool stops guessing and
+    gains a way to be told."""
+    outside = tmp_path / "home" / ".env"
+    outside.parent.mkdir(exist_ok=True)
+    outside.write_text("X=1\n")
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    monkeypatch.chdir(root)
+    assert wiz._resolve_env_files("acme", [outside]) == [outside]
