@@ -222,6 +222,39 @@ asserted unchanged.
 
 ---
 
+## R7a — Identity baseline, captured 2026-07-28 before any change (T001)
+
+| name | container | port | volumes |
+|---|---|---|---|
+| `acme` | `agent-container-acme` | 2206 | 9 |
+| `blog` | `agent-container-blog` | 2220 | 9 |
+| `scratch` | `agent-container-scratch` | 2244 | 9 |
+| `my-box` | `agent-container-my-box` | 2204 | 9 |
+| `a` | `agent-container-a` | 2297 | 9 |
+| `zzz-999` | `agent-container-zzz-999` | 2282 | 9 |
+
+`per_container_volumes("acme")`, canonical order:
+
+```text
+agent-container-acme-workspace   agent-container-acme-opencode-data
+agent-container-acme-claude      agent-container-acme-shellenv
+agent-container-acme-codex       agent-container-acme-tmux
+agent-container-acme-pi          agent-container-acme-ssh
+agent-container-acme-opencode
+```
+
+**The one value expected to change**, and the only one:
+
+```text
+before: agent-container-acme-shellenv:/home/dev/.agent-container
+after:  agent-container-acme-shellenv:/home/dev/.agent-env
+```
+
+Note the **name** is identical on both sides — only the mount path moves (R3). Every value in
+the table above must be byte-identical after the feature (SC-003); T038 diffs against this.
+
+---
+
 ## R8 — This is the project's first genuinely breaking change
 
 Constitution VII: python-semantic-release reads Conventional Commits. Removing the previous

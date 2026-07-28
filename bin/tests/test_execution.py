@@ -45,7 +45,10 @@ def up_env(wiz, monkeypatch, tmp_path):
 def _in_workdir(monkeypatch, tmp_path):
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
-    (work / ".env").write_text("TOKEN=x\n")
+    # Feature 011: a project keeps its env file in the project config directory.
+    # The bare ./.env is no longer read (FR-001b).
+    (work / ".agent-container").mkdir(exist_ok=True)
+    (work / ".agent-container" / ".env").write_text("TOKEN=x\n")
     monkeypatch.chdir(work)
     return work
 
@@ -273,7 +276,8 @@ def test_is_ssh_git_url(wiz):
 
 def test_clone_precheck_ssh_without_key_dies(wiz, tmp_path):
     # FR-014/SC-008: an SSH-URL clone with no push key dies before compose.
-    ef = tmp_path / ".env"
+    (tmp_path / ".agent-container").mkdir(exist_ok=True)
+    ef = tmp_path / ".agent-container" / ".env"
     ef.write_text("GH_TOKEN=x\n")
     spec = wiz.ExecSpec(repo="git@github.com:you/repo", workspace="ephemeral")
     with pytest.raises(wiz.Fatal, match="SSH URL but no push key"):
@@ -281,7 +285,8 @@ def test_clone_precheck_ssh_without_key_dies(wiz, tmp_path):
 
 
 def test_clone_precheck_https_needs_no_key(wiz, tmp_path):
-    ef = tmp_path / ".env"
+    (tmp_path / ".agent-container").mkdir(exist_ok=True)
+    ef = tmp_path / ".agent-container" / ".env"
     ef.write_text("GH_TOKEN=x\n")
     spec = wiz.ExecSpec(repo="https://github.com/you/repo", workspace="persistent")
     wiz.clone_credential_precheck(spec, ef, None)  # no raise
@@ -295,7 +300,8 @@ def test_clone_precheck_ssh_with_pushkey_ok(wiz, tmp_path):
 
 
 def test_clone_precheck_ssh_with_env_key_ok(wiz, tmp_path):
-    ef = tmp_path / ".env"
+    (tmp_path / ".agent-container").mkdir(exist_ok=True)
+    ef = tmp_path / ".agent-container" / ".env"
     ef.write_text("SSH_PUSH_KEY_B64=aGVsbG8=\n")
     spec = wiz.ExecSpec(repo="git@github.com:you/repo", workspace="persistent")
     wiz.clone_credential_precheck(spec, ef, None)  # env-provided key satisfies it

@@ -654,12 +654,30 @@ def parse_kv_config(text: str) -> dict[str, str]:
 
 
 def env_file_candidates(name: str, cwd: Path) -> list[Path]:
-    """Env-file resolution order (./.env, then per-name, then shared default).
+    """Env-file resolution order (Feature 011, FR-001b): project level then user
+    level, each with a per-environment file and a shared default.
 
-    >>> [str(p) for p in env_file_candidates("acme", Path("/w"))][0]
-    '/w/.env'
+        <root>/.agent-container/<name>.env
+        <root>/.agent-container/.env
+        ~/.config/agent-container/<name>.env
+        ~/.config/agent-container/.env
+
+    Symmetric by design — the same filename means the same thing at both levels,
+    which is what makes the two levels legible as ONE layered configuration.
+
+    The bare `./.env` is deliberately NOT here. It is a shared ecosystem
+    convention (Compose, direnv, dotenv libraries all read it) and belongs to
+    whoever put it there; an agent-container env file goes in an agent-container
+    location, or is named explicitly with `-e`.
+
+    >>> [p.name for p in env_file_candidates("acme", Path("/nonexistent-xyz"))]
+    ['acme.env', '.env']
     """
-    return [cwd / ".env", CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
+    out: list[Path] = []
+    pcd = project_config_dir(cwd)
+    if pcd is not None:
+        out += [pcd / f"{name}.env", pcd / ".env"]
+    return [*out, CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
 
 
 def resolve_env_file(name: str) -> Path | None:
@@ -681,16 +699,23 @@ APIKEY_PROVIDER_RE = re.compile(r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$")
 def discover_apikey_files(name: str, cwd: Path | None = None) -> dict[str, Path]:
     """Discover per-provider model/API key FILES by convention (US2, T012).
 
-    Globs `agent-container.<name>.<provider>.key` (project-local, WINS) then
-    `<name>.<provider>.key` under the user config dir — one file per provider,
+    Globs `<name>.<provider>.key` under the USER config dir — one file per provider,
     <provider> lower-cased (e.g. anthropic, openai). Returns {provider: source
     path}, providers sorted for a deterministic order. Secret hygiene: existence
     only — the file's CONTENTS are never read here. Absent → {} so the env/`.env`
     delivery remains the layered fallback (`up <name>` with no key file unchanged).
     """
-    cwd = Path.cwd() if cwd is None else cwd
+    # Feature 011 FR-001f: plaintext credentials are USER-LEVEL ONLY. There is
+    # deliberately no project-local lookup and no `.agent-container/` equivalent:
+    # that directory travels with the repository, and Feature 008 settled that the
+    # repo holds a LOCATOR, never a value. Putting keys there would mean `git add
+    # .agent-container/` — the natural action, since it holds the spec — stages an
+    # API key, with _refuse_git_tracked_plaintext catching it only at deploy time,
+    # after the secret is already in history. A project that wants its credential
+    # referenced from the repo uses a locator source instead.
+    _ = cwd  # accepted for signature compatibility; project level is not consulted
     found: dict[str, Path] = {}
-    for base, prefix in ((cwd, f"agent-container.{name}."), (CONFIG_DIR, f"{name}.")):
+    for base, prefix in ((CONFIG_DIR, f"{name}."),):
         if not base.is_dir():
             continue
         for f in sorted(base.glob(f"{prefix}*.key")):
@@ -729,13 +754,15 @@ CANONICAL_MANIFEST: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 def canonical_config_dir(name: str, cwd: Path) -> Path | None:
-    """Resolve the operator-canonical config SOURCE dir by convention (US3),
-    project-local first — mirrors `.env`/sidecar/key-file discovery.
+    """Resolve the operator-canonical config SOURCE dir (Feature 011): project
+    config directory first, then user level — mirrors the env/sidecar chain.
 
     >>> canonical_config_dir("acme", Path("/nonexistent-xyz")) is None
     True
     """
-    for c in (cwd / f"agent-container.{name}.config", CONFIG_DIR / f"{name}.config"):
+    pcd = project_config_dir(cwd)
+    project = [pcd / f"{name}.config"] if pcd is not None else []
+    for c in (*project, CONFIG_DIR / f"{name}.config"):
         if c.is_dir():
             return c
     return None
@@ -1998,13 +2025,15 @@ SIDECAR_ALLOWED_TOPLEVEL = {"services", "version"}  # version: tolerated (compos
 
 
 def sidecar_override_candidates(name: str, cwd: Path) -> list[Path]:
-    """Discovery order, mirroring .env resolution (project-local first, then the
-    per-name user config).
+    """Discovery order, mirroring the env chain: project config directory first,
+    then the per-name user config (Feature 011).
 
-    >>> [p.name for p in sidecar_override_candidates("acme", Path("/w"))]
-    ['agent-container.acme.services.yaml', 'acme.services.yaml']
+    >>> [p.name for p in sidecar_override_candidates("acme", Path("/nonexistent-xyz"))]
+    ['acme.services.yaml']
     """
-    return [cwd / f"agent-container.{name}.services.yaml", CONFIG_DIR / f"{name}.services.yaml"]
+    pcd = project_config_dir(cwd)
+    project = [pcd / f"{name}.services.yaml"] if pcd is not None else []
+    return [*project, CONFIG_DIR / f"{name}.services.yaml"]
 
 
 def resolve_sidecar_override(name: str) -> Path | None:
@@ -4590,6 +4619,11 @@ INJECT_AAC_DIR = "/workspace/.agent-container"
 
 
 def find_project_root(start: Path | None = None) -> Path | None:
+    # NOTE (Feature 011): the per-environment resolvers defined EARLIER in this
+    # file (env_file_candidates, discover_apikey_files, canonical_config_dir,
+    # resolve_sidecar_override) call this via project_config_dir(). Python binds
+    # names at CALL time, not definition time, so the backwards reference is
+    # fine — verified, not assumed. Do not "fix" the ordering; nothing is broken.
     """Walk upward from `start` (cwd) to the nearest ancestor holding a
     `.agent-container/` directory; return it, or None (declarative model inert →
     today's imperative behavior, FR-004). Deterministic regardless of subdir."""
@@ -4598,6 +4632,22 @@ def find_project_root(start: Path | None = None) -> Path | None:
         if (d / PROJECT_MARKER).is_dir():
             return d
     return None
+
+
+def project_config_dir(cwd: Path | None = None) -> Path | None:
+    """The project config directory — `<project root>/.agent-container` — or None
+    when `cwd` is not inside a project (Feature 011, FR-001).
+
+    One helper rather than four copies of the same walk: every per-environment
+    resolver goes through here, so "where does a project keep its files" has a
+    single answer. Returns None rather than guessing, and each caller then falls
+    back to user-level configuration on its own terms.
+
+    >>> project_config_dir(Path("/definitely/not/a/project")) is None
+    True
+    """
+    root = find_project_root(cwd)
+    return None if root is None else root / PROJECT_MARKER
 
 
 def _spec_yaml_files(root: Path) -> list[Path]:
