@@ -181,14 +181,19 @@ running a non-interactive `login` would persist it — so instead the entrypoint
 
 ### Convention-discovered key files (no flags)
 
-Drop a per-provider key file next to your `.env` (or under
-`~/.config/agent-container/`); `up`/`redeploy` discover and stage it
-automatically — one file per provider:
+Drop a per-provider key file under `~/.config/agent-container/`; `up`/`redeploy`
+discover and stage it automatically — one file per provider:
 
 ```
-~/.config/agent-container/<name>.<provider>.key    →  ~/.config/agent-container/<name>.<provider>.key
-#   <provider> ∈ anthropic | openai | <provider>   (lower-case)
+~/.config/agent-container/<name>.<provider>.key
+#   <provider> ∈ anthropic | openai | …   (lower-case)
 ```
+
+**User level only** (Feature 011, FR-001f). There is deliberately no project-local
+equivalent: `.agent-container/` travels with the repository, and the repo holds a
+**locator, never a value** — so a key placed there would be staged by `git add`.
+To reference a credential *from* the repo, declare a locator source
+(`file`/`keychain`/`command`/`onepassword`/`bitwarden`) in the spec instead.
 
 ### Per-agent wiring (all ephemeral)
 
