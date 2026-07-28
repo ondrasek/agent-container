@@ -57,9 +57,9 @@ a project left in the old layout is refused with every offending file named.
 - [X] T013 [US1] Repoint `resolve_sidecar_override` (line ~2010) at `.agent-container/<name>.services.yaml`. Its doctest names both old paths and must be updated.
 - [X] T014 [US1] Make `-e/--env-file` repeatable on `up` (line ~5492) and `redeploy` (line ~5676): `list[Path]`, each validated to exist, threaded into `build_compose_model`'s `env_file`. **The compose model already emits a list** (`service["env_file"] = [str(env_file)]`, line ~2263) and Compose applies it in order with later winning — so ordering needs no logic of ours (research R2b). Widen the parameter rather than adding a second one.
 - [X] T015 [US1] Add the superseded-layout refusal to `bin/agent-container`: one check over the project root for `agent-container.<name>.*`, listing **every** offender with its destination, called from every command that resolves per-environment files. Include the conditional `./.env` case from FR-001c.
-- [ ] T016 [US1] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S2 (a consolidated project deploys), S3 (discovery from a subdirectory), S4 (refusal fires on a superseded credential; stays silent when an agent-container env resolves) and S4a (`-e` stacking, order, fail-fast, and **no value leaked into the generated artifact**).
+- [X] T016 [US1] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S2 (a consolidated project deploys), S3 (discovery from a subdirectory), S4 (refusal fires on a superseded credential; stays silent when an agent-container env resolves) and S4a (`-e` stacking, order, fail-fast, and **no value leaked into the generated artifact**).
 
-- [ ] T016a [US1] In `bin/tests/test_acceptance.py`, assert `-e` works when the host is **not** the default context, reusing the docker-context-as-remote pattern already used for `host env` (line ~1087): register a host on a non-default docker context and deploy with `-e <path outside the project>`. FR-001e's remote parity currently rests on a **docstring** claim — *"env_file is read client-side by compose"* (research R2b) — that nothing has run. That is the same shape as the `opencode run` exit-status assumption in Feature 010, which needed a real probe to get right; if compose ever resolved that path on the daemon instead, `-e` would silently break for every remote deployment.
+- [X] T016a [US1] In `bin/tests/test_acceptance.py`, assert `-e` works when the host is **not** the default context, reusing the docker-context-as-remote pattern already used for `host env` (line ~1087): register a host on a non-default docker context and deploy with `-e <path outside the project>`. FR-001e's remote parity currently rests on a **docstring** claim — *"env_file is read client-side by compose"* (research R2b) — that nothing has run. That is the same shape as the `opencode run` exit-status assumption in Feature 010, which needed a real probe to get right; if compose ever resolved that path on the daemon instead, `-e` would silently break for every remote deployment.
 
 **Checkpoint**: US1 alone is shippable — the project root is clean and the layering is legible.
 
@@ -82,7 +82,7 @@ the image sources; a tree without them fails clearly.
 - [X] T022 [P] [US2] Update `orchestration/compose.yaml` (`build.context`) and `orchestration/agent-container.container` to build from `image/`.
 - [X] T023 [P] [US2] Update the shell suites that locate the entrypoint under test — `bin/tests/test_entrypoint.sh`, `test_entrypoint_execution.sh`, `test_entrypoint_tmux_layout.sh` — and the shellcheck targets in `scripts/quality-gate.sh`.
 - [X] T024 [US2] Update the cross-file agreement test in `bin/tests/test_pure_logic.py`: it parses `entrypoint.sh` and `Dockerfile` **at the repo root** and will break on the move. That is the test working as intended — repoint it at `image/`.
-- [ ] T025 [US2] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S5: build local **and remote**, asserting the transferred context contains only `image/`. The remote case matters most — that context crosses the network to another daemon.
+- [X] T025 [US2] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S5: build local **and remote**, asserting the transferred context contains only `image/`. The remote case matters most — that context crosses the network to another daemon.
 
 ---
 
@@ -96,12 +96,12 @@ write it.
 **Depends on**: Phase 2. Independent of US1 and US2.
 
 - [X] T026 [P] [US3] In `bin/tests/test_compose.py`, assert the shell-env mount is `agent-container-<name>-shellenv:/home/dev/.agent-env` — **name unchanged, path changed** (contract C5). The identity lock from T002 must still pass.
-- [ ] T026a [P] [US3] In `bin/tests/test_agent_as_code.py`, pin the delivered-spec contract that FR-012 requires survive the rename: `INJECT_AAC_DIR == "/workspace/.agent-container"` and its **read-only** delivery. FR-012 has no other task — it is currently covered only incidentally, by pre-existing assertions reached through the full-suite run (T037). An FR with no test of its own is invisible the day someone decides the delivered spec should be renamed too.
+- [X] T026a [P] [US3] In `bin/tests/test_agent_as_code.py`, pin the delivered-spec contract that FR-012 requires survive the rename: `INJECT_AAC_DIR == "/workspace/.agent-container"` and its **read-only** delivery. FR-012 has no other task — it is currently covered only incidentally, by pre-existing assertions reached through the full-suite run (T037). An FR with no test of its own is invisible the day someone decides the delivered spec should be renamed too.
 - [X] T027 [US3] Update the shell-env mount in `all_volume_mounts` (`bin/agent-container` line ~382) and its doctest, which pins the full mount string.
 - [X] T028 [US3] In `image/Dockerfile`, create `/home/dev/.agent-env` **dev-owned** in the `mkdir -p` / `chown` / `chmod 0755` lists (line ~184) and update the two comments naming the old path. **Feature 010 proved this is mandatory, not defensive**: a volume mounted at a path the image does not create comes up `root:root` and rootless cannot write it — even under a dev-owned parent.
 - [X] T029 [US3] In `image/entrypoint.sh`, update `AGENT_CONTAINER_ENV_FILE` (line ~74), the `mkdir -p` (line ~77) and the block comment describing the persistent shell env.
 - [X] T030 [P] [US3] Update the shell-env mount in `orchestration/compose.yaml` and `orchestration/agent-container.container`.
-- [ ] T031 [US3] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S7: write to `~/.agent-env/env`, down, up, confirm it survived **and that `dev` can write the mount point**.
+- [X] T031 [US3] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S7: write to `~/.agent-env/env`, down, up, confirm it survived **and that `dev` can write the mount point**.
 
 ---
 

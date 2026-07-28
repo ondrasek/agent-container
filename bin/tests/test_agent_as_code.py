@@ -10,6 +10,8 @@ inert when no project). Requirement anchors named in the bodies.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 LOCAL_HOST = {"driver": "docker", "context": "", "address": "localhost"}
@@ -1128,3 +1130,19 @@ def test_delivery_ensures_trailing_newline_for_ssh_target(wiz, tmp_path, monkeyp
     _c, _e, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert ssh.push_key is not None
     assert ssh.push_key.read_text().endswith("-----END KEY-----\n")
+
+
+def test_delivered_spec_path_and_read_only_survive_feature_011(wiz):
+    """FR-012 (analysis C3). The delivered spec deliberately does NOT move.
+
+    `/workspace/.agent-container` SHOULD echo the project config name, because it
+    is literally that directory delivered read-only — unlike `~/.agent-container`,
+    which shared the name while being unrelated and was renamed. Pinned here so
+    that distinction is a decision on record rather than an accident someone
+    "tidies up" later, and so FR-012 has a test of its own rather than being
+    covered only incidentally by the full-suite run.
+    """
+    assert wiz.INJECT_AAC_DIR == "/workspace/.agent-container"
+    src = (Path(__file__).resolve().parents[1] / "agent-container").read_text()
+    marker = 'target.startswith(INJECT_AAC_DIR + "/")'
+    assert marker in src, "the delivered-spec containment check disappeared"
