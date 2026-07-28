@@ -680,6 +680,66 @@ def env_file_candidates(name: str, cwd: Path) -> list[Path]:
     return [*out, CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
 
 
+# Feature 011 FR-004/FR-005: the hard cut REFUSES, it does not ignore.
+#
+# Deleting the old lookup is only half the work. A deleted lookup is
+# indistinguishable, from the operator's side, from silently ignoring their file
+# — and the superseded set includes CREDENTIALS, so an ignored key means an agent
+# running unauthenticated while the operator believes one was injected
+# (Constitution III). Each superseded name is paired with where it now belongs.
+#
+# `<name>.<provider>.key` deliberately has NO project-local destination (FR-001f):
+# `.agent-container/` travels with the repository and Feature 008 settled that the
+# repo holds a locator, never a value.
+SUPERSEDED_SUFFIXES: tuple[tuple[str, str], ...] = (
+    (".env", ".agent-container/{name}.env"),
+    (".services.yaml", ".agent-container/{name}.services.yaml"),
+    (".config", ".agent-container/{name}.config/"),
+)
+
+
+def refuse_superseded_layout(name: str, root: Path | None = None) -> None:
+    """Refuse a project still using the pre-011 layout, naming every offender.
+
+    Silent when there is nothing to report — an operator with a clean project
+    must never see migration chatter.
+    """
+    root = Path.cwd() if root is None else root
+    offenders: list[str] = []
+    prefix = f"agent-container.{name}"
+
+    for suffix, dest in SUPERSEDED_SUFFIXES:
+        p = root / f"{prefix}{suffix}"
+        if p.exists():
+            offenders.append(f"  {p.name}  ->  {dest.format(name=name)}")
+    for p in sorted(root.glob(f"{prefix}.*.key")):
+        offenders.append(
+            f"  {p.name}  ->  {CONFIG_DIR}/{p.name.removeprefix('agent-container.')}"
+            "  (user level; or reference it with a credential locator)"
+        )
+
+    # The CONDITIONAL case (FR-001c). A bare ./.env belongs to whoever put it
+    # there — Compose, direnv, a framework — so refusing on it unconditionally
+    # would make the tool hostile to the directory it shares. But ignoring it
+    # when NOTHING else resolves would silently strand GH_TOKEN and provider
+    # keys. Refuse only in that second case.
+    bare = root / ".env"
+    resolves = any(c.is_file() for c in env_file_candidates(name, root))
+    if bare.is_file() and not resolves:
+        offenders.append(
+            f"  .env  ->  .agent-container/{name}.env  (or .agent-container/.env,"
+            " or name it explicitly with -e/--env-file)"
+        )
+
+    if offenders:
+        die(
+            "this project uses the pre-011 layout, which is no longer read:\n"
+            + "\n".join(offenders),
+            entity=name,
+            remedy="move each file to the path shown, then re-run",
+        )
+
+
 def _resolve_env_files(name: str, override: list[Path] | None) -> list[Path]:
     """The env files for this deployment (Feature 011 FR-001d).
 
@@ -3003,6 +3063,9 @@ def do_up(
             f"container {cname} exists but is not running on {host_name}. Run: agent-container down {name}{hflag}"
         )
 
+    # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
+    # never gets a half-configured environment built from files we no longer read.
+    refuse_superseded_layout(name)
     env_file = _resolve_env_files(name, env_file_override)
 
     # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
@@ -3248,6 +3311,9 @@ def do_redeploy(
     ensure_tunnel(host_rec)
     if container_name(name) not in host_container_names(host_rec, include_stopped=True):
         warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
+    # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
+    # never gets a half-configured environment built from files we no longer read.
+    refuse_superseded_layout(name)
     env_file = _resolve_env_files(name, env_file_override)
     clone_credential_precheck(spec, env_file, push_key)
     with deployment_lock(host_name, name):
