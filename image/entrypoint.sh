@@ -62,7 +62,9 @@ for opt in ANTHROPIC_API_KEY OPENAI_API_KEY; do
 done
 
 # --- 1b. Seed persistent shell-env template ---------------------------------
-# /home/dev/.agent-container lives on the per-container 'shellenv' named volume and is
+# /home/dev/.agent-env lives on the per-container 'shellenv' named volume and is
+# (Feature 011) named for what it IS — the persistent shell environment — rather
+# than sharing a name with the project config directory it has nothing to do with.
 # sourced into every interactive bash/zsh shell (see Dockerfile). On first boot
 # the volume is empty, so drop a commented template explaining its purpose.
 # Idempotent: never overwrite an existing file, and never echo its contents.
@@ -71,12 +73,12 @@ done
 # off-container test harness redirect this one path; production leaves it unset
 # so the default is byte-identical to the previous behavior.
 AGENT_CONTAINER_HOME="${AGENT_CONTAINER_HOME:-/home/dev}"
-AGENT_CONTAINER_ENV_FILE="${AGENT_CONTAINER_HOME}/.agent-container/env"
+AGENT_CONTAINER_ENV_FILE="${AGENT_CONTAINER_HOME}/.agent-env/env"
 if [[ ! -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
     log "seeding persistent shell-env template at ${AGENT_CONTAINER_ENV_FILE}"
-    mkdir -p "${AGENT_CONTAINER_HOME}/.agent-container"
+    mkdir -p "${AGENT_CONTAINER_HOME}/.agent-env"
     cat > "${AGENT_CONTAINER_ENV_FILE}" <<'EOF'
-# ~/.agent-container/env — persistent shell environment for this agent-container container.
+# ~/.agent-env/env — persistent shell environment for this agent-container container.
 #
 # This file lives on the per-container 'shellenv' named volume, so it survives
 # `agent-container down` / `agent-container up` and crashes (it is dropped only by `down --purge`).

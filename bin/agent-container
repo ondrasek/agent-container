@@ -390,7 +390,7 @@ def all_volume_mounts(name: str) -> list[str]:
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-env', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
     """
     return [
         f"{volume_name(name)}:/workspace",
@@ -399,7 +399,7 @@ def all_volume_mounts(name: str) -> list[str]:
         f"{pi_volume_name(name)}:/home/dev/.pi",
         f"{opencode_volume_name(name)}:/home/dev/.config/opencode",
         f"{opencode_data_volume_name(name)}:/home/dev/.local/share/opencode",
-        f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
+        f"{shellenv_volume_name(name)}:/home/dev/.agent-env",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
         f"{ssh_volume_name(name)}:/home/dev/.ssh",
     ]

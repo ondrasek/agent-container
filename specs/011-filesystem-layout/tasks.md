@@ -95,12 +95,12 @@ write it.
 
 **Depends on**: Phase 2. Independent of US1 and US2.
 
-- [ ] T026 [P] [US3] In `bin/tests/test_compose.py`, assert the shell-env mount is `agent-container-<name>-shellenv:/home/dev/.agent-env` — **name unchanged, path changed** (contract C5). The identity lock from T002 must still pass.
+- [X] T026 [P] [US3] In `bin/tests/test_compose.py`, assert the shell-env mount is `agent-container-<name>-shellenv:/home/dev/.agent-env` — **name unchanged, path changed** (contract C5). The identity lock from T002 must still pass.
 - [ ] T026a [P] [US3] In `bin/tests/test_agent_as_code.py`, pin the delivered-spec contract that FR-012 requires survive the rename: `INJECT_AAC_DIR == "/workspace/.agent-container"` and its **read-only** delivery. FR-012 has no other task — it is currently covered only incidentally, by pre-existing assertions reached through the full-suite run (T037). An FR with no test of its own is invisible the day someone decides the delivered spec should be renamed too.
-- [ ] T027 [US3] Update the shell-env mount in `all_volume_mounts` (`bin/agent-container` line ~382) and its doctest, which pins the full mount string.
-- [ ] T028 [US3] In `image/Dockerfile`, create `/home/dev/.agent-env` **dev-owned** in the `mkdir -p` / `chown` / `chmod 0755` lists (line ~184) and update the two comments naming the old path. **Feature 010 proved this is mandatory, not defensive**: a volume mounted at a path the image does not create comes up `root:root` and rootless cannot write it — even under a dev-owned parent.
-- [ ] T029 [US3] In `image/entrypoint.sh`, update `AGENT_CONTAINER_ENV_FILE` (line ~74), the `mkdir -p` (line ~77) and the block comment describing the persistent shell env.
-- [ ] T030 [P] [US3] Update the shell-env mount in `orchestration/compose.yaml` and `orchestration/agent-container.container`.
+- [X] T027 [US3] Update the shell-env mount in `all_volume_mounts` (`bin/agent-container` line ~382) and its doctest, which pins the full mount string.
+- [X] T028 [US3] In `image/Dockerfile`, create `/home/dev/.agent-env` **dev-owned** in the `mkdir -p` / `chown` / `chmod 0755` lists (line ~184) and update the two comments naming the old path. **Feature 010 proved this is mandatory, not defensive**: a volume mounted at a path the image does not create comes up `root:root` and rootless cannot write it — even under a dev-owned parent.
+- [X] T029 [US3] In `image/entrypoint.sh`, update `AGENT_CONTAINER_ENV_FILE` (line ~74), the `mkdir -p` (line ~77) and the block comment describing the persistent shell env.
+- [X] T030 [P] [US3] Update the shell-env mount in `orchestration/compose.yaml` and `orchestration/agent-container.container`.
 - [ ] T031 [US3] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S7: write to `~/.agent-env/env`, down, up, confirm it survived **and that `dev` can write the mount point**.
 
 ---

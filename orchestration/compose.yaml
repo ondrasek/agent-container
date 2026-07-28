@@ -19,7 +19,7 @@
 # Volume parity with the CLI: this template mounts the SAME nine per-container
 # named volumes that `agent-container up` mounts (workspace + the agent config /
 # shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
-# `codex login` / `opencode auth login`, `~/.agent-container/env`, `~/.config/tmux`,
+# `codex login` / `opencode auth login`, `~/.agent-env/env`, `~/.config/tmux`,
 # and the SSH identity (host key + authorized_keys) persist across `down`/`up` on
 # this path too. opencode has TWO volumes: it follows XDG and splits configuration
 # (~/.config/opencode) from credentials + session history (~/.local/share/opencode).
@@ -48,7 +48,7 @@ services:
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-pi:/home/dev/.pi"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-opencode:/home/dev/.config/opencode"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-opencode-data:/home/dev/.local/share/opencode"
-      - "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:/home/dev/.agent-container"
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:/home/dev/.agent-env"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:/home/dev/.config/tmux"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-ssh:/home/dev/.ssh"
     # unless-stopped: an always-on dev box should come back after a host reboot

@@ -127,3 +127,22 @@ def test_non_persistent_workspace_still_declares_both_opencode_volumes(wiz):
         assert wiz.volume_name("acme") not in m["volumes"]
         assert "agent-container-acme-opencode" in m["volumes"]
         assert "agent-container-acme-opencode-data" in m["volumes"]
+
+
+# --- Feature 011 US3: the shell-env mount point moves, the NAME does not -----
+
+
+def test_shellenv_mounts_at_agent_env_with_an_unchanged_name(wiz):
+    """FR-009 / contract C5. `~/.agent-container` was confusable with the project
+    config directory it has nothing to do with; `~/.agent-env` says what it is.
+
+    The volume NAME is untouched (Constitution IV), so an existing volume
+    reappears at the new path on recreate — contents are relocated, never
+    stranded. Asserting both halves in one place is the point: a change that
+    moved the name too would look identical from the mount string alone.
+    """
+    m = wiz.build_compose_model("acme", "/repo")
+    mounts = dict(x.split(":", 1) for x in m["services"]["agent"]["volumes"] if ":" in x)
+    assert mounts["agent-container-acme-shellenv"] == "/home/dev/.agent-env"
+    assert "agent-container-acme-shellenv" in m["volumes"]  # name unchanged
+    assert not any(v.endswith(":/home/dev/.agent-container") for v in mounts.values())
