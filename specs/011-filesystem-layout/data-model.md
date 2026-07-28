@@ -36,7 +36,7 @@ fallback** — the layering Claude Code and similar tools use.
 | Per-environment file | Project level (wins) | User level (fallback) |
 |---|---|---|
 | env | `.agent-container/<name>.env` | `~/.config/agent-container/<name>.env` |
-| credential | `.agent-container/<name>.<provider>.key` | `~/.config/agent-container/<name>.<provider>.key` |
+| credential | **none — excluded by FR-001f** | `~/.config/agent-container/<name>.<provider>.key` |
 | agent config | `.agent-container/<name>.config/` | `~/.config/agent-container/<name>.config/` |
 | sidecars | `.agent-container/<name>.services.yaml` | `~/.config/agent-container/<name>.services.yaml` |
 
@@ -45,9 +45,14 @@ fallback** — the layering Claude Code and similar tools use.
 obvious. Consolidation makes the prefix redundant, and dropping it is what makes the two levels
 legible as one configuration at two scopes.
 
-**Asymmetry, by design**: the **host registry** (`hosts.json`) exists only at user level. Hosts
-are a property of the operator's machine, not of a project. It has no project-level counterpart
-and this feature does not add one.
+**Two asymmetries, both deliberate**:
+
+- The **host registry** (`hosts.json`) exists only at user level — hosts are a property of the
+  operator's machine, not of a project.
+- **Plaintext credentials** exist only at user level (FR-001f). `.agent-container/` travels with
+  the repository, and Feature 008 settled that the repo holds a **locator, never a value**. A
+  project that wants its credential referenced from the repo uses a locator source
+  (`file`/`keychain`/`command`/`onepassword`/`bitwarden`); the value itself stays out.
 
 **The bare `./.env` is no longer read** (research R2). A `.env` in a project root belongs to
 whoever put it there; an agent-container env file goes in an agent-container location. Both
@@ -70,7 +75,7 @@ it: `agent-container up dev -e ~/.env`.
 | # | What | From | To | Risk |
 |---|---|---|---|---|
 | 1 | env file | `./agent-container.<name>.env`, `./.env` | `.agent-container/<name>.env` (+ `.agent-container/.env` default) | **conditional refusal** — a dropped `.env` strands `GH_TOKEN` and keys |
-| 2 | credential | `./agent-container.<name>.<provider>.key` | `.agent-container/<name>.<provider>.key` | **refusal must fire** — silently ignoring starts an unauthenticated agent |
+| 2 | credential | `./agent-container.<name>.<provider>.key` | **removed — no project-local replacement** (FR-001f) | **refusal must fire** — silently ignoring starts an unauthenticated agent |
 | 3 | agent config | `./agent-container.<name>.config/` | `.agent-container/<name>.config/` | low |
 | 4 | sidecars | `./agent-container.<name>.services.yaml` | `.agent-container/<name>.services.yaml` | low |
 | 5 | image sources | `./Dockerfile`, `./entrypoint.sh`, `./.dockerignore` | `image/` | **breaks the checkout marker** (R1) |
@@ -104,7 +109,7 @@ string** inside `all_volume_mounts` is expected to differ; every **name** must b
 | Superseded | Status |
 |---|---|
 | `./agent-container.<name>.env` | **refused**, naming the destination |
-| `./agent-container.<name>.<provider>.key` | **refused** — the load-bearing case |
+| `./agent-container.<name>.<provider>.key` | **refused** — the load-bearing case. The message names the **user-level** path and the locator sources, not a project-local destination: there isn't one (FR-001f) |
 | `./agent-container.<name>.config/` | **refused** |
 | `./agent-container.<name>.services.yaml` | **refused** |
 | `./Dockerfile`, `./entrypoint.sh` (as build inputs) | build fails, naming `image/` |

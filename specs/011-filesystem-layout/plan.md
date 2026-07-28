@@ -54,6 +54,9 @@ containers, CI-authoritative). The identity guarantee (SC-003) is already mechan
 - The new `~/.agent-env` mount point **must be pre-created dev-owned in the image** — Feature 010
   proved a volume mounted at an image-absent path comes up `root:root` and rootless cannot write
   it, even under a dev-owned parent.
+- **Plaintext credentials never enter `.agent-container/`** (research R2c) — that directory
+  travels with the repository, and Feature 008 settled that the repo holds a locator, never a
+  value. Project-local key discovery is deleted, not repointed.
 - The bare `./.env` is **no longer read** (research R2). Dropping it silently would strand an
   operator's `GH_TOKEN` and API keys, so it is refused **conditionally** — only when no
   agent-container env file resolves at all (R2a).
@@ -120,17 +123,20 @@ the `image/` move, the templates and the docs parallelise against it.
    in agent-container locations at both levels, and the chain becomes symmetric
    (`<name>.env` + `.env`, project then user). The conditional refusal (R2a) keeps the removal
    from silently stranding a token.
-3. **`-e/--env-file` becomes repeatable and stacks in order** (R2b) — the escape hatch that
+3. **Project-local plaintext key files are deleted, not moved** (R2c) — consolidating them
+   into the committed directory would have created a new way to commit a secret. Secret values
+   live at user level or behind a locator.
+4. **`-e/--env-file` becomes repeatable and stacks in order** (R2b) — the escape hatch that
    makes dropping the implicit `./.env` reasonable. The compose model already emits a list and
    Compose applies it in order, so ordering needs no logic of ours; and because Compose reads
    env files client-side, `-e ~/.env` works against a remote host.
-4. **The shell-env volume name does not change** (R3) — only its mount point. Existing contents
+5. **The shell-env volume name does not change** (R3) — only its mount point. Existing contents
    reappear at the new path rather than being stranded.
-5. **Pre-create `~/.agent-env` dev-owned in the image** (R3) — the Feature 010 trap, and it fails
+6. **Pre-create `~/.agent-env` dev-owned in the image** (R3) — the Feature 010 trap, and it fails
    only at runtime if missed.
-6. **The hard cut is two pieces of work, not one** (R5): delete the old lookup *and* add the
+7. **The hard cut is two pieces of work, not one** (R5): delete the old lookup *and* add the
    refusal. Deleting alone is indistinguishable from silently ignoring.
-7. **`/workspace/.agent-container` and `/run/agent-container` deliberately do not move** (R6).
+8. **`/workspace/.agent-container` and `/run/agent-container` deliberately do not move** (R6).
 
 ## Complexity Tracking
 

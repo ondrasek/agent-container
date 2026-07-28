@@ -115,6 +115,26 @@ Then confirm no value leaked into the generated artifact:
 grep -r "B=2" "$XDG_STATE_HOME/agent-container/"      # expect: no hits
 ```
 
+### S4b — Plaintext credentials are user-level only (C2b, FR-001f)
+
+```bash
+printf 'sk-ant-xxx' > .agent-container/dev.anthropic.key    # inside the committed directory
+agent-container up dev
+```
+
+**Expected**: the key is **not discovered**. `.agent-container/` travels with the repository and
+Feature 008 settled that the repo holds a locator, never a value — so the directory holds no
+secret values, and the tool does not teach operators to put one there.
+
+```bash
+rm .agent-container/dev.anthropic.key
+printf 'sk-ant-xxx' > ~/.config/agent-container/dev.anthropic.key
+agent-container up dev
+```
+
+**Expected**: discovered and injected, as before. Confirm it reaches the agent and appears on no
+volume.
+
 ### S5 — The build context contains only the image sources (US2, C4)
 
 ```bash

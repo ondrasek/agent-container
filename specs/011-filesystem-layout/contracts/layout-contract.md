@@ -30,7 +30,7 @@ Resolution order for every per-environment file is **project, then user**:
 | Kind | Filename |
 |---|---|
 | env | `<name>.env`, falling back to a shared `.env` at the same level |
-| credential | `<name>.<provider>.key` |
+| credential | `<name>.<provider>.key` — **user level only** (FR-001f) |
 | agent config | `<name>.config/` |
 | sidecars | `<name>.services.yaml` |
 
@@ -42,6 +42,18 @@ Full order: `.agent-container/<name>.env` → `.agent-container/.env` →
 `~/.config/agent-container/<name>.env` → `~/.config/agent-container/.env`.
 
 **The bare `./.env` is not in the chain.** It belongs to whoever put it there.
+
+### C2b. Plaintext credentials are user-level only
+
+| Given | When | Then |
+|---|---|---|
+| `~/.config/agent-container/<name>.anthropic.key` | `up` | discovered and injected, as today |
+| `.agent-container/<name>.anthropic.key` | `up` | **not discovered** — the project config directory holds locators and non-secret config, never secret values |
+| `./agent-container.<name>.anthropic.key` (old layout) | `up` | **refused**, naming the **user-level** path and the locator sources — there is no project-local destination to name |
+
+The directory travels with the repository; Feature 008 settled that the repo holds a locator,
+never a value. Consolidating plaintext keys into it would have moved secrets deeper into the
+repo, so they are removed instead.
 
 ### C2a. Explicit env files (`-e`, repeatable)
 

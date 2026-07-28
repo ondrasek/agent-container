@@ -111,6 +111,35 @@ Naming files is a statement that the operator is in control; silently merging di
 underneath would make the effective environment depend on directory contents the operator was
 trying to bypass.
 
+### R2c — Project-local plaintext credentials are removed, not relocated
+
+`discover_apikey_files` (line ~681) globs `agent-container.<name>.<provider>.key` project-local
+**first**, then `<name>.<provider>.key` under the user config dir. The project-local half is a
+plaintext **value** living in the repository.
+
+Feature 008 settled the principle — *"the repo stores only a locator, never a value"*, and
+`docs/agent-as-code.md` states each credential entry is *"a reference to a source, never a
+value"*. `_refuse_git_tracked_plaintext` exists as the backstop for when that principle is
+violated by accident.
+
+**The consolidation would have made that accident easier, not harder.** `.agent-container/` is
+by definition the directory that travels with the repository; moving plaintext keys into it
+means `git add .agent-container/` — the natural action, since the directory holds the spec —
+stages an API key. The existing refusal fires at *deploy* time, by which point the secret is
+already in git history.
+
+**Decision (operator, 2026-07-28)**: drop project-local key discovery entirely, with **no
+replacement inside `.agent-container/`**. Secret values come from user level or a locator.
+
+**This is less work, not more**: the project-local branch of the two-element loop in
+`discover_apikey_files` is deleted rather than repointed, and the `.gitignore` mitigation the
+analysis was about to propose becomes unnecessary. The layout then *expresses* Feature 008's
+principle instead of quietly undercutting it.
+
+**Cost, accepted**: no per-project plaintext key files. Environment names are unique, so the
+user-level `<name>.<provider>.key` is already effectively per-project, and anyone wanting the
+credential referenced from the repo uses a locator source.
+
 ---
 
 ## R3 — The shell-env rename moves a mount point, never an identity

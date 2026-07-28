@@ -76,6 +76,15 @@ obvious home**, without changing what the tool *does*.
   a conventional thing for this tool to claim — a `.env` in a project root belongs to whoever
   put it there. An operator who wants an agent-container env file puts it in an
   agent-container location, at project or user level.
+- Q: Should project-local plaintext credential files (`agent-container.<name>.<provider>.key`)
+  move into `.agent-container/`? → A: **No — drop them entirely.** Feature 008 settled that the
+  repo holds a **locator, never a value**, and `.agent-container/` is by definition the
+  directory that *travels with the repository*. Consolidating plaintext keys into it would
+  move secret values deeper into the repo, against that decision. Project-local key discovery
+  is removed with the rest of the old layout, with **no replacement inside
+  `.agent-container/`**. Secret values live at **user level**
+  (`~/.config/agent-container/<name>.<provider>.key`, already the existing fallback) or behind
+  a locator (`file`/`keychain`/`command`/`onepassword`/`bitwarden`).
 - Q: How does an operator use an env file that lives somewhere else entirely (e.g. `~/.env`)?
   → A: **Explicitly, via a repeatable `-e`/`--env-file` option.** Multiple occurrences
   **stack in order of occurrence**. This is the escape hatch that makes dropping the implicit
@@ -189,10 +198,18 @@ confirm the documentation shows one authoritative map with no stale names.
 
 ### Functional Requirements
 
-- **FR-001**: All per-environment files a project owns (spec, environment variables,
-  credential files, sidecar overrides) MUST live under the **project config directory
+- **FR-001**: All per-environment files a project owns (spec, environment variables, sidecar
+  overrides, agent config) MUST live under the **project config directory
   `.agent-container/`** — which already holds the declarative spec — and it MUST be the only
-  tool-owned entry in the **project root**.
+  tool-owned entry in the **project root**. **Plaintext credential files are excluded** — see
+  FR-001f.
+- **FR-001f**: Project-local plaintext credential discovery
+  (`agent-container.<name>.<provider>.key`) MUST be **removed with no replacement inside
+  `.agent-container/`**. That directory travels with the repository, and Feature 008 settled
+  that the repo holds a **locator, never a value**; consolidating plaintext keys into it would
+  move secrets deeper into the repo rather than out of it. Secret values MUST come from **user
+  level** (`~/.config/agent-container/<name>.<provider>.key`) or from a **locator** source.
+  The project config directory therefore holds only locators and non-secret configuration.
 - **FR-001b**: The tool MUST **stop reading the bare `./.env`** in the project root. Env-file
   resolution MUST be **symmetric across the two levels** — a per-environment file and a shared
   default at each: `.agent-container/<name>.env` → `.agent-container/.env` →
@@ -252,7 +269,9 @@ confirm the documentation shows one authoritative map with no stale names.
 - **FR-012**: The declarative spec's **read-only in-container delivery** guarantee MUST be
   preserved unchanged through any rename.
 - **FR-013**: No credential value may be exposed by the reorganization; files that were
-  private MUST remain private, and a git-tracked plaintext secret MUST remain refused.
+  private MUST remain private, and a git-tracked plaintext secret MUST remain refused. The
+  reorganization MUST NOT introduce a **new** way to commit a secret: this is why FR-001f
+  keeps plaintext keys out of the directory that travels with the repository.
 - **FR-014**: Exactly **one authoritative map** of the layout MUST exist in the
   documentation, with no superseded name left anywhere.
 - **FR-015**: The layout MUST be **location-independent** — nothing may depend on the
