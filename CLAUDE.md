@@ -84,20 +84,21 @@ Don't bake host-specific orchestration into the image.
   dep at build time — agents never `apt install` at runtime.** Add packages to the `Dockerfile`.
 - Treat **commit-and-push** as a property of the agent configuration, not something enforced by
   git hooks alone (hooks can be bypassed).
-- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of truth
-  for the fast checks (ruff check+format · ty · bandit `-ll` · vulture · xenon rank B/CC≤10 ·
-  refurb · `--self-test` · hermetic pytest · shell suites). The local Stop hook runs it and feeds
-  failures back (`exit 2`); the CI `quality-gate` job runs the *same* script as a hard gate. It
-  **excludes** the slow acceptance tier — that is CI-authoritative (`pytest -m acceptance
+- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of
+  truth for the fast checks (ruff check+format · ty · bandit `-ll` · vulture · xenon rank B/CC≤10
+  · refurb · `--self-test` · hermetic pytest · shell suites). The local Stop hook runs it
+  (`exit 2` feeds failures back); the CI `quality-gate` job runs the *same* script as a hard
+  gate. It **excludes** the slow acceptance tier — CI-authoritative (`pytest -m acceptance
   bin/tests`; on macOS+Lima the work dir must be Lima-shared). A gate failure blocks the release.
 - **Run the full suite, not just your new tests.** Changing a shared contract is exactly when a
   pre-existing test still pins the old shape.
 - **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: a
-  local `commit-msg` hook (`.githooks/`, `git config core.hooksPath .githooks`, run once per
-  clone) running `cz check`; the `commits` CI job; and a GitHub ruleset on `main`
-  (`.github/conventional-commits-ruleset.json`). Types: `feat`/`fix`/`docs`/`style`/`refactor`/
-  `perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING CHANGE`). `--no-verify` bypasses
-  the local hook only.
+  local `commit-msg` hook (`.githooks/`, `git config core.hooksPath .githooks`, once per clone)
+  running `cz check`; the `commits` CI job; and a GitHub ruleset on `main`. Types: `feat`/`fix`/
+  `docs`/`style`/`refactor`/`perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING
+  CHANGE`). `--no-verify` bypasses the local hook only.
+- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, plus one proving
+  that check can fail.
 - When proposing a tool or dependency, justify it against the constraints above — especially
   "not VSCode-locked" and Constitution VI (least dependencies).
 - **Keep this file under 2000 tokens.** It is loaded every session. New feature detail belongs in
