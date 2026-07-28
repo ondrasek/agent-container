@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project intent
 
@@ -82,29 +82,30 @@ Don't bake host-specific orchestration into the image.
 
 - **Rootless by decision**: no `sudo`/root at runtime, sshd as `dev` on 2222. **Bake every system
   dep at build time — agents never `apt install` at runtime.** Add packages to the `Dockerfile`.
-- Treat **commit-and-push** as a property of the agent configuration, not something enforced by
-  git hooks alone (hooks can be bypassed).
-- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of truth
-  for the fast checks (ruff check+format · ty · bandit `-ll` · vulture · xenon rank B/CC≤10 ·
-  refurb · `--self-test` · hermetic pytest · shell suites). The local Stop hook runs it and feeds
-  failures back (`exit 2`); the CI `quality-gate` job runs the *same* script as a hard gate. It
-  **excludes** the slow acceptance tier — that is CI-authoritative (`pytest -m acceptance
-  bin/tests`; on macOS+Lima the work dir must be Lima-shared). A gate failure blocks the release.
-- **Run the full suite, not just your new tests.** Changing a shared contract is exactly when a
+- Treat **commit-and-push** as a property of the agent config, not something enforced by git
+  hooks alone (they can be bypassed).
+- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of
+  truth for the fast checks (ruff check+format · ty · bandit `-ll` · vulture · xenon B/CC≤10 ·
+  refurb · `--self-test` · pytest · shell suites). The local Stop hook runs it (`exit 2` feeds
+  failures back); CI's `quality-gate` job runs the *same* script as a hard gate. It **excludes**
+  the acceptance tier — CI-authoritative (`pytest -m acceptance bin/tests`; on macOS+Lima the
+  work dir must be Lima-shared). A gate failure blocks the release.
+- **Run the full suite, not just your new tests** — changing a shared contract is exactly when a
   pre-existing test still pins the old shape.
 - **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: a
-  local `commit-msg` hook (`.githooks/`, `git config core.hooksPath .githooks`, run once per
-  clone) running `cz check`; the `commits` CI job; and a GitHub ruleset on `main`
-  (`.github/conventional-commits-ruleset.json`). Types: `feat`/`fix`/`docs`/`style`/`refactor`/
-  `perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING CHANGE`). `--no-verify` bypasses
-  the local hook only.
-- When proposing a tool or dependency, justify it against the constraints above — especially
-  "not VSCode-locked" and Constitution VI (least dependencies).
+  local `commit-msg` hook (`.githooks/`, `git config core.hooksPath .githooks`, once per clone)
+  running `cz check`; the `commits` CI job; and a GitHub ruleset on `main`. Types: `feat`/`fix`/
+  `docs`/`style`/`refactor`/`perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING
+  CHANGE`). `--no-verify` bypasses the local hook only.
+- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, plus one proving that
+  check can fail.
+- Justify any new tool or dependency against the constraints above — especially "not
+  VSCode-locked" and Constitution VI.
 - **Keep this file under 2000 tokens.** It is loaded every session. New feature detail belongs in
   `docs/` and `specs/`, with at most a one-line invariant here.
 
 ## Out of scope (don't add unless asked)
 
-- IDE integrations beyond plain SSH/tmux/nvim.
+- IDE integrations beyond SSH/tmux/nvim.
 - Multi-user / multi-tenant access controls — single operator (the user) is assumed.
-- Kubernetes manifests — the target is a single VPS running a container runtime, not a cluster.
+- Kubernetes manifests — the target is a single VPS, not a cluster.

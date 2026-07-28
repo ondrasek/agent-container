@@ -217,6 +217,60 @@ def test_script_fatal_exits_one_via_uv(tmp_path):
     assert "Traceback" not in proc.stderr
 
 
+def _short_flag_offenders(wiz) -> list[str]:
+    """Every (command, param) whose option declares a short flag but no long one."""
+    import inspect
+
+    commands = list(wiz.app.registered_commands)
+    for g in wiz.app.registered_groups:  # a sub-app's own commands count too
+        commands += list(g.typer_instance.registered_commands)
+
+    offenders: list[str] = []
+    for cmd in commands:
+        cb = cmd.callback
+        if cb is None:
+            continue
+        for pname, param in inspect.signature(cb).parameters.items():
+            decls = getattr(param.default, "param_decls", None) or ()
+            shorts = [d for d in decls if re.fullmatch(r"-[a-zA-Z]", d)]
+            longs = [d for d in decls if d.startswith("--")]
+            if shorts and not longs:
+                offenders.append(f"{cmd.name or cb.__name__}:{pname} declares {shorts}")
+    return offenders
+
+
+def test_every_short_flag_has_a_long_form(wiz):
+    """Project convention: a short flag MUST always be accompanied by a long one.
+
+    Short flags are scarce, collide easily and read as noise in scripts and docs;
+    the long form is the name, the short one is a convenience. Enforced here so it
+    stays true as commands are added — the same treatment the supported-agent and
+    command lists get, rather than relying on reviewer memory.
+    """
+    assert not (o := _short_flag_offenders(wiz)), (
+        "short flags with no long form:\n  " + "\n  ".join(o)
+    )
+
+
+def test_the_short_flag_check_actually_catches_a_violation(wiz, monkeypatch):
+    """The convention test above passes today because the codebase complies. This
+    proves it would FAIL if it stopped complying — a passing test that cannot fail
+    is worse than no test, and this project has been bitten by exactly that."""
+    import typer
+
+    @wiz.app.command("temp-violator")
+    def _violator(bad: bool = typer.Option(False, "-Z", help="short only, no long form")):
+        pass
+
+    try:
+        offenders = _short_flag_offenders(wiz)
+        assert any("-Z" in o for o in offenders), f"the check missed a violation: {offenders}"
+    finally:
+        wiz.app.registered_commands[:] = [
+            c for c in wiz.app.registered_commands if c.name != "temp-violator"
+        ]
+
+
 # --- Feature 011: repeatable -e/--env-file (FR-001d, contract C2a) -----------
 
 
