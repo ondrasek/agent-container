@@ -33,7 +33,7 @@
 services:
   agent-container:
     build:
-      context: ../
+      context: ../image
       dockerfile: Dockerfile
     image: localhost/agent-container:latest
     container_name: "agent-container-${AGENT_CONTAINER_NAME:-default}"

@@ -272,3 +272,16 @@ def test_env_file_outside_the_project_is_usable(wiz, tmp_path, monkeypatch):
     (root / ".agent-container").mkdir(parents=True)
     monkeypatch.chdir(root)
     assert wiz._resolve_env_files("acme", [outside]) == [outside]
+
+
+def test_build_without_image_sources_fails_actionably(wiz, tmp_path, monkeypatch):
+    """FR-008 / contract C4. A tree that is not a checkout must say what was
+    expected and where — never a traceback, and never a bare "no checkout" while
+    the operator is standing inside one (research R1)."""
+    not_a_checkout = tmp_path / "elsewhere"
+    not_a_checkout.mkdir()
+    monkeypatch.setenv("AGENT_CONTAINER_REPO", str(not_a_checkout))
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.do_build("x:y")
+    msg = str(ei.value)
+    assert "image/Dockerfile" in msg, f"the message must name what is missing: {msg}"

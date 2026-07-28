@@ -428,7 +428,7 @@ def _canonical_agents(wiz) -> set[str]:
 
 def test_entrypoint_dispatch_matches_canonical_agent_list(wiz):
     """FR-002: entrypoint.sh's headless dispatch covers exactly AGENTS."""
-    body = (_ROOT / "entrypoint.sh").read_text()
+    body = (_ROOT / "image" / "entrypoint.sh").read_text()
     block = body.split("run_headless_agent()", 1)[1].split("\n}", 1)[0]
     arms = set(re.findall(r"^\s*([a-z][a-z0-9-]*)\)\s*exec ", block, re.M))
     assert arms == _canonical_agents(wiz), (
@@ -439,7 +439,7 @@ def test_entrypoint_dispatch_matches_canonical_agent_list(wiz):
 
 def test_dockerfile_installs_exactly_the_canonical_agents(wiz):
     """FR-002/FR-003: every agent is baked, and nothing extra is."""
-    body = (_ROOT / "Dockerfile").read_text()
+    body = (_ROOT / "image" / "Dockerfile").read_text()
     pkgs = set(re.findall(r"npm i -g (?:--ignore-scripts )?(\S+)", body))
     unmapped = pkgs - set(_NPM_PACKAGE_TO_AGENT)
     assert not unmapped, (

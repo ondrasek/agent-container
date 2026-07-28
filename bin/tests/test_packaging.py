@@ -131,11 +131,12 @@ def test_main_guard_routes_through_cli():
 
 
 def test_find_repo_root_honours_agent_container_repo(wiz, monkeypatch, tmp_path):
-    # AGENT_CONTAINER_REPO wins when it satisfies the checkout marker (Dockerfile +
-    # completions/agent-container.bash — the repo-specific sentinel).
+    # AGENT_CONTAINER_REPO wins when it satisfies the checkout marker (Feature 011:
+    # image/Dockerfile + completions/agent-container.bash — the repo-specific sentinel).
     checkout = tmp_path / "fake-checkout"
     (checkout / "completions").mkdir(parents=True)
-    (checkout / "Dockerfile").write_text("FROM scratch\n")
+    (checkout / "image").mkdir()
+    (checkout / "image" / "Dockerfile").write_text("FROM scratch\n")
     (checkout / "completions" / "agent-container.bash").write_text("# complete\n")
     monkeypatch.setenv("AGENT_CONTAINER_REPO", str(checkout))
     assert wiz._find_repo_root() == checkout.resolve()
@@ -202,8 +203,8 @@ def test_completion_script_reads_from_checkout(wiz):
 # allow-lists only what the build consumes, so secrets cannot ride along
 # (Constitution III). These guards keep it that way.
 
-DOCKERIGNORE = REPO_ROOT / ".dockerignore"
-DOCKERFILE = REPO_ROOT / "Dockerfile"
+DOCKERIGNORE = REPO_ROOT / "image" / ".dockerignore"
+DOCKERFILE = REPO_ROOT / "image" / "Dockerfile"
 
 
 def _dockerignore_rules() -> list[str]:
@@ -250,3 +251,37 @@ def test_dockerignore_excludes_operator_secret_conventions():
     allowed = {r.lstrip("!") for r in _dockerignore_rules() if r.startswith("!")}
     for pattern in (".env", "agent-container.*.key", "*.pem", ".git"):
         assert pattern not in allowed, f"{pattern} must never be in the build context"
+
+
+# --- Feature 011: the checkout marker follows the image sources --------------
+
+
+def test_checkout_marker_requires_image_dockerfile(wiz, tmp_path):
+    """T020, research R1 — the highest-risk edit in Feature 011.
+
+    `REPO_ROOT` resolves at IMPORT time, before `Fatal`/`die` exist, so a wrong
+    marker cannot report itself: it degrades to "no checkout reachable", and
+    `build` then complains about a missing checkout while standing inside one.
+    A root-level Dockerfile is no longer the marker; `image/Dockerfile` is.
+    """
+    old = tmp_path / "old-layout"
+    (old / "completions").mkdir(parents=True)
+    (old / "Dockerfile").write_text("FROM scratch\n")  # pre-011 position
+    (old / "completions" / "agent-container.bash").write_text("# complete\n")
+    assert not wiz._is_repo_checkout(old), "a root Dockerfile must no longer mark a checkout"
+
+    new = tmp_path / "new-layout"
+    (new / "completions").mkdir(parents=True)
+    (new / "image").mkdir()
+    (new / "image" / "Dockerfile").write_text("FROM scratch\n")
+    (new / "completions" / "agent-container.bash").write_text("# complete\n")
+    assert wiz._is_repo_checkout(new)
+
+
+def test_checkout_marker_still_needs_the_completion_script(wiz, tmp_path):
+    """The pair, not either half: `image/Dockerfile` alone is common to unrelated
+    trees, which is why the completion script is in the marker at all."""
+    part = tmp_path / "partial"
+    (part / "image").mkdir(parents=True)
+    (part / "image" / "Dockerfile").write_text("FROM scratch\n")
+    assert not wiz._is_repo_checkout(part)

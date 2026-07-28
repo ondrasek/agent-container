@@ -80,15 +80,19 @@ DEFAULT_HOST = "local"
 def _is_repo_checkout(base: Path) -> bool:
     """Best-effort test that `base` is an agent-container checkout.
 
-    Keyed on `completions/agent-container.bash` (plus a Dockerfile for the build
-    context): a repo-specific sentinel rather than the generic `Dockerfile` +
-    `completions/` dir pair, which is common to unrelated trees. Requiring the
+    Keyed on `completions/agent-container.bash` (plus `image/Dockerfile` for the
+    build context): a repo-specific sentinel rather than the generic `Dockerfile`
+    + `completions/` dir pair, which is common to unrelated trees. Feature 011
+    moved the image sources into `image/`, which makes the marker MORE specific,
+    not less. Note this runs at IMPORT time, before Fatal/die exist — a wrong
+    marker cannot report itself, it just degrades to "no checkout reachable".
+    Requiring the
     exact file _completion_script reads (bin/agent-container: REPO_ROOT/completions/
     agent-container.<shell>) also makes the marker and that consumed path the same
     invariant — a recognized checkout can never then serve stale package data.
     This is a heuristic, not a guaranteed false-positive-free identifier.
     """
-    return (base / "Dockerfile").is_file() and (
+    return (base / "image" / "Dockerfile").is_file() and (
         base / "completions" / "agent-container.bash"
     ).is_file()
 
@@ -2464,7 +2468,7 @@ def do_build(tag: str, context: Path | None = None) -> None:
             if not _is_repo_checkout(base):
                 die(
                     f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout "
-                    "(missing Dockerfile/completions/agent-container.bash)"
+                    "(missing image/Dockerfile or completions/agent-container.bash)"
                 )
             ctx = base
         else:
@@ -2474,6 +2478,12 @@ def do_build(tag: str, context: Path | None = None) -> None:
             "no repo checkout for the docker build context; run from a checkout, "
             "set AGENT_CONTAINER_REPO=<checkout>, or pass --context <dir>"
         )
+    # Feature 011 FR-006/FR-007: the context is `image/`, not the checkout root.
+    # Narrow BY CONSTRUCTION — the directory boundary is the guarantee, rather
+    # than a .dockerignore allowlist that must be maintained in step with the
+    # Dockerfile. This matters most for a REMOTE host, where the context crosses
+    # the network to another daemon.
+    ctx = ctx / "image"
     rt = detect_runtime()
     log(f"building image '{tag}' with {rt} from {ctx}")
     # Inherited stdio: layer progress must stream, never capture.
@@ -2483,17 +2493,24 @@ def do_build(tag: str, context: Path | None = None) -> None:
 
 
 def resolve_build_context() -> Path:
-    """The repo checkout used as the compose build context (image builds on the
-    host). Same resolution as do_build (AGENT_CONTAINER_REPO -> REPO_ROOT); dies
-    actionably when no checkout is reachable (e.g. a bare PyPI install)."""
+    """The compose build context — `<checkout>/image` (Feature 011 FR-006/FR-007).
+
+    The context is the image directory, not the checkout: narrow BY CONSTRUCTION
+    rather than by a .dockerignore allowlist maintained in step with the
+    Dockerfile. The whole context travels to the target daemon, which may be
+    REMOTE, so the boundary is a security property and not tidiness.
+
+    Same resolution as do_build (AGENT_CONTAINER_REPO -> REPO_ROOT); dies
+    actionably when no checkout is reachable (e.g. a bare PyPI install).
+    """
     env = os.environ.get("AGENT_CONTAINER_REPO")
     if env:
         base = Path(env).expanduser().resolve()
         if not _is_repo_checkout(base):
             die(f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout")
-        return base
+        return base / "image"
     if REPO_ROOT is not None:
-        return REPO_ROOT
+        return REPO_ROOT / "image"
     die(
         "no repo checkout for the compose build context; run from a checkout "
         "or set AGENT_CONTAINER_REPO=<checkout>"

@@ -589,7 +589,7 @@ def test_entrypoint_gives_opencode_no_home_redirect(wiz):
     their volume; opencode never writes an env-supplied key to its auth store
     (verified against the real binary), so a redirect would add machinery and
     exposure surface, not remove it."""
-    body = (Path(__file__).resolve().parents[2] / "entrypoint.sh").read_text()
+    body = (Path(__file__).resolve().parents[2] / "image" / "entrypoint.sh").read_text()
     assert "CODEX_HOME" in body and "PI_CODING_AGENT_DIR" in body  # the two that DO redirect
     assert "OPENCODE_CONFIG_DIR" not in body
     assert "OPENCODE_CONFIG" not in body

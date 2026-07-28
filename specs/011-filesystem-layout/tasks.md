@@ -74,14 +74,14 @@ the image sources; a tree without them fails clearly.
 
 **Depends on**: Phase 2 only. Independent of US1 and US3.
 
-- [ ] T017 [P] [US2] In `bin/tests/test_packaging.py`, update the fake-checkout fixture (line ~139) to create `image/Dockerfile`, and assert `_is_repo_checkout` accepts `image/Dockerfile` + `completions/agent-container.bash` and **rejects** a tree with only a root `Dockerfile`.
-- [ ] T018 [P] [US2] In `bin/tests/test_cli.py`, assert `build` against a tree with no `image/Dockerfile` fails naming what was expected and where (FR-008, contract C4) — not a traceback, and not a "no checkout" message while inside one.
-- [ ] T019 [US2] `git mv Dockerfile entrypoint.sh .dockerignore image/`.
-- [ ] T020 [US2] **The high-risk edit.** Update `_is_repo_checkout` in `bin/agent-container` (line ~80) to key on `image/Dockerfile`, update its docstring (which explains *why* the pair was chosen), and update the `AGENT_CONTAINER_REPO` `die` text (line ~2353) that names `"missing Dockerfile/completions/agent-container.bash"`. `REPO_ROOT` resolves **at import, before `die` exists** — a wrong marker cannot report itself and degrades to "no checkout reachable" (research R1).
-- [ ] T021 [US2] Point the build context at `image/`: `do_build` (line ~2342) and the `"build": {"context": …}` emission in `build_compose_model` (line ~2255).
-- [ ] T022 [P] [US2] Update `orchestration/compose.yaml` (`build.context`) and `orchestration/agent-container.container` to build from `image/`.
-- [ ] T023 [P] [US2] Update the shell suites that locate the entrypoint under test — `bin/tests/test_entrypoint.sh`, `test_entrypoint_execution.sh`, `test_entrypoint_tmux_layout.sh` — and the shellcheck targets in `scripts/quality-gate.sh`.
-- [ ] T024 [US2] Update the cross-file agreement test in `bin/tests/test_pure_logic.py`: it parses `entrypoint.sh` and `Dockerfile` **at the repo root** and will break on the move. That is the test working as intended — repoint it at `image/`.
+- [X] T017 [P] [US2] In `bin/tests/test_packaging.py`, update the fake-checkout fixture (line ~139) to create `image/Dockerfile`, and assert `_is_repo_checkout` accepts `image/Dockerfile` + `completions/agent-container.bash` and **rejects** a tree with only a root `Dockerfile`.
+- [X] T018 [P] [US2] In `bin/tests/test_cli.py`, assert `build` against a tree with no `image/Dockerfile` fails naming what was expected and where (FR-008, contract C4) — not a traceback, and not a "no checkout" message while inside one.
+- [X] T019 [US2] `git mv Dockerfile entrypoint.sh .dockerignore image/`.
+- [X] T020 [US2] **The high-risk edit.** Update `_is_repo_checkout` in `bin/agent-container` (line ~80) to key on `image/Dockerfile`, update its docstring (which explains *why* the pair was chosen), and update the `AGENT_CONTAINER_REPO` `die` text (line ~2353) that names `"missing Dockerfile/completions/agent-container.bash"`. `REPO_ROOT` resolves **at import, before `die` exists** — a wrong marker cannot report itself and degrades to "no checkout reachable" (research R1).
+- [X] T021 [US2] Point the build context at `image/`: `do_build` (line ~2342) and the `"build": {"context": …}` emission in `build_compose_model` (line ~2255).
+- [X] T022 [P] [US2] Update `orchestration/compose.yaml` (`build.context`) and `orchestration/agent-container.container` to build from `image/`.
+- [X] T023 [P] [US2] Update the shell suites that locate the entrypoint under test — `bin/tests/test_entrypoint.sh`, `test_entrypoint_execution.sh`, `test_entrypoint_tmux_layout.sh` — and the shellcheck targets in `scripts/quality-gate.sh`.
+- [X] T024 [US2] Update the cross-file agreement test in `bin/tests/test_pure_logic.py`: it parses `entrypoint.sh` and `Dockerfile` **at the repo root** and will break on the move. That is the test working as intended — repoint it at `image/`.
 - [ ] T025 [US2] Add acceptance coverage in `bin/tests/test_acceptance.py` for quickstart S5: build local **and remote**, asserting the transferred context contains only `image/`. The remote case matters most — that context crosses the network to another daemon.
 
 ---
