@@ -146,20 +146,29 @@ def test_do_up_threads_push_material(wiz, monkeypatch, tmp_path):
 # --- US2: model/API credential FILE discovery + ephemeral staging (T011) ------
 
 
-def test_discover_apikey_files_project_local_wins(wiz, tmp_path):
-    """Discovery order (M2): `./agent-container.<name>.<provider>.key` (project-local)
-    wins over `~/.config/agent-container/<name>.<provider>.key`."""
-    proj = tmp_path / "agent-container.acme.anthropic.key"
-    proj.write_text("PROJECT")
+def test_plaintext_credentials_are_user_level_only(wiz, tmp_path):
+    """Feature 011 FR-001f / contract C2b. Project-local plaintext keys are GONE,
+    with no `.agent-container/` replacement.
+
+    `.agent-container/` travels with the repository and Feature 008 settled that
+    the repo holds a locator, never a value. Keeping keys out of it means
+    `git add .agent-container/` — the natural action, since it holds the spec —
+    cannot stage an API key. Neither the old project-root name nor a project
+    config placement may be discovered.
+    """
+    (tmp_path / ".agent-container").mkdir()
+    (tmp_path / "agent-container.acme.anthropic.key").write_text("OLD-LAYOUT")
+    (tmp_path / ".agent-container" / "acme.anthropic.key").write_text("IN-PROJECT-CONFIG")
     wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     (wiz.CONFIG_DIR / "acme.anthropic.key").write_text("USERCONF")
     found = wiz.discover_apikey_files("acme", cwd=tmp_path)
-    assert found == {"anthropic": proj}  # project-local path wins
+    assert found == {"anthropic": wiz.CONFIG_DIR / "acme.anthropic.key"}
 
 
 def test_discover_apikey_files_multiple_providers_lowercased(wiz, tmp_path):
-    (tmp_path / "agent-container.acme.anthropic.key").write_text("A")
-    (tmp_path / "agent-container.acme.OpenAI.key").write_text("O")  # mixed case -> lowered
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.anthropic.key").write_text("A")
+    (wiz.CONFIG_DIR / "acme.OpenAI.key").write_text("O")  # mixed case -> lowered
     found = wiz.discover_apikey_files("acme", cwd=tmp_path)
     assert set(found) == {"anthropic", "openai"}
 
@@ -173,7 +182,8 @@ def test_discover_apikey_files_ignores_other_names(wiz, tmp_path):
     and non-.key files (e.g. the .env / sidecar) never match."""
     (tmp_path / "agent-container.other.anthropic.key").write_text("X")
     (tmp_path / "agent-container.acme.services.yaml").write_text("services: {}")
-    (tmp_path / ".env").write_text("GH_TOKEN=x")
+    (tmp_path / ".agent-container").mkdir(exist_ok=True)
+    (tmp_path / ".agent-container" / ".env").write_text("GH_TOKEN=x")
     assert wiz.discover_apikey_files("acme", cwd=tmp_path) == {}
 
 
@@ -181,7 +191,8 @@ def test_stage_apikey_injection_ephemeral_target(wiz, tmp_path):
     """Each provider key is staged to the EPHEMERAL INJECT_APIKEY_DIR/<provider>
     (a /run path — never a per-agent volume, H1/FR-012), byte-identical, 0644,
     under the 0700 per-host state dir."""
-    src = tmp_path / "agent-container.acme.anthropic.key"
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    src = wiz.CONFIG_DIR / "acme.anthropic.key"
     src.write_bytes(b"sk-ant-SECRET")
     entries = wiz.stage_apikey_injection("local", "acme", cwd=tmp_path)
     by_name = {e[0]: e for e in entries}
@@ -202,7 +213,8 @@ def test_stage_apikey_injection_none_returns_empty(wiz, tmp_path):
 def test_apikey_value_never_inlined_in_compose_model(wiz, tmp_path):
     """FR-011: the compose model references the staged key by FILE path — the secret
     bytes are never inlined, and the target stays under /run (ephemeral)."""
-    src = tmp_path / "agent-container.acme.openai.key"
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    src = wiz.CONFIG_DIR / "acme.openai.key"
     src.write_bytes(b"sk-oai-SUPERSECRET")
     entries = wiz.stage_apikey_injection("local", "acme", cwd=tmp_path)
     model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=entries)
@@ -235,7 +247,8 @@ def test_compose_up_exec_threads_discovered_apikeys(wiz, monkeypatch, tmp_path):
         return {"name": name, "services": {"agent": {}}, "volumes": {}}
 
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "agent-container.acme.anthropic.key").write_bytes(b"K")
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.anthropic.key").write_bytes(b"K")
     monkeypatch.setattr(wiz, "build_compose_model", _fake_build)
     monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
     monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
@@ -257,7 +270,8 @@ def _config_src(tmp_path: Path, name: str = "acme") -> Path:
     """Build a project-local canonical-config source dir with canonical files
     (settings, guidance, an MCP def — all non-secret per FR-007) plus a
     runtime-state file that is NOT in the manifest (must not be delivered)."""
-    root = tmp_path / f"agent-container.{name}.config"
+    (tmp_path / ".agent-container").mkdir(exist_ok=True)
+    root = tmp_path / ".agent-container" / f"{name}.config"
     claude = root / "claude"
     claude.mkdir(parents=True)
     (claude / "settings.json").write_text('{"theme":"dark"}\n')
@@ -298,7 +312,8 @@ def test_discover_canonical_config_absent_returns_empty(wiz, tmp_path):
 
 
 def test_canonical_config_dir_project_local_wins(wiz, tmp_path):
-    proj = tmp_path / "agent-container.acme.config"
+    (tmp_path / ".agent-container").mkdir(exist_ok=True)
+    proj = tmp_path / ".agent-container" / "acme.config"
     (proj / "claude").mkdir(parents=True)
     wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     (wiz.CONFIG_DIR / "acme.config" / "claude").mkdir(parents=True)
@@ -494,7 +509,8 @@ def test_all_material_staged_locally_before_compose_up(wiz, monkeypatch, tmp_pat
     pk = _key(tmp_path)
     kh = tmp_path / "kh"
     kh.write_text("github.com ssh-ed25519 AAAA\n")
-    (tmp_path / "agent-container.acme.anthropic.key").write_bytes(b"sk-ant-SECRET")
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.anthropic.key").write_bytes(b"sk-ant-SECRET")
     _config_src(tmp_path)
     captured: dict = {}
 
@@ -562,7 +578,8 @@ def test_opencode_key_is_never_inlined_in_the_compose_descriptor(wiz, tmp_path):
 def test_opencode_key_discovery_uses_the_shared_convention(wiz, tmp_path):
     """FR-010: no bespoke path for opencode — the same
     `./agent-container.<name>.<provider>.key` convention as the other agents."""
-    (tmp_path / "agent-container.acme.anthropic.key").write_text("A")
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.anthropic.key").write_text("A")
     assert set(wiz.discover_apikey_files("acme", cwd=tmp_path)) == {"anthropic"}
 
 
@@ -572,8 +589,123 @@ def test_entrypoint_gives_opencode_no_home_redirect(wiz):
     their volume; opencode never writes an env-supplied key to its auth store
     (verified against the real binary), so a redirect would add machinery and
     exposure surface, not remove it."""
-    body = (Path(__file__).resolve().parents[2] / "entrypoint.sh").read_text()
+    body = (Path(__file__).resolve().parents[2] / "image" / "entrypoint.sh").read_text()
     assert "CODEX_HOME" in body and "PI_CODING_AGENT_DIR" in body  # the two that DO redirect
     assert "OPENCODE_CONFIG_DIR" not in body
     assert "OPENCODE_CONFIG" not in body
     assert "XDG_DATA_HOME" not in body
+
+
+# --- Feature 011 US1: the two configuration levels share one schema ----------
+
+
+def test_config_and_sidecar_resolve_project_then_user(wiz, tmp_path, monkeypatch):
+    """FR-001/FR-001a. Canonical config and sidecar overrides both resolve from
+    the project config directory first, then user level — and the SAME filename
+    means the same thing at both levels, which is what makes the two levels
+    legible as one layered configuration rather than two conventions."""
+    root = tmp_path / "proj"
+    pcd = root / ".agent-container"
+    pcd.mkdir(parents=True)
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # identical basenames at both levels
+    (pcd / "acme.config").mkdir()
+    (wiz.CONFIG_DIR / "acme.config").mkdir()
+    assert wiz.canonical_config_dir("acme", root) == pcd / "acme.config"
+
+    got = [p.name for p in wiz.sidecar_override_candidates("acme", root)]
+    assert got == ["acme.services.yaml", "acme.services.yaml"]  # same name, two scopes
+    parents = [p.parent for p in wiz.sidecar_override_candidates("acme", root)]
+    assert parents == [pcd, wiz.CONFIG_DIR]  # project first, user fallback
+
+
+def test_user_level_is_the_fallback_when_the_project_has_none(wiz, tmp_path):
+    """The layering must degrade, not fail: a project that defines nothing still
+    picks up the operator's machine-wide defaults."""
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "acme.config").mkdir()
+    assert wiz.canonical_config_dir("acme", root) == wiz.CONFIG_DIR / "acme.config"
+
+
+# --- Feature 011 US1: the hard cut refuses, never ignores --------------------
+
+
+def _proj(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    return root
+
+
+def test_superseded_files_are_refused_and_name_their_destination(wiz, tmp_path):
+    """FR-004/FR-005, contract C3. Deleting the old lookup is not enough: a
+    deleted lookup is indistinguishable, from the operator's side, from silently
+    ignoring their file. Each offender is named with where it now belongs."""
+    root = _proj(tmp_path)
+    (root / "agent-container.acme.env").write_text("X=1\n")
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.refuse_superseded_layout("acme", root)
+    msg = str(ei.value)
+    assert "agent-container.acme.env" in msg
+    assert ".agent-container/acme.env" in msg
+
+
+def test_a_superseded_key_names_user_level_not_a_project_destination(wiz, tmp_path):
+    """FR-001f. There IS no project-local destination for a plaintext key, so the
+    message must not invent one — it points at user level and the locator model."""
+    root = _proj(tmp_path)
+    (root / "agent-container.acme.anthropic.key").write_text("sk-ant-x")
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.refuse_superseded_layout("acme", root)
+    msg = str(ei.value)
+    assert "agent-container.acme.anthropic.key" in msg
+    assert ".agent-container/acme.anthropic.key" not in msg  # must NOT suggest this
+    assert "config/agent-container" in msg or "locator" in msg
+
+
+def test_all_offenders_are_listed_in_one_message(wiz, tmp_path):
+    """One message, not one per run — an operator fixing them one at a time is a
+    worse experience than being told everything at once."""
+    root = _proj(tmp_path)
+    for f in (
+        "agent-container.acme.env",
+        "agent-container.acme.services.yaml",
+        "agent-container.acme.anthropic.key",
+    ):
+        (root / f).write_text("x")
+    (root / "agent-container.acme.config").mkdir()
+    with pytest.raises(wiz.Fatal) as ei:
+        wiz.refuse_superseded_layout("acme", root)
+    msg = str(ei.value)
+    for f in ("acme.env", "acme.services.yaml", "acme.anthropic.key", "acme.config"):
+        assert f"agent-container.{f}" in msg, f"{f} missing from the refusal"
+
+
+def test_a_clean_project_is_silent(wiz, tmp_path):
+    """No migration chatter for a project that has nothing to migrate."""
+    root = _proj(tmp_path)
+    (root / ".agent-container" / "acme.env").write_text("X=1\n")
+    wiz.refuse_superseded_layout("acme", root)  # must not raise
+
+
+def test_bare_dotenv_refuses_only_when_no_agent_container_env_resolves(wiz, tmp_path, monkeypatch):
+    """FR-001c. The CONDITIONAL case, and the silent half is as load-bearing as
+    the loud one.
+
+    Refusing on any `./.env` would make the tool hostile to the directory it
+    shares — Compose projects legitimately have one that was never meant for us.
+    Ignoring it silently when nothing else resolves would strand GH_TOKEN and
+    provider keys. So: refuse only when the operator would otherwise deploy with
+    no env file at all while a `.env` sits there.
+    """
+    monkeypatch.setattr(wiz, "CONFIG_DIR", tmp_path / "userconf")
+    root = _proj(tmp_path)
+    (root / ".env").write_text("GH_TOKEN=x\n")
+
+    with pytest.raises(wiz.Fatal, match=r"\.env"):
+        wiz.refuse_superseded_layout("acme", root)  # nothing else resolves -> refuse
+
+    (root / ".agent-container" / "acme.env").write_text("GH_TOKEN=y\n")
+    wiz.refuse_superseded_layout("acme", root)  # now silent: the stray .env is someone else's

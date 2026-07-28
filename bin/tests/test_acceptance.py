@@ -87,6 +87,21 @@ def _config_dir_of(state_dir: Path) -> Path:
     return state_dir / "xdgconfig" / "agent-container"
 
 
+def _pcd(work: Path) -> Path:
+    """Feature 011: the project config directory, created on demand."""
+    d = work / ".agent-container"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _userconf(acc) -> Path:
+    """Feature 011 FR-001f: plaintext credentials are USER-LEVEL only — there is
+    deliberately no project-local location for them."""
+    d = _config_dir_of(acc.state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _exec(name: str, argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         [RUNTIME, "exec", f"agent-container-{name}", *argv],
@@ -601,7 +616,7 @@ def test_sidecar_shares_deployment_lifecycle(acc, _image):
     state = work / "state"
     env_file = work / f"{name}.env"
     env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
-    (work / f"agent-container.{name}.services.yaml").write_text(_SIDECAR_YAML)
+    (_pcd(work) / f"{name}.services.yaml").write_text(_SIDECAR_YAML)
 
     def cli(*args, timeout=600):
         # cwd=work so the project-local override is discovered (mirrors real use).
@@ -695,8 +710,8 @@ def test_apikey_injection_ephemeral_and_off_volume(acc, _image):
     # Project-local convention files (discovered relative to the CLI's cwd).
     ant_val = "sk-ant-ACCEPTANCE-SECRET"
     oai_val = "sk-oai-ACCEPTANCE-SECRET"
-    (work / f"agent-container.{name}.anthropic.key").write_text(ant_val + "\n")
-    (work / f"agent-container.{name}.openai.key").write_text(oai_val + "\n")
+    (_userconf(acc) / f"{name}.anthropic.key").write_text(ant_val + "\n")
+    (_userconf(acc) / f"{name}.openai.key").write_text(oai_val + "\n")
 
     def cli(*args, timeout=600):
         return subprocess.run(
@@ -767,8 +782,8 @@ def test_injected_key_preserves_canonical_codex_config(acc, _image):
     state = work / "state"
     env_file = work / f"{name}.env"
     env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
-    (work / f"agent-container.{name}.openai.key").write_text("sk-oai-SECRET\n")
-    cfg = work / f"agent-container.{name}.config" / "codex"
+    (_userconf(acc) / f"{name}.openai.key").write_text("sk-oai-SECRET\n")
+    cfg = _pcd(work) / f"{name}.config" / "codex"
     cfg.mkdir(parents=True)
     marker = "model = 'CANONICAL-MARKER'"
     (cfg / "config.toml").write_text(marker + "\n")
@@ -814,7 +829,7 @@ def test_canonical_config_fresh_redeploy_runtime_state_persists(acc, _image):
     env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
     # Project-local convention dir (discovered relative to the CLI's cwd): a
     # canonical file (in the manifest) plus a name that is NOT a manifest path.
-    cfg = work / f"agent-container.{name}.config" / "claude"
+    cfg = _pcd(work) / f"{name}.config" / "claude"
     cfg.mkdir(parents=True)
     (cfg / "CLAUDE.md").write_text("VERSION-ONE\n")
 
@@ -887,7 +902,7 @@ def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
     env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
     old_val = "sk-ant-ROTATE-OLD-SECRET"
     new_val = "sk-ant-ROTATE-NEW-SECRET"
-    key_file = work / f"agent-container.{name}.anthropic.key"
+    key_file = _userconf(acc) / f"{name}.anthropic.key"
     key_file.write_text(old_val + "\n")
     inject_path = "/run/agent-container/apikeys/anthropic"
     compose_path = state / "agent-container" / "local" / f"{name}.compose.yaml"
@@ -1712,3 +1727,121 @@ def test_opencode_injected_key_never_lands_on_a_volume(acc):
     compose = list((acc.state_dir / "agent-container" / "local").glob("acc10sec.compose.yaml"))
     for f in compose:
         assert secret not in f.read_text(), f"secret inlined in {f}"
+
+
+# --- Feature 011: the layout, against real containers ------------------------
+
+
+def test_consolidated_project_deploys_and_discovery_walks_up(acc):
+    """Quickstart S2 + S3 (US1, contracts C1/C2). The env file is found in the
+    project config directory, and the tool behaves identically when run from a
+    nested subdirectory — the project root is defined by the marker, not by cwd."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    proj = acc.tmp / "proj11"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "acc11.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n"
+    )
+    nested = proj / "src" / "deep"
+    nested.mkdir(parents=True)
+    acc.register("acc11")
+    r = acc.cli(["up", "acc11", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=nested)
+    assert r.returncode == 0, f"deploy from a nested cwd failed:\n{r.stderr}"
+    assert _exec("acc11", ["true"]).returncode == 0
+
+
+def test_superseded_layout_is_refused_not_ignored(acc):
+    """Quickstart S4 (FR-004). The load-bearing case: a superseded CREDENTIAL
+    must refuse, because ignoring it deploys an agent without the key the
+    operator believes was injected."""
+    proj = acc.tmp / "proj11old"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "acc11o.env").write_text("GH_TOKEN=x\n")
+    (proj / "agent-container.acc11o.anthropic.key").write_text("sk-ant-STALE\n")
+    r = acc.cli(["up", "acc11o"], cwd=proj)
+    assert r.returncode != 0, "a superseded credential file must refuse, not deploy"
+    out = r.stdout + r.stderr
+    assert "agent-container.acc11o.anthropic.key" in out
+    assert ".agent-container/acc11o.anthropic.key" not in out  # no such destination
+
+
+def test_explicit_env_files_stack_in_order(acc):
+    """Quickstart S4a (FR-001d/FR-001e). `-e` from anywhere, later winning."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    base = acc.tmp / "outside" / "base.env"
+    base.parent.mkdir(exist_ok=True)
+    base.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\nSTACKED=first\n")
+    over = acc.tmp / "outside" / "over.env"
+    over.write_text("STACKED=second\n")
+    acc.register("acc11e")
+    r = acc.cli(
+        ["up", "acc11e", "-e", str(base), "-e", str(over),
+         "--authorized-key", str(laptop.with_suffix(".pub"))]
+    )  # fmt: skip
+    assert r.returncode == 0, f"stacked -e deploy failed:\n{r.stderr}"
+    got = _exec("acc11e", ["bash", "-lc", 'printf %s "$STACKED"']).stdout.strip()
+    assert got == "second", f"later -e must win, got {got!r}"
+
+
+def test_shell_env_survives_recreation_at_the_new_path(acc):
+    """Quickstart S7 (US3, C5). The volume NAME never changed, so this is a
+    relocation rather than a migration — and `dev` must be able to write the new
+    mount point (the Feature 010 trap)."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    acc.up("acc11se", authorized_key=[laptop.with_suffix(".pub")])
+    w = _exec("acc11se", ["bash", "-lc", 'echo "export MARK=1" >> ~/.agent-env/env'])
+    assert w.returncode == 0, f"dev cannot write the new mount point: {w.stderr}"
+    acc.down("acc11se")  # NOT --purge
+    acc.up("acc11se", authorized_key=[laptop.with_suffix(".pub")])
+    got = _exec("acc11se", ["cat", "/home/dev/.agent-env/env"])
+    assert "MARK=1" in got.stdout, "shell env did not survive recreation"
+    assert "agent-container-acc11se-shellenv" in acc.volumes_of("acc11se")  # name unchanged
+
+
+def test_build_context_contains_only_the_image_sources(acc):
+    """Quickstart S5 (US2, FR-007). The context travels to the daemon, which may
+    be remote — so this is a security boundary, not tidiness."""
+    r = acc.cli(["build", "acc11ctx:test"])
+    assert r.returncode == 0, f"build from image/ failed:\n{r.stderr}"
+    out = r.stdout + r.stderr
+    for leaked in ("specs/", "bin/tests", "pyproject.toml"):
+        assert leaked not in out, f"{leaked} appeared in the build context transfer"
+
+
+def test_explicit_env_file_works_against_a_non_default_context(acc):
+    """T016a / FR-001e (analysis C2). Remote parity for `-e`.
+
+    Research R2b claims env files are read CLIENT-SIDE by compose, which is why a
+    path that exists only on the operator's machine works against a remote
+    daemon. That claim came from a docstring and nothing had run it — the same
+    shape as Feature 010's `opencode run` exit-status assumption, which needed a
+    real probe to get right. If compose ever resolved the path on the daemon
+    instead, `-e` would silently break for every remote deployment.
+
+    A non-default docker context pointing at the local daemon exercises the
+    remote code path without a second machine (the pattern `host env` uses).
+    """
+    ctx = subprocess.run(
+        ["docker", "context", "show"], capture_output=True, text=True
+    ).stdout.strip()
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    cfg.joinpath("hosts.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default": None,
+                "hosts": {"acc11rem": {"driver": "docker", "context": ctx, "address": "localhost"}},
+            }
+        )
+    )
+    outside = acc.tmp / "outside" / "remote.env"
+    outside.parent.mkdir(exist_ok=True)
+    outside.write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\nREMOTE_MARK=yes\n"
+    )
+    acc.register("acc11r")
+    r = acc.cli(["up", "acc11r", "--host", "acc11rem", "-e", str(outside)])
+    assert r.returncode == 0, f"-e against a non-default context failed:\n{r.stderr}"
+    got = _exec("acc11r", ["bash", "-lc", 'printf %s "$REMOTE_MARK"']).stdout.strip()
+    assert got == "yes", "the client-side env file did not reach a context-targeted deploy"

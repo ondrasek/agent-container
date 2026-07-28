@@ -256,7 +256,7 @@ remote round-trips for the fast local view.
 
 **Sidecar / helper services.** A deployment may declare helper services in an
 operator-supplied compose override file, discovered next to the `.env`
-(`./agent-container.<name>.services.yaml`, then
+(`.agent-container/<name>.services.yaml`, then
 `~/.config/agent-container/<name>.services.yaml`). When present it is merged as a
 second `-f` into every compose invocation, so the agent and its helpers share one
 project and one lifecycle — `up`/`stop`/`start`/`redeploy`/`down`/`wipe` all act
@@ -596,7 +596,7 @@ agent-container attach blog                                       # totally sepa
 
 The hard constraint that drives the design: **every agent commits AND pushes every change.** So even on catastrophic container loss, your work lives on GitHub.
 
-- `agent-container down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-container`), the tmux-config volume (`~/.config/tmux`), and the SSH-identity volume (`~/.ssh`). `agent-container up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf` *and* your SSH host key + authorized_keys.
+- `agent-container down acme` — stops + removes the container. **All per-container volumes are kept** — `/workspace`, plus the agent-login volumes (`~/.claude`, `~/.codex`, `~/.pi`), the shell-env volume (`~/.agent-env`), the tmux-config volume (`~/.config/tmux`), and the SSH-identity volume (`~/.ssh`). `agent-container up acme` later restores the same `/workspace` contents *and* your agent logins *and* your `tmux.conf` *and* your SSH host key + authorized_keys.
 - `agent-container down acme --purge` — also drops **every** per-container volume (workspace + claude + codex + pi + shellenv + tmux + ssh). Use for a true clean slate; you will re-`login` to the agents afterward and re-inject your SSH key.
 - VPS reboot — if you used the Quadlet path, the container comes back automatically. If you used the quick path, run `agent-container up acme` again. Pushed commits are unaffected either way.
 - Quadlet service crashed — `systemctl --user restart agent-container-acme.service`. Look at `journalctl --user -u agent-container-acme.service` first.
@@ -674,15 +674,15 @@ sole durable copy). Full contract: [`docs/credentials.md`](docs/credentials.md).
 
 ### Persistent shell environment
 
-Each container mounts a `~/.agent-container` volume holding an `env` file that is sourced
+Each container mounts a `~/.agent-env` volume holding an `env` file that is sourced
 into **every** bash and zsh session (login, SSH, and tmux panes). Use it for
 per-container exports, aliases, or extra secrets that should outlive the
 container:
 
 ```bash
 # inside the container — the file is seeded with a commented template on first boot
-nvim ~/.agent-container/env       # add lines like:  export FOO=bar
-# new shells (or: source ~/.agent-container/env) pick it up; it survives down/up.
+nvim ~/.agent-env/env       # add lines like:  export FOO=bar
+# new shells (or: source ~/.agent-env/env) pick it up; it survives down/up.
 ```
 
 It's read with `set -a` semantics, so plain `KEY=VALUE` lines are exported. A

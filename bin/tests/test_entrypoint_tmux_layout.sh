@@ -24,7 +24,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENTRY="${REPO_ROOT}/entrypoint.sh"
+ENTRY="${REPO_ROOT}/image/entrypoint.sh"
 
 pass=0
 fail=0

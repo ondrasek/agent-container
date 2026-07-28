@@ -18,7 +18,7 @@
 # Volume parity with the CLI: this template mounts the SAME nine per-container
 # named volumes that `agent-container up` mounts (workspace + the five agent /
 # shell-env / tmux config dirs + ~/.ssh), so interactive `claude login` /
-# `codex login`, `~/.agent-container/env`, `~/.config/tmux`, and the SSH
+# `codex login`, `~/.agent-env/env`, `~/.config/tmux`, and the SSH
 # identity (host key + authorized_keys) persist across restarts and recreation
 # on the Quadlet path too. Keep this list in sync with `all_volume_mounts()` in
 # bin/agent-container.
@@ -41,7 +41,7 @@ Volume=agent-container-${NAME}-codex:/home/dev/.codex
 Volume=agent-container-${NAME}-pi:/home/dev/.pi
 Volume=agent-container-${NAME}-opencode:/home/dev/.config/opencode
 Volume=agent-container-${NAME}-opencode-data:/home/dev/.local/share/opencode
-Volume=agent-container-${NAME}-shellenv:/home/dev/.agent-container
+Volume=agent-container-${NAME}-shellenv:/home/dev/.agent-env
 Volume=agent-container-${NAME}-tmux:/home/dev/.config/tmux
 Volume=agent-container-${NAME}-ssh:/home/dev/.ssh
 EnvironmentFile=${ENV_FILE}

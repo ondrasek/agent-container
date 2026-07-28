@@ -186,23 +186,39 @@ def test_hosts_entry_without_conf_file(wiz):
 
 
 def test_env_file_candidate_order(wiz, tmp_path):
-    cands = wiz.env_file_candidates("acme", tmp_path / "work")
-    assert cands == [
-        tmp_path / "work" / ".env",
+    """Feature 011 FR-001b: project config dir, then user config; per-environment
+    file before the shared default at each level. The bare ./.env is not read."""
+    work = tmp_path / "work"
+    (work / ".agent-container").mkdir(parents=True)
+    assert wiz.env_file_candidates("acme", work) == [
+        work / ".agent-container" / "acme.env",
+        work / ".agent-container" / ".env",
         wiz.CONFIG_DIR / "acme.env",
         wiz.CONFIG_DIR / ".env",
     ]
 
 
-def test_resolve_env_file_prefers_cwd(wiz, tmp_path, monkeypatch):
+def test_resolve_env_file_prefers_project_level(wiz, tmp_path, monkeypatch):
+    """Project level wins over user level — the layering operators expect from
+    Claude Code and similar tools (Feature 011)."""
     work = tmp_path / "work"
-    work.mkdir()
+    (work / ".agent-container").mkdir(parents=True)
     monkeypatch.chdir(work)
     wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    (work / ".env").write_text("X=1\n")
+    (work / ".agent-container" / "acme.env").write_text("X=1\n")
     (wiz.CONFIG_DIR / "acme.env").write_text("X=2\n")
     (wiz.CONFIG_DIR / ".env").write_text("X=3\n")
-    assert wiz.resolve_env_file("acme") == work / ".env"
+    assert wiz.resolve_env_file("acme") == work / ".agent-container" / "acme.env"
+
+
+def test_bare_project_root_env_is_not_read(wiz, tmp_path, monkeypatch):
+    """FR-001b: a `.env` in the project ROOT belongs to whoever put it there —
+    Compose, direnv, a framework. The tool no longer claims it."""
+    work = tmp_path / "work"
+    (work / ".agent-container").mkdir(parents=True)
+    monkeypatch.chdir(work)
+    (work / ".env").write_text("X=1\n")
+    assert wiz.resolve_env_file("acme") is None
 
 
 def test_resolve_env_file_then_name_env_then_shared(wiz, tmp_path, monkeypatch):
@@ -412,7 +428,7 @@ def _canonical_agents(wiz) -> set[str]:
 
 def test_entrypoint_dispatch_matches_canonical_agent_list(wiz):
     """FR-002: entrypoint.sh's headless dispatch covers exactly AGENTS."""
-    body = (_ROOT / "entrypoint.sh").read_text()
+    body = (_ROOT / "image" / "entrypoint.sh").read_text()
     block = body.split("run_headless_agent()", 1)[1].split("\n}", 1)[0]
     arms = set(re.findall(r"^\s*([a-z][a-z0-9-]*)\)\s*exec ", block, re.M))
     assert arms == _canonical_agents(wiz), (
@@ -423,7 +439,7 @@ def test_entrypoint_dispatch_matches_canonical_agent_list(wiz):
 
 def test_dockerfile_installs_exactly_the_canonical_agents(wiz):
     """FR-002/FR-003: every agent is baked, and nothing extra is."""
-    body = (_ROOT / "Dockerfile").read_text()
+    body = (_ROOT / "image" / "Dockerfile").read_text()
     pkgs = set(re.findall(r"npm i -g (?:--ignore-scripts )?(\S+)", body))
     unmapped = pkgs - set(_NPM_PACKAGE_TO_AGENT)
     assert not unmapped, (
@@ -540,3 +556,139 @@ def test_completions_offer_every_cli_command(wiz):
             f"{label} completion is out of sync with the CLI: "
             f"missing={sorted(registered - offered)}, unknown={sorted(offered - registered)}"
         )
+
+
+# --- Feature 011: the identity lock -----------------------------------------
+#
+# Identity is the mechanism by which the tool finds and owns existing
+# deployments (Constitution IV). Feature 011 moves FILES; if it moves an
+# IDENTITY, every environment an operator already runs becomes an orphan the
+# tool can no longer see. This test is the gate the whole feature is measured
+# against — baseline captured in research.md R7a BEFORE any change.
+
+IDENTITY_BASELINE = {
+    "acme": ("agent-container-acme", 2206),
+    "blog": ("agent-container-blog", 2220),
+    "scratch": ("agent-container-scratch", 2244),
+    "my-box": ("agent-container-my-box", 2204),
+    "a": ("agent-container-a", 2297),
+    "zzz-999": ("agent-container-zzz-999", 2282),
+}
+
+VOLUME_SUFFIXES = (
+    "workspace",
+    "claude",
+    "codex",
+    "pi",
+    "opencode",
+    "opencode-data",
+    "shellenv",
+    "tmux",
+    "ssh",
+)
+
+
+@pytest.mark.parametrize(("name", "expected"), sorted(IDENTITY_BASELINE.items()))
+def test_identity_is_unchanged_by_feature_011(wiz, name, expected):
+    """FR-010 / SC-003: container name and port are byte-identical to the
+    pre-011 baseline. A single differing byte fails the feature regardless of
+    how tidy the layout became."""
+    assert (wiz.container_name(name), wiz.port_for_name(name)) == expected
+
+
+@pytest.mark.parametrize("name", sorted(IDENTITY_BASELINE))
+def test_volume_names_are_unchanged_by_feature_011(wiz, name):
+    """FR-010: all nine volume NAMES, in canonical order. The shell-env volume
+    is the one to watch — Feature 011 moves its MOUNT POINT, and this asserts
+    that its NAME does not follow (research R3)."""
+    assert wiz.per_container_volumes(name) == [
+        f"agent-container-{name}-{s}" for s in VOLUME_SUFFIXES
+    ]
+
+
+def test_only_the_shellenv_mount_path_may_change(wiz):
+    """The deliberate exception. Every mount keeps its volume name; exactly one
+    mount PATH is permitted to move (`~/.agent-container` → `~/.agent-env`), and
+    nothing else may. Written so a stray path edit elsewhere fails here rather
+    than surfacing as a stranded volume at runtime."""
+    mounts = dict(m.split(":", 1) for m in wiz.all_volume_mounts("acme"))
+    assert sorted(mounts) == sorted(f"agent-container-acme-{s}" for s in VOLUME_SUFFIXES)
+    fixed = {
+        "workspace": "/workspace",
+        "claude": "/home/dev/.claude",
+        "codex": "/home/dev/.codex",
+        "pi": "/home/dev/.pi",
+        "opencode": "/home/dev/.config/opencode",
+        "opencode-data": "/home/dev/.local/share/opencode",
+        "tmux": "/home/dev/.config/tmux",
+        "ssh": "/home/dev/.ssh",
+    }
+    for suffix, path in fixed.items():
+        assert mounts[f"agent-container-acme-{suffix}"] == path, f"{suffix} mount path moved"
+    assert mounts["agent-container-acme-shellenv"] in (
+        "/home/dev/.agent-container",  # pre-US3
+        "/home/dev/.agent-env",  # post-US3
+    )
+
+
+# --- Feature 011 US1: project config resolution ------------------------------
+
+
+def test_env_chain_is_symmetric_across_both_levels(wiz, tmp_path, monkeypatch):
+    """FR-001b / contract C2. Each level has a per-environment file and a shared
+    default, and the bare ./.env is NOT in the chain — a `.env` in a project root
+    belongs to whoever put it there (Compose, direnv, a framework)."""
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    monkeypatch.setattr(wiz, "CONFIG_DIR", tmp_path / "userconf")
+    got = [str(p) for p in wiz.env_file_candidates("acme", root)]
+    assert got == [
+        str(root / ".agent-container" / "acme.env"),
+        str(root / ".agent-container" / ".env"),
+        str(tmp_path / "userconf" / "acme.env"),
+        str(tmp_path / "userconf" / ".env"),
+    ]
+    assert str(root / ".env") not in got  # FR-001b: not ours to claim
+
+
+def test_env_chain_falls_back_to_user_level_outside_a_project(wiz, tmp_path, monkeypatch):
+    """No project root → only the user-level half. The tool must not invent a
+    project config directory for a bare directory."""
+    monkeypatch.setattr(wiz, "CONFIG_DIR", tmp_path / "userconf")
+    got = [str(p) for p in wiz.env_file_candidates("acme", tmp_path / "nowhere")]
+    assert got == [str(tmp_path / "userconf" / "acme.env"), str(tmp_path / "userconf" / ".env")]
+
+
+def test_project_root_is_found_from_any_subdirectory(wiz, tmp_path):
+    """FR-015 / contract C1: discovery walks UP, so the tool behaves identically
+    from any subdirectory, and the layout is location-independent."""
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    nested = root / "src" / "deep" / "nested"
+    nested.mkdir(parents=True)
+    assert wiz.find_project_root(nested) == root.resolve()
+    assert wiz.project_config_dir(nested) == root.resolve() / ".agent-container"
+    assert wiz.find_project_root(tmp_path / "elsewhere") is None
+
+
+def test_no_tool_owned_file_remains_in_a_consolidated_project_root(wiz, tmp_path, monkeypatch):
+    """FR-002 / SC-001 — the POSITIVE property (analysis C4).
+
+    The refusal test asserts that known-superseded names are rejected; it would
+    still pass if some other tool-owned name were left behind, because it only
+    looks for names it already knows. This asserts the complement: for a
+    correctly consolidated project, nothing the tool consumes sits in the root.
+    """
+    root = tmp_path / "proj"
+    cfg = root / ".agent-container"
+    cfg.mkdir(parents=True)
+    for f in ("acme.env", "acme.services.yaml", "environments.yaml"):
+        (cfg / f).write_text("x\n")
+    (root / "README.md").write_text("mine\n")  # the operator's own file
+    monkeypatch.setattr(wiz, "CONFIG_DIR", tmp_path / "userconf")
+
+    consumed = {p.name for p in wiz.env_file_candidates("acme", root)}
+    consumed |= {p.name for p in wiz.discover_apikey_files("acme", root).values()}
+    stray = [e.name for e in root.iterdir() if e.is_file() and e.name in consumed]
+    assert stray == [], f"tool-owned files left in the project root: {stray}"
+    assert not list(root.glob("agent-container.*")), "old-layout names still present"

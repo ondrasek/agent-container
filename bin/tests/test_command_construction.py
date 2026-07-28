@@ -243,20 +243,22 @@ def test_do_up_resolves_env_file_and_runs(up_env, capture_compose, monkeypatch, 
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
-    (work / ".env").write_text("TOKEN=x\n")
+    (work / ".agent-container").mkdir(exist_ok=True)
+    (work / ".agent-container" / ".env").write_text("TOKEN=x\n")
     monkeypatch.chdir(work)
     wiz.do_up("acme")
     (argv,) = capture_compose
     assert "compose" in argv and "up" in argv
     model = json.loads(wiz.compose_file_path("local", "acme").read_text())
-    assert model["services"]["agent"]["env_file"] == [str(work / ".env")]
+    assert model["services"]["agent"]["env_file"] == [str(work / ".agent-container" / ".env")]
 
 
 def test_do_up_threads_mounts_through(up_env, capture_compose, monkeypatch, tmp_path):
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
-    (work / ".env").write_text("TOKEN=x\n")
+    (work / ".agent-container").mkdir(exist_ok=True)
+    (work / ".agent-container" / ".env").write_text("TOKEN=x\n")
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.chdir(work)
@@ -273,7 +275,8 @@ def test_do_up_rejects_bad_mount_before_any_runtime_call(
     wiz = up_env
     work = tmp_path / "work"
     work.mkdir()
-    (work / ".env").write_text("TOKEN=x\n")
+    (work / ".agent-container").mkdir(exist_ok=True)
+    (work / ".agent-container" / ".env").write_text("TOKEN=x\n")
     monkeypatch.chdir(work)
     with pytest.raises(wiz.Fatal, match="does not exist or is not a directory"):
         wiz.do_up("acme", mounts=[str(tmp_path / "missing")])
@@ -285,7 +288,7 @@ def test_do_up_dies_without_env_file(up_env, capture_compose, monkeypatch, tmp_p
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
-    with pytest.raises(wiz.Fatal, match="no .env found"):
+    with pytest.raises(wiz.Fatal, match="no env file found"):
         wiz.do_up("acme")
     assert capture_compose == []
 
@@ -680,7 +683,7 @@ def test_sidecar_override_discovery_prefers_project_local(wiz, monkeypatch, tmp_
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
-    proj_local = _write_override(work / "agent-container.acme.services.yaml")
+    proj_local = _write_override(work / ".agent-container" / "acme.services.yaml")
     _write_override(wiz.CONFIG_DIR / "acme.services.yaml")  # also present, lower priority
     assert wiz.resolve_sidecar_override("acme") == proj_local
 
@@ -746,7 +749,7 @@ def test_resolve_sidecar_override_fatal_on_invalid(wiz, monkeypatch, tmp_path):
     """A present-but-invalid override is fatal (FR-018), never silently skipped."""
     monkeypatch.chdir(tmp_path)
     _write_override(
-        tmp_path / "agent-container.acme.services.yaml", "services:\n  agent:\n    image: x\n"
+        tmp_path / ".agent-container" / "acme.services.yaml", "services:\n  agent:\n    image: x\n"
     )
     with pytest.raises(wiz.Fatal, match="must not redefine"):
         wiz.resolve_sidecar_override("acme")
@@ -759,7 +762,7 @@ def test_compose_up_exec_merges_discovered_override(wiz, capture_compose, monkey
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
-    ov = _write_override(work / "agent-container.acme.services.yaml")
+    ov = _write_override(work / ".agent-container" / "acme.services.yaml")
     env_file, _ = make_env_file(tmp_path)
     wiz.compose_up_exec("local", dict(LOCAL_HOST), "acme", env_file, [], None, [])
     argv = capture_compose[-1]

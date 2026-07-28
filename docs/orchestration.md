@@ -72,7 +72,7 @@ If you need to override (e.g. you already have something on 2218), edit the stat
 
 ## Volume layout
 
-- **Nine named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`) and opencode's **two**, `-opencode` (`~/.config/opencode`) and `-opencode-data` (`~/.local/share/opencode`) — it is the one agent that splits configuration from credentials — the shell-env volume `-shellenv` (`~/.agent-container`), the tmux-config volume `-tmux` (`~/.config/tmux`), and the SSH volume `-ssh` (`~/.ssh` — `authorized_keys` and the host key under `hostkeys/`, so SSH identity is stable across recreation).
+- **Nine named volumes per container**: `agent-container-<name>-workspace` (mounted at `/workspace`), plus the agent-login volumes `-claude` / `-codex` / `-pi` (`~/.claude`, `~/.codex`, `~/.pi`) and opencode's **two**, `-opencode` (`~/.config/opencode`) and `-opencode-data` (`~/.local/share/opencode`) — it is the one agent that splits configuration from credentials — the shell-env volume `-shellenv` (`~/.agent-env`), the tmux-config volume `-tmux` (`~/.config/tmux`), and the SSH volume `-ssh` (`~/.ssh` — `authorized_keys` and the host key under `hostkeys/`, so SSH identity is stable across recreation).
 - The volumes **survive `agent-container down`** — only `down --purge` removes them (all nine).
 - Hard constraint: **the container is ephemeral**. The volume is for **scratch + uncommitted work in flight**, not durable state. Every agent commits and pushes; if you lose the volume, you lose only un-pushed work.
 
@@ -103,7 +103,7 @@ If you add a mutating verb, take the lock. This is the invariant that keeps para
 
 ## Sidecar services
 
-An operator override file — `./agent-container.<name>.services.yaml`, falling back to
+An operator override file — `.agent-container/<name>.services.yaml`, falling back to
 `~/.config/agent-container/<name>.services.yaml` — is merged as a **second `-f`** on every compose
 call, so the agent container and its helpers share one project and one lifecycle (`down` tears
 both down).

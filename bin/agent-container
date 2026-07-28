@@ -80,15 +80,19 @@ DEFAULT_HOST = "local"
 def _is_repo_checkout(base: Path) -> bool:
     """Best-effort test that `base` is an agent-container checkout.
 
-    Keyed on `completions/agent-container.bash` (plus a Dockerfile for the build
-    context): a repo-specific sentinel rather than the generic `Dockerfile` +
-    `completions/` dir pair, which is common to unrelated trees. Requiring the
+    Keyed on `completions/agent-container.bash` (plus `image/Dockerfile` for the
+    build context): a repo-specific sentinel rather than the generic `Dockerfile`
+    + `completions/` dir pair, which is common to unrelated trees. Feature 011
+    moved the image sources into `image/`, which makes the marker MORE specific,
+    not less. Note this runs at IMPORT time, before Fatal/die exist — a wrong
+    marker cannot report itself, it just degrades to "no checkout reachable".
+    Requiring the
     exact file _completion_script reads (bin/agent-container: REPO_ROOT/completions/
     agent-container.<shell>) also makes the marker and that consumed path the same
     invariant — a recognized checkout can never then serve stale package data.
     This is a heuristic, not a guaranteed false-positive-free identifier.
     """
-    return (base / "Dockerfile").is_file() and (
+    return (base / "image" / "Dockerfile").is_file() and (
         base / "completions" / "agent-container.bash"
     ).is_file()
 
@@ -386,7 +390,7 @@ def all_volume_mounts(name: str) -> list[str]:
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-container', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-env', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
     """
     return [
         f"{volume_name(name)}:/workspace",
@@ -395,7 +399,7 @@ def all_volume_mounts(name: str) -> list[str]:
         f"{pi_volume_name(name)}:/home/dev/.pi",
         f"{opencode_volume_name(name)}:/home/dev/.config/opencode",
         f"{opencode_data_volume_name(name)}:/home/dev/.local/share/opencode",
-        f"{shellenv_volume_name(name)}:/home/dev/.agent-container",
+        f"{shellenv_volume_name(name)}:/home/dev/.agent-env",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
         f"{ssh_volume_name(name)}:/home/dev/.ssh",
     ]
@@ -654,12 +658,110 @@ def parse_kv_config(text: str) -> dict[str, str]:
 
 
 def env_file_candidates(name: str, cwd: Path) -> list[Path]:
-    """Env-file resolution order (./.env, then per-name, then shared default).
+    """Env-file resolution order (Feature 011, FR-001b): project level then user
+    level, each with a per-environment file and a shared default.
 
-    >>> [str(p) for p in env_file_candidates("acme", Path("/w"))][0]
-    '/w/.env'
+        <root>/.agent-container/<name>.env
+        <root>/.agent-container/.env
+        ~/.config/agent-container/<name>.env
+        ~/.config/agent-container/.env
+
+    Symmetric by design — the same filename means the same thing at both levels,
+    which is what makes the two levels legible as ONE layered configuration.
+
+    The bare `./.env` is deliberately NOT here. It is a shared ecosystem
+    convention (Compose, direnv, dotenv libraries all read it) and belongs to
+    whoever put it there; an agent-container env file goes in an agent-container
+    location, or is named explicitly with `-e`.
+
+    >>> [p.name for p in env_file_candidates("acme", Path("/nonexistent-xyz"))]
+    ['acme.env', '.env']
     """
-    return [cwd / ".env", CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
+    out: list[Path] = []
+    pcd = project_config_dir(cwd)
+    if pcd is not None:
+        out += [pcd / f"{name}.env", pcd / ".env"]
+    return [*out, CONFIG_DIR / f"{name}.env", CONFIG_DIR / ".env"]
+
+
+# Feature 011 FR-004/FR-005: the hard cut REFUSES, it does not ignore.
+#
+# Deleting the old lookup is only half the work. A deleted lookup is
+# indistinguishable, from the operator's side, from silently ignoring their file
+# — and the superseded set includes CREDENTIALS, so an ignored key means an agent
+# running unauthenticated while the operator believes one was injected
+# (Constitution III). Each superseded name is paired with where it now belongs.
+#
+# `<name>.<provider>.key` deliberately has NO project-local destination (FR-001f):
+# `.agent-container/` travels with the repository and Feature 008 settled that the
+# repo holds a locator, never a value.
+SUPERSEDED_SUFFIXES: tuple[tuple[str, str], ...] = (
+    (".env", ".agent-container/{name}.env"),
+    (".services.yaml", ".agent-container/{name}.services.yaml"),
+    (".config", ".agent-container/{name}.config/"),
+)
+
+
+def refuse_superseded_layout(name: str, root: Path | None = None) -> None:
+    """Refuse a project still using the pre-011 layout, naming every offender.
+
+    Silent when there is nothing to report — an operator with a clean project
+    must never see migration chatter.
+    """
+    root = Path.cwd() if root is None else root
+    offenders: list[str] = []
+    prefix = f"agent-container.{name}"
+
+    for suffix, dest in SUPERSEDED_SUFFIXES:
+        p = root / f"{prefix}{suffix}"
+        if p.exists():
+            offenders.append(f"  {p.name}  ->  {dest.format(name=name)}")
+    for p in sorted(root.glob(f"{prefix}.*.key")):
+        offenders.append(
+            f"  {p.name}  ->  {CONFIG_DIR}/{p.name.removeprefix('agent-container.')}"
+            "  (user level; or reference it with a credential locator)"
+        )
+
+    # The CONDITIONAL case (FR-001c). A bare ./.env belongs to whoever put it
+    # there — Compose, direnv, a framework — so refusing on it unconditionally
+    # would make the tool hostile to the directory it shares. But ignoring it
+    # when NOTHING else resolves would silently strand GH_TOKEN and provider
+    # keys. Refuse only in that second case.
+    bare = root / ".env"
+    resolves = any(c.is_file() for c in env_file_candidates(name, root))
+    if bare.is_file() and not resolves:
+        offenders.append(
+            f"  .env  ->  .agent-container/{name}.env  (or .agent-container/.env,"
+            " or name it explicitly with -e/--env-file)"
+        )
+
+    if offenders:
+        die(
+            "this project uses the pre-011 layout, which is no longer read:\n"
+            + "\n".join(offenders),
+            entity=name,
+            remedy="move each file to the path shown, then re-run",
+        )
+
+
+def _resolve_env_files(name: str, override: list[Path] | None) -> list[Path]:
+    """The env files for this deployment (Feature 011 FR-001d).
+
+    Explicit `-e` files REPLACE the discovery chain and are applied in the order
+    given, later winning — naming files is a statement that the operator is in
+    control, so merging discovered files underneath would make the effective
+    environment depend on directory contents they were bypassing.
+    """
+    if override:
+        return list(override)
+    found = resolve_env_file(name)
+    if found is None:
+        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
+        die(
+            f"no env file found. Looked in: {cands}",
+            remedy="create one of those paths, or name a file explicitly with -e/--env-file",
+        )
+    return [found]
 
 
 def resolve_env_file(name: str) -> Path | None:
@@ -681,16 +783,23 @@ APIKEY_PROVIDER_RE = re.compile(r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$")
 def discover_apikey_files(name: str, cwd: Path | None = None) -> dict[str, Path]:
     """Discover per-provider model/API key FILES by convention (US2, T012).
 
-    Globs `agent-container.<name>.<provider>.key` (project-local, WINS) then
-    `<name>.<provider>.key` under the user config dir — one file per provider,
+    Globs `<name>.<provider>.key` under the USER config dir — one file per provider,
     <provider> lower-cased (e.g. anthropic, openai). Returns {provider: source
     path}, providers sorted for a deterministic order. Secret hygiene: existence
     only — the file's CONTENTS are never read here. Absent → {} so the env/`.env`
     delivery remains the layered fallback (`up <name>` with no key file unchanged).
     """
-    cwd = Path.cwd() if cwd is None else cwd
+    # Feature 011 FR-001f: plaintext credentials are USER-LEVEL ONLY. There is
+    # deliberately no project-local lookup and no `.agent-container/` equivalent:
+    # that directory travels with the repository, and Feature 008 settled that the
+    # repo holds a LOCATOR, never a value. Putting keys there would mean `git add
+    # .agent-container/` — the natural action, since it holds the spec — stages an
+    # API key, with _refuse_git_tracked_plaintext catching it only at deploy time,
+    # after the secret is already in history. A project that wants its credential
+    # referenced from the repo uses a locator source instead.
+    _ = cwd  # accepted for signature compatibility; project level is not consulted
     found: dict[str, Path] = {}
-    for base, prefix in ((cwd, f"agent-container.{name}."), (CONFIG_DIR, f"{name}.")):
+    for base, prefix in ((CONFIG_DIR, f"{name}."),):
         if not base.is_dir():
             continue
         for f in sorted(base.glob(f"{prefix}*.key")):
@@ -729,13 +838,15 @@ CANONICAL_MANIFEST: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 def canonical_config_dir(name: str, cwd: Path) -> Path | None:
-    """Resolve the operator-canonical config SOURCE dir by convention (US3),
-    project-local first — mirrors `.env`/sidecar/key-file discovery.
+    """Resolve the operator-canonical config SOURCE dir (Feature 011): project
+    config directory first, then user level — mirrors the env/sidecar chain.
 
     >>> canonical_config_dir("acme", Path("/nonexistent-xyz")) is None
     True
     """
-    for c in (cwd / f"agent-container.{name}.config", CONFIG_DIR / f"{name}.config"):
+    pcd = project_config_dir(cwd)
+    project = [pcd / f"{name}.config"] if pcd is not None else []
+    for c in (*project, CONFIG_DIR / f"{name}.config"):
         if c.is_dir():
             return c
     return None
@@ -1998,13 +2109,15 @@ SIDECAR_ALLOWED_TOPLEVEL = {"services", "version"}  # version: tolerated (compos
 
 
 def sidecar_override_candidates(name: str, cwd: Path) -> list[Path]:
-    """Discovery order, mirroring .env resolution (project-local first, then the
-    per-name user config).
+    """Discovery order, mirroring the env chain: project config directory first,
+    then the per-name user config (Feature 011).
 
-    >>> [p.name for p in sidecar_override_candidates("acme", Path("/w"))]
-    ['agent-container.acme.services.yaml', 'acme.services.yaml']
+    >>> [p.name for p in sidecar_override_candidates("acme", Path("/nonexistent-xyz"))]
+    ['acme.services.yaml']
     """
-    return [cwd / f"agent-container.{name}.services.yaml", CONFIG_DIR / f"{name}.services.yaml"]
+    pcd = project_config_dir(cwd)
+    project = [pcd / f"{name}.services.yaml"] if pcd is not None else []
+    return [*project, CONFIG_DIR / f"{name}.services.yaml"]
 
 
 def resolve_sidecar_override(name: str) -> Path | None:
@@ -2214,7 +2327,7 @@ def build_compose_model(
     build_context: Path | str,
     host_key_file: Path | None = None,
     authorized_keys_file: Path | None = None,
-    env_file: Path | None = None,
+    env_file: Path | list[Path] | None = None,
     extra_mounts: list[str] | None = None,
     injected_configs: list[tuple[str, Path, str]] | None = None,
     *,
@@ -2260,7 +2373,11 @@ def build_compose_model(
     if environment:  # Feature 004 non-secret settings (mode/agent/clone-url)
         service["environment"] = dict(environment)
     if env_file is not None:
-        service["env_file"] = [str(env_file)]
+        # Feature 011 FR-001d: one path or many. Compose applies `env_file:` in
+        # order with LATER entries winning, which is exactly the stacking `-e`
+        # promises — so ordering needs no logic here, only the list.
+        files = [env_file] if isinstance(env_file, Path) else list(env_file)
+        service["env_file"] = [str(f) for f in files]
     # The workspace named volume is declared ONLY in persistent mode (Constitution
     # IV refinement, FR-013): bind/ephemeral must NOT create it. The other eight are
     # always declared. `--purge`/`wipe` tolerate the workspace volume's absence.
@@ -2351,7 +2468,7 @@ def do_build(tag: str, context: Path | None = None) -> None:
             if not _is_repo_checkout(base):
                 die(
                     f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout "
-                    "(missing Dockerfile/completions/agent-container.bash)"
+                    "(missing image/Dockerfile or completions/agent-container.bash)"
                 )
             ctx = base
         else:
@@ -2361,6 +2478,12 @@ def do_build(tag: str, context: Path | None = None) -> None:
             "no repo checkout for the docker build context; run from a checkout, "
             "set AGENT_CONTAINER_REPO=<checkout>, or pass --context <dir>"
         )
+    # Feature 011 FR-006/FR-007: the context is `image/`, not the checkout root.
+    # Narrow BY CONSTRUCTION — the directory boundary is the guarantee, rather
+    # than a .dockerignore allowlist that must be maintained in step with the
+    # Dockerfile. This matters most for a REMOTE host, where the context crosses
+    # the network to another daemon.
+    ctx = ctx / "image"
     rt = detect_runtime()
     log(f"building image '{tag}' with {rt} from {ctx}")
     # Inherited stdio: layer progress must stream, never capture.
@@ -2370,17 +2493,24 @@ def do_build(tag: str, context: Path | None = None) -> None:
 
 
 def resolve_build_context() -> Path:
-    """The repo checkout used as the compose build context (image builds on the
-    host). Same resolution as do_build (AGENT_CONTAINER_REPO -> REPO_ROOT); dies
-    actionably when no checkout is reachable (e.g. a bare PyPI install)."""
+    """The compose build context — `<checkout>/image` (Feature 011 FR-006/FR-007).
+
+    The context is the image directory, not the checkout: narrow BY CONSTRUCTION
+    rather than by a .dockerignore allowlist maintained in step with the
+    Dockerfile. The whole context travels to the target daemon, which may be
+    REMOTE, so the boundary is a security property and not tidiness.
+
+    Same resolution as do_build (AGENT_CONTAINER_REPO -> REPO_ROOT); dies
+    actionably when no checkout is reachable (e.g. a bare PyPI install).
+    """
     env = os.environ.get("AGENT_CONTAINER_REPO")
     if env:
         base = Path(env).expanduser().resolve()
         if not _is_repo_checkout(base):
             die(f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout")
-        return base
+        return base / "image"
     if REPO_ROOT is not None:
-        return REPO_ROOT
+        return REPO_ROOT / "image"
     die(
         "no repo checkout for the compose build context; run from a checkout "
         "or set AGENT_CONTAINER_REPO=<checkout>"
@@ -2744,11 +2874,16 @@ def is_ssh_git_url(url: str) -> bool:
     return url.startswith("ssh://") or bool(re.match(r"^[^/@]+@[^/:]+:", url))
 
 
-def env_file_defines(env_file: Path | None, key: str) -> bool:
+def env_file_defines(env_file: Path | list[Path] | None, key: str) -> bool:
     """Best-effort: does `env_file` define a non-empty `key`? Only for the clone
     fail-fast pre-check — the entrypoint does the authoritative in-container check."""
     if env_file is None:
         return False
+    files = [env_file] if isinstance(env_file, Path) else list(env_file)
+    return any(_one_env_file_defines(f, key) for f in files)
+
+
+def _one_env_file_defines(env_file: Path, key: str) -> bool:
     try:
         for raw in env_file.read_text().splitlines():
             line = raw.strip()
@@ -2762,7 +2897,9 @@ def env_file_defines(env_file: Path | None, key: str) -> bool:
     return False
 
 
-def clone_credential_precheck(spec: ExecSpec, env_file: Path | None, push_key: Path | None) -> None:
+def clone_credential_precheck(
+    spec: ExecSpec, env_file: Path | list[Path] | None, push_key: Path | None
+) -> None:
     """Fail fast (FR-014) when an SSH-URL clone-on-start has no push key: refuse
     BEFORE creating an empty-workspace container. https:// needs no key (GH_TOKEN
     is always present); bind is never cloned. The entrypoint re-checks in-container."""
@@ -2800,7 +2937,7 @@ def compose_up_exec(
     host_name: str,
     host_rec: dict,
     name: str,
-    env_file: Path,
+    env_file: Path | list[Path],
     mounts: list[str],
     host_key: Path | None,
     authorized_keys: list[Path],
@@ -2909,7 +3046,7 @@ def compose_up_exec(
 def do_up(
     name: str,
     host: str | None = None,
-    env_file_override: Path | None = None,
+    env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
@@ -2943,10 +3080,10 @@ def do_up(
             f"container {cname} exists but is not running on {host_name}. Run: agent-container down {name}{hflag}"
         )
 
-    env_file = env_file_override or resolve_env_file(name)
-    if env_file is None:
-        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
-        die(f"no .env found. Looked in: {cands}")
+    # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
+    # never gets a half-configured environment built from files we no longer read.
+    refuse_superseded_layout(name)
+    env_file = _resolve_env_files(name, env_file_override)
 
     # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
     # container is created; https:// uses GH_TOKEN and needs none.
@@ -3170,7 +3307,7 @@ def do_start(name: str, host: str | None = None) -> None:
 def do_redeploy(
     name: str,
     host: str | None = None,
-    env_file_override: Path | None = None,
+    env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
     host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
@@ -3191,10 +3328,10 @@ def do_redeploy(
     ensure_tunnel(host_rec)
     if container_name(name) not in host_container_names(host_rec, include_stopped=True):
         warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
-    env_file = env_file_override or resolve_env_file(name)
-    if env_file is None:
-        cands = ", ".join(str(c) for c in env_file_candidates(name, Path.cwd()))
-        die(f"no .env found. Looked in: {cands}")
+    # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
+    # never gets a half-configured environment built from files we no longer read.
+    refuse_superseded_layout(name)
+    env_file = _resolve_env_files(name, env_file_override)
     clone_credential_precheck(spec, env_file, push_key)
     with deployment_lock(host_name, name):
         compose_up_exec(
@@ -4590,6 +4727,11 @@ INJECT_AAC_DIR = "/workspace/.agent-container"
 
 
 def find_project_root(start: Path | None = None) -> Path | None:
+    # NOTE (Feature 011): the per-environment resolvers defined EARLIER in this
+    # file (env_file_candidates, discover_apikey_files, canonical_config_dir,
+    # resolve_sidecar_override) call this via project_config_dir(). Python binds
+    # names at CALL time, not definition time, so the backwards reference is
+    # fine — verified, not assumed. Do not "fix" the ordering; nothing is broken.
     """Walk upward from `start` (cwd) to the nearest ancestor holding a
     `.agent-container/` directory; return it, or None (declarative model inert →
     today's imperative behavior, FR-004). Deterministic regardless of subdir."""
@@ -4598,6 +4740,22 @@ def find_project_root(start: Path | None = None) -> Path | None:
         if (d / PROJECT_MARKER).is_dir():
             return d
     return None
+
+
+def project_config_dir(cwd: Path | None = None) -> Path | None:
+    """The project config directory — `<project root>/.agent-container` — or None
+    when `cwd` is not inside a project (Feature 011, FR-001).
+
+    One helper rather than four copies of the same walk: every per-environment
+    resolver goes through here, so "where does a project keep its files" has a
+    single answer. Returns None rather than guessing, and each caller then falls
+    back to user-level configuration on its own terms.
+
+    >>> project_config_dir(Path("/definitely/not/a/project")) is None
+    True
+    """
+    root = find_project_root(cwd)
+    return None if root is None else root / PROJECT_MARKER
 
 
 def _spec_yaml_files(root: Path) -> list[Path]:
@@ -5337,7 +5495,7 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
             do_up(
                 name,
                 host=host_name,
-                env_file_override=env_file,
+                env_file_override=[env_file] if env_file else None,
                 spec=spec,
                 extra_injected_configs=aac,
                 push_key=ssh.push_key,
@@ -5488,8 +5646,12 @@ def up(
     host: str | None = typer.Option(
         None, "--host", help="Deploy to this registered host (default: the registry default)."
     ),
-    env_file: Path | None = typer.Option(
-        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    env_file: list[Path] = typer.Option(
+        None,
+        "-e",
+        "--env-file",
+        help="Env file to load; repeatable, applied in order (later wins). "
+        "Bypasses env-file resolution; each path must exist.",
     ),
     mount: list[str] = typer.Option(
         None,
@@ -5568,8 +5730,9 @@ def up(
     Default: an interactive claude session on a persistent workspace (attach with
     `agent-container attach NAME`). Use --mode headless for a one-shot job."""
     set_json_mode(as_json)
-    if env_file is not None and not env_file.is_file():
-        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
+        if not _ef.is_file():
+            raise typer.BadParameter(f"--env-file {_ef} does not exist")
     spec = ExecSpec(
         mode=mode,
         agent=agent,
@@ -5672,8 +5835,12 @@ def start(
 def redeploy(
     name: str = typer.Argument(..., help="Container short name."),
     host: str | None = typer.Option(None, "--host", help="Host the container runs on."),
-    env_file: Path | None = typer.Option(
-        None, "--env-file", help="Bypass env-file resolution; path must exist."
+    env_file: list[Path] = typer.Option(
+        None,
+        "-e",
+        "--env-file",
+        help="Env file to load; repeatable, applied in order (later wins). "
+        "Bypasses env-file resolution; each path must exist.",
     ),
     mount: list[str] = typer.Option(
         None, "--mount", help="Bind-mount a host dir (repeatable), as for `up`."
@@ -5709,8 +5876,9 @@ def redeploy(
     Deliberately non-idempotent: always rebuilds + recreates, even with no change.
     May change mode/agent/workspace/repo."""
     set_json_mode(as_json)
-    if env_file is not None and not env_file.is_file():
-        raise typer.BadParameter(f"--env-file {env_file} does not exist")
+    for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
+        if not _ef.is_file():
+            raise typer.BadParameter(f"--env-file {_ef} does not exist")
     spec = ExecSpec(
         mode=mode,
         agent=agent,
