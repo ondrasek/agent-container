@@ -33,16 +33,26 @@
 
 ## Notes
 
-Four items for `/speckit-clarify`. The first is not a detail — it decides whether the feature
-should exist in this shape at all:
+**Clarified 2026-07-29.** Three of the four listed items are settled, including the one that
+decided whether the feature was viable in this shape:
 
-1. **How the control plane holds host access** (FR-007). Constitution III assumes secrets are
-   ephemeral, off-volume, and scoped to one container's job. A long-lived management container
-   strains all three, and no existing channel obviously fits. This is the feature's central
-   design question and should be settled before planning.
-2. **What "revoke" means** (FR-008) — rotating a key the tool injected, or something the hosts
-   enforce. Determines whether revocation is real or advisory.
-3. **Self-termination behaviour** (FR-010) — refuse, defer, or act on itself last. All three are
-   defensible; leaving it undecided is not.
-4. **Whether the control plane runs the same image** as agent containers or a narrower one.
-   Reusing it is cheaper; a narrower one carries less to steal.
+- **How host access is held**: the control plane **generates its own** keypair in-container,
+  encrypted at rest, unlocked by an operator-held passphrase on every connect. The tool never
+  handles the private key, so there is no injection channel to violate — this **fits**
+  Constitution III's operator-interactive carve-out rather than needing an exception.
+- **Revocation** is concrete: withdraw the public key from the hosts and containers that trust it,
+  performed by the tool across them from one command.
+- **Daemon access needs no separate credential.** Remote daemon access is already
+  `ssh://user@host`, so the same keypair serves both; capability is decided by *where the public
+  half is authorised*.
+
+Still open for planning:
+
+1. **Self-termination behaviour** (FR-010) — refuse, defer, or act on itself last.
+2. **Whether the control plane runs the same image** as agent containers or a narrower one.
+   Reusing it is cheaper; a narrower one carries less worth stealing, which matters more here
+   than anywhere else in the roadmap.
+
+One consequence to carry into planning: a control plane's public key is a **standing**
+authorisation across many hosts and containers, including ones created later. Every prior feature
+injected keys per deployment. That difference is the thing an attacker would target.
