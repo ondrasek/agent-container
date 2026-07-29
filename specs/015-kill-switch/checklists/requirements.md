@@ -33,13 +33,22 @@
 
 ## Notes
 
-Three items for `/speckit-clarify`, all consequential:
+**Clarified 2026-07-29.** All three listed items are settled, plus one more:
 
-1. **What "verified" means** (FR-014). Confirming a stop costs a round-trip per environment
-   against hosts that may be slow — precisely the hosts most likely to be in trouble. The
-   guarantee and its cost need settling together.
-2. **Whether a leaked-credential emergency needs a third form** beyond stop and destroy — e.g.
-   stop *and* invalidate injected credentials. Adjacent to Feature 012, and arguably the real
-   emergency this feature exists for.
-3. **Timeout behaviour** (FR-004's *undetermined*). How long to wait before an environment is
-   classed undetermined determines whether the action is fast and vague or slow and certain.
+- **Verification** is a re-query per *host* after stopping — cost scales with hosts, not
+  environments, and "stopped" means observed stopped rather than inferred from an exit status.
+- **Timeout**: a fixed per-host default, overridable, with hosts contacted in parallel. Total
+  elapsed time is bounded by the slowest host rather than the sum, which matters when the point is
+  acting quickly.
+- **No third form.** Stopping preserves volumes, and a volume may hold an operator-interactive
+  login — so a suspected leak is served by *destroying*, which is what a third form would have
+  done under another name. Recorded as FR-006a, which also requires the tool to say that revoking
+  a credential at the provider is outside its reach rather than implying otherwise.
+- **Confirmation**: destroy only. Stopping is recoverable, and a prompt is friction on the action
+  whose value is speed.
+
+The one thing worth carrying into planning: **FR-006a is documentation as a requirement.** The
+stop-vs-destroy mapping is the kind of thing an operator must not have to derive at the moment
+they need it, so it belongs in help text rather than only in this spec.
+
+Nothing outstanding.

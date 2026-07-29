@@ -31,6 +31,28 @@ The hardest requirement here is not stopping things. It is being **honest about 
 operator reaching for a kill switch is already having a bad day, and a report that overstates
 success is worse than an error.
 
+## Clarifications
+
+### Session 2026-07-29
+
+- Q: What does FR-014's "verified" cost? → A: **Re-query each host after stopping** and confirm
+  the containers are gone from what it reports. Cost is one extra round-trip **per host**, not per
+  environment. This is the action where a wrong answer costs most, and the spec already assumes
+  speed matters less than truth.
+- Q: How long before a host is classed undetermined? → A: **A fixed per-host timeout with a
+  sensible default, overridable, and hosts contacted in parallel.** Total time is then bounded by
+  the slowest single host rather than the sum of all of them — which matters when the point is
+  acting quickly.
+- Q: Does a leaked credential need a third form? → A: **No — the two forms already cover it, and
+  the mapping must be stated.** Stopping leaves volumes intact, and a volume may hold an
+  operator-interactive login; so for a suspected leak, stopping is *not* enough and destroying is
+  exactly right. A third form would do what destroy does under another name while implying a
+  revocation guarantee the tool cannot deliver — it cannot revoke a provider's key.
+- Q: Does the stopping form require confirmation? → A: **No — only destroying does.** In the
+  emergency this exists for, a prompt is friction on the *recoverable* action; stopped containers
+  keep their volumes and start again. Destroy keeps its confirmation because it is not
+  recoverable, and FR-008's preview serves anyone who wants to look first.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -121,7 +143,9 @@ untouched.
 - **Nothing to stop** — must be an unambiguous success, not an error.
 - **The inventory is absent** — the feature must refuse rather than fall back to "whatever
   answers", because a kill switch that silently narrows its scope is a false guarantee.
-- **A stop that appears to succeed but does not** — must be verified, not assumed.
+- **A stop that appears to succeed but does not** — must be verified by re-query, not assumed.
+- **A host that is merely slow rather than unreachable** — the timeout is overridable precisely so
+  an operator who knows their host is slow can wait instead of receiving *undetermined*.
 
 ## Requirements *(mandatory)*
 
@@ -135,12 +159,22 @@ untouched.
   against the others.
 - **FR-004**: The result MUST distinguish **stopped**, **not stopped**, and **could not be
   determined**, per environment.
+- **FR-004a**: Hosts MUST be contacted **in parallel**, with a **per-host timeout** that has a
+  sensible default and is overridable. A host that does not answer within it yields *could not be
+  determined* for its environments. Total time MUST be bounded by the slowest host, not the sum.
 - **FR-005**: If anything was not stopped or not confirmed, the action MUST NOT report overall
   success.
 - **FR-006**: A **stopping** form and a **destroying** form MUST both exist, and destruction MUST
   never be the default or implicit.
-- **FR-007**: The destroying form MUST require explicit confirmation, consistent with the
-  existing confirmation idiom.
+- **FR-006a**: The tool MUST state **which form suits which emergency**, because the difference is
+  not obvious under pressure: a runaway or looping agent calls for **stopping** (recoverable,
+  volumes intact); a suspected credential leak calls for **destroying**, because stopping leaves
+  volumes that may hold an operator-interactive login. Revoking a credential at the provider is
+  outside this tool and MUST be said so, not implied.
+- **FR-007**: The destroying form MUST require explicit confirmation, consistent with the existing
+  confirmation idiom. The **stopping** form MUST NOT require confirmation: it is recoverable, and
+  a prompt is friction on the action whose value is speed. FR-008's preview covers anyone wanting
+  to check first.
 - **FR-008**: The operator MUST be able to preview exactly what would be affected **without
   affecting it**.
 - **FR-009**: The action MUST NOT touch a container the tool did not create.
@@ -151,7 +185,9 @@ untouched.
   reflect what happened.
 - **FR-013**: If the inventory is unavailable, the action MUST **refuse** rather than silently
   fall back to live enumeration — a kill switch that narrows its own scope is a false guarantee.
-- **FR-014**: A stop MUST be **verified**, not assumed from a command exiting zero.
+- **FR-014**: A stop MUST be **verified** by re-querying the host afterwards and confirming the
+  container is absent from what it reports — never inferred from a command exiting zero. The
+  verification MUST be **per host**, so its cost scales with hosts rather than environments.
 - **FR-015**: The result MUST be available through the existing machine-readable interface,
   including the per-environment outcomes.
 - **FR-016**: Interruption partway MUST leave a truthful record, and a repeated run MUST be safe.
@@ -171,6 +207,10 @@ untouched.
 - **SC-001**: With environments on N reachable hosts, one invocation stops **all** of them.
 - **SC-002**: An unreachable host is reported as undetermined and **never** as stopped — **zero**
   occurrences across repeated tests.
+- **SC-002a**: With N hosts of which one is unreachable, total elapsed time is bounded by the
+  slowest responsive host plus one timeout — **not** N timeouts.
+- **SC-002b**: Every environment reported *stopped* was observed absent on a re-query — **zero**
+  reported from an exit status alone.
 - **SC-003**: Any incomplete run reports overall failure — **zero** runs that report success while
   something is unstopped or unconfirmed.
 - **SC-004**: A container not created by the tool is never affected — **zero** occurrences.
@@ -190,8 +230,12 @@ untouched.
   feature refuses to operate without it rather than degrading to live enumeration.
 - **Verification is part of stopping.** A command that exits zero is not evidence; the tool
   confirms, because this is the one action where a wrong answer is most costly.
-- Speed matters less than truth. This may take time against slow hosts, provided it reports
-  accurately.
+- **Speed matters less than truth — but not needlessly.** Verification costs one round-trip per
+  host, and parallelism keeps the total bounded by the slowest host rather than their sum, so
+  accuracy is bought without making the emergency case slow.
+- **The two forms map to two emergencies, and that mapping must be written down.** Stop for a
+  runaway agent; destroy for a suspected leak, because stopping preserves the volumes a credential
+  may live on. An operator choosing under pressure should not have to derive this.
 
 ## Out of Scope
 
