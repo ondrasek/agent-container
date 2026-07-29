@@ -33,15 +33,25 @@
 
 ## Notes
 
-**Clarified 2026-07-29.** The shared-store question is settled: **separate stores**, sharing
-placement and write-safety machinery but not schema or retention. Run records are pruned
-actively; inventory entries are kept. See FR-011a.
+**Clarified 2026-07-29** (two passes). All items settled.
 
-Two items remain for planning, both genuinely open:
+First pass: separate store from Feature 014's inventory — shared placement and write-safety, not
+schema or retention.
 
-1. **How the record learns what was committed** (FR-004). The agent commits *inside* the
-   container; the record is written *outside* it. That seam is this feature's main design
-   question, and it decides whether FR-005 — the unpushed-commit warning, which is the record's
-   most valuable single field — is reliable or best-effort.
-2. **Whether interactive sessions are recorded** (FR-013). Cheap to state, materially changes
-   volume and usefulness: an interactive session has no task text and no clean end.
+Second pass:
+
+- **Who records**: the container writes a summary when the run ends; the tool ingests it on its
+  next contact with that host. Detached is the *default* headless mode, so any design needing the
+  CLI attached at the end would have missed the case the feature exists for. This produced
+  **FR-001b** — teardown must ingest before removing the storage holding pending records, or
+  destroying an environment silently discards the account of what it did.
+- **Commit link**: the entrypoint captures the repository's commit and upstream position at start
+  and exit. Agent-independent, identical for local and remote hosts, and it still works for an
+  agent that crashed — which is precisely when the record matters most. That makes FR-005's
+  unpushed-commit warning **reliable** rather than best-effort.
+- **Interactive sessions are recorded**, as a distinct kind — a deviation from the recommendation
+  that composes well, since the git capture runs anyway and this catches commits made by hand. It
+  required an outcome vocabulary of its own (FR-003): *finished* and *failed* are meaningless for
+  a session someone detached from, and applying them would have made the field noise.
+
+Nothing outstanding.

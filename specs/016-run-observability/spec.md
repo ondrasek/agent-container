@@ -42,6 +42,24 @@ This feature gives each run a durable record that outlives its container.
   live* and *how writes are made safe* — the fiddly parts, worth solving once — but not a schema
   and not a retention rule.
 
+### Session 2026-07-29 (second pass)
+
+- Q: A detached headless run ends with no CLI attached — who writes the record? → A: **The
+  container writes a summary locally when the run ends; the CLI ingests it into the durable store
+  the next time it talks to that host.** The entrypoint is the only thing present at that moment,
+  and a summary on a volume outlives the container. Detached is the *default* headless mode, so a
+  design that only recorded foreground runs would miss the case the feature exists for.
+- Q: How does the record learn what was committed and whether it was pushed? → A: **The entrypoint
+  captures the repository's commit and upstream-tracking position at start and at exit.** The
+  difference is what the run committed; comparing local against upstream at exit is whether it
+  pushed. Done inside the container where the repository is, so it works identically for local and
+  remote hosts and needs no cooperation from any agent — including one that crashed.
+- Q: Are interactive sessions recorded? → A: **Yes, as a distinct kind.** Noted as a deviation
+  from the recommendation, and it composes well: the git capture above already runs for every
+  session, so recording interactive ones is nearly free and captures commits made by hand. It does
+  require an outcome vocabulary of its own, since *finished* and *failed* are meaningless for a
+  session someone simply detached from.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Know what happened after the container is gone (Priority: P1)
@@ -121,6 +139,10 @@ captured and the second is explicitly *unknown* rather than zero.
 - **A run that never started** (image missing, credential unresolvable) — must be distinguishable
   from one that started and failed.
 - **A record write that fails** — must not fail the run itself, but must not be silent.
+- **Teardown before ingestion** — an environment destroyed while a record is still pending must
+  not lose it; teardown ingests first (FR-001b).
+- **A container that never comes back** — its pending record is on a volume, so it survives until
+  the volume is removed; if the volume goes too, the loss must be visible rather than silent.
 - **Concurrent runs** in different environments — must not interleave or overwrite records.
 - **An agent that reports usage in its own units** — must not be normalised into a false
   equivalence between agents.
@@ -137,10 +159,24 @@ captured and the second is explicitly *unknown* rather than zero.
 
 - **FR-001**: Every agent run MUST produce a durable record that survives the container's
   removal.
-- **FR-002**: The record MUST identify the environment, the agent, the task given, and the start
-  and end times.
-- **FR-003**: The record MUST state **how the run ended**, distinguishing at least: finished,
-  failed, stopped by the operator, and never started.
+- **FR-001a**: The record MUST be written **by the container** when the run ends, to storage that
+  outlives the container, and **ingested by the tool** into the durable store on its next contact
+  with that host. A design that requires the CLI to be attached at the end would miss detached
+  runs, which are the default.
+- **FR-001b**: Teardown MUST ingest any pending records **before** removing the storage that holds
+  them. Destroying an environment must not silently discard the account of what it did.
+- **FR-004a**: The repository effect MUST be derived from the repository's **commit and
+  upstream-tracking position captured at start and at exit**, inside the container. It MUST NOT
+  depend on an agent reporting it — an agent that crashed reports nothing, which is exactly when
+  the record matters most.
+- **FR-002**: The record MUST identify the environment, the agent, its **kind** (headless or
+  interactive), the task given, and the start and end times. The task MAY be absent for an
+  interactive session, which has none.
+- **FR-003**: The record MUST state **how it ended**, from a closed set scoped to its kind. For a
+  **headless run**: finished, failed, stopped by the operator, never started. For an **interactive
+  session**: ended (the operator disconnected) or stopped (the container was stopped under it).
+  *Finished* and *failed* MUST NOT be applied to an interactive session — a session has no
+  completion semantics, and pretending otherwise would make the field meaningless.
 - **FR-004**: The record MUST link the run to its effect on the repository — what was committed
   and whether it was pushed.
 - **FR-005**: A run that committed **without pushing** MUST be visible as such — this is the
@@ -159,8 +195,10 @@ captured and the second is explicitly *unknown* rather than zero.
   expected; a shared store is not.
 - **FR-012**: Records MUST be listable and retrievable through the existing machine-readable
   interface.
-- **FR-013**: Whether **interactive** sessions are recorded MUST be a defined decision, not an
-  accident of implementation.
+- **FR-013**: Interactive sessions **MUST** be recorded, as a distinct kind. They carry no task
+  text and use the interactive outcome vocabulary (FR-003), but they DO carry the repository
+  effect — the same start/end capture applies, so commits made by hand during a session are
+  linked exactly as an agent's are.
 - **FR-014**: The record MUST NOT attempt to replace the agent's own logs; its relationship to
   them MUST be stated.
 - **FR-015**: Usage reported in agent-specific units MUST NOT be normalised into a false
@@ -168,7 +206,8 @@ captured and the second is explicitly *unknown* rather than zero.
 
 ### Key Entities *(include if feature involves data)*
 
-- **Run record**: one agent execution — environment, agent, task, timing, and how it ended.
+- **Run record**: one agent execution *or* interactive session — environment, agent, **kind**,
+  task (absent for interactive), timing, and how it ended, from the vocabulary for that kind.
 - **Repository effect**: what the run committed and whether it pushed.
 - **Usage**: what the agent reported about cost or consumption, in its own terms, or *unknown*.
 
@@ -178,8 +217,10 @@ captured and the second is explicitly *unknown* rather than zero.
 
 - **SC-001**: A run's record is retrievable after its environment is fully torn down — **100%**
   of runs.
-- **SC-002**: Every record states how the run ended, from a closed set — **zero** ambiguous
-  endings.
+- **SC-002**: Every record states how it ended, from the closed set for its kind — **zero**
+  ambiguous endings, and **zero** interactive sessions marked *finished* or *failed*.
+- **SC-002a**: A record produced by a **detached** run is present after the CLI's next contact
+  with that host — **100%** of runs, with the CLI never attached at the moment the run ended.
 - **SC-003**: A run that committed without pushing is identifiable — **zero** such runs that look
   like clean successes.
 - **SC-004**: An agent reporting no usage yields *unknown*, never zero — **zero** occurrences of
@@ -196,6 +237,9 @@ captured and the second is explicitly *unknown* rather than zero.
 - **This is a summary, not a log.** Logs stay where they are and remain the detail; this record
   is the small durable thing you can list and compare later. Conflating them would produce a
   store nobody prunes and nobody reads.
+- **Recording interactive sessions is nearly free.** The start/end repository capture runs for
+  every session regardless, so the marginal cost is one small record per session — and it captures
+  commits an operator made by hand, which no agent would have reported.
 - **Unknown is not zero.** For usage especially, a false zero silently understates a total, and a
   total that is quietly wrong is worse than one that admits a gap.
 - **The commit link is what makes the record valuable.** The tool's central promise is that
