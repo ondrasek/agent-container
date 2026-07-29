@@ -33,14 +33,22 @@
 
 ## Notes
 
-The spec deliberately carries **no `[NEEDS CLARIFICATION]` markers**, but two decisions are
-flagged for `/speckit-clarify` because they set scope rather than detail:
+**Clarified 2026-07-29** — all four open questions resolved; checklist re-validated 16/16.
 
-1. **What "no providers declared" means** (FR-004) — "all", "none", or "the agent's default".
-   These give three materially different products, and the third is the status quo the feature
-   exists to change.
-2. **Whether the tool may refuse to deploy** an agent whose provider set cannot be constrained
-   (FR-008's honest-strength requirement) — or whether it deploys with a stated limitation.
+The two items previously listed here are settled: an empty declaration means *unrestricted but
+disclosed* (FR-004), and an unenforceable declaration warns or refuses according to an
+`enforcement` mode (FR-007b).
 
-Both are recorded as requirements with defined shape, so the spec is testable as written; the
-clarification decides which of the permitted answers is chosen.
+Two things the clarification changed materially, worth carrying into planning:
+
+1. **Enforcement moved from advisory to real.** The egress proxy sidecar refuses undeclared
+   hosts, so this is no longer "configure the agent and hope". FR-008's honesty requirement
+   survives but is now precise: a proxy binds clients that honour it and does not stop a process
+   that dials directly.
+2. **The per-agent question changed.** It is no longer "does this agent expose a provider list"
+   but "does this agent honour proxy environment variables" — which must be established by
+   **running each agent**, not read from its documentation. Feature 010 established why that
+   distinction matters.
+
+One accepted tradeoff, recorded rather than argued: `advisory` is the default, so the safe
+behaviour is the one an operator must remember to ask for.

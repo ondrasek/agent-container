@@ -30,6 +30,34 @@ This feature makes the set of reachable providers **declared, enforced and visib
 > **by construction**, not by preference. Whatever this feature does, an unprivileged process
 > must be able to do.
 
+## Clarifications
+
+### Session 2026-07-29
+
+- Q: How is undeclared egress actually detected and prevented, given the container cannot add
+  privileges? → A: **An egress proxy sidecar.** The tool already merges an operator sidecar file
+  as a second compose `-f`, sharing one project and lifecycle, so a proxy that allowlists the
+  declared providers needs **no container privileges**. The agent is pointed at it through
+  standard proxy environment variables. This turns enforcement from *"the agent was configured
+  not to"* into *"the request was refused"*, and makes the egress record real rather than
+  dependent on what an agent chooses to report.
+- Q: What does an environment declaring **no** providers mean? → A: **Unrestricted, but
+  disclosed.** Behaviour is unchanged from today, except the operator is told once that the agent
+  has a built-in default it can reach without their credential. The gap being closed was silence,
+  not permissiveness; enforcement stays opt-in and existing environments keep working.
+- Q: When a declaration cannot be honoured for the chosen agent, refuse or warn? → A: **Refuse
+  only in strict mode.** An `enforcement` setting selects `advisory` (default — deploy, state the
+  limitation) or `strict` (refuse). Noted tradeoff, accepted knowingly: the safe behaviour is the
+  one an operator must remember to ask for.
+- Q: Where does the declaration live? → A: **The declarative spec**
+  (`.agent-container/environments.yaml`), beside the credentials that authorise the providers. No
+  new file and no new resolution path.
+
+**Consequence worth stating**: the proxy answer makes the third question narrower than it looked.
+With a proxy in place, enforcement is real for *any* agent that honours proxy environment
+variables — the agent's own configuration stops being the mechanism. "Cannot be constrained"
+therefore means **the agent bypasses the proxy**, not "the agent lacks a provider setting".
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Declare which providers an environment may use (Priority: P1)
@@ -127,14 +155,15 @@ discoverable after the container is gone.
 
 - **FR-001**: An operator MUST be able to declare, per environment, the set of model providers
   that environment is permitted to reach.
-- **FR-002**: The declaration MUST live with the environment's other configuration and travel
-  with the project, following the project/user configuration layering already established.
+- **FR-002**: The declaration MUST live in the **declarative spec**
+  (`.agent-container/environments.yaml`), beside the credentials that authorise those providers —
+  no new file and no new resolution path.
 - **FR-003**: An attempt to reach a provider outside the declared set MUST NOT succeed silently.
   The operator MUST learn of it — at deploy time where that is possible, and at run time
   otherwise.
-- **FR-004**: The behaviour when **no** providers are declared MUST be defined, documented and
-  deliberate — not an accident of implementation. It MUST be stated whether that means "all",
-  "none", or "the agent's default".
+- **FR-004**: An environment declaring **no** providers MUST be **unrestricted**, exactly as
+  today — and the operator MUST be told once that the agent may reach a built-in default without
+  their credential. Enforcement is opt-in; the defect being fixed is silence, not permissiveness.
 - **FR-005**: For every supported agent, the tool MUST be able to report **what that agent can
   reach**, including any built-in default provider, without the operator consulting the agent's
   own documentation.
@@ -142,10 +171,19 @@ discoverable after the container is gone.
   credential, the operator MUST be told **once and clearly**, rather than discovering it from
   traffic or from behaviour.
 - **FR-007**: Enforcement MUST NOT require adding privileges, capabilities or runtime
-  installation to the container (Constitution II). A control needing them is out of scope.
-- **FR-008**: The **strength** of the enforcement MUST be stated honestly: whether it prevents
-  egress or merely configures the agent not to attempt it, and what an agent that ignores the
-  configuration could still do.
+  installation to the agent container (Constitution II). It MUST be delivered as an **egress
+  proxy sidecar**, merged through the existing sidecar channel so it shares the environment's
+  compose project and lifecycle — including teardown.
+- **FR-007a**: The agent MUST be pointed at the proxy through standard proxy environment
+  variables, and the proxy MUST refuse any host outside the declared set.
+- **FR-007b**: An `enforcement` setting MUST select between **`advisory`** (default — deploy, and
+  state that the declaration is not enforced for this agent) and **`strict`** (refuse to deploy
+  when the declaration cannot be enforced). The effective mode MUST be visible before deploying.
+- **FR-008**: The **strength** of the enforcement MUST be stated honestly. A proxy refuses
+  requests from clients that honour it; it does **not** stop a process that ignores proxy settings
+  and opens a direct connection, because packet filtering needs privileges this feature may not
+  add. The tool MUST NOT imply a stronger guarantee than that, and MUST say which agents are
+  known to honour the proxy.
 - **FR-009**: No provider declaration may expose a credential value, and declaring a provider
   MUST NOT imply storing its credential in the project (Constitution III, and the Feature 011
   rule that the repo holds a locator, never a value).
@@ -166,7 +204,11 @@ discoverable after the container is gone.
 - **Built-in default provider**: a provider an agent will use with no operator configuration —
   the thing this feature exists to surface.
 - **Egress event**: a record that a provider was reached, or an attempt was made, including
-  whether it fell inside the declared set.
+  whether it fell inside the declared set and whether it was permitted or refused.
+- **Egress proxy**: the sidecar that enforces the declaration and produces egress events; shares
+  the environment's compose project and lifecycle.
+- **Enforcement mode**: `advisory` (default) or `strict` — whether an unenforceable declaration
+  warns or refuses.
 
 ## Success Criteria *(mandatory)*
 
@@ -178,8 +220,11 @@ discoverable after the container is gone.
   without the operator being informed — **zero** silent occurrences.
 - **SC-003**: An agent with a built-in default provider is disclosed to the operator in **100%**
   of environments where no provider is declared.
-- **SC-004**: The enforcement strength is stated for every supported agent, with **zero** cases
-  where the tool implies a stronger guarantee than it delivers.
+- **SC-004**: The enforcement strength is stated for every supported agent — including whether
+  that agent is known to honour the proxy — with **zero** cases where the tool implies a stronger
+  guarantee than it delivers.
+- **SC-004a**: In `strict` mode, an environment whose declaration cannot be enforced is refused —
+  **zero** deployments that proceed with an unenforceable declaration.
 - **SC-005**: No new privilege, capability or runtime installation is required — verified by the
   container running exactly as rootlessly as before.
 - **SC-006**: An undeclared-egress event remains discoverable after the container is removed —
@@ -188,15 +233,21 @@ discoverable after the container is gone.
 
 ## Assumptions
 
-- **Enforcement is configuration-level, not packet-level.** Constitution II forbids the
-  privileges packet filtering needs, so this feature configures agents and refuses deployments;
-  it does not promise a determined process inside the container cannot open a socket. FR-008
-  requires this be said out loud rather than implied away.
+- **Enforcement is proxy-level, not packet-level.** A sidecar proxy genuinely refuses undeclared
+  hosts — stronger than configuring agents and hoping — but it binds only clients that honour
+  proxy settings. A process that ignores them and dials directly is not stopped, because packet
+  filtering needs privileges Constitution II forbids. FR-008 requires that limit be stated, not
+  implied away.
+- **The sidecar channel already exists.** Feature 002 merges an operator override as a second
+  compose `-f`, sharing one project and lifecycle. This feature is a *consumer* of that
+  mechanism, not a new one — and teardown of the environment tears down the proxy with it.
 - **Provider identity is by name, not by endpoint.** Operators think in vendors; the mapping from
   a name to the hosts it implies is the tool's business, and is expected to change as vendors
   change theirs.
-- **The four supported agents differ in what they permit.** Some expose a configurable provider
-  list, some do not. The feature must degrade honestly per agent rather than pretend uniformity.
+- **What differs per agent is proxy adherence, not provider configuration.** With a proxy doing
+  the enforcing, an agent's own provider settings stop being the mechanism. The per-agent question
+  becomes "does it honour proxy environment variables", which must be established by running each
+  agent rather than assumed from documentation.
 - Declaring providers is **opt-in**; an operator who declares nothing is not broken, but they
   are informed (FR-004, FR-006).
 - The container remains **rootless and immutable at runtime**; nothing here changes what is baked
@@ -204,7 +255,8 @@ discoverable after the container is gone.
 
 ## Out of Scope
 
-- Network-level packet filtering, firewalls, or anything requiring added capabilities.
+- Network-level packet filtering, firewalls, or anything requiring added capabilities. A proxy
+  is in scope precisely because it needs none.
 - Controlling egress unrelated to model providers (package registries, git remotes, telemetry).
 - Auditing the *content* of what an agent sends — this feature governs *where*, not *what*.
 - Per-request cost or token accounting (that is the observability feature).
@@ -212,6 +264,9 @@ discoverable after the container is gone.
 
 ## Dependencies
 
+- **Feature 002 (lifecycle verbs / sidecars)**: the sidecar override channel FR-007 delivers the
+  proxy through, and the shared-lifecycle guarantee that tears it down with the environment.
+- **Feature 006 (agent-as-code)**: the declarative spec FR-002 places the declaration in.
 - **Feature 003 / 008 (credentialing, credential managers)**: providers and credentials are
   related but distinct; the declaration must not become a second place a secret can live.
 - **Feature 010 (opencode)**: the agent whose verified default-provider behaviour motivated this.
