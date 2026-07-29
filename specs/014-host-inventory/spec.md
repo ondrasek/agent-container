@@ -33,6 +33,23 @@ created: what, where, when, and what became of it.
 > enumerate, and enumerating by asking live hosts fails exactly when a kill switch matters most —
 > when something is wrong, unreachable, or forgotten.
 
+## Clarifications
+
+### Session 2026-07-29
+
+- Q: Do the inventory (this feature) and run observability (Feature 016) share one durable store?
+  → A: **No — two separate stores.** They look alike but behave differently: the inventory is
+  small, mutated in place, and its entries must be kept **indefinitely**, because the whole point
+  is finding the environment forgotten six months ago. Run records are append-only, grow with
+  every run, and want aggressive pruning. One store means one of them gets the wrong retention —
+  either the valuable old inventory entries are pruned away, or the run log grows without bound.
+  They may share *where they live* and *how writes are made safe*; they do not share a schema or
+  a retention rule.
+- Q: Where does the inventory live, given Feature 011 places derived host state under
+  `<state>/<host>/`? → A: **Not there.** The inventory must survive a host's removal (FR-003),
+  and a per-host directory is deleted with the host. It needs its own location, not scoped to any
+  host — a **sixth** location in the Feature 011 vocabulary.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Remember everything the tool created (Priority: P1)
@@ -132,7 +149,10 @@ whether its host is one the tool provisioned.
 - **FR-001**: The tool MUST durably record every environment it creates: what, on which host,
   and when.
 - **FR-002**: The record MUST live at **user level**, on the operator's machine, independent of
-  any project and of any host.
+  any project and of any host. It MUST NOT live under the per-host state directory
+  (`<state>/<host>/`), which is removed with its host — that would delete exactly the entries
+  FR-003 requires be kept. This is a **new location** in the Feature 011 vocabulary and must be
+  named there.
 - **FR-003**: The record MUST survive the container's removal, the host's removal from the
   registry, and the host's deprovisioning.
 - **FR-004**: The tool MUST record the **outcome** of an environment — still expected, torn down
@@ -149,7 +169,11 @@ whether its host is one the tool provisioned.
   III).
 - **FR-011**: The record MUST be readable through the existing machine-readable interface.
 - **FR-012**: The record MUST NOT grow without bound; its retention behaviour MUST be defined and
-  documented.
+  documented. Retention MUST favour **keeping old entries**: the entries most worth having are the
+  oldest forgotten ones, which naive age-based pruning deletes first.
+- **FR-012a**: This record MUST be **separate** from Feature 016's run records — separate schema
+  and separate retention. Shared placement and shared write-safety machinery are permitted and
+  expected; a shared store is not, because their retention needs are opposite.
 - **FR-013**: If the record is absent or unreadable, the tool MUST degrade to today's live-only
   behaviour rather than fail.
 - **FR-014**: Where the record and live state disagree, which is authoritative for which purpose

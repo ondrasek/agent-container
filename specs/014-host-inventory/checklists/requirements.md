@@ -33,12 +33,14 @@
 
 ## Notes
 
-Three items for `/speckit-clarify`, all scope-setting:
+**Clarified 2026-07-29.** Two of the three listed items are settled:
 
-1. **Retention** (FR-012). "Bounded but generous" needs a number or a rule. The tension is real:
-   the most valuable entries are the oldest forgotten ones, which is exactly what naive pruning
-   deletes first.
-2. **Whether this record and the observability feature's run history share one store.** Both are
-   durable, user-level, and survive the container. Deciding late means building two.
-3. **What "outcome" values exist** (FR-004) — the set must be closed, since reconciliation
-   classifies against it.
+- **Shared store with Feature 016: no.** Two stores, separate schemas and retention. The
+  retention needs are opposite — the inventory's most valuable entries are its oldest, which is
+  exactly what a run log prunes first.
+- **Placement**: not under `<state>/<host>/`, since that directory dies with the host it is named
+  for and would delete the entries FR-003 exists to preserve. A new, sixth location for the
+  Feature 011 vocabulary.
+
+Still open for planning: the **closed set of outcome values** (FR-004), since reconciliation
+classifies against it, and the concrete retention rule behind FR-012's "favour keeping".
