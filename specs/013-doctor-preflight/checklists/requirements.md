@@ -33,11 +33,21 @@
 
 ## Notes
 
-Two items for `/speckit-clarify`, both scope-setting rather than detail:
+**Clarified 2026-07-29.** Both listed items are settled, plus two more:
 
-1. **The command's name.** "doctor" is conventional (brew, flutter) but this project has no
-   precedent for a diagnostic verb, and `status` already exists for declarative drift — the two
-   must not blur.
-2. **Whether image freshness is checkable at all without a registry round-trip**, and what
-   "older than the CLI" means precisely. FR-012 requires the check; its cost decides whether it
-   belongs in the default run or behind a flag.
+- **Name**: `doctor`. Verified `status` is genuinely taken — it is an alias of `plan` and answers
+  whether a *declared spec has converged*, not whether a deploy would work.
+- **Image freshness**: a version label stamped at build, compared locally. No registry
+  round-trip, so it stays in the default pass.
+- **Exit status**: `0` deploy-would-work, `1` blocking, `2+` doctor itself failed. Advisories exit
+  `0` deliberately, so `doctor && up` stays viable — a diagnostic people stop chaining is one
+  nobody runs.
+- **Default scope**: this project's environments plus machine-level state; a name narrows it.
+
+One consequence surfaced while integrating and is now FR-012b: **an image with no version stamp
+must report *unknown***, not stale and not fresh. Every image built before this feature is
+unstamped, so calling them stale would nag every operator into a rebuild they may not need, and
+calling them fresh would assert something unknown. It is the FR-006 rule applied to the case that
+will actually be common on day one.
+
+Nothing outstanding.

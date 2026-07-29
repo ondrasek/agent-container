@@ -27,6 +27,25 @@ The value is not merely earlier failure. Some of what it reports has no failure 
 an image older than the CLI that built it still runs, and the operator has no way to know they
 are attached to something stale.
 
+## Clarifications
+
+### Session 2026-07-29
+
+- Q: What is the command called? → A: **`doctor`.** Conventional across tools operators already
+  use, and it does not collide: `status` is an **alias of `plan`** and answers "has my declared
+  spec converged", which is a different question from "would a deploy work".
+- Q: How is image staleness determined? → A: **A version label baked at build time.** The
+  building CLI's version is recorded into the image; `doctor` compares it locally against the
+  installed version. No network and no registry round-trip, so it belongs in the default pass —
+  and it answers the question actually being asked.
+- Q: What does the exit status mean? → A: **0** when a deploy would work (advisories permitted),
+  **1** when a blocking finding would prevent it, **2 or more** when `doctor` itself could not
+  run. This makes `doctor && up` the natural idiom, and keeps advisories from failing scripts —
+  a diagnostic people stop chaining is a diagnostic nobody runs.
+- Q: What does a bare invocation check? → A: **This project plus the machine** — every environment
+  declared in the project you are standing in, plus hosts, user configuration and the tool
+  itself. A name narrows it to one environment; outside a project it degrades to machine-level.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Ask whether a deploy would work (Priority: P1)
@@ -112,6 +131,8 @@ user-level configuration without erroring about a missing project.
 - **A project in the pre-011 layout** — the single most likely real finding; must be reported
   with the move, matching what a deploy would say.
 - **An image older than the CLI** — has no failure today; the operator has no way to know.
+- **An image with no version stamp at all** — built before stamping existed; must be *unknown*,
+  not assumed either way.
 - **Nothing wrong at all** — must be quiet and unambiguous, not a wall of green.
 - **`doctor` itself failing** — must be distinguishable from "the environment is unhealthy".
 
@@ -119,8 +140,9 @@ user-level configuration without erroring about a missing project.
 
 ### Functional Requirements
 
-- **FR-001**: The tool MUST provide a command that reports whether a deploy would succeed,
-  **without performing one**.
+- **FR-001**: The tool MUST provide a **`doctor`** command that reports whether a deploy would
+  succeed, **without performing one**. The name MUST NOT be `status`, which is already an alias
+  of `plan` and answers a different question — whether a declared spec has converged.
 - **FR-002**: The command MUST be **strictly read-only**: no file, container, volume, image or
   registry entry may be created, modified or removed by running it.
 - **FR-003**: A single run MUST report **all** detected problems, not stop at the first.
@@ -129,17 +151,29 @@ user-level configuration without erroring about a missing project.
 - **FR-005**: Findings MUST carry a **severity** distinguishing what blocks a deploy from what is
   advisory.
 - **FR-006**: A check that cannot be completed MUST be reported as **unknown**, never as passing.
-- **FR-007**: The command MUST work **without a project**, reporting on hosts, user-level
-  configuration and the installed tool, and saying plainly that no project was found.
+- **FR-007**: A bare invocation MUST check **every environment declared in the current project,
+  plus machine-level state** (hosts, user configuration, the installed tool). Naming an
+  environment MUST narrow it to that one. Outside a project it MUST degrade to machine-level
+  checks and say plainly that no project was found — never fail.
 - **FR-008**: One failing or unreachable check MUST NOT prevent the others from being reported.
 - **FR-009**: The command MUST NOT trigger an interactive prompt as a side effect of checking
   whether a credential resolves.
 - **FR-010**: No credential value may be printed, logged or otherwise exposed (Constitution III).
-- **FR-011**: The result MUST be available through the existing machine-readable interface, with
-  a status a program can act on without parsing prose.
+- **FR-011**: The result MUST be available through the existing machine-readable interface, and
+  the **exit status** MUST be actionable without parsing prose: **0** when a deploy would succeed
+  (advisories permitted), **1** when a blocking finding would prevent it, **2 or greater** when
+  `doctor` itself could not run. Advisories MUST NOT produce a non-zero status — chaining
+  `doctor && up` must remain viable, or the command stops being run.
 - **FR-012**: The checks MUST include, at minimum: project layout validity, per-environment
   configuration resolution, credential resolvability, host reachability, image freshness relative
   to the installed tool, and port availability.
+- **FR-012a**: The image build MUST stamp the **building CLI's version** into the image, and the
+  freshness check MUST compare it locally against the installed version — no network or registry
+  round-trip, so the check belongs in the default pass.
+- **FR-012b**: An image carrying **no version stamp** predates this feature. It MUST be reported
+  as **unknown**, never as fresh and never as stale — consistent with FR-006. Reporting it stale
+  would nag every operator into a rebuild they may not need; reporting it fresh would assert
+  something unknown.
 - **FR-013**: A failure **of the command itself** MUST be distinguishable from a report that the
   environment is unhealthy.
 - **FR-014**: When everything is satisfied, the output MUST be **brief** — an operator must be
@@ -162,7 +196,7 @@ user-level configuration without erroring about a missing project.
   filesystem, container, volume and registry state before and after.
 - **SC-003**: Every finding names a remedy — **zero** findings that state only a symptom.
 - **SC-004**: A blocking and an advisory finding are distinguishable by a program without parsing
-  prose — **100%** of runs.
+  prose — **100%** of runs — and an advisory-only result exits **0**, so `doctor && up` proceeds.
 - **SC-005**: An unreachable host is reported as unreachable, never as healthy or absent —
   **100%** of runs.
 - **SC-006**: No credential value appears in any output — **100%** of runs.
@@ -182,6 +216,9 @@ user-level configuration without erroring about a missing project.
   containers or resolve credentials that require interaction.
 - Findings should share their wording with the corresponding deploy-time failure, so operators
   learn one message rather than two.
+- **The freshness check only becomes useful after images are rebuilt.** Stamping is a build-time
+  change, so every existing image reports *unknown* until it is rebuilt. That is correct rather
+  than unfortunate — asserting freshness about an unstamped image would be a guess.
 
 ## Out of Scope
 
@@ -193,7 +230,8 @@ user-level configuration without erroring about a missing project.
 
 ## Dependencies
 
-- **Feature 011 (filesystem layout)**: the layout check, and the shared remedy wording.
+- **Feature 011 (filesystem layout)**: the layout check, the shared remedy wording, and
+  `image/` — where FR-012a's version stamp is applied at build.
 - **Feature 003 / 008 (credentialing, credential managers)**: resolvability without prompting or
   exposure.
 - **Feature 001 / 002 (hosts, lifecycle)**: host reachability, fail-closed rather than
