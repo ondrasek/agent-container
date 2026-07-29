@@ -33,14 +33,23 @@
 
 ## Notes
 
-**Clarified 2026-07-29.** Two of the three listed items are settled:
+**Clarified 2026-07-29** (two passes). All items settled.
 
-- **Shared store with Feature 016: no.** Two stores, separate schemas and retention. The
-  retention needs are opposite — the inventory's most valuable entries are its oldest, which is
-  exactly what a run log prunes first.
-- **Placement**: not under `<state>/<host>/`, since that directory dies with the host it is named
-  for and would delete the entries FR-003 exists to preserve. A new, sixth location for the
-  Feature 011 vocabulary.
+First pass (cross-cutting): two stores, not one; the inventory lives outside `<state>/<host>/`
+because that directory dies with the host it is named for.
 
-Still open for planning: the **closed set of outcome values** (FR-004), since reconciliation
-classifies against it, and the concrete retention rule behind FR-012's "favour keeping".
+Second pass:
+
+- **Outcomes** are a closed set of four: `active` / `removed` / `vanished` / `host-gone`. The
+  distinction between the last two is **what disappeared** — the environment or its host — not
+  who caused it. `unknown` is deliberately excluded: it is computed at reconciliation, never
+  stored.
+- **Retention**: keep everything indefinitely, with a large backstop cap. One row per environment
+  ever created makes the volume concern largely theoretical, and the entries worth having are the
+  old forgotten ones that age-based pruning removes first.
+- **Identity**: a generated id per deployment, so FR-015 holds **by construction** — there is no
+  overwrite path to get wrong. A reused name is simply several entries.
+- **Reconciliation**: explicit command, plus a one-line hint in `list`. A discrepancy an operator
+  must already suspect in order to look for is one nobody finds.
+
+Nothing outstanding.

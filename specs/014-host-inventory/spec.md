@@ -50,6 +50,29 @@ created: what, where, when, and what became of it.
   and a per-host directory is deleted with the host. It needs its own location, not scoped to any
   host — a **sixth** location in the Feature 011 vocabulary.
 
+### Session 2026-07-29 (second pass)
+
+- Q: What is the closed set of outcome values? → A: **`active` / `removed` / `vanished` /
+  `host-gone`.** Four, keeping the host's fate on the environment itself rather than requiring a
+  lookup against the host record — an operator asking *"where did this go"* gets the answer in one
+  place. The disambiguation is by **what disappeared**, not by who caused it: `removed` = the
+  environment was torn down while its host remained; `host-gone` = the host went away and its
+  environments went with it, whether the tool deprovisioned it or not. `unknown` is deliberately
+  **not** an outcome — it is a reconciliation *result*, computed, never stored.
+- Q: How long are entries kept? → A: **Everything, indefinitely, with a large backstop cap.** The
+  volume concern is largely theoretical: one row per environment ever created, so years of heavy
+  use is hundreds of rows. Keeping everything is what makes the feature work, since its value is
+  the entry you forgot. FR-012's bound is satisfied by a cap that exists for pathological cases,
+  not for tidiness.
+- Q: How is an entry identified, so a reused name does not overwrite history? → A: **A generated
+  id per creation.** Every deployment mints a new entry; host and name are attributes to query by.
+  FR-015 then holds **by construction** — there is no overwrite path to get wrong — and a reused
+  name is simply several entries.
+- Q: When does reconciliation run? → A: **An explicit command, plus a hint in `list`.** Full
+  classification is paid for when asked, but `list` — which already queries every host — surfaces
+  a one-line note when record and reality disagree. A discrepancy you must already suspect in
+  order to find is a discrepancy nobody finds.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Remember everything the tool created (Priority: P1)
@@ -134,7 +157,8 @@ whether its host is one the tool provisioned.
 - **Two invocations at once** — the record must not be corrupted by concurrent writes.
 - **A container created outside the tool** — must never be claimed as the tool's own.
 - **A host that is unreachable, versus one that is gone** — must be distinguishable; conflating
-  them makes reconciliation lie.
+  them makes reconciliation lie. Unreachable yields the reconciliation result *unknown*; gone
+  yields the stored outcome `host-gone`.
 - **The record is deleted or missing** — must degrade to today's live-only behaviour, not fail.
 - **The record disagrees with local port state** — one of them must be authoritative, stated.
 - **An environment recreated with the same name** — must not silently overwrite the history of
@@ -155,10 +179,19 @@ whether its host is one the tool provisioned.
   named there.
 - **FR-003**: The record MUST survive the container's removal, the host's removal from the
   registry, and the host's deprovisioning.
-- **FR-004**: The tool MUST record the **outcome** of an environment — still expected, torn down
-  through the tool, or discovered absent.
-- **FR-005**: The operator MUST be able to **reconcile** the record against what hosts report,
-  and see three distinct classes: recorded-but-missing, present-but-unrecorded, and unknown.
+- **FR-004**: The tool MUST record the **outcome** of an environment from this closed set:
+  **`active`** (expected to exist), **`removed`** (torn down while its host remained),
+  **`vanished`** (found absent with no action of ours), **`host-gone`** (its host went away and
+  took it). The distinction between `removed` and `host-gone` is **what disappeared** — the
+  environment or the host — not who caused it. `unknown` MUST NOT be an outcome value: it is a
+  reconciliation result, computed at comparison time, never stored.
+- **FR-005**: The operator MUST be able to **reconcile** the record against what hosts report via
+  an **explicit command**, seeing each entry classified as agreeing, recorded-but-missing,
+  present-but-unrecorded, or unknown.
+- **FR-005a**: `list` MUST surface a **brief indication** when the record and live state disagree,
+  without performing or printing the full classification. `list` already queries every host, so
+  this costs little — and a discrepancy an operator must already suspect in order to look for is
+  one nobody finds.
 - **FR-006**: An unreachable host MUST yield **unknown**, never *missing* — consistent with the
   existing fail-closed rule.
 - **FR-007**: The tool MUST NOT claim ownership of a container it did not create.
@@ -168,9 +201,10 @@ whether its host is one the tool provisioned.
 - **FR-010**: **No credential, token or key value** may be written to the record (Constitution
   III).
 - **FR-011**: The record MUST be readable through the existing machine-readable interface.
-- **FR-012**: The record MUST NOT grow without bound; its retention behaviour MUST be defined and
-  documented. Retention MUST favour **keeping old entries**: the entries most worth having are the
-  oldest forgotten ones, which naive age-based pruning deletes first.
+- **FR-012**: Entries MUST be kept **indefinitely** by default. Growth is bounded in practice —
+  one entry per environment ever created — so the bound FR-012 requires is a **deliberately large
+  backstop cap** for pathological cases, never routine tidying. Age-based pruning MUST NOT be the
+  default: the entries most worth having are the oldest forgotten ones, which it deletes first.
 - **FR-012a**: This record MUST be **separate** from Feature 016's run records — separate schema
   and separate retention. Shared placement and shared write-safety machinery are permitted and
   expected; a shared store is not, because their retention needs are opposite.
@@ -178,13 +212,16 @@ whether its host is one the tool provisioned.
   behaviour rather than fail.
 - **FR-014**: Where the record and live state disagree, which is authoritative for which purpose
   MUST be defined and documented.
-- **FR-015**: Recreating an environment with a previously-used name MUST NOT silently discard the
-  earlier history.
+- **FR-015**: Each deployment MUST create a **new entry with its own generated identifier**; host
+  and name are attributes, not the key. Recreating an environment with a previously-used name
+  therefore yields an additional entry and cannot overwrite the earlier one — the guarantee holds
+  by construction rather than by careful handling.
 
 ### Key Entities *(include if feature involves data)*
 
-- **Inventory entry**: one environment the tool created — its name, host, creation time, and
-  current known outcome.
+- **Inventory entry**: one *deployment* the tool made — a generated identifier, plus name, host,
+  creation time, and outcome (`active` / `removed` / `vanished` / `host-gone`). A reused name
+  produces additional entries, never a replacement.
 - **Host reference**: which host an entry belongs to, retained even after that host leaves the
   registry, and whether the tool provisioned it.
 - **Reconciliation result**: the comparison of record against live state, classifying each entry
@@ -198,7 +235,10 @@ whether its host is one the tool provisioned.
 - **SC-002**: An entry remains after its container, its host registration, and its host are all
   gone — **100%**.
 - **SC-003**: Reconciliation classifies every entry into exactly one of agreeing / missing /
-  unrecorded / unknown — **zero** unclassified.
+  unrecorded / unknown — **zero** unclassified — and every stored outcome is one of the four
+  values in FR-004, with **zero** entries carrying `unknown` as a stored outcome.
+- **SC-003a**: Recreating an environment with a previously-used name yields **two** entries, and
+  the earlier one is unchanged — verified across repeated create/remove/create cycles.
 - **SC-004**: An unreachable host never produces a *missing* classification — **zero**
   occurrences.
 - **SC-005**: A container not created by the tool is never claimed — **zero** false ownership.
