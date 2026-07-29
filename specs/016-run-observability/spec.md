@@ -31,6 +31,17 @@ This feature gives each run a durable record that outlives its container.
 > retrievable while a container lives. What is missing is the small, structured, durable summary
 > — the thing you can list, compare and search months later.
 
+## Clarifications
+
+### Session 2026-07-29
+
+- Q: Do run records share a durable store with the host inventory (Feature 014)? → A: **No — two
+  separate stores.** Run records are append-only, grow with every run, and want aggressive
+  pruning; the inventory is small, mutated in place, and must keep its oldest entries
+  indefinitely. Sharing a store gives one of them the wrong retention. They may share *where they
+  live* and *how writes are made safe* — the fiddly parts, worth solving once — but not a schema
+  and not a retention rule.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Know what happened after the container is gone (Priority: P1)
@@ -141,6 +152,11 @@ captured and the second is explicitly *unknown* rather than zero.
 - **FR-009**: Concurrent runs MUST NOT interleave, overwrite or lose records.
 - **FR-010**: **No credential value** may be written to a record (Constitution III).
 - **FR-011**: Records MUST NOT grow without bound; retention MUST be defined and documented.
+  Unlike the inventory, run records are expected to be **pruned actively** — they accumulate with
+  every run, and old ones lose value quickly once their commits are in history.
+- **FR-011a**: Run records MUST be **separate** from Feature 014's inventory — separate schema,
+  separate retention. Shared placement and shared write-safety machinery are permitted and
+  expected; a shared store is not.
 - **FR-012**: Records MUST be listable and retrievable through the existing machine-readable
   interface.
 - **FR-013**: Whether **interactive** sessions are recorded MUST be a defined decision, not an
@@ -186,8 +202,9 @@ captured and the second is explicitly *unknown* rather than zero.
   agents commit and push; the record inherits that as its anchor, which is why FR-005 exists.
 - **Agent cooperation varies.** Some agents report usage, some do not, and none report it
   identically. The record accommodates that rather than inventing parity.
-- Likely shares a durable store with the host inventory (Feature 014) — both are user-level and
-  outlive the container. Deciding that once avoids building two.
+- **Separate store from the inventory** (Feature 014), decided 2026-07-29. Both are durable and
+  user-level, so they should share placement and write-safety machinery; their retention needs
+  are opposite, so they do not share a store.
 
 ## Out of Scope
 

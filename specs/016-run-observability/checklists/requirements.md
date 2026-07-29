@@ -33,12 +33,15 @@
 
 ## Notes
 
-Three items for `/speckit-clarify`:
+**Clarified 2026-07-29.** The shared-store question is settled: **separate stores**, sharing
+placement and write-safety machinery but not schema or retention. Run records are pruned
+actively; inventory entries are kept. See FR-011a.
 
-1. **Shared store with Feature 014?** Both are durable, user-level and outlive the container.
-   This should be decided once, before either is planned, or two stores get built.
-2. **How the record learns what was committed** (FR-004). The agent commits inside the container;
-   the record is written outside it. That seam is the feature's main design question, and it
-   determines whether FR-005 is reliable or best-effort.
-3. **Whether interactive sessions are recorded** (FR-013). Cheap to state, materially changes
-   volume and usefulness — an interactive session has no task text and no clean end.
+Two items remain for planning, both genuinely open:
+
+1. **How the record learns what was committed** (FR-004). The agent commits *inside* the
+   container; the record is written *outside* it. That seam is this feature's main design
+   question, and it decides whether FR-005 — the unpushed-commit warning, which is the record's
+   most valuable single field — is reliable or best-effort.
+2. **Whether interactive sessions are recorded** (FR-013). Cheap to state, materially changes
+   volume and usefulness: an interactive session has no task text and no clean end.
