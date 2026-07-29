@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.18.1 (2026-07-29)
+
+### Bug Fixes
+
+- **build**: Name the image/ move when standing in a pre-011 checkout
+  ([`97b1e1c`](https://github.com/ondrasek/agent-container/commit/97b1e1ca8a191f65ab1714a5d1c6c25699ca2a87))
+
+### Testing
+
+- **guards**: Prove every structural drift guard can actually fail
+  ([`a71aa65`](https://github.com/ondrasek/agent-container/commit/a71aa650a08bdb85af50305eb43f321bdf62cfa1))
+
+
 ## v0.18.0 (2026-07-28)
 
 ### Bug Fixes
