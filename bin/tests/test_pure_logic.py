@@ -476,10 +476,16 @@ def test_completions_offer_exactly_the_canonical_agents(wiz):
         )
         # Referenced somewhere OTHER than its own assignment, and reachable from
         # a `--agent` completion arm.
+        # Comments do NOT count as uses. Found by the guard-proof suite: this file
+        # documents the variable in a comment, so the naive check passed for a
+        # script that declared the list and never referenced it — the same
+        # shape-not-behaviour bug the guard exists to catch, one level up.
         uses = [
             ln
             for ln in body.splitlines()
-            if "_agent_container_agents" in ln and not re.match(r"\s*_agent_container_agents=", ln)
+            if "_agent_container_agents" in ln
+            and not re.match(r"\s*#", ln)
+            and not re.match(r"\s*(local\s+)?_agent_container_agents=", ln)
         ]
         assert uses, (
             f"{fname} declares the agent list but never uses it (--agent would complete nothing)"
