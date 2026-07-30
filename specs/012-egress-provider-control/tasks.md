@@ -1,0 +1,208 @@
+# Tasks: Egress and Provider Control
+
+**Input**: Design documents from `/specs/012-egress-provider-control/`
+
+**Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md),
+[data-model.md](./data-model.md), [contracts/egress-contract.md](./contracts/egress-contract.md),
+[quickstart.md](./quickstart.md)
+
+**Tests**: Included. This project's quality gate is a hard CI gate and the feature's core claims
+(enforcement strength, `NO_PROXY` precedence, identity) are exactly the kind that pass in
+appearance and fail in substance — the recurring failure shape in this repo is **a check that
+passes while the thing it names is broken**.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+- **[Story]**: US1 / US2 / US3
+
+## Path Conventions
+
+Single-file CLI. Nearly everything lands in `bin/agent-container`; tests in `bin/tests/`; docs in
+`docs/`. There is no new module (plan, Structure decision).
+
+---
+
+## Scope decision carried from the plan — read before starting
+
+**US3 / FR-010 is DEFERRED to after Feature 016**, for two independent reasons:
+
+1. Durable egress records need a volume, and a **tenth** per-container volume is an identity
+   migration, not an edit (research R9). The identity lock fails on it *by design*.
+2. The ingestion pattern it needs is Feature 016's (research R5).
+
+US3's tasks are written below and marked deferred so the work is *recorded*, not forgotten. The
+shipped scope of this feature is **US1 + US2** — both P1, neither depends on FR-010.
+
+---
+
+## Phase 1: Setup
+
+**Purpose**: Pin the one genuinely open decision — which proxy — by running it, not reading about
+it. This is the project's established pattern (Feature 010's opencode probe, this feature's R1).
+
+- [ ] T001 Capture the pre-feature identity baseline into `bin/tests/test_pure_logic.py` context: run `agent-container list --json` and record container name, port and the nine volume names in the scratchpad, so T033's diff has something to compare against (quickstart S1)
+- [ ] T002 Evaluate candidate forward-proxy images against C3's four hard criteria — allowlists on the `CONNECT` target, **refuses with a status rather than dropping**, runs **rootless**, injects **no CA certificate** — and record the result plus rejected candidates in `specs/012-egress-provider-control/research.md` as R10
+- [ ] T003 Prove the chosen image satisfies C3 **by running it**: start it with a one-host allowlist, `curl` an allowed host (expect success) and a disallowed host (expect a **fast refusal**, not a hang), and confirm with `tcpdump`/handshake inspection that the TLS session is end-to-end. Record the transcript in R10
+
+**Checkpoint**: the proxy is chosen on evidence, and the R1a risk (drop vs refuse) is closed.
+
+---
+
+## Phase 2: Foundational (blocking prerequisites)
+
+**Purpose**: The facts and the schema every story rests on. Nothing in US1 or US2 can be built or
+tested without these.
+
+- [ ] T004 [P] Add the provider→hosts mapping table (`PROVIDERS`) to `bin/agent-container`, versioned with the tool, covering the providers the four supported agents use (research R6, data-model §1)
+- [ ] T005 [P] Add the built-in-default-provider fixture (`AGENT_BUILTIN_DEFAULT`) to `bin/agent-container`, one entry per member of `AGENTS`, recording whether the agent answers with no operator credential and which provider it reaches (data-model §3; opencode's value is Feature 010's probe result)
+- [ ] T006 [P] Add the proxy-adherence fixture (`AGENT_HONOURS_PROXY`) to `bin/agent-container`, one entry per member of `AGENTS`, all four `True` per research R1 (data-model §4)
+- [ ] T007 Add cross-file agreement tests in `bin/tests/test_pure_logic.py` proving `AGENT_BUILTIN_DEFAULT` and `AGENT_HONOURS_PROXY` each cover **exactly** `AGENTS` — a fifth agent added without probing must **fail**, and must default to *not known to honour* so `strict` refuses it
+- [ ] T008 Add a proof in `bin/tests/test_guards_can_fail.py` that T007's guard actually fails on drift: append a synthetic fifth agent to `AGENTS` in a copy and assert the guard raises. The repo's recurring failure is a guard that passes while the thing it names is broken
+- [ ] T009 Extend `validate_environment` in `bin/agent-container` with the optional `egress` key: `providers` (list of known names) and `enforcement` (via `_enum_field`), dying before any action and naming the offending file+field (contract C1)
+- [ ] T010 Add schema tests in `bin/tests/test_agent_as_code.py` for every C1 row: `egress` not a mapping, `providers` a bare **string** (must die naming the field, **not** iterate characters), unknown provider name (dies listing the known set), unknown key inside `egress`, bad `enforcement` enum
+- [ ] T011 Add tests in `bin/tests/test_agent_as_code.py` pinning the **three distinct declaration states** — `egress` absent (unrestricted), `providers: []` (air-gapped), `providers: [x]` (constrained). Absent must **never** coerce to empty; that would turn every existing environment air-gapped on upgrade (data-model §2)
+
+**Checkpoint**: the schema accepts and rejects correctly; the per-agent facts are enforced by tests
+rather than by comments.
+
+---
+
+## Phase 3: User Story 1 — Declare which providers an environment may use (P1)
+
+**Goal**: A declared provider set is enforced by a proxy the tool deploys; anything undeclared is
+refused rather than silently allowed.
+
+**Independent test**: declare one provider, confirm the agent reaches it normally, then confirm an
+undeclared provider does not succeed silently (quickstart S2, S3).
+
+### Compose model
+
+- [ ] T012 [US1] Extend `build_compose_model` in `bin/agent-container` to emit a second `egress` service — with the allowlist derived from the declaration — **only** when a declaration is present and enforceable (contract C2)
+- [ ] T013 [US1] Set `HTTPS_PROXY`/`HTTP_PROXY` on the `agent` service in `build_compose_model` to point at the `egress` service (contract C2, FR-007a)
+- [ ] T014 [US1] Add a test in `bin/tests/test_compose.py` proving the generated model is **byte-identical to today** when no declaration is present — the FR-004/FR-012 guarantee that existing environments keep working
+- [ ] T015 [US1] Add tests in `bin/tests/test_compose.py` proving the `egress` service appears with the right allowlist for a non-empty declaration, and appears with an **empty** allowlist for `providers: []` (FR-011 — zero providers is coherent, not degenerate)
+- [ ] T016 [US1] Add a test in `bin/tests/test_compose.py` proving the proxy is emitted into the **generated** file and that `resolve_sidecar_override` is untouched — the operator's `<name>.services.yaml` stays operator-owned and still rides as the second `-f` on top (research R4)
+- [ ] T017 [US1] Add a test in `bin/tests/test_pure_logic.py` proving the identity is unchanged: nine volumes, same names, same container name, same port. A tenth volume means FR-010 leaked into this feature (research R9)
+
+### `NO_PROXY` — the silent-failure case
+
+- [ ] T018 [US1] Make the tool set `NO_PROXY` itself, to the minimum needed for in-container traffic, in `bin/agent-container` (contract C6, research R3)
+- [ ] T019 [US1] Refuse an operator-supplied `NO_PROXY` that would **widen** the tool's value, naming the file it came from; permit a narrower or equal one (contract C6)
+- [ ] T020 [US1] Add tests in `bin/tests/test_compose.py` for C6's three rows — wider (refused, names the file), narrower (permitted), no declaration (tool sets nothing). This is the feature's most likely silent failure and gets its own test, not a doc line
+
+### Enforcement mode
+
+- [ ] T021 [US1] Implement the `advisory` / `strict` decision in `bin/agent-container`: advisory deploys and states the declaration is unenforced; strict refuses, naming the agent and why (FR-007b, data-model §5)
+- [ ] T022 [US1] Make the **effective** mode visible before deploying, in `bin/agent-container` (FR-007b)
+- [ ] T023 [P] [US1] Add tests in `bin/tests/test_agent_as_code.py` covering the four cells of data-model §5's mode table, including strict refusing on a proxy that cannot start (SC-004a — zero deployments proceeding with an unenforceable declaration)
+
+### Lifecycle
+
+- [ ] T024 [US1] Verify `down`, `redeploy` and `wipe` tear the proxy down with no new step, because it shares the compose project — add the assertion to `bin/tests/test_lifecycle.py` (contract C2, quickstart S9)
+- [ ] T025 [US1] Handle the headless-foreground consequence in `bin/agent-container`: `--abort-on-container-exit --exit-code-from agent` stops every service when any exits, so a crashing proxy aborts the run. Fail-closed and correct — **state it** in `docs/execution.md` rather than let a headless user discover it (research R4)
+
+**Checkpoint**: US1 is independently deliverable and testable. Run quickstart S2, S3, S5, S6, S9.
+
+---
+
+## Phase 4: User Story 2 — The default-provider path is explicit (P1)
+
+**Goal**: An operator learns that an agent has a built-in provider it will reach without their
+credential — the specific defect that motivated the feature — rather than discovering it from
+traffic.
+
+**Independent test**: with no credential and no declaration, confirm the tool states that the
+selected agent has a built-in default and what that implies (quickstart S4).
+
+- [ ] T026 [US2] Emit the disclosure at deploy, **once**, for an environment with no declaration whose agent has a built-in default, in `bin/agent-container` — stating that the agent can reach a provider without the operator's credential, **which** provider where known, and that `egress.providers` is how to constrain it (contract C4, FR-006)
+- [ ] T027 [US2] Add tests in `bin/tests/test_cli.py` proving the disclosure fires when there is no declaration **and** the agent has a default, and does **not** fire when a declaration exists or the agent has no default — noise trains operators to ignore it (contract C4)
+- [ ] T028 [US2] Implement the enforcement-strength statement in `bin/agent-container`: a proxy refuses clients that honour it, does **not** stop a process that dials directly, and **which** agents are known to honour it — currently all four (contract C5, FR-008)
+- [ ] T029 [US2] Add a test in `bin/tests/test_cli.py` asserting the strength statement names the adherence set and contains **no** phrasing implying packet-level or absolute enforcement. SC-004's failure mode is satisfying the requirement in appearance
+- [ ] T030 [P] [US2] Extend the `--json` envelope in `bin/agent-container` with `egress.providers`, `egress.hosts`, `egress.enforcement`, `egress.enforced`, `agent.builtin_default_provider`, `agent.honours_proxy` (contract C7, FR-005/FR-013)
+- [ ] T031 [P] [US2] Add tests in `bin/tests/test_agent_interface.py` proving the `--json` fields resolve a provider **name** to its **hosts**, so an operator sees the mapping before a refusal rather than after (research R6)
+
+**Checkpoint**: US2 is independently deliverable. Run quickstart S4, S7, S8.
+
+---
+
+## Phase 5: User Story 3 — Undeclared egress is recorded (P2) — **DEFERRED**
+
+**Deferred to after Feature 016.** Recorded here so the work is tracked, not forgotten. Do **not**
+implement in this feature: T033 would fail, correctly.
+
+- [ ] T032 [US3] **DEFERRED** — Emit egress events from the proxy with the fields in data-model §6 (`timestamp`, `host`, `provider`, `declared`, `decision`) and **nothing more**: no headers, no bodies, no model names. The narrowness is Constitution III holding, not an omission
+- [ ] T033 [US3] **DEFERRED** — Persist egress events as rows in Feature 016's store rather than a tenth per-container volume (research R9, FR-010). If 016 has not landed, this task is **blocked**, not worked around
+- [ ] T034 [US3] **DEFERRED** — Surface events through inspection with **no noise when nothing happened** — silence means nothing occurred (spec US3 scenario 3)
+
+---
+
+## Phase 6: Polish & Cross-Cutting
+
+- [ ] T035 [P] Write `docs/egress.md` covering the declaration, the three states, enforcement modes, the honest strength statement, and the `NO_PROXY` rule
+- [ ] T036 [P] Add the providers-vs-credentials distinction to `docs/credentials.md` — declaring a provider must not imply storing its credential in the project (FR-009); they are neighbours in the file, not a hierarchy
+- [ ] T037 [P] Update `docs/agent-as-code.md` with the `egress:` block in the example spec
+- [ ] T038 Add at most a one-line invariant to `CLAUDE.md` and re-measure the token budget with a real tokenizer — the file is at 1999/2000 and prune-before-adding applies
+- [ ] T039 Add acceptance tests in `bin/tests/test_acceptance.py` for quickstart S3 (undeclared refused **fast**, not hung), S4 (disclosure), S6 (`NO_PROXY` refused), S10 (rootlessness unchanged) and S11 (a pre-feature environment deploys identically)
+- [ ] T040 Re-run the identity check from T001 and diff against the baseline — nine volumes, same names, same port. **This is the blocking check**; if any name drifted, nothing else matters
+- [ ] T041 Run `scripts/quality-gate.sh` and the full acceptance tier, then verify every quickstart scenario S1–S11 by hand. Run the **whole** suite, not just the new tests — changing a shared contract is exactly when a pre-existing test still pins the old shape
+
+---
+
+## Dependencies
+
+```text
+Phase 1 (T001–T003)  ── proxy chosen by running it
+        ↓
+Phase 2 (T004–T011)  ── facts + schema; BLOCKS both stories
+        ↓
+   ┌────┴────┐
+   ↓         ↓
+Phase 3    Phase 4    ── US1 and US2 are INDEPENDENT after Phase 2
+(US1)      (US2)
+   └────┬────┘
+        ↓
+Phase 6 (T035–T041)  ── polish; T040 blocking
+
+Phase 5 (US3) ── DEFERRED, blocked on Feature 016
+```
+
+- **T003 blocks T012** — do not build the compose model around an unproven proxy.
+- **T007/T008 block T021** — `strict` decides on the adherence fixture, so the fixture must be
+  guarded before it is trusted.
+- **T009 blocks everything in Phase 3 and 4** — nothing can read a declaration that does not parse.
+- **T017 and T040 are the same check** at start and end. T040 is blocking.
+
+## Parallel opportunities
+
+| Batch | Tasks | Why safe |
+|---|---|---|
+| Foundational facts | T004, T005, T006 | three independent tables, no shared logic |
+| US2 machine-readable | T030, T031 | separate file from the prose output |
+| Docs | T035, T036, T037 | three separate files |
+
+US1 and US2 can be worked by different people in parallel once Phase 2 lands — they touch
+different code paths (compose model vs. output/JSON).
+
+## Implementation strategy
+
+**MVP = Phase 1 + Phase 2 + Phase 3 (US1).** That gives a declared, enforced provider set. It is
+useful alone, and it is where all the risk lives.
+
+**Increment 2 = Phase 4 (US2).** Disclosure and the honest strength statement. Small, and it closes
+the specific defect that motivated the feature.
+
+**Increment 3 = Phase 5 (US3), after Feature 016.** Do not pull it forward to feel complete; the
+cost is an identity migration plus an ingestion path that gets thrown away.
+
+## Task count
+
+| Phase | Tasks |
+|---|---|
+| 1 — Setup | 3 |
+| 2 — Foundational | 8 |
+| 3 — US1 | 14 |
+| 4 — US2 | 6 |
+| 5 — US3 (deferred) | 3 |
+| 6 — Polish | 7 |
+| **Total** | **41** (38 in scope, 3 deferred) |
