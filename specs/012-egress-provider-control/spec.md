@@ -35,9 +35,9 @@ This feature makes the set of reachable providers **declared, enforced and visib
 ### Session 2026-07-29
 
 - Q: How is undeclared egress actually detected and prevented, given the container cannot add
-  privileges? → A: **An egress proxy sidecar.** The tool already merges an operator sidecar file
-  as a second compose `-f`, sharing one project and lifecycle, so a proxy that allowlists the
-  declared providers needs **no container privileges**. The agent is pointed at it through
+  privileges? → A: **An egress proxy sidecar.** A helper container sharing the environment's
+  compose project and lifecycle can allowlist the declared providers with **no container
+  privileges**. The agent is pointed at it through
   standard proxy environment variables. This turns enforcement from *"the agent was configured
   not to"* into *"the request was refused"*, and makes the egress record real rather than
   dependent on what an agent chooses to report.
@@ -172,8 +172,11 @@ discoverable after the container is gone.
   traffic or from behaviour.
 - **FR-007**: Enforcement MUST NOT require adding privileges, capabilities or runtime
   installation to the agent container (Constitution II). It MUST be delivered as an **egress
-  proxy sidecar**, merged through the existing sidecar channel so it shares the environment's
-  compose project and lifecycle — including teardown.
+  proxy sidecar** — a helper container in the environment's own compose project, so it shares that
+  project's lifecycle including teardown. It MUST be emitted into the compose model **the tool
+  generates**, not into the operator's sidecar override file: that file is validated services-only
+  and forbidden from redefining the agent service, and is operator-owned by design (planning
+  research R4, which corrected an earlier assumption that the override channel was the route).
 - **FR-007a**: The agent MUST be pointed at the proxy through standard proxy environment
   variables, and the proxy MUST refuse any host outside the declared set.
 - **FR-007b**: An `enforcement` setting MUST select between **`advisory`** (default — deploy, and
@@ -238,9 +241,10 @@ discoverable after the container is gone.
   proxy settings. A process that ignores them and dials directly is not stopped, because packet
   filtering needs privileges Constitution II forbids. FR-008 requires that limit be stated, not
   implied away.
-- **The sidecar channel already exists.** Feature 002 merges an operator override as a second
-  compose `-f`, sharing one project and lifecycle. This feature is a *consumer* of that
-  mechanism, not a new one — and teardown of the environment tears down the proxy with it.
+- **The compose project already carries helpers.** Feature 002 established that a helper service
+  in the environment's compose project shares its lifecycle, so teardown of the environment tears
+  down the proxy with it. This feature adds its service to the model the tool **generates**; the
+  operator's own override file continues to layer on top, untouched and still operator-owned.
 - **Provider identity is by name, not by endpoint.** Operators think in vendors; the mapping from
   a name to the hosts it implies is the tool's business, and is expected to change as vendors
   change theirs.
@@ -264,8 +268,8 @@ discoverable after the container is gone.
 
 ## Dependencies
 
-- **Feature 002 (lifecycle verbs / sidecars)**: the sidecar override channel FR-007 delivers the
-  proxy through, and the shared-lifecycle guarantee that tears it down with the environment.
+- **Feature 002 (lifecycle verbs / sidecars)**: the shared-lifecycle guarantee that tears the proxy
+  down with the environment, and the operator override channel this feature must **not** disturb.
 - **Feature 006 (agent-as-code)**: the declarative spec FR-002 places the declaration in.
 - **Feature 003 / 008 (credentialing, credential managers)**: providers and credentials are
   related but distinct; the declaration must not become a second place a secret can live.
