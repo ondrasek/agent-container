@@ -63,6 +63,24 @@ sandbox shell and machine-level daemon access. That is accepted, because a contr
 inspect but not stop is a viewer, not a control plane. The passphrase is what carries that risk,
 and it is why FR-004 and FR-008 exist.
 
+### Session 2026-07-30
+
+- Q: What happens when a stop-everything action is invoked from inside the control plane? → A:
+  **It refuses to act on itself, excludes itself from the run, and says so.** The control plane is
+  the one container whose stopping makes the report undeliverable, so acting on itself is the only
+  case where FR-010's "never leave the outcome unknown" cannot be honoured. Excluding itself
+  guarantees it; the operator stops it from their own machine or from another control plane.
+- Q: Same image as agent containers, or narrower? → A: **Narrower** — the CLI, ssh, tmux and git,
+  with **no agent CLIs**. This is the one container holding keys to everything, so carrying less
+  worth stealing matters more here than anywhere else, and it makes "no agents in the control
+  plane" a property rather than a documented rule. Accepted cost: a second image to build, version
+  and stamp.
+- Q: What if the operator loses the passphrase? → A: **No recovery — redeploy and re-authorise.**
+  The passphrase is the only thing protecting a key that can reach everything, so a recovery path
+  would by definition be a way to obtain that key without it. Redeploying mints a fresh keypair;
+  the operator authorises the new public key and withdraws the old, which is the revocation flow
+  FR-008 already requires.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Manage from a device that has nothing installed (Priority: P1)
@@ -152,7 +170,9 @@ regarding its own container is defined and safe.
 - **A stale control plane** — one whose tool version predates the environments it manages, or
   whose host registry has drifted.
 - **Loss of the SSH key** to the control plane — recovery must not require rebuilding every
-  managed host.
+  managed host; withdrawing and re-authorising a public key is enough (FR-008).
+- **Loss of the passphrase** — no recovery by design (FR-017); redeploy and re-authorise. Stated
+  when the passphrase is printed, not after it is lost.
 - **A phone-sized screen** — output that assumes a wide terminal is unusable for the actual
   motivating case.
 - **An interrupted mobile connection** mid-operation — must not corrupt state; the session ends,
@@ -195,8 +215,10 @@ regarding its own container is defined and safe.
 - **FR-009**: The control plane MUST appear in the inventory, identified as a control plane
   rather than an agent environment.
 - **FR-010**: An action invoked from inside a control plane that would stop or destroy **its own
-  container** MUST have defined behaviour, and MUST NOT self-terminate mid-operation leaving the
-  outcome unknown.
+  container** MUST **refuse to act on itself**, exclude it from the run, and report that exclusion
+  explicitly — naming how the operator can stop it instead (from their own machine, or another
+  control plane). The control plane is the one container whose stopping makes the report
+  undeliverable, so self-exclusion is what makes "the outcome is never unknown" achievable at all.
 - **FR-011**: Output MUST be usable on a **narrow screen** — the motivating case is a phone.
 - **FR-012**: A stopped or rebooted control plane MUST be usable again **without
   reconfiguration**: its key persists on its volume, and the operator supplies the passphrase on
@@ -206,6 +228,15 @@ regarding its own container is defined and safe.
 - **FR-014**: Multiple control planes MUST be individually identifiable and MUST NOT conflict.
 - **FR-015**: The image MUST remain **rootless and immutable at runtime**; the control plane adds
   no privileges (Constitution II).
+- **FR-015a**: The control plane MUST run a **narrower image** than agent containers — the CLI,
+  ssh, tmux and git, and **no agent CLIs or their runtimes**. This makes "no agents in the control
+  plane" structural rather than documentary: an agent that is not installed cannot be run. The
+  cost is a second image, which MUST be built, versioned and freshness-stamped on the same terms
+  as the agent image.
+- **FR-017**: A lost passphrase MUST have **no recovery path**. Any such path would be a way to
+  obtain the key without the passphrase. Recovery is **redeploy** — a fresh keypair, its public
+  half authorised, the previous one withdrawn via FR-008. The tool MUST state this at deploy time,
+  when the passphrase is printed, rather than leaving an operator to discover it after the loss.
 - **FR-016**: A control plane whose tool version differs from what an environment was created
   with MUST behave predictably and say so.
 
@@ -240,6 +271,10 @@ regarding its own container is defined and safe.
   command.
 - **SC-008**: No new class of durable secret is introduced — verified against the credential
   rules — **100%**.
+- **SC-009**: The control-plane image contains **zero** agent CLIs — verified by inspecting the
+  built image, not by reading its build definition.
+- **SC-010**: A stop-everything action invoked from inside reports its own container as
+  **excluded** — **zero** runs in which the control plane's own outcome is unknown.
 
 ## Assumptions
 
@@ -269,7 +304,8 @@ regarding its own container is defined and safe.
 
 - A web UI, an HTTP API, or any non-SSH surface.
 - Multi-user or multi-tenant access control — single operator remains assumed.
-- Running agents inside the control plane.
+- Running agents inside the control plane — enforced by FR-015a's narrower image, not merely
+  declared here.
 - Cross-operator or shared control planes.
 - Automatic or unattended deployment of control planes.
 
@@ -278,6 +314,10 @@ regarding its own container is defined and safe.
 - **Feature 013 (`doctor`)**, **014 (inventory)**, **015 (kill switch)**, **016
   (observability)**: the management surface it exposes. It should be specified last and built
   last for exactly this reason.
+- **A second image has consequences beyond this feature.** Feature 013's version stamp must be
+  applied to both images, and the existing cross-file test asserting the Dockerfile installs
+  exactly the supported agents must learn that the control-plane image installs **none** — it
+  would otherwise fail, correctly, on a second Dockerfile that omits them.
 - **Feature 001 / 002 (hosts, lifecycle)**: the registry it carries and the verbs it offers.
 - **Feature 003 / 008 (credentialing)**: the operator-interactive carve-out FR-007 relies on —
   on-volume credentials are permitted when they originate from an operator-interactive act, which

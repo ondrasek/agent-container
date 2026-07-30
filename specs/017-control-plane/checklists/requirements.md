@@ -33,26 +33,27 @@
 
 ## Notes
 
-**Clarified 2026-07-29.** Three of the four listed items are settled, including the one that
-decided whether the feature was viable in this shape:
+**Clarified 2026-07-29 and 2026-07-30.** All items settled.
 
-- **How host access is held**: the control plane **generates its own** keypair in-container,
-  encrypted at rest, unlocked by an operator-held passphrase on every connect. The tool never
-  handles the private key, so there is no injection channel to violate — this **fits**
-  Constitution III's operator-interactive carve-out rather than needing an exception.
-- **Revocation** is concrete: withdraw the public key from the hosts and containers that trust it,
-  performed by the tool across them from one command.
-- **Daemon access needs no separate credential.** Remote daemon access is already
-  `ssh://user@host`, so the same keypair serves both; capability is decided by *where the public
-  half is authorised*.
+First pass — the question that decided viability: the control plane **mints its own** keypair
+in-container, encrypted at rest, unlocked by an operator-held passphrase on every connect. The
+tool never handles the private key, so this **fits** Constitution III's operator-interactive
+carve-out rather than needing an exception. Daemon access needs no second credential, since remote
+daemon access is already `ssh://user@host` — capability is decided by where the public half is
+authorised, which makes scope and revocation enforceable outside the container.
 
-Still open for planning:
+Second pass:
 
-1. **Self-termination behaviour** (FR-010) — refuse, defer, or act on itself last.
-2. **Whether the control plane runs the same image** as agent containers or a narrower one.
-   Reusing it is cheaper; a narrower one carries less worth stealing, which matters more here
-   than anywhere else in the roadmap.
+- **Self-termination**: refuse and exclude itself, reporting the exclusion. The control plane is
+  the one container whose stopping makes the report undeliverable, so self-exclusion is what makes
+  FR-010's guarantee achievable at all.
+- **Narrower image** (FR-015a): no agent CLIs, so "no agents in the control plane" is a property
+  rather than a rule. Accepted cost is a second image — and it reaches outside this feature, which
+  is now recorded under Dependencies: Feature 013's version stamp applies to both images, and the
+  existing agent-list agreement test must learn that this image installs **none**, or it will fail
+  correctly on a Dockerfile that omits them.
+- **Lost passphrase**: no recovery, by design — a recovery path is a way to get the key without
+  the passphrase. Redeploy, re-authorise, withdraw the old key. FR-017 requires saying so **when
+  the passphrase is printed**, not after it is lost.
 
-One consequence to carry into planning: a control plane's public key is a **standing**
-authorisation across many hosts and containers, including ones created later. Every prior feature
-injected keys per deployment. That difference is the thing an attacker would target.
+Nothing outstanding.
