@@ -122,9 +122,11 @@ is an off-the-shelf image, not something this project builds.
 
 **FR-010 needs a volume, and a tenth volume is a migration (R9).** The identity contract pins nine
 per-container volume names; `--purge`, `wipe` and both completions read that list, and the identity
-lock test fails on a tenth *by design*. Feature 016 already needs durable per-container records and
-will pay that cost once — 012's egress events should be rows in 016's store, not a store of their
-own. FR-010 also depends on 016's ingestion (R5), so both point the same way.
+lock test fails on a tenth *by design*. That volume should be paid for **once**, by whichever
+feature ships it first — expected to be 016, since the storage-and-ingestion machinery is its
+subject. 012's egress events then reuse **that store**, keeping **their own schema**: a different
+producer (the proxy, not the agent) and a different lifetime (continuous, not at-run-end), and
+016's FR-011a already establishes that a distinct concern gets a distinct schema.
 
 **Recommended phasing**: ship US1 (declaration + enforcement) and US2 (disclosure) — both P1,
 neither needs FR-010 — and deliver US3/FR-010 after 016 lands. US3 is already P2 for exactly this

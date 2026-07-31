@@ -112,8 +112,11 @@ design, which is the guard working.
 
 **Decision**: do not add a volume in this feature. Two routes, to be settled in tasks:
 
-- Feature 016 already needs durable per-container records and will pay the identity cost once.
-  012's egress events become **rows in 016's store**, not a store of their own.
+- Feature 016 already needs the same durable per-container store and will pay the identity cost
+  once. 012's egress events reuse **that storage and its ingestion machinery** — but keep **their
+  own schema**. They are not rows in a run record: a different producer (the proxy, not the agent)
+  and a different lifetime (continuous, not at-run-end). 016's own FR-011a sets the precedent that
+  a distinct concern gets a distinct schema.
 - If 012 must ship FR-010 first, the tenth volume is an explicit, announced identity migration
   with the baseline updated deliberately — never a silent edit to make a test pass.
 

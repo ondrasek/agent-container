@@ -29,7 +29,9 @@ Single-file CLI. Nearly everything lands in `bin/agent-container`; tests in `bin
 
 1. Durable egress records need a volume, and a **tenth** per-container volume is an identity
    migration, not an edit (research R9). The identity lock fails on it *by design*.
-2. The ingestion pattern it needs is Feature 016's (research R5).
+2. That store and its ingestion machinery are shared with Feature 016, which is the expected first
+   mover (research R5). The dependency is **not** one-way: whichever feature ships the store first
+   pays the migration, and the other consumes it.
 
 US3's tasks are written below and marked deferred so the work is *recorded*, not forgotten. The
 shipped scope of this feature is **US1 + US2** — both P1, neither depends on FR-010.
@@ -132,7 +134,7 @@ selected agent has a built-in default and what that implies (quickstart S4).
 implement in this feature: T033 would fail, correctly.
 
 - [ ] T032 [US3] **DEFERRED** — Emit egress events from the proxy with the fields in data-model §6 (`timestamp`, `host`, `provider`, `declared`, `decision`) and **nothing more**: no headers, no bodies, no model names. The narrowness is Constitution III holding, not an omission
-- [ ] T033 [US3] **DEFERRED** — Persist egress events as rows in Feature 016's store rather than a tenth per-container volume (research R9, FR-010). If 016 has not landed, this task is **blocked**, not worked around
+- [ ] T033 [US3] **DEFERRED** — Persist egress events into the durable per-container store and its ingestion machinery, under **their own schema** — not as rows in a run record, and not behind a tenth volume of this feature's own (research R9, FR-010). If that store does not yet exist, this task is **blocked**, not worked around
 - [ ] T034 [US3] **DEFERRED** — Surface events through inspection with **no noise when nothing happened** — silence means nothing occurred (spec US3 scenario 3)
 
 ---

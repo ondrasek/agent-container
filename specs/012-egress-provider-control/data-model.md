@@ -143,9 +143,11 @@ A record that a provider was reached or an attempt was made.
 proxy does not terminate TLS (R2), so it cannot see them — and that is the point. This entity's
 narrowness is Constitution III holding.
 
-**Storage**: see plan R9. An egress-record volume would be a **tenth** per-container volume and
-therefore an identity migration. These events should be rows in Feature 016's store, which pays
-that cost once. Until then, FR-010 is deferred with US3.
+**Storage**: see plan R9. An egress-record volume of this feature's own would be a **tenth**
+per-container volume and therefore an identity migration. These events instead reuse the shared
+durable store and its ingestion machinery — under **their own schema**, not as rows in a run
+record. Whichever feature ships that store first pays the migration once; Feature 016 is the
+expected first mover. Until it exists, FR-010 is deferred with US3.
 
 **Silence means nothing happened** (spec US3 scenario 3) — no periodic heartbeat, no empty
 records, no "0 events" noise.

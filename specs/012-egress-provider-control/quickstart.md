@@ -174,8 +174,9 @@ change in effective permissions beyond the one-time disclosure.
 
 **FR-010 / US3 (egress events outlive the container) is not validated here.** It needs durable
 per-container storage, which means a tenth volume and therefore an identity migration (research
-R9), and it depends on Feature 016's ingestion (research R5). Both point the same way: it lands
-after 016.
+R9). That store is shared with Feature 016 and should be paid for once, by whichever feature ships
+it first — expected to be 016, since the machinery is its subject. **SC-006 is therefore not yet in
+force**, rather than silently failing.
 
 If it were implemented in this feature, S1 would fail — which is the guard working, not a bug.
 

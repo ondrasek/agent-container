@@ -191,7 +191,14 @@ discoverable after the container is gone.
   MUST NOT imply storing its credential in the project (Constitution III, and the Feature 011
   rule that the repo holds a locator, never a value).
 - **FR-010**: Undeclared egress events MUST be recorded such that they remain available after the
-  container is removed (Constitution I — the container is ephemeral).
+  container is removed (Constitution I — the container is ephemeral). Egress events are their
+  **own schema** — a different producer (the proxy, not the agent) and a different lifetime
+  (continuous, not at-run-end); Feature 016's FR-011a already establishes that a distinct concern
+  gets a distinct schema. What this requirement needs is the **durable per-container store and its
+  ingestion machinery**, which introduces a **tenth** per-container volume — an identity migration
+  under Constitution IV, to be paid **once** by whichever feature ships it first. Feature 016 is
+  the expected first mover, since that machinery is its subject. **This requirement is therefore
+  delivered after that store exists, not before**, and US3 carries P2 accordingly.
 - **FR-011**: An environment declaring **zero** providers MUST be a coherent, supported state.
 - **FR-012**: Behaviour for environments created before this feature MUST remain working, and any
   change in their effective permissions MUST be stated rather than silently applied.
@@ -231,7 +238,8 @@ discoverable after the container is gone.
 - **SC-005**: No new privilege, capability or runtime installation is required — verified by the
   container running exactly as rootlessly as before.
 - **SC-006**: An undeclared-egress event remains discoverable after the container is removed —
-  **100%** of runs.
+  **100%** of runs. Measured once FR-010 is delivered; until the durable store exists, this
+  criterion is **not yet in force** rather than silently failing.
 - **SC-007**: No credential value is exposed by the declaration mechanism — **100%** of runs.
 
 ## Assumptions
@@ -277,6 +285,12 @@ discoverable after the container is gone.
 - **Feature 011 (filesystem layout)**: the declaration follows the established project/user
   configuration layering, and the repo-holds-a-locator rule.
 - **Feature 009 (agent-operable CLI)**: FR-013's machine-readable exposure.
+- **Feature 016 (run observability) — for FR-010 only, and not a one-way arrow.** Both features
+  need the same durable per-container store and ingestion machinery, and the tenth volume it
+  introduces should be paid for **once**. Whichever ships it first builds it; the other consumes
+  it. 016 is the expected first mover because that machinery is its subject, whereas here it
+  serves a single P2 story. **US1 and US2 — this feature's entire P1 scope — depend on none of
+  it.**
 - **Constitution II (rootless, immutable runtime)**: the boundary that shapes the whole design.
 - **Constitution III (least exposure)**: the principle this feature extends from "where a
   credential rests" to "where data goes".
