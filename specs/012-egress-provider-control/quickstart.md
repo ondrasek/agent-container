@@ -72,6 +72,32 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://api.openai.com/v1/models
 proxy is dropping rather than refusing (C3, research R1a). A success means the request went around
 the proxy — check `NO_PROXY` (S6) before anything else.
 
+### S3a — An indirect endpoint is declarable, and replaces the vendor's hosts (FR-001a/FR-001b)
+
+```yaml
+egress:
+  providers:
+    - name: anthropic
+      hosts: [llm.corp.internal]
+```
+
+```bash
+agent-container up dev
+agent-container status dev --json | jq '.egress.hosts, .egress.host_source'
+```
+
+**Expected**: the allowlist contains `llm.corp.internal` and **not** `api.anthropic.com`;
+`host_source` reads `declaration`. Then, inside the container:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/v1/messages
+```
+
+**Expected**: **refused.** An operator who routed through a gateway did so to close the direct
+path. If this succeeds, `hosts:` was implemented as additive — the declaration reads as constrained
+while the vendor path stays open, which is the silent over-permission this feature exists to
+prevent.
+
 ### S4 — The built-in default is disclosed (US2, SC-003) — the motivating defect
 
 Remove the `egress:` block entirely and deploy with **no credential at all**:

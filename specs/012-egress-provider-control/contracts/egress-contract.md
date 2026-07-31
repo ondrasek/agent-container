@@ -13,7 +13,10 @@ The interfaces this feature exposes. Entities and validation rules are in
 
 ```yaml
 egress:
-  providers: [anthropic, openai]   # optional; list of known provider names
+  providers:                       # optional; entries are names OR {name, hosts}
+    - anthropic                    #   short form — tool supplies the hosts
+    - name: openai                 #   long form — indirect endpoint (FR-001a)
+      hosts: [llm.corp.internal]   #   REPLACES the tool's mapping (FR-001b)
   enforcement: advisory            # optional; advisory | strict
 ```
 
@@ -23,9 +26,18 @@ egress:
 | `egress.providers: []` | proxy deployed, refuses everything (FR-011) |
 | `egress` not a mapping | `die` naming the file and field |
 | `providers` a bare string | `die` naming the field — **must not** iterate characters |
-| unknown provider name | `die` naming it, listing the known set |
+| unknown name in **short** form | `die` naming it, listing the known set |
+| unknown name in **long** form | **accepted** — the hosts are authoritative and the name is a label (FR-001a) |
+| long form without `hosts` | `die` — that is the short form written the long way |
+| `hosts` entry with a scheme, path or port | `die` naming the field — a URL must not be silently accepted and then never match |
+| unknown key inside a provider mapping | `die` naming the key |
 | unknown key inside `egress` | `die` naming the key |
 | `enforcement` outside the enum | `die` via `_enum_field` |
+
+**Replacement, not extension (FR-001b)**: where `hosts` is given, the tool's mapping for that entry
+is **discarded**. Additive semantics would leave the direct vendor path open for an operator who
+routed through a gateway to close it — a silent over-permission while the declaration reads as
+constrained.
 
 **Guarantee**: validation runs **before any action** and makes no partial change — the existing
 declarative-spec contract, unchanged.
@@ -130,7 +142,8 @@ The existing `--json` envelope (Feature 009) gains, per environment:
 | Field | Meaning |
 |---|---|
 | `egress.providers` | the declared names |
-| `egress.hosts` | what those names resolve to — so an operator sees the mapping **before** a refusal, not after |
+| `egress.hosts` | the **effective** allowlist — so an operator sees the mapping **before** a refusal, not after. Must reflect an operator `hosts:` override rather than the tool's default (FR-001b), or the JSON would state a permission set the proxy does not enforce |
+| `egress.host_source` | per entry: `tool` or `declaration` — which side supplied the hosts |
 | `egress.enforcement` | the effective mode |
 | `egress.enforced` | whether the declaration is actually being enforced for this agent |
 | `agent.builtin_default_provider` | the disclosure, machine-readable |

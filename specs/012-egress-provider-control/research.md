@@ -150,9 +150,26 @@ tool's, and it will drift as vendors change endpoints.
 machine-readable interface (FR-005) so an operator can see exactly what a name permits — rather
 than discovering it when a request is refused.
 
-**Alternative rejected**: letting operators declare raw hostnames. It is more flexible and it is
-what an escape hatch would look like, but it moves the drift problem onto the operator and makes
-the declaration unreadable — `anthropic` says what is meant; a list of hostnames does not.
+**Alternative rejected — as the *only* form**: letting operators declare raw hostnames everywhere.
+It moves the vendor-drift problem onto the operator and makes the declaration unreadable —
+`anthropic` says what is meant; a list of hostnames does not.
+
+### R6a (AMENDED, analysis finding F3) — raw hosts survive as an escape hatch
+
+Rejecting raw hostnames outright collided with the spec's own edge case: a provider reached
+**indirectly** — a corporate gateway, a self-hosted endpoint, a vendor-compatible deployment.
+Under names-only, such an operator can only leave the declaration empty and get **no enforcement
+at all**. The deployments most likely to want egress control would have received the least.
+
+**Decision**: a provider entry takes either a bare name or a name plus an explicit `hosts:` list.
+Names stay the default and keep R6's readability for the common case; raw hosts appear exactly
+where they are needed and are self-documenting there.
+
+**The load-bearing sub-decision**: an explicit `hosts:` **REPLACES** the tool's mapping for that
+entry, never extends it. An operator who routes through a gateway is usually doing so to *close*
+the direct vendor path; additive semantics would silently leave it open while the declaration read
+as constrained — the exact silent over-permission this feature exists to prevent. It needs a test,
+because additive-vs-replacing is invisible in a passing deployment.
 
 ---
 

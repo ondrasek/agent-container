@@ -15,19 +15,25 @@ operators think in vendors, and the name→hosts mapping is the tool's business 
 | Field | Type | Notes |
 |---|---|---|
 | `name` | string | the operator-facing identifier (`anthropic`, `openai`, …) |
-| `hosts` | list of hostnames | what the name permits; **tool-owned**, versioned with the tool |
+| `hosts` | list of hostnames | what the name permits. **Tool-owned by default**, versioned with the tool; **operator-overridable** per entry (FR-001a) |
 
 **Not a field**: any credential. A provider is distinct from the credential that authorises it
 (FR-009). The two are related in the spec file only by sitting in the same environment block.
 
 ### Rules
 
-- The name must be one the tool knows. An unknown name **dies naming it**, and lists the known
-  set — an operator must not discover a typo when a request is refused at run time.
-- `hosts` is not operator-declarable in this feature. Letting operators write raw hostnames moves
-  vendor drift onto them and makes the declaration unreadable (R6, alternative rejected).
-- The mapping is exposed through the machine-readable interface (FR-005/FR-013) so an operator can
-  read what a name permits **before** deploying.
+- A **bare** name must be one the tool knows. An unknown name **dies naming it**, and lists the
+  known set — an operator must not discover a typo when a request is refused at run time.
+- A name carrying an explicit `hosts:` list need **not** be known to the tool: that is the point of
+  the escape hatch (FR-001a). The name is then a label, and the hosts are authoritative.
+- An explicit `hosts:` **REPLACES** the tool's mapping for that entry, never extends it (FR-001b,
+  research R6a). Additive semantics would leave the direct vendor path open for the operator who
+  routed through a gateway precisely to close it.
+- `hosts` entries are **hostnames** — no scheme, no path, no port. A URL must die naming the field
+  rather than being silently accepted and never matching.
+- The effective mapping — tool-supplied or operator-supplied — is exposed through the
+  machine-readable interface (FR-005/FR-013) so an operator can read what a declaration permits
+  **before** deploying.
 
 ---
 
@@ -44,14 +50,21 @@ environments:
     credentials:
       - { name: ANTHROPIC_API_KEY, source: onepassword, vault: Personal, item: anthropic, field: key }
     egress:
-      providers: [anthropic]      # the declaration
-      enforcement: advisory       # advisory (default) | strict
+      providers:
+        - anthropic                       # short form — the tool supplies the hosts
+        - name: openai                    # long form — an indirect endpoint (FR-001a)
+          hosts: [llm.corp.internal]      #   REPLACES the tool's mapping (FR-001b)
+      enforcement: advisory               # advisory (default) | strict
 ```
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `egress.providers` | list of provider names | absent | absent ≠ empty — see below |
+| `egress.providers` | list of names **or** `{name, hosts}` mappings | absent | absent ≠ empty — see below |
 | `egress.enforcement` | `advisory` \| `strict` | `advisory` | FR-007b |
+
+The two entry forms are interchangeable within one list. The short form is the common case and
+keeps the declaration readable; the long form appears exactly where an indirect endpoint makes it
+necessary, and is self-documenting there.
 
 ### The three states, which are genuinely different
 
@@ -68,9 +81,13 @@ on upgrade. They are distinct by construction, and the schema must not coerce on
 
 - `egress` must be a mapping; unknown keys inside it die naming the key — matching the existing
   spec's behaviour for `container` and `credentials`.
-- `providers` must be a list of strings. A bare string is a common mistake and must die naming the
-  field, not iterate the characters.
-- Each name must be known (see Provider).
+- `providers` must be a **list**. A bare string is a common mistake and must die naming the field,
+  not iterate the characters.
+- Each entry is either a **string** or a **mapping** with `name` (required) and `hosts` (required
+  when the mapping form is used — a mapping with only `name` is the short form written the long
+  way, and should die telling the operator to use the string).
+- A bare-string entry's name must be known (see Provider); a mapping entry's name need not be.
+- Unknown keys inside a provider mapping die naming the key.
 - `enforcement` is enum-checked through the existing `_enum_field` helper.
 - Validation happens **before any action**, making no partial change — the existing spec contract.
 

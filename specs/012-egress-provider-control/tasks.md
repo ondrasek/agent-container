@@ -61,8 +61,11 @@ tested without these.
 - [ ] T006 [P] Add the proxy-adherence fixture (`AGENT_HONOURS_PROXY`) to `bin/agent-container`, one entry per member of `AGENTS`, all four `True` per research R1 (data-model §4)
 - [ ] T007 Add cross-file agreement tests in `bin/tests/test_pure_logic.py` proving `AGENT_BUILTIN_DEFAULT` and `AGENT_HONOURS_PROXY` each cover **exactly** `AGENTS` — a fifth agent added without probing must **fail**, and must default to *not known to honour* so `strict` refuses it
 - [ ] T008 Add a proof in `bin/tests/test_guards_can_fail.py` that T007's guard actually fails on drift: append a synthetic fifth agent to `AGENTS` in a copy and assert the guard raises. The repo's recurring failure is a guard that passes while the thing it names is broken
-- [ ] T009 Extend `validate_environment` in `bin/agent-container` with the optional `egress` key: `providers` (list of known names) and `enforcement` (via `_enum_field`), dying before any action and naming the offending file+field (contract C1)
-- [ ] T010 Add schema tests in `bin/tests/test_agent_as_code.py` for every C1 row: `egress` not a mapping, `providers` a bare **string** (must die naming the field, **not** iterate characters), unknown provider name (dies listing the known set), unknown key inside `egress`, bad `enforcement` enum
+- [ ] T009 Extend `validate_environment` in `bin/agent-container` with the optional `egress` key: `providers` (a list whose entries are **either** a known name **or** a `{name, hosts}` mapping, FR-001a) and `enforcement` (via `_enum_field`), dying before any action and naming the offending file+field (contract C1)
+- [ ] T009a Implement the **replacement** semantics in `bin/agent-container`: where an entry carries `hosts:`, the tool's mapping for that entry is **discarded**, not extended (FR-001b, research R6a)
+- [ ] T009b Reject malformed host lists in `bin/agent-container` — an entry with a scheme, path or port must `die` naming the field rather than being accepted and then never matching (contract C1)
+- [ ] T010 Add schema tests in `bin/tests/test_agent_as_code.py` for every C1 row: `egress` not a mapping, `providers` a bare **string** (must die naming the field, **not** iterate characters), unknown name in short form (dies listing the known set), unknown name in **long** form (**accepted** — hosts are authoritative), long form without `hosts` (dies), a URL in `hosts` (dies), unknown key inside a provider mapping, unknown key inside `egress`, bad `enforcement` enum
+- [ ] T010a Add a test in `bin/tests/test_compose.py` proving `hosts:` **replaces** rather than extends: declaring `{name: anthropic, hosts: [gw.corp]}` must produce an allowlist containing `gw.corp` and **not** the vendor's own hosts. Additive-vs-replacing is invisible in a passing deployment, which is why it gets a test rather than a doc line (FR-001b)
 - [ ] T011 Add tests in `bin/tests/test_agent_as_code.py` pinning the **three distinct declaration states** — `egress` absent (unrestricted), `providers: []` (air-gapped), `providers: [x]` (constrained). Absent must **never** coerce to empty; that would turn every existing environment air-gapped on upgrade (data-model §2)
 
 **Checkpoint**: the schema accepts and rejects correctly; the per-agent facts are enforced by tests
@@ -122,7 +125,7 @@ selected agent has a built-in default and what that implies (quickstart S4).
 - [ ] T028 [US2] Implement the enforcement-strength statement in `bin/agent-container`: a proxy refuses clients that honour it, does **not** stop a process that dials directly, and **which** agents are known to honour it — currently all four (contract C5, FR-008)
 - [ ] T029 [US2] Add a test in `bin/tests/test_cli.py` asserting the strength statement names the adherence set and contains **no** phrasing implying packet-level or absolute enforcement. SC-004's failure mode is satisfying the requirement in appearance
 - [ ] T030 [P] [US2] Extend the `--json` envelope in `bin/agent-container` with `egress.providers`, `egress.hosts`, `egress.enforcement`, `egress.enforced`, `agent.builtin_default_provider`, `agent.honours_proxy` (contract C7, FR-005/FR-013)
-- [ ] T031 [P] [US2] Add tests in `bin/tests/test_agent_interface.py` proving the `--json` fields resolve a provider **name** to its **hosts**, so an operator sees the mapping before a refusal rather than after (research R6)
+- [ ] T031 [P] [US2] Add tests in `bin/tests/test_agent_interface.py` proving the `--json` fields report the **effective** allowlist — including `host_source` — so an operator sees the mapping before a refusal rather than after, and an operator `hosts:` override is reflected rather than the tool's default (research R6/R6a, FR-001b). Reporting the default while enforcing an override would state a permission set the proxy does not enforce
 
 **Checkpoint**: US2 is independently deliverable. Run quickstart S4, S7, S8.
 
@@ -202,9 +205,9 @@ cost is an identity migration plus an ingestion path that gets thrown away.
 | Phase | Tasks |
 |---|---|
 | 1 — Setup | 3 |
-| 2 — Foundational | 8 |
+| 2 — Foundational | 11 |
 | 3 — US1 | 14 |
 | 4 — US2 | 6 |
 | 5 — US3 (deferred) | 3 |
 | 6 — Polish | 7 |
-| **Total** | **41** (38 in scope, 3 deferred) |
+| **Total** | **44** (41 in scope, 3 deferred) |

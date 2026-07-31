@@ -143,7 +143,8 @@ discoverable after the container is gone.
 - **Enforcement without new privileges is not absolute** — the difference between *"the agent is
   configured not to"* and *"the network will not carry it"* must be explicit to the operator.
 - **A provider reached indirectly** (a proxy, a gateway, a self-hosted endpoint) — declaring
-  "anthropic" must not accidentally permit or forbid an unrelated endpoint.
+  "anthropic" must not accidentally permit or forbid an unrelated endpoint. Met by FR-001a's
+  explicit host list, which **replaces** the tool's mapping rather than extending it (FR-001b).
 - **Environments predating this feature** — must keep working; pre-1.0, no compatibility is
   promised beyond that.
 - **Air-gapped or offline use** — declaring zero providers must be a coherent state, not a
@@ -155,6 +156,16 @@ discoverable after the container is gone.
 
 - **FR-001**: An operator MUST be able to declare, per environment, the set of model providers
   that environment is permitted to reach.
+- **FR-001a**: A provider entry MUST support an optional explicit **host list**, so an operator
+  reaching a provider **indirectly** — a corporate gateway, a self-hosted endpoint, a
+  vendor-compatible deployment — can express it. Without this, such an operator could only leave
+  the declaration empty and get **no enforcement at all**, which would give the least protection
+  to the deployments most likely to want it.
+- **FR-001b**: Where an explicit host list is given, it **REPLACES** the tool's mapping for that
+  entry; it MUST NOT be added to it. An operator who routes through a gateway is usually doing so
+  to close the direct vendor path — treating the list as additive would silently leave that path
+  open while the declaration reads as constrained. The provider name remains the human-meaningful
+  label the declaration is read by.
 - **FR-002**: The declaration MUST live in the **declarative spec**
   (`.agent-container/environments.yaml`), beside the credentials that authorise those providers —
   no new file and no new resolution path.
@@ -210,7 +221,8 @@ discoverable after the container is gone.
 - **Provider**: a named model endpoint an agent can reach (e.g. the vendor an API key belongs
   to). Identified by a stable name; distinct from the *credential* that authorises it.
 - **Provider declaration**: the per-environment set of permitted providers, part of the
-  environment's configuration.
+  environment's configuration. Each entry is either a bare **name** (the tool supplies the hosts)
+  or a name with an explicit **host list** that replaces them (FR-001a/FR-001b).
 - **Built-in default provider**: a provider an agent will use with no operator configuration —
   the thing this feature exists to surface.
 - **Egress event**: a record that a provider was reached, or an attempt was made, including
