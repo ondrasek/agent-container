@@ -285,6 +285,24 @@ confirm the documentation shows one authoritative map with no stale names.
   documentation, with no superseded name left anywhere.
 - **FR-015**: The layout MUST be **location-independent** — nothing may depend on the
   project living at a particular absolute path.
+- **FR-016** *(amended 2026-08-03)*: A YAML file in the project config directory MUST be
+  identified by **kind**, never by "every `*.yaml` here". **The suffix names the top-level key the
+  file contains**: `environments.yaml` / `*.environments.yaml` hold `environments:`;
+  `*.services.yaml` holds `services:`.
+
+  **Why this was missing.** FR-002 gathered both the declarative spec and the sidecar override
+  into this one directory, but the spec loader claimed *every* `*.yaml` by glob and refused any
+  file whose top-level key was not `environments`. A sidecar override's key **is** `services:` — so
+  a project using Feature 006 and Feature 002 together, in the directory this feature mandated for
+  both, was **refused outright**. Two documented features could not coexist. Neither test suite
+  caught it: the spec tests never wrote a sidecar file, and the sidecar tests never wrote a spec.
+- **FR-016a**: An **unrecognised** `*.yaml` in the project config directory MUST be **refused**,
+  naming the file and the recognised kinds. Silently skipping it would turn a typo
+  (`enviroments.yaml`) into "no environments found" with no indication anything was wrong —
+  trading a loud failure for a quiet one, which FR-005's refuse-don't-ignore rule already forbids
+  for superseded names.
+- **FR-016b**: An operator MUST be able to opt out of FR-016a's refusal, downgrading it to a
+  **warning**, for the case where unrelated YAML is deliberately kept in the directory.
 
 ### Key Entities *(include if feature involves data)*
 
