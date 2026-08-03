@@ -149,8 +149,9 @@ implement in this feature: T033 would fail, correctly.
 - [ ] T037 [P] Update `docs/agent-as-code.md` with the `egress:` block in the example spec
 - [ ] T038 Add at most a one-line invariant to `CLAUDE.md` and re-measure the token budget with a real tokenizer — the file is at 1999/2000 and prune-before-adding applies
 - [ ] T039 Add acceptance tests in `bin/tests/test_acceptance.py` for quickstart S3 (undeclared refused **fast**, not hung), S4 (disclosure), S6 (`NO_PROXY` refused), S10 (rootlessness unchanged) and S11 (a pre-feature environment deploys identically)
+- [ ] T039a Add a test in `bin/tests/test_credentialing.py` asserting **no credential value** appears in the generated compose model, the proxy's generated config, or `--json` output, for an environment declaring **both** providers and credentials. Seed a recognisable **sentinel** value through each credential source and assert its absence in every generated artifact. Asserting "no key-shaped string" would test the assertion's imagination; asserting a *known* value is absent tests the actual path (FR-009, SC-007)
 - [ ] T040 Re-run the identity check from T001 and diff against the baseline — nine volumes, same names, same port. **This is the blocking check**; if any name drifted, nothing else matters
-- [ ] T041 Run `scripts/quality-gate.sh` and the full acceptance tier, then verify every quickstart scenario S1–S11 by hand. Run the **whole** suite, not just the new tests — changing a shared contract is exactly when a pre-existing test still pins the old shape
+- [ ] T041 Run `scripts/quality-gate.sh` and the full acceptance tier, then verify every quickstart scenario S1–S11 by hand, **including the lettered ones** (S3a, S9a). Run the **whole** suite, not just the new tests — changing a shared contract is exactly when a pre-existing test still pins the old shape
 
 ---
 
@@ -167,7 +168,7 @@ Phase 3    Phase 4    ── US1 and US2 are INDEPENDENT after Phase 2
 (US1)      (US2)
    └────┬────┘
         ↓
-Phase 6 (T035–T041)  ── polish; T040 blocking
+Phase 6 (T035–T041)  ── polish; T039a security, T040 blocking
 
 Phase 5 (US3) ── DEFERRED, blocked on Feature 016
 ```
@@ -209,5 +210,5 @@ cost is an identity migration plus an ingestion path that gets thrown away.
 | 3 — US1 | 14 |
 | 4 — US2 | 6 |
 | 5 — US3 (deferred) | 3 |
-| 6 — Polish | 7 |
-| **Total** | **44** (41 in scope, 3 deferred) |
+| 6 — Polish | 8 |
+| **Total** | **45** (42 in scope, 3 deferred) |

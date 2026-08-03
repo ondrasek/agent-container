@@ -186,6 +186,21 @@ agent-container wipe dev -y
 **Expected**: nothing left behind. The proxy is in the same compose project, so this needs no new
 teardown step — if it does, it was put in the wrong file (C2).
 
+### S9a — No credential value reaches any generated artifact (FR-009, SC-007)
+
+With an environment declaring **both** providers and credentials, seed a sentinel and look for it:
+
+```bash
+export ANTHROPIC_API_KEY='sk-ant-SENTINEL-do-not-appear'
+agent-container up dev
+grep -r 'SENTINEL' "$XDG_STATE_HOME/agent-container/"     # expect: no hits
+agent-container status dev --json | grep SENTINEL          # expect: no hits
+```
+
+**Expected**: no hits anywhere — the generated compose model, the proxy's generated config, and
+`--json`. A *known* sentinel is the point: grepping for key-shaped strings would only test what the
+person writing the check happened to imagine.
+
 ### S10 — Rootlessness is unchanged (SC-005)
 
 ```bash
@@ -230,6 +245,7 @@ If it were implemented in this feature, S1 would fail — which is the guard wor
 | Built-in default disclosed once | S4 |
 | `NO_PROXY` cannot disable enforcement | S6 — **the silent-failure case** |
 | Strength stated honestly, no overclaim | S7 |
+| No credential value in any generated artifact | S9a — **SC-007** |
 | Rootlessness unchanged | S10 |
 | Pre-feature environments unchanged | S11 |
 | FR-010 deferred deliberately, not forgotten | Tier 3 |
