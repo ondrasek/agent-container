@@ -68,8 +68,16 @@ silently disable the entire feature while leaving the declaration in place — t
 FR-008 exists to prevent.
 
 **Decision**: the tool sets `NO_PROXY` itself, to the minimum needed for in-container traffic, and
-MUST detect and refuse an operator-supplied `NO_PROXY` that would widen it. Precedence must be
-the tool's, not the env-file's.
+MUST refuse **any** operator-supplied `NO_PROXY` while a declaration is enforced. Precedence must
+be the tool's, not the env-file's.
+
+**No subset comparison (amended, analysis finding F4).** The first draft said "refuse a value that
+would *widen* it", which quietly required deciding whether one `NO_PROXY` is wider than another —
+across `*`, `.suffix` forms, bare hostnames, IP literals, CIDR blocks and port suffixes, in forms
+that are not consistent between HTTP clients. **A comparison erring in the permissive direction
+reproduces the exact bypass this rule exists to prevent, and passes every test one would naturally
+write.** Refusing outright is unambiguous, fails closed, and is testable as present-or-absent. A
+genuine need for `NO_PROXY` should be expressed deliberately, not by defeating the check.
 
 **This is the feature's most likely silent-failure mode** and deserves a test of its own, not a
 line in the docs.

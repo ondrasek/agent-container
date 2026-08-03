@@ -126,9 +126,19 @@ The tool sets `NO_PROXY` itself, to the minimum needed for in-container traffic.
 
 | Case | Behaviour |
 |---|---|
-| operator env-file sets `NO_PROXY` wider | **refused**, naming the file — it would silently disable enforcement while the declaration still reads as enforced |
-| operator sets `NO_PROXY` narrower or equal | permitted |
+| declaration enforced, operator supplies **any** `NO_PROXY` | **refused**, naming the file and the variable |
 | no declaration | the tool sets nothing; today's behaviour |
+
+**No subset comparison is attempted, deliberately.** Deciding whether one `NO_PROXY` is "wider"
+than another means comparing `*`, `.suffix` forms, bare hostnames, IP literals, CIDR blocks and
+port suffixes — forms that are not even consistent between HTTP clients. A comparison that erred
+in the **permissive** direction would produce exactly the silent bypass this contract exists to
+prevent, and would pass every test one would naturally think to write.
+
+Refusing outright is unambiguous, **fails closed** (a refused deploy, never a silent bypass), and
+is testable as present-or-absent. It costs an operator nothing real: `NO_PROXY` for in-container
+traffic is the tool's job. An operator with a genuine need should say so, and a declared way to
+express it can be added — deliberately, not by defeating the check.
 
 **This is the feature's most likely silent-failure mode** (research R3) and has a test of its own,
 not a line in the docs.

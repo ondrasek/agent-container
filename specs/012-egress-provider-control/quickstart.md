@@ -27,7 +27,8 @@ Covers, for this feature:
 - the compose model gains an `egress` service **only** when a declaration is present, and is
   **byte-identical to today** when absent (C2, C8)
 - the identity lock still passes — nine volumes, unchanged names (C8)
-- `NO_PROXY` precedence: a wider operator value is refused (C6)
+- `NO_PROXY` precedence: **any** operator value is refused under an enforced declaration, with no
+  subset comparison attempted (C6)
 - the adherence and built-in-default fixtures agree with `AGENTS` — a fifth agent fails both (C5)
 
 ---
@@ -135,8 +136,19 @@ printf 'NO_PROXY=*\n' > .agent-container/dev.env
 agent-container up dev
 ```
 
-**Expected**: **refused**, naming the file. If it deploys, re-run S3 — the declaration will read as
-enforced while enforcing nothing, which is worse than no feature at all.
+**Expected**: **refused**, naming the file and the variable. If it deploys, re-run S3 — the
+declaration will read as enforced while enforcing nothing, which is worse than no feature at all.
+
+Now the same with a value that *looks* harmless:
+
+```bash
+printf 'NO_PROXY=localhost\n' > .agent-container/dev.env
+agent-container up dev
+```
+
+**Expected**: **also refused.** The tool attempts no judgement about which values are safe — that
+comparison is what C6 deliberately does not implement. A refusal here is the feature working, not
+being pedantic.
 
 ### S7 — Enforcement strength is stated honestly (C5, SC-004)
 

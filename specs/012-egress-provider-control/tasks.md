@@ -93,8 +93,8 @@ undeclared provider does not succeed silently (quickstart S2, S3).
 ### `NO_PROXY` — the silent-failure case
 
 - [ ] T018 [US1] Make the tool set `NO_PROXY` itself, to the minimum needed for in-container traffic, in `bin/agent-container` (contract C6, research R3)
-- [ ] T019 [US1] Refuse an operator-supplied `NO_PROXY` that would **widen** the tool's value, naming the file it came from; permit a narrower or equal one (contract C6)
-- [ ] T020 [US1] Add tests in `bin/tests/test_compose.py` for C6's three rows — wider (refused, names the file), narrower (permitted), no declaration (tool sets nothing). This is the feature's most likely silent failure and gets its own test, not a doc line
+- [ ] T019 [US1] Refuse **any** operator-supplied `NO_PROXY` while a declaration is enforced, naming the file and the variable, in `bin/agent-container`. **Attempt no subset comparison** — a "is this wider?" check across `*`, `.suffix`, IP, CIDR and port forms would err permissively and reproduce the bypass it exists to prevent (contract C6, research R3)
+- [ ] T020 [US1] Add tests in `bin/tests/test_compose.py` for C6's two rows — any operator `NO_PROXY` under an enforced declaration (refused, names the file), and no declaration (tool sets nothing). Present-or-absent, not a comparison. This is the feature's most likely silent failure and gets its own test, not a doc line
 
 ### Enforcement mode
 

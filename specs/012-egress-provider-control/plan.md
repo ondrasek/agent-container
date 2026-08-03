@@ -22,7 +22,10 @@ Two findings shape the design beyond what the spec anticipated:
   meant to improve least-exposure.
 - **`NO_PROXY` is the bypass** (research R3). An operator env-file setting it wide would silently
   disable the feature while the declaration still reads as enforced. That is the most likely
-  silent failure and needs a test, not a doc line.
+  silent failure and needs a test, not a doc line. The tool therefore refuses **any** operator
+  `NO_PROXY` under an enforced declaration and **attempts no subset comparison** — deciding
+  "is this wider?" across `*`, `.suffix`, IP, CIDR and port forms would err permissively and
+  reproduce the bypass it exists to prevent.
 
 ## Technical Context
 
@@ -107,8 +110,9 @@ is an off-the-shelf image, not something this project builds.
 1. **The proxy allowlists on `CONNECT`, never decrypts** (R2) — the Constitution III linchpin.
 2. **The proxy refuses rather than drops** (R1a) — refusal yields a clean client error; dropping
    yields the observed hangs.
-3. **The tool owns `NO_PROXY`** (R3) and refuses an operator value that would widen it. This is
-   the most likely silent failure in the feature.
+3. **The tool owns `NO_PROXY`** (R3) and refuses **any** operator value under an enforced
+   declaration, comparing nothing. This is the most likely silent failure in the feature, and a
+   subset check would fail permissively while passing its own tests.
 4. **The known-honours-proxy list is a test fixture, not a comment** (R7) — a newly added agent
    must fail that test rather than silently inherit "honours".
 5. **The proxy is a second service in the model the tool already generates** (R4 revised, after
