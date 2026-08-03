@@ -239,7 +239,11 @@ discoverable after the container is gone.
 - **SC-001**: For every supported agent, an operator can determine the complete set of providers
   it may reach **without reading that agent's documentation** — verified for all four.
 - **SC-002**: An environment that declares a provider set never reaches an undeclared provider
-  without the operator being informed — **zero** silent occurrences.
+  **via a client that honours the proxy** without the operator being informed — **zero** silent
+  occurrences. A process that ignores proxy settings and opens a direct connection is **outside
+  this criterion**, as FR-008 states; measuring it would require packet filtering, which
+  Constitution II forbids. Scoped deliberately: an unbounded "never" here would be an overclaim
+  sitting in the success criteria of a feature whose subject is not overclaiming.
 - **SC-003**: An agent with a built-in default provider is disclosed to the operator in **100%**
   of environments where no provider is declared.
 - **SC-004**: The enforcement strength is stated for every supported agent — including whether
