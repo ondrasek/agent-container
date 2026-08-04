@@ -45,7 +45,8 @@ it. This is the project's established pattern (Feature 010's opencode probe, thi
 
 - [ ] T001 Capture the pre-feature identity baseline into `bin/tests/test_pure_logic.py` context: run `agent-container list --json` and record container name, port and the nine volume names in the scratchpad, so T033's diff has something to compare against (quickstart S1)
 - [ ] T002 Evaluate candidate forward-proxy images against C3's four hard criteria — allowlists on the `CONNECT` target, **refuses with a status rather than dropping**, runs **rootless**, injects **no CA certificate** — and record the result plus rejected candidates in `specs/012-egress-provider-control/research.md` as R10
-- [ ] T003 Prove the chosen image satisfies C3 **by running it**: start it with a one-host allowlist, `curl` an allowed host (expect success) and a disallowed host (expect a **fast refusal**, not a hang), and confirm with `tcpdump`/handshake inspection that the TLS session is end-to-end. Record the transcript in R10
+- [ ] T002a Re-run the **Constitution VI** justification against the image T002 actually chose, and record it in `plan.md`'s Complexity Tracking. The current entry justifies "a proxy image" generically; VI requires every dependency earn its place, which cannot be assessed against a placeholder — image size, provenance, maintenance status and update cadence are all properties of the concrete choice
+- [ ] T003 Prove the chosen image satisfies C3 **by running it**: start it with a one-host allowlist, `curl` an allowed host (expect success) and a disallowed host (expect **an HTTP status code to be returned** — assert on the status, not on elapsed time, since "fast" has no threshold and a timing assertion would be flaky), and confirm with `tcpdump`/handshake inspection that the TLS session is end-to-end. Record the transcript in R10
 
 **Checkpoint**: the proxy is chosen on evidence, and the R1a risk (drop vs refuse) is closed.
 
@@ -102,6 +103,11 @@ undeclared provider does not succeed silently (quickstart S2, S3).
 - [ ] T022 [US1] Make the **effective** mode visible before deploying, in `bin/agent-container` (FR-007b)
 - [ ] T023 [P] [US1] Add tests in `bin/tests/test_agent_as_code.py` covering the four cells of data-model §5's mode table, including strict refusing on a proxy that cannot start (SC-004a — zero deployments proceeding with an unenforceable declaration)
 
+### Error attribution
+
+- [ ] T023a [US1] Make a declared provider whose credential cannot be resolved fail naming the **missing credential**, not the declaration, in `bin/agent-container` (FR-003b). Blaming the provider list for a credential problem sends the operator to edit the one thing that is correct
+- [ ] T023b [P] [US1] Add a test in `bin/tests/test_credentialing.py` asserting that failure names the credential and does **not** name the `egress` block (FR-003b)
+
 ### Lifecycle
 
 - [ ] T024 [US1] Verify `down`, `redeploy` and `wipe` tear the proxy down with no new step, because it shares the compose project — add the assertion to `bin/tests/test_lifecycle.py` (contract C2, quickstart S9)
@@ -122,6 +128,8 @@ selected agent has a built-in default and what that implies (quickstart S4).
 
 - [ ] T026 [US2] Emit the disclosure at deploy, **once**, for an environment with no declaration whose agent has a built-in default, in `bin/agent-container` — stating that the agent can reach a provider without the operator's credential, **which** provider where known, and that `egress.providers` is how to constrain it (contract C4, FR-006)
 - [ ] T027 [US2] Add tests in `bin/tests/test_cli.py` proving the disclosure fires when there is no declaration **and** the agent has a default, and does **not** fire when a declaration exists or the agent has no default — noise trains operators to ignore it (contract C4)
+- [ ] T027a [US2] Report at **deploy time** when the selected agent's built-in default provider is **not in the declared set**, in `bin/agent-container` (FR-003a). Both facts are known without running the agent, so waiting for a runtime refusal would be withholding. Covers spec US2 acceptance scenario 2, which had no task
+- [ ] T027b [P] [US2] Add a test in `bin/tests/test_cli.py` for T027a — fires when the default is outside the declared set, silent when it is inside or when nothing is declared (FR-003a)
 - [ ] T028 [US2] Implement the enforcement-strength statement in `bin/agent-container`: a proxy refuses clients that honour it, does **not** stop a process that dials directly, and **which** agents are known to honour it — currently all four (contract C5, FR-008)
 - [ ] T029 [US2] Add a test in `bin/tests/test_cli.py` asserting the strength statement names the adherence set and contains **no** phrasing implying packet-level or absolute enforcement. SC-004's failure mode is satisfying the requirement in appearance
 - [ ] T030 [P] [US2] Extend the `--json` envelope in `bin/agent-container` with `egress.providers`, `egress.hosts`, `egress.enforcement`, `egress.enforced`, `agent.builtin_default_provider`, `agent.honours_proxy` (contract C7, FR-005/FR-013)
@@ -148,7 +156,7 @@ implement in this feature: T033 would fail, correctly.
 - [ ] T036 [P] Add the providers-vs-credentials distinction to `docs/credentials.md` — declaring a provider must not imply storing its credential in the project (FR-009); they are neighbours in the file, not a hierarchy
 - [ ] T037 [P] Update `docs/agent-as-code.md` with the `egress:` block in the example spec
 - [ ] T038 Add at most a one-line invariant to `CLAUDE.md` and re-measure the token budget with a real tokenizer — the file is at 1999/2000 and prune-before-adding applies
-- [ ] T039 Add acceptance tests in `bin/tests/test_acceptance.py` for quickstart S3 (undeclared refused **fast**, not hung), S4 (disclosure), S6 (`NO_PROXY` refused), S10 (rootlessness unchanged) and S11 (a pre-feature environment deploys identically)
+- [ ] T039 Add acceptance tests in `bin/tests/test_acceptance.py` for quickstart S3 (undeclared refused — assert a **refusal status code**, not elapsed time), S4 (disclosure), S6 (`NO_PROXY` refused), S10 (rootlessness unchanged) and S11 (a pre-feature environment deploys identically)
 - [ ] T039a Add a test in `bin/tests/test_credentialing.py` asserting **no credential value** appears in the generated compose model, the proxy's generated config, or `--json` output, for an environment declaring **both** providers and credentials. Seed a recognisable **sentinel** value through each credential source and assert its absence in every generated artifact. Asserting "no key-shaped string" would test the assertion's imagination; asserting a *known* value is absent tests the actual path (FR-009, SC-007)
 - [ ] T040 Re-run the identity check from T001 and diff against the baseline — nine volumes, same names, same port. **This is the blocking check**; if any name drifted, nothing else matters
 - [ ] T041 Run `scripts/quality-gate.sh` and the full acceptance tier, then verify every quickstart scenario S1–S11 by hand, **including the lettered ones** (S3a, S9a). Run the **whole** suite, not just the new tests — changing a shared contract is exactly when a pre-existing test still pins the old shape
@@ -205,10 +213,10 @@ cost is an identity migration plus an ingestion path that gets thrown away.
 
 | Phase | Tasks |
 |---|---|
-| 1 — Setup | 3 |
+| 1 — Setup | 4 |
 | 2 — Foundational | 11 |
-| 3 — US1 | 14 |
-| 4 — US2 | 6 |
+| 3 — US1 | 16 |
+| 4 — US2 | 8 |
 | 5 — US3 (deferred) | 3 |
 | 6 — Polish | 8 |
-| **Total** | **45** (42 in scope, 3 deferred) |
+| **Total** | **50** (47 in scope, 3 deferred) |

@@ -137,7 +137,7 @@ discoverable after the container is gone.
 - **An agent with no configurable provider list** — the limit of what can be enforced for that
   agent must be stated plainly, not implied to be equivalent to the others.
 - **A declared provider the agent cannot use** (no credential for it) — must fail naming the
-  missing credential, not the declaration.
+  missing credential, not the declaration. Met by FR-003b.
 - **An agent that ignores the mechanism** — if enforcement can be bypassed by the agent itself,
   that limit must be documented; a control presented as stronger than it is, is worse than none.
 - **Enforcement without new privileges is not absolute** — the difference between *"the agent is
@@ -170,8 +170,16 @@ discoverable after the container is gone.
   (`.agent-container/environments.yaml`), beside the credentials that authorise those providers —
   no new file and no new resolution path.
 - **FR-003**: An attempt to reach a provider outside the declared set MUST NOT succeed silently.
-  The operator MUST learn of it — at deploy time where that is possible, and at run time
-  otherwise.
+  The operator MUST learn of it at **run time**, when the proxy refuses the request.
+- **FR-003a**: One case **is** knowable before anything runs and MUST be reported at **deploy
+  time**: the selected agent's **built-in default provider is not in the declared set**. Both
+  facts are known without executing the agent, so waiting for a runtime refusal would be a choice
+  to withhold. This is the concrete content of the earlier vague "at deploy time where that is
+  possible" — the agent picks its provider at run time, so no *general* deploy-time detection
+  exists, and claiming otherwise would be an untestable requirement.
+- **FR-003b**: A declared provider whose **credential cannot be resolved** MUST fail naming the
+  **missing credential**, never the declaration. Blaming the provider list for a credential
+  problem sends the operator to edit the one thing that is correct.
 - **FR-004**: An environment declaring **no** providers MUST be **unrestricted**, exactly as
   today — and the operator MUST be told once that the agent may reach a built-in default without
   their credential. Enforcement is opt-in; the defect being fixed is silence, not permissiveness.

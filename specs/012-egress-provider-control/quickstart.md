@@ -69,9 +69,13 @@ declared:
 curl -sS -o /dev/null -w '%{http_code}\n' https://api.openai.com/v1/models
 ```
 
-**Expected**: **refused, fast** — a clean proxy error, not a hang and not a 200. A hang means the
-proxy is dropping rather than refusing (C3, research R1a). A success means the request went around
-the proxy — check `NO_PROXY` (S6) before anything else.
+**Expected**: **a refusal status code is printed** — `403` or similar, not `200`, and not an empty
+line. The assertion is on the *status*, not on elapsed time: "fast" has no threshold and a timing
+check would be flaky.
+
+- An **empty** result means the proxy **dropped** the connection rather than refusing it — the
+  R1a failure, which produces the 30–40s hangs the research probe saw (C3).
+- A **200** means the request went around the proxy — check `NO_PROXY` (S6) before anything else.
 
 ### S3a — An indirect endpoint is declarable, and replaces the vendor's hosts (FR-001a/FR-001b)
 
@@ -241,7 +245,7 @@ If it were implemented in this feature, S1 would fail — which is the guard wor
 |---|---|
 | Identity unchanged — nine volumes | S1 — **the blocking one** |
 | Gate green | Tier 1 |
-| Permitted path works, undeclared path refused fast | S2, S3 |
+| Permitted path works, undeclared path returns a refusal **status** | S2, S3 |
 | Built-in default disclosed once | S4 |
 | `NO_PROXY` cannot disable enforcement | S6 — **the silent-failure case** |
 | Strength stated honestly, no overclaim | S7 |

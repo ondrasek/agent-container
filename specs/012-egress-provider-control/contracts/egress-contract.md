@@ -81,7 +81,7 @@ A crashing proxy therefore aborts the agent run. Fail-closed and correct; still 
 |---|---|
 | **MUST NOT terminate or inspect TLS** | it would see every `Authorization` header, creating a new plaintext credential location inside the component meant to improve least-exposure (research R2, Constitution III) |
 | Allowlists on the **`CONNECT` target** | the hostname is visible before TLS is established; decryption is unnecessary |
-| **MUST refuse, never drop** | a refusal gives a clean, fast client error; dropping gives the 30–40s hangs the probe saw for `claude` and `opencode` (research R1a) |
+| **MUST refuse with a status code, never drop** | a refusal returns an HTTP status the client reports immediately; dropping gives the 30–40s hangs the probe saw for `claude` and `opencode`. Verified by asserting **a status is returned**, never by timing — "fast" has no threshold (research R1a) |
 | Requires **no added capability** on the agent container | Constitution II; the proxy is a separate container |
 | Injects **no CA certificate** into the agent image | a durable trust change to an image meant to be immutable |
 

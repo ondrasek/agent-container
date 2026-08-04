@@ -145,5 +145,5 @@ and correct, but a behaviour change for headless users that must be stated, not 
 
 | Deviation | Why needed | Simpler alternative rejected because |
 |---|---|---|
-| A proxy image is added to deployments | The only way to enforce egress without adding privileges (Constitution II forbids packet filtering) | Configuring agents' own provider lists is advisory only, and R1 shows a proxy makes enforcement real for all four agents |
+| A proxy image is added to deployments | The only way to enforce egress without adding privileges (Constitution II forbids packet filtering) | Configuring agents' own provider lists is advisory only, and R1 shows a proxy makes enforcement real for all four agents. **This justification is generic and must be re-run against the concrete image (T002a)** — size, provenance and maintenance cadence are properties of the choice, not of the category |
 | A second service appears in the generated compose model | Inherits the project, lifecycle and teardown the model already guarantees | The operator override channel is validated services-only and forbidden from redefining `agent` — tool material there would clobber an operator file or need a third `-f` |
