@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.19.0 (2026-08-04)
+
+### Bug Fixes
+
+- **spec**: Identify .agent-container/ YAML by kind, not by glob
+  ([#011](https://github.com/ondrasek/agent-container/pull/11),
+  [`def97fb`](https://github.com/ondrasek/agent-container/commit/def97fb7eb1e220a8be360d1b7e344d41de32198))
+
+
 ## v0.18.1 (2026-07-29)
 
 ### Bug Fixes
