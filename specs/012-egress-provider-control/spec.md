@@ -156,6 +156,73 @@ discoverable after the container is gone.
 
 ---
 
+### User Story 4 - Enforcement the agent cannot switch off (Priority: P1)
+
+An operator's declaration holds **even when the agent actively tries to evade it**. The agent
+cannot reach an undeclared destination by unsetting an environment variable, editing its own
+configuration, or running a script that does either.
+
+**Why this priority**: US1's proxy binds only clients that *choose* to honour proxy environment
+variables. An agent that can be prompted into `unset HTTPS_PROXY`, or into writing that line to
+`~/.agent-env/env`, defeats the entire control — and a prompt-injected agent is precisely the
+threat this container exists to contain. US1 protects against **accident and misconfiguration**;
+US4 protects against **the agent itself**. Without it the declaration describes an intention rather
+than a boundary.
+
+**Independent Test**: with a declaration in force, unset every proxy variable inside the container
+and attempt to reach an undeclared host. It must fail. Then attempt the same on a **non-standard
+port** (8080, 1337) and confirm those fail too.
+
+**Acceptance Scenarios**:
+
+1. **Given** a declaration in force, **When** the agent unsets all proxy environment variables and
+   connects directly, **Then** the attempt **fails** — enforcement does not depend on the agent's
+   cooperation.
+2. **Given** the same, **When** the agent writes proxy overrides into `~/.agent-env/env` and opens
+   a new shell, **Then** the attempt still fails.
+3. **Given** the same, **When** the agent contacts an undeclared host on a **non-standard port**
+   (e.g. `8080`), **Then** it fails — the control is not port-specific, so it cannot be sidestepped
+   by choosing an unusual one.
+4. **Given** enforcement is active, **When** the operator inspects the agent container's
+   privileges, **Then** they are **unchanged** — no capability is added to the container that runs
+   untrusted code.
+
+---
+
+### User Story 5 - Every protocol and port is declared, or it fails (Priority: P1)
+
+Whatever the environment is permitted to reach — HTTP, HTTPS, SSH, FTP, gRPC, a database, a
+non-standard port — the operator **declares it**. Anything not declared fails closed.
+
+**Why this priority**: US4's mechanism is only as strong as its default. Allowing everything except
+HTTP/HTTPS would leave the widest possible hole: an agent reaches a malicious endpoint on `8080`,
+or exfiltrates over SSH, and the declaration says nothing about either. **Default-deny is what
+makes US4 an enforcement boundary rather than a speed bump**, and it is P1 for the same reason US4
+is — a partial boundary invites the shape of traffic that evades it.
+
+**Independent Test**: declare one HTTPS provider and nothing else. Confirm that provider works and
+that SSH, FTP and an arbitrary high port all fail — then declare SSH to one host and confirm only
+that host on that port becomes reachable.
+
+**Acceptance Scenarios**:
+
+1. **Given** a declaration listing only HTTPS providers, **When** any other protocol or port is
+   attempted, **Then** it **fails** — declared-or-denied, with no implicit allowance.
+2. **Given** an operator declares a non-HTTP destination (SSH to a git remote, say), **When** the
+   agent uses it, **Then** it succeeds — and **only** that host and port, not the protocol
+   generally.
+3. **Given** name resolution is required for any declared destination to work at all, **When** the
+   environment starts, **Then** DNS functions — a dependency the declaration does not have to state
+   because nothing reachable works without it.
+4. **Given** a declaration the mechanism cannot enforce, **When** the operator deploys, **Then** the
+   behaviour follows the existing `enforcement` setting (FR-007b) — refuse under `strict`, deploy
+   and say so under `advisory`.
+5. **Given** an environment with **no** declaration, **When** it starts, **Then** behaviour is
+   unchanged and unrestricted (FR-004) — default-deny applies to environments that opted in, never
+   retroactively to those that did not.
+
+---
+
 ### Edge Cases
 
 - **An agent with no configurable provider list** — the limit of what can be enforced for that
@@ -300,6 +367,34 @@ discoverable after the container is gone.
 - **FR-013**: The permitted set MUST be visible through the tool's existing machine-readable
   interface, so an agent operating the CLI can determine it without parsing prose.
 
+#### Transparent enforcement (US4/US5, added 2026-08-04)
+
+- **FR-016**: Enforcement MUST NOT depend on the agent honouring proxy environment variables.
+  Outbound traffic MUST be routed to the proxy **by the network stack**, so unsetting a variable,
+  editing agent configuration, or running a script that does either **changes nothing**.
+- **FR-017**: The **default MUST be deny**. Any port or protocol not declared MUST fail —
+  explicitly including non-standard HTTP ports (`8080`), which would otherwise be the widest hole
+  in the mechanism: an agent reaching a malicious endpoint on an unusual port while the declaration
+  claims to constrain it.
+- **FR-018**: The declaration MUST be able to express **non-HTTP destinations** (SSH, FTP, gRPC, a
+  database) as host **and port**, so an operator can permit exactly what the environment needs and
+  nothing adjacent. Permitting a protocol generally is not sufficient granularity.
+- **FR-019**: **No capability may be added to the agent container** (Constitution II). The
+  privilege required to program the network stack MUST sit on the **proxy** container, which runs
+  no untrusted code. The agent joins that container's network namespace and gains nothing.
+- **FR-020**: Name resolution MUST keep working, since no declared destination is reachable without
+  it. It is a dependency of the mechanism, not a permission the operator has to think about.
+- **FR-021**: Where transparent enforcement cannot be delivered on a host, the existing
+  `enforcement` setting governs (FR-007b) — refuse under `strict`, deploy and state the limitation
+  under `advisory`. **FR-004 is unaffected**: an environment with no declaration stays unrestricted.
+  Default-deny applies to environments that opted in, never retroactively to those that did not.
+- **FR-022**: FR-008's honesty statement MUST be **revised, not merely extended**, once transparent
+  enforcement is in force. The current wording says packet filtering "needs privileges this
+  container deliberately does not have" — which is true of the **agent** container and false of the
+  deployment. Left standing it would argue against the mechanism that supersedes it, and would
+  understate a guarantee the tool actually delivers. Understating is a smaller sin than
+  overclaiming, but it is still an inaccurate statement of what the operator is getting.
+
 ### Key Entities *(include if feature involves data)*
 
 - **Provider**: a named model endpoint an agent can reach (e.g. the vendor an API key belongs
@@ -341,6 +436,15 @@ discoverable after the container is gone.
   **100%** of runs. Measured once FR-010 is delivered; until the durable store exists, this
   criterion is **not yet in force** rather than silently failing.
 - **SC-007**: No credential value is exposed by the declaration mechanism — **100%** of runs.
+- **SC-008** *(US4)*: With a declaration in force, an agent that unsets every proxy variable and
+  connects directly **fails** — **zero** successful bypasses. This is the criterion that separates
+  a boundary from an intention.
+- **SC-009** *(US5)*: An undeclared port or protocol fails — verified for a **non-standard HTTP
+  port**, SSH and FTP, with **zero** reachable undeclared destinations.
+- **SC-010** *(US5)*: A declared non-HTTP destination is reachable **only** at the declared host and
+  port — **zero** cases where declaring one destination admits another.
+- **SC-011** *(US4)*: The agent container's capability set is **identical** to an undeclared
+  deployment's — **zero** added privileges on the container running untrusted code.
 
 ## Assumptions
 

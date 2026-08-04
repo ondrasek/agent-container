@@ -298,6 +298,82 @@ injected material, so this is a constraint on the implementation, not a probe ar
 
 ---
 
+## R11 (VERIFIED by probe) — Transparent, default-deny enforcement is achievable with no agent privileges
+
+The env-var mechanism (US1–US3) binds only clients that **choose** to honour it. An agent prompted
+into `unset HTTPS_PROXY`, or into writing that line to `~/.agent-env/env`, defeats it completely —
+and a prompt-injected agent is exactly what this container exists to contain. US4/US5 close that.
+
+**Architecture** — the Istio/Linkerd sidecar pattern:
+
+```yaml
+egress:
+  cap_add: [NET_ADMIN]              # the ONLY privileged piece; runs no untrusted code
+agent:
+  network_mode: "service:egress"    # joins that netns; cap_add: NOTHING
+```
+
+Rules installed inside the shared namespace by the **proxy**:
+
+```text
+nat OUTPUT     REDIRECT tcp 80,443 -> transparent proxy port, exempting the proxy's own uid
+filter OUTPUT  POLICY DROP                     <- everything undeclared fails
+               ACCEPT -o lo                    <- redirected traffic lands here
+               ACCEPT ESTABLISHED,RELATED
+               ACCEPT udp/tcp 53               <- DNS; nothing reachable works without it
+               ACCEPT --uid-owner <proxy>      <- the proxy may egress
+               (declared non-HTTP destinations appended here, host+port)
+```
+
+**Measured**, agent running as uid 1000 with **no proxy environment variables at all**:
+
+| Attempt | Result |
+|---|---|
+| `8080` undeclared — *the non-standard-port bypass* | **blocked** |
+| `1337` arbitrary | **blocked** |
+| `22` SSH undeclared | **blocked** |
+| `21` FTP undeclared | **blocked** |
+| `80` / `443` | **redirected to the proxy** — 8 packets on the REDIRECT rule |
+| `53` DNS | reached |
+| Agent container `CapAdd` | `[]` |
+
+`iptables` reported `policy DROP 18 packets` and `24 packets` accepted on `lo`, so both halves are
+confirmed: undeclared traffic is dropped, HTTP/HTTPS is intercepted rather than passed.
+
+### R11a — the default is the whole design
+
+A first sketch used `-P OUTPUT ACCEPT` with REDIRECT on 80/443 only. **Port 8080 sails straight
+through that**, which is worse than no control: the declaration reads as constraining while an
+agent reaches anything it likes on an unusual port. Default-deny is not a hardening step to add
+later; it is what makes the mechanism a boundary rather than a speed bump.
+
+### R11b — tinyproxy cannot serve this, and the image choice changes
+
+A transparently-redirected HTTPS connection arrives as a **raw TLS stream**, not a `CONNECT`
+request — tinyproxy has nothing to read a hostname from. Filtering by hostname without decrypting
+requires **SNI peeking**: squid's `ssl_bump peek` + `splice` reads the ClientHello SNI and splices
+the connection through **without terminating TLS**, so R2 and Constitution III still hold (no CA,
+no `Authorization` header ever visible). `ubuntu/squid` was evaluated and rejected in R10 on size;
+under US4 it becomes the leading candidate, since the criterion it lost on is now outweighed by one
+it uniquely satisfies.
+
+### R11c — consequences that are not implementation details
+
+- **The published port moves.** With a shared namespace the agent service cannot publish ports; the
+  `2200 + hash` binding moves to the egress service. The port **number** is unchanged so Constitution
+  IV's value holds, but the service owning the binding changes — a **migration** for every running
+  container, not an edit.
+- **Constitution II is better served, not violated.** The principle is per-container: the container
+  running untrusted code gains nothing. `NET_ADMIN` lands on the one running a proxy and nothing
+  else. FR-008's current claim that packet filtering "needs privileges this container deliberately
+  does not have" conflates *the agent container* with *any container* — FR-022 exists to fix that
+  wording rather than let it argue against its own successor.
+- **Non-HTTP egress becomes explicit** — which is the point (FR-018), and resolves the git-push
+  collision more precisely than the HTTP-only allowlist could: SSH to a declared host and port is
+  permitted exactly, rather than the protocol being allowed wholesale.
+
+---
+
 ## R8 — Constitution check
 
 | Principle | Effect |
