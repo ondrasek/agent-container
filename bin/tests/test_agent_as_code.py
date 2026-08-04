@@ -1588,3 +1588,127 @@ def test_unchanged_declaration_does_not_drift(wiz):
     spec = wiz.ExecSpec()
     d = {"allow": [{"provider": "anthropic"}, {"host": "github.com"}]}
     assert wiz.config_drift(wiz.env_desired_config(spec, d), wiz.env_desired_config(spec, d)) == []
+
+
+# --- Phase 8: the four entry shapes, and the three renderings ---------------
+
+
+@pytest.mark.parametrize(
+    "block,expect",
+    [
+        ("        - provider: anthropic\n", ("anthropic", "api.anthropic.com", None, "tool")),
+        (
+            "        - provider: corp\n          hosts: [gw.corp]\n",
+            ("corp", "gw.corp", None, "declaration"),
+        ),
+        ("        - host: example.com\n", ("example.com", "example.com", None, "declaration")),
+        (
+            "        - host: example.com\n          port: 5432\n",
+            ("example.com", "example.com", 5432, "declaration"),
+        ),
+    ],
+)
+def test_all_four_entry_shapes_resolve(wiz, tmp_path, block, expect):
+    """T106/FR-018a. The fourth shape is the one that matters most: `port` is what
+    routes an entry to netfilter instead of the proxy."""
+    root = _egress(tmp_path, f"      allow:\n{block}", sub=str(abs(hash(block)))[:6])
+    (env,) = wiz.load_project_spec(root)
+    assert wiz.resolve_destinations(env["egress"]) == [expect]
+
+
+@pytest.mark.parametrize("bad", ["0", "65536", "-1", "'22'", "22.5", "true"])
+def test_bad_port_dies_naming_the_field(wiz, tmp_path, bad):
+    """A port outside 1-65535, or one that is not an integer. `true` is included
+    because YAML parses it as a bool and `isinstance(True, int)` is True in
+    Python — so a naive range check would accept `port: true` as port 1."""
+    root = _egress(
+        tmp_path, f"      allow:\n        - host: x.com\n          port: {bad}\n", sub=f"p{bad[:3]}"
+    )
+    with pytest.raises(wiz.Fatal, match="must be an integer 1-65535"):
+        wiz.load_project_spec(root)
+
+
+def test_squid_rendering_is_unquoted_and_dot_prefixed(wiz):
+    """T108/R12a — the two forms that produce a SILENTLY EMPTY allowlist.
+
+    A quoted token is a FILE PATH to squid, and `*.x` is not squid syntax at all.
+    Neither is an error; both just match nothing.
+    """
+    entries = [
+        ("a", "api.anthropic.com", None, "tool"),
+        ("b", "*.githubusercontent.com", None, "declaration"),
+    ]
+    acl = wiz.build_squid_acl(entries)
+    assert '"' not in acl and "'" not in acl, "a quoted entry is read as a FILE PATH"
+    assert "*." not in acl, "`*.` is not squid syntax and would match nothing"
+    assert acl == "api.anthropic.com\n.githubusercontent.com\n"
+
+
+def test_netfilter_rendering_denies_by_default(wiz):
+    """T110/FR-017. An undeclared port produces NO rule — the policy denies it.
+
+    The first design sketch redirected 80/443 under a default-ACCEPT policy,
+    which let an agent reach anything it liked on 8080 while the declaration
+    still read as constraining. Worse than no control.
+    """
+    entries = [("g", "github.com", 22, "declaration"), ("a", "api.anthropic.com", None, "tool")]
+    rules = wiz.build_netfilter_rules(entries)
+    assert rules.count("iptables -A OUTPUT") == 1, "only the PORTED entry gets a rule"
+    assert "--dport 22" in rules
+    assert "8080" not in rules and "api.anthropic.com" not in rules
+    assert "-j ACCEPT" in rules and "-P OUTPUT" not in rules, "the policy is the entrypoint's"
+
+
+def test_unbound_rendering_escapes_the_catch_all_refuse(wiz):
+    """Every declared name needs `transparent` as well as its forward-zone, or the
+    baked `local-zone: "." refuse` matches first and the allowlist permits
+    NOTHING while passing every refusal test (R17)."""
+    conf = wiz.build_unbound_conf([("a", "api.anthropic.com", None, "tool")])
+    assert 'local-zone: "api.anthropic.com" transparent' in conf
+    assert 'name: "api.anthropic.com"' in conf
+    assert conf.count("forward-addr:") == 1
+
+
+def test_phase_a_two_key_syntax_is_refused_with_the_replacement(wiz, tmp_path):
+    """T113/FR-018b — removed, NOT deprecated, and never silently ignored.
+
+    Ignoring a `providers:` block would deploy an environment permitting far less
+    than its author wrote down, which is the silent-under-permission mirror of the
+    silent-over-permission this feature exists to prevent.
+    """
+    root = _egress(tmp_path, "      providers: [anthropic]\n", "old")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "`providers:` was replaced" in msg
+    assert "{provider: anthropic}" in msg, "must show the replacement, not just refuse"
+    assert "port" in msg, "and mention that a port selects netfilter"
+
+
+def test_the_three_renderings_agree_on_one_declaration(wiz, tmp_path):
+    """T114. One declaration, three surfaces — drift between them is the failure
+    the unified schema exists to prevent, and it would be silent.
+
+    A portless host must appear in the proxy allowlist AND the resolver but NOT
+    netfilter; a ported host in netfilter AND the resolver but NOT the proxy.
+    """
+    root = _egress(
+        tmp_path,
+        "      allow:\n"
+        "        - provider: anthropic\n"
+        "        - host: github.com\n          port: 22\n",
+        "agree",
+    )
+    (env,) = wiz.load_project_spec(root)
+    e = wiz.resolve_destinations(env["egress"])
+    acl, rules, dns = (
+        wiz.build_squid_acl(e),
+        wiz.build_netfilter_rules(e),
+        wiz.build_unbound_conf(e),
+    )
+
+    assert "api.anthropic.com" in acl and "api.anthropic.com" not in rules
+    assert "github.com" in rules and "github.com" not in acl
+    # BOTH need resolution: a ported destination is unreachable without DNS, and
+    # omitting it would make SSH fail in a way that looks like a firewall bug.
+    assert "api.anthropic.com" in dns and "github.com" in dns

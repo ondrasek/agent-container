@@ -278,15 +278,15 @@ everything after it is wasted. Prove it first, as Phase A proved the proxy by ru
 ## Phase 8 (B2): Generation — one declaration, three surfaces
 
 - [X] T105 Implement the unified `egress.allow` schema in `bin/agent-container` — entries `{provider}`, `{provider, hosts}`, `{host}`, `{host, port}` (FR-018a); **the port selects the enforcement surface**
-- [ ] T106 [P] Add schema tests in `bin/tests/test_agent_as_code.py` for all four entry shapes, plus a `{host, port}` with a non-integer port and a port outside 1–65535
+- [X] T106 [P] Add schema tests in `bin/tests/test_agent_as_code.py` for all four entry shapes, plus a `{host, port}` with a non-integer port and a port outside 1–65535
 - [X] T107 Render the **squid** allowlist from the declaration in `bin/agent-container`: bare host for exact, **leading dot** for subdomains, and **never quoted** — research R12a measured that a quoted entry is read as a FILE PATH and yields an acl with no entries
-- [ ] T108 [P] Add a test asserting the squid rendering is unquoted and uses the leading-dot form, and that `*.example.com` from Phase A's syntax is **translated, not passed through** (FR-018a)
+- [X] T108 [P] Add a test asserting the squid rendering is unquoted and uses the leading-dot form, and that `*.example.com` from Phase A's syntax is **translated, not passed through** (FR-018a)
 - [X] T109 Render the **netfilter** rules from `{host, port}` entries in `bin/agent-container` — default-deny OUTPUT, REDIRECT 80/443 to squid, REDIRECT 53 to dnsmasq, explicit ACCEPT per declared host+port (FR-017/FR-018)
-- [ ] T110 [P] Add a test proving the generated ruleset **denies by default** — an undeclared port produces no ACCEPT rule, and the policy is DROP rather than ACCEPT. The first design sketch got this wrong, and default-accept is worse than no control
+- [X] T110 [P] Add a test proving the generated ruleset **denies by default** — an undeclared port produces no ACCEPT rule, and the policy is DROP rather than ACCEPT. The first design sketch got this wrong, and default-accept is worse than no control
 - [X] T111 Render the **dnsmasq** config from the same list in `bin/agent-container` — `local-zone: "." refuse` plus a per-name `forward-zone`, upstream from FR-020c's enumerated set (FR-020/FR-020b/FR-020c)
 - [X] T112 Migrate Phase A's two-key syntax to the unified list (FR-018b) — **removed, not deprecated**. Update `validate_egress`, `validate_provider_entry`, `resolve_provider_hosts` and the ~15 tests that pin the old shape
-- [ ] T113 [P] Add a test proving a Phase A two-key declaration is **refused with a migration message naming the replacement**, not silently ignored — the FR-005 refuse-don't-ignore precedent
-- [ ] T114 Prove the three renderings agree: one declaration, three surfaces, and a test that a host declared once appears in **all three** (or, for a ported entry, in netfilter only). Drift between surfaces is the failure this unified schema exists to prevent
+- [X] T113 [P] Add a test proving a Phase A two-key declaration is **refused with a migration message naming the replacement**, not silently ignored — the FR-005 refuse-don't-ignore precedent
+- [X] T114 Prove the three renderings agree: one declaration, three surfaces, and a test that a host declared once appears in **all three** (or, for a ported entry, in netfilter only). Drift between surfaces is the failure this unified schema exists to prevent
 
 **Checkpoint**: one list generates three consistent surfaces; the old syntax migrates loudly.
 
