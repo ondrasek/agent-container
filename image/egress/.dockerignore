@@ -1,6 +1,13 @@
-# Deny-all, then re-admit. The context is already one directory, but this makes the
-# narrowness structural rather than incidental — the context may cross the network to
-# a remote daemon (the Feature 009 measurement: an unprotected context shipped 2234
-# files / 23.4 MB, including a planted .env and an API key).
+# Deny-all, then re-admit by name. The context is already one directory, but this
+# keeps the narrowness structural rather than incidental — the context may cross
+# the network to a remote daemon (the Feature 009 measurement: an unprotected
+# context shipped 2234 files / 23.4 MB, including a planted .env and an API key).
+#
+# Re-admit EXPLICITLY, never by pattern: a new file here has to be added on
+# purpose, so nothing joins the build context of the security component by
+# accident.
 *
 !Dockerfile
+!entrypoint.sh
+!squid.conf
+!unbound.conf

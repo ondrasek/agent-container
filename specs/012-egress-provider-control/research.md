@@ -598,3 +598,61 @@ stands; only the daemon changes, and it changes for a requirement R13 did not we
 **Consequence for the plan**: the Phase B image is `squid + unbound + iptables`. The DNS surface's
 generator emits `forward-zone` blocks per declared name rather than dnsmasq `server=/…/` lines —
 a third rendering of the same list (data-model §7), which is why the renderings were kept separate.
+
+---
+
+## R17 — T100/T101 built; forcing DNS by NAT is UNRESOLVED
+
+The Phase B image exists and the boundary works. One sub-problem does not, and it is recorded here
+rather than left for someone to rediscover.
+
+### What the built image proves
+
+| Property | Result |
+|---|---|
+| squid `peek` → `splice`, never `bump` | ✅ real server certificate reaches the agent |
+| default-deny (`-P OUTPUT DROP`) | ✅ ports 8080/1337 dropped |
+| evasion by `unset` of every proxy variable | ✅ still blocked |
+| agent capability set | ✅ `[]`; `NET_ADMIN` only on the proxy |
+| unbound allowlist-only | ✅ declared `NOERROR`, undeclared/tunnelling-shaped **`REFUSED`** |
+
+**Two config defects were found by running it, both of which would have shipped:**
+
+1. **Squid needs a non-intercept forward-proxy port.** With `http_port`/`https_port` both marked
+   `intercept`, squid builds its internal URLs with port `0` and dies:
+   `FATAL: mimeLoadIcon: cannot parse internal URL: http://…:0/…`. A loopback-only `http_port
+   127.0.0.1:3127` satisfies it and is never advertised to the agent.
+
+2. **`local-zone: "." refuse` shadows `forward-zone`.** Declared names were `REFUSED` along with
+   everything else — an allowlist permitting **nothing**. Each declared name needs an explicit
+   `local-zone: "<name>" transparent` to escape the catch-all.
+
+   Worth naming: this is exactly the failure analysis finding **A1 / T136a** predicted — *"an
+   allowlist-only resolver that resolves NOTHING passes every refusal test"*. Every refusal check
+   passed while the resolver was completely broken. The positive-case task existed before the bug
+   did, and still only caught it because it was run.
+
+### UNRESOLVED — FR-020a, forcing port 53 to the sidecar resolver
+
+unbound answers correctly **at the container's own address** (`dig @172.17.0.2` → `NOERROR`). What
+does not work is making an agent that queries something else land there:
+
+| Approach | Result |
+|---|---|
+| `REDIRECT --to-port 53` | rule fires (29 pkts counted) but no reply — needs `route_localnet`, and `/proc/sys` is **read-only** in the container |
+| `--sysctl net.ipv4.conf.all.route_localnet=1` at run | no change |
+| `DNAT --to-destination <container-ip>:53` | no reply; also broke direct `@127.0.0.1` queries |
+| `DNAT` with `! -d <container-ip>` | still no reply |
+
+**Note the earlier gates were not affected**: R15 simply `ACCEPT`ed port 53 rather than redirecting
+it, which is why the mechanism verified cleanly there. The redirect is new here and is the only
+part that fails.
+
+**Most promising next step**, untested: give the agent service `dns: [<egress-ip>]` so the normal
+path needs no NAT at all, and keep NAT solely to catch a hardcoded external resolver. Requires
+confirming compose permits `dns:` alongside `network_mode: service:` — if it does not, the resolver
+address has to reach the agent another way.
+
+**Until this is settled, FR-020a is not met and T128 is not startable.** The DNS allowlist would be
+advisory: an agent that picks its own resolver walks around it, and DNS is the channel whose
+payload rides in the *question*.

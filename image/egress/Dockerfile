@@ -1,67 +1,78 @@
-# The egress proxy (Feature 012). Syntax-compatible with both `docker build` and
-# `podman build` — no BuildKit-specific features, matching the agent image.
+# The egress boundary (Feature 012 Phase B). Syntax-compatible with both
+# `docker build` and `podman build` — no BuildKit-specific features.
+#
+# PHASE B REPLACES PHASE A'S MECHANISM. Phase A pointed the agent at a tinyproxy
+# sidecar through HTTPS_PROXY: enforcement that depended on the agent's
+# cooperation, and an agent prompted into `unset HTTPS_PROXY` defeated it. This
+# image programs the network stack instead, so routing is not the agent's choice.
 #
 # Built HERE rather than pulled. This container IS the egress control, so sourcing
 # it from a third-party registry account would put the security component outside
-# the trust boundary; Alpine's package repo is the same class of dependency as the
-# agent image's Debian base. Costs no publishing — the tool already builds on the
-# target host. See specs/012-egress-provider-control/research.md R10, which records
-# that the smallest prebuilt candidate SEGFAULTS on its first refusal.
+# the trust boundary. Costs no publishing — the tool already builds on the target
+# host.
 #
-# What this proxy does NOT do, deliberately: it never terminates TLS. It allowlists
-# on the CONNECT target, which is visible BEFORE the TLS session exists. A
-# decrypting proxy would see every Authorization header, creating a new plaintext
-# credential location inside the component meant to reduce exposure (Constitution
-# III). That is why no CA certificate is generated, installed, or injected here.
+# THE PRIVILEGE LIVES HERE, NOT IN THE AGENT. This container gets NET_ADMIN and
+# runs no untrusted code; the agent container joins its network namespace with an
+# EMPTY capability set. Constitution II is per-container — the rule is that the
+# container running untrusted agent code holds no more privilege than its work
+# requires, and under this arrangement it holds none at all. Verified: research
+# R15 records CapAdd [] on the agent and [CAP_NET_ADMIN] here.
+#
+# IT NEVER TERMINATES TLS. squid `peek`s the ClientHello to read the SNI and then
+# `splice`s the connection through — it does not `bump`. A bumping proxy would see
+# every Authorization header, creating a new plaintext credential location inside
+# the component meant to reduce exposure (Constitution III). Verified by R15: the
+# certificate the agent sees for a declared host is the REAL server certificate,
+# not one this container generated. If that ever shows a locally-issued CN, the
+# configuration has silently become `bump` and the boundary has inverted.
 
 FROM alpine:3.21
 
-# Pinned: the filter semantics below (FilterType, FilterDefaultDeny) are version
-# -specific, and an unpinned rebuild could change them under us.
-# `~1.11` is apk's fuzzy-version syntax. The pin is real, not decorative:
-# `tinyproxy~99.99` exits 1 (measured), so a version that cannot satisfy it
-# fails the build rather than silently installing something else.
-# Written `~` and not `~=`: the latter also works today, but only because
-# apk's parser tolerates the stray `=` — undocumented tolerance is the kind
-# of thing that stops being tolerated in a future apk.
-RUN apk add --no-cache 'tinyproxy~1.11'
-
-# The static half of the configuration is BAKED. Only the allowlist varies per
-# environment, and it arrives as a compose `config` at /etc/tinyproxy/filter —
-# never a host bind, which fails over a remote or Lima daemon (research R10b).
+# squid   — SNI peek-and-splice. Alpine's build carries --with-openssl (R12).
+#           tinyproxy cannot serve this at all: a transparently redirected TLS
+#           stream is not a CONNECT request and carries no hostname to read.
+# unbound — allowlist-only resolution that can answer REFUSED. dnsmasq returns
+#           NXDOMAIN for a policy refusal, which both lies ("no such name") and
+#           CACHES — so a policy error would present as a DNS bug and outlive the
+#           declaration that caused it (R16, FR-020e).
+# iptables — the REDIRECT and default-deny rules.
 #
-# FilterDefaultDeny Yes inverts the filter's meaning: the file becomes an
-# ALLOWLIST, so an EMPTY file denies everything. That is the air-gapped state
-# (`providers: []`), and it is asserted by a test rather than assumed — an
-# empty-means-allow-all inversion would be catastrophic and silent.
-#
-# FilterType is used rather than the deprecated FilterExtended (which warns on
-# every load in 1.11.x). FilterCaseSensitive is omitted: it is a documented no-op.
-#
-# `ere` is load-bearing, not a preference. Accepted values are bre|ere|fnmatch, and
-# the generated wildcard pattern `^([A-Za-z0-9_-]+\.)*example\.com$` relies on ERE
-# grouping and `+`. Under `bre` those are LITERAL characters, so the pattern would
-# match nothing and the host would be silently denied — fail-closed, but broken in
-# a way that looks like a policy decision rather than a bug.
-RUN printf '%s\n' \
-    'Port 8888' \
-    'Listen 0.0.0.0' \
-    'Timeout 600' \
-    'LogLevel Info' \
-    'MaxClients 100' \
-    'Allow 0.0.0.0/0' \
-    'ConnectPort 443' \
-    'Filter "/etc/tinyproxy/filter"' \
-    'FilterDefaultDeny Yes' \
-    'FilterType ere' \
-    > /etc/tinyproxy/tinyproxy.conf \
- && touch /etc/tinyproxy/filter \
- && chown -R nobody:nobody /etc/tinyproxy
+# Fuzzy-pinned with apk's `~` syntax. The pins are real, not decorative: an
+# unsatisfiable version exits 1 rather than silently installing something else.
+RUN apk add --no-cache \
+      'squid~6.12' \
+      'unbound~1.22' \
+      iptables \
+      openssl
 
-# Rootless, like the agent container (Constitution II). 65534 = nobody.
-USER 65534:65534
+# The certificate squid presents on the intercept port. It is NEVER shown to a
+# client for a spliced (i.e. permitted) connection — those see the real server's
+# certificate — so this exists only to satisfy `https_port … ssl-bump`, and
+# self-signed is correct. It is emphatically NOT a CA: nothing in the agent
+# container is asked to trust it, and no CA certificate is injected anywhere.
+RUN openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout /tmp/k.pem -out /tmp/c.pem -subj "/CN=agent-container-egress" 2>/dev/null \
+ && cat /tmp/c.pem /tmp/k.pem > /etc/squid/intercept.pem \
+ && rm -f /tmp/k.pem /tmp/c.pem \
+ && chown squid:squid /etc/squid/intercept.pem \
+ && chmod 0400 /etc/squid/intercept.pem \
+ && mkdir -p /var/log/squid /run/unbound \
+ && chown -R squid:squid /var/log/squid
 
-EXPOSE 8888
+# The per-environment allowlist arrives as compose `configs` with `content:` —
+# never `file:`, which is materialised as a BIND of a local path and therefore
+# cannot reach a remote daemon (R10b, measured). Touched so both daemons start
+# even before the tool injects anything.
+RUN touch /etc/squid/allowed_sni.acl /etc/unbound/allowed.conf \
+ && chown squid:squid /etc/squid/allowed_sni.acl
 
-# -d keeps it in the foreground so compose owns the lifecycle.
-ENTRYPOINT ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]
+EXPOSE 3128 3129 53
+
+# NOT rootless, and that is this container's whole purpose. The entrypoint needs
+# CAP_NET_ADMIN to program netfilter; squid then drops to `squid` and unbound to
+# `unbound` on their own. The agent container — the one running untrusted code —
+# stays rootless with an empty capability set.
+COPY squid.conf /etc/squid/squid.conf
+COPY unbound.conf /etc/unbound/unbound.conf
+COPY entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

@@ -265,8 +265,8 @@ do**, which no unit test can establish. Every evasion scenario drives the contai
 **Purpose**: If SNI filtering without decryption does not work, this phase has no mechanism and
 everything after it is wasted. Prove it first, as Phase A proved the proxy by running four of them.
 
-- [ ] T100 Create `image/egress/Dockerfile` for Phase B — Alpine + **squid 6.12** (`--with-openssl`, R12) + **`unbound`** (R16 — dnsmasq cannot return REFUSED, so it cannot satisfy FR-020e) + `iptables`, replacing tinyproxy. Keep the rootless posture for squid itself; only the entrypoint needs `NET_ADMIN`
-- [ ] T101 Write `image/egress/entrypoint.sh`: resolve the squid uid at **runtime** (never hard-coded), install the netfilter rules, start unbound, then **exec** squid so compose owns PID 1. Rules go in **before** squid starts — a window where the proxy is up and the rules are not is a window where the agent is unconstrained (R15)
+- [X] T100 Create `image/egress/Dockerfile` for Phase B — Alpine + **squid 6.12** (`--with-openssl`, R12) + **`unbound`** (R16 — dnsmasq cannot return REFUSED, so it cannot satisfy FR-020e) + `iptables`, replacing tinyproxy. Keep the rootless posture for squid itself; only the entrypoint needs `NET_ADMIN`
+- [X] T101 Write `image/egress/entrypoint.sh`: resolve the squid uid at **runtime** (never hard-coded), install the netfilter rules, start unbound, then **exec** squid so compose owns PID 1. Rules go in **before** squid starts — a window where the proxy is up and the rules are not is a window where the agent is unconstrained (R15)
 - [X] T102 **Prove peek-and-splice end to end by running it**: an allowed SNI splices through and the client sees the **real server certificate**; a disallowed SNI is terminated. Record in research R12b. **If the client sees a proxy-generated certificate, stop** — that is `bump`, not `splice`, and it breaks R2/Constitution III
 - [X] T103 Settle FR-020e by running dnsmasq: does `local=/#/` return **NXDOMAIN** or can it return **REFUSED**? NXDOMAIN says "no such host" where the truth is "policy", and the error path must not be designed around the wrong signal. Record in research R13a
 - [X] T104 Verify the agent container's capability set is **unchanged** with `network_mode: service:egress` — `CapAdd: []` on the agent, `[NET_ADMIN]` on the proxy (SC-011, quickstart S16). **This is the blocking check for the whole phase**
@@ -328,7 +328,7 @@ it must fail (quickstart S12).
 **Independent test**: declare one HTTPS provider; confirm SSH, FTP and an arbitrary high port all
 fail, then declare SSH to one host and confirm only that host on that port opens (quickstart S13/S14).
 
-- [ ] T128 [US5] Force **all** port-53 traffic to the sidecar resolver via netfilter (FR-020a) so an agent cannot select its own resolver
+- [ ] T128 [US5] **BLOCKED (research R17)** — force all port-53 traffic to the sidecar resolver (FR-020a). REDIRECT needs `route_localnet` and `/proc/sys` is read-only; DNAT gets no reply and breaks direct queries. Try `dns: [<egress-ip>]` on the agent service first, so the normal path needs no NAT and NAT only catches a hardcoded resolver — confirm compose allows `dns:` alongside `network_mode: service:`. **Until this lands the DNS allowlist is advisory** so an agent cannot select its own resolver
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding
