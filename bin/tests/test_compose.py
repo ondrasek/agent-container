@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def test_project_name(wiz):
     assert wiz.compose_project("acme") == "agent-container-acme"
@@ -146,3 +148,105 @@ def test_shellenv_mounts_at_agent_env_with_an_unchanged_name(wiz):
     assert mounts["agent-container-acme-shellenv"] == "/home/dev/.agent-env"
     assert "agent-container-acme-shellenv" in m["volumes"]  # name unchanged
     assert not any(v.endswith(":/home/dev/.agent-container") for v in mounts.values())
+
+
+# --- Feature 012: the egress proxy in the generated model --------------------
+
+
+def _model(wiz, tmp_path, **kw):
+    return wiz.build_compose_model("acme", tmp_path / "image", **kw)
+
+
+def test_no_declaration_leaves_the_model_byte_identical(wiz, tmp_path):
+    """FR-004/FR-012 — the guarantee every existing environment depends on.
+
+    Byte-identical, not merely equivalent: this is compared as serialized JSON
+    because that is what actually reaches the daemon.
+    """
+    import json
+
+    before = json.dumps(_model(wiz, tmp_path), indent=2, sort_keys=True)
+    after = json.dumps(_model(wiz, tmp_path, egress_filter_file=None), indent=2, sort_keys=True)
+    assert before == after
+    assert "egress" not in before
+    assert wiz.EGRESS_SERVICE_KEY not in _model(wiz, tmp_path)["services"]
+
+
+def test_declaration_adds_exactly_one_service_and_no_volume(wiz, tmp_path):
+    """The proxy must not touch the nine-volume identity contract (Constitution IV)."""
+    f = tmp_path / "acme.egress.filter"
+    f.write_text("^api\\.anthropic\\.com$\n")
+    plain, withp = _model(wiz, tmp_path), _model(wiz, tmp_path, egress_filter_file=f)
+    assert set(withp["services"]) - set(plain["services"]) == {"egress"}
+    assert withp["volumes"] == plain["volumes"], "the volume set must be untouched"
+    egress = withp["services"]["egress"]
+    assert "ports" not in egress, "the proxy must not be published to the host"
+    assert "volumes" not in egress
+    assert "env_file" not in egress, "an operator env-file must not reach the security control"
+    assert withp["configs"]["egress_filter"]["file"] == str(f)
+
+
+def test_proxy_container_name_is_outside_the_environment_namespace(wiz, tmp_path):
+    """Compose would name it `agent-container-acme-egress-1`, which begins with
+    CONTAINER_PREFIX — and six sites treat any `agent-container-*` container as a
+    deployable environment to list, pick or tear down."""
+    f = tmp_path / "f"
+    f.write_text("")
+    cn = _model(wiz, tmp_path, egress_filter_file=f)["services"]["egress"]["container_name"]
+    assert not cn.startswith(wiz.CONTAINER_PREFIX), f"{cn} would be scanned as an environment"
+
+
+def test_agent_is_pointed_at_the_proxy_in_both_cases(wiz, tmp_path):
+    """Lowercase variants matter: curl, git and most HTTP clients read
+    `https_proxy`, not `HTTPS_PROXY`."""
+    f = tmp_path / "f"
+    f.write_text("")
+    env = _model(wiz, tmp_path, egress_filter_file=f)["services"]["agent"]["environment"]
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        assert env[k] == f"http://egress:{wiz.EGRESS_PORT}"
+    assert env["NO_PROXY"] == env["no_proxy"] == wiz.EGRESS_NO_PROXY
+
+
+# --- FR-003c: the check that protects "commit AND push every change" ---------
+
+
+def test_push_check_fires_for_an_https_remote_not_in_the_allowlist(wiz):
+    """Probe-verified failure: under `providers: [anthropic]`, git over HTTPS to
+    github.com returns `CONNECT tunnel failed, response 403` — at push time."""
+    with pytest.raises(wiz.Fatal, match="does not permit 'github.com'"):
+        wiz.check_egress_permits_push(
+            {"providers": ["anthropic"]}, "https://github.com/you/acme", "strict"
+        )
+
+
+def test_push_check_is_silent_when_the_host_is_declared(wiz):
+    wiz.check_egress_permits_push(
+        {"providers": ["anthropic"], "allow": ["github.com"]},
+        "https://github.com/you/acme",
+        "strict",
+    )
+
+
+def test_push_check_is_silent_for_ssh_remotes(wiz):
+    """ssh does not honour https_proxy, so an SSH push is unaffected. This
+    asymmetry is why the defect is invisible to anyone testing with a push key."""
+    for url in ("git@github.com:you/acme.git", "ssh://git@github.com/you/acme"):
+        wiz.check_egress_permits_push({"providers": ["anthropic"]}, url, "strict")
+
+
+def test_push_check_is_silent_when_nothing_is_declared(wiz):
+    wiz.check_egress_permits_push(None, "https://github.com/you/acme", "strict")
+
+
+def test_push_check_warns_rather_than_dies_under_advisory(wiz):
+    wiz.check_egress_permits_push(
+        {"providers": ["anthropic"]}, "https://github.com/you/acme", "advisory"
+    )
+
+
+def test_push_check_uses_the_same_patterns_as_the_proxy(wiz):
+    """The check and the enforcement must not be able to disagree — a wildcard the
+    proxy would admit must not be reported as refused."""
+    e = [("allow", ("*.githubusercontent.com",), "declaration")]
+    assert wiz.egress_permits_host(e, "raw.githubusercontent.com")
+    assert not wiz.egress_permits_host(e, "githubusercontent.com.attacker.net")

@@ -582,6 +582,30 @@ AGENT_HONOURS_PROXY: dict[str, bool] = {
 
 ENFORCEMENT_MODES = ("advisory", "strict")
 
+# The proxy's compose service key — also its DNS name on the project network, which
+# is how the agent reaches it. Its container name is set EXPLICITLY because compose
+# would otherwise call it `<project>-egress-1`, i.e. `agent-container-<name>-egress-1`,
+# which begins with CONTAINER_PREFIX — and six separate sites treat any
+# `agent-container-*` container as an environment to list, pick or tear down.
+EGRESS_SERVICE_KEY = "egress"
+EGRESS_PORT = 8888
+EGRESS_FILTER_PATH = "/etc/tinyproxy/filter"
+# The minimum for in-container traffic. The tool owns this value; an operator one is
+# refused rather than compared (contract C6) — deciding whether one NO_PROXY is
+# "wider" than another means comparing *, .suffix, IP, CIDR and port forms, and a
+# comparison erring permissively reproduces the exact bypass the rule prevents.
+EGRESS_NO_PROXY = "localhost,127.0.0.1,::1"
+
+
+def egress_container_name(name: str) -> str:
+    """The proxy's container name — deliberately OUTSIDE the `agent-container-*`
+    namespace that identifies deployable environments (Constitution IV).
+
+    >>> egress_container_name("acme")
+    'agent-egress-acme'
+    """
+    return f"agent-egress-{name}"
+
 
 def validate_private_key(path: Path) -> None:
     """Fail fast if `path` is not a readable, unencrypted OpenSSH private key.
@@ -2423,6 +2447,7 @@ def build_compose_model(
     environment: dict[str, str] | None = None,
     workspace_mount: object = _WORKSPACE_DEFAULT,
     declare_workspace_volume: bool = True,
+    egress_filter_file: Path | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
@@ -2458,8 +2483,23 @@ def build_compose_model(
         "ports": [f"{port}:2222"],
         "volumes": workspace_mounts + other_volume_mounts(name) + list(extra_mounts or []),
     }
-    if environment:  # Feature 004 non-secret settings (mode/agent/clone-url)
-        service["environment"] = dict(environment)
+    env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
+    if egress_filter_file is not None:
+        # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
+        # `https_proxy`, not `HTTPS_PROXY`. Compose applies `environment:` OVER
+        # `env_file:`, so these win over an operator env-file — which is what C6
+        # requires of NO_PROXY precedence.
+        target = f"http://{EGRESS_SERVICE_KEY}:{EGRESS_PORT}"
+        env |= {
+            "HTTPS_PROXY": target,
+            "HTTP_PROXY": target,
+            "https_proxy": target,
+            "http_proxy": target,
+            "NO_PROXY": EGRESS_NO_PROXY,
+            "no_proxy": EGRESS_NO_PROXY,
+        }
+    if env:
+        service["environment"] = env
     if env_file is not None:
         # Feature 011 FR-001d: one path or many. Compose applies `env_file:` in
         # order with LATER entries winning, which is exactly the stacking `-e`
@@ -2500,8 +2540,24 @@ def build_compose_model(
     for cfg_name, local_file, target in injected_configs or []:
         svc_configs.append({"source": cfg_name, "target": target})
         model_configs[cfg_name] = {"file": str(local_file)}
+    if egress_filter_file is not None:
+        # A second service in the model the tool GENERATES — never the operator's
+        # <name>.services.yaml, which is validated services-only and stays theirs.
+        # No `ports:` (reachable only over the project network), no `volumes:` (the
+        # nine-volume identity contract is untouched), no `env_file:` (an operator
+        # env-file must never reach the security control itself).
+        model["services"][EGRESS_SERVICE_KEY] = {
+            "container_name": egress_container_name(name),
+            "build": {"context": str(Path(build_context) / "egress")},
+            "restart": restart,
+            "configs": [{"source": "egress_filter", "target": EGRESS_FILTER_PATH}],
+        }
+        model_configs["egress_filter"] = {"file": str(egress_filter_file)}
     if svc_configs:
         service["configs"] = svc_configs
+    if model_configs:
+        # Split from the guard above: the egress config can exist while the agent
+        # service has no configs of its own.
         model["configs"] = model_configs
     return model
 
@@ -3015,6 +3071,30 @@ def stage_task_injection(
     return [("task", f, INJECT_TASK_PATH)]
 
 
+def stage_egress_injection(
+    host: str, name: str, entries: list[tuple[str, tuple[str, ...], str]]
+) -> Path:
+    """Stage the generated tinyproxy allowlist as a LOCAL file, for delivery over
+    the compose `configs` channel — NEVER a host bind, which fails over a remote or
+    Lima daemon (research R10b, and the 001/003 lesson).
+
+    Always writes a file, including for `providers: []`: `FilterDefaultDeny Yes`
+    makes the body an ALLOWLIST, so an EMPTY body denies everything (verified,
+    research R10c) — and tinyproxy refuses to start if `Filter` names a file that
+    does not exist. Callers gate on enforce_egress_declaration() first.
+
+    Not a credential and not under /run: it is the proxy's configuration, and it
+    contains only hostnames the operator wrote down.
+    """
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    f = d / f"{name}.egress.filter"
+    f.write_text(build_egress_filter(entries))
+    f.chmod(0o644)
+    return f
+
+
 def compose_up_exec(
     host_name: str,
     host_rec: dict,
@@ -3077,6 +3157,18 @@ def compose_up_exec(
     # a non-local host is refused here, before any runtime call (FR-011).
     ws_mount, declare_ws = resolve_workspace(spec, name, host_rec)
     build_ctx = resolve_build_context()
+    # Feature 012: the declaration is read HERE — the one choke point every deploy
+    # path passes through (`up`, `apply`, `redeploy`, wizard). A lookup in `do_up`
+    # would leave `redeploy` unenforced while the declaration read as enforced.
+    egress = resolve_egress_declaration(name)
+    # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
+    # the operator hears it now, not after the agent has done a session of work.
+    check_egress_permits_push(egress, spec.repo, (egress or {}).get("enforcement") or "advisory")
+    egress_file = (
+        stage_egress_injection(host_name, name, resolve_provider_hosts(egress))
+        if enforce_egress_declaration(egress, spec.agent)
+        else None
+    )
     model = build_compose_model(
         name,
         build_ctx,
@@ -3089,6 +3181,7 @@ def compose_up_exec(
         environment=spec.compose_environment(),
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
+        egress_filter_file=egress_file,
     )
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
@@ -5121,6 +5214,175 @@ def build_egress_filter(entries: list[tuple[str, tuple[str, ...], str]]) -> str:
         out.append(f"# {label} ({source})")
         out.extend(egress_filter_line(h) for h in hosts)
     return "".join(f"{line}\n" for line in out)
+
+
+def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | None:
+    """The `egress:` block declared for environment <name>, or None if undeclared.
+
+    Placed here — and called from `compose_up_exec` — because that is the ONLY
+    choke point every deploy path passes through. `do_up` serves `up` and `apply`,
+    but `do_redeploy` and the wizard call `compose_up_exec` directly, so a lookup
+    in `do_up` would leave a `redeploy` running with no proxy while the declaration
+    still read as enforced. Mirrors `resolve_sidecar_override`, which already does
+    project-config discovery from this same path.
+
+    Returns None when there is no project, no spec, or no matching environment —
+    an environment deployed imperatively outside any project is simply undeclared,
+    which is the unrestricted default and not an error.
+    """
+    root = find_project_root(cwd or Path.cwd())
+    if root is None:
+        return None
+    try:
+        environments = load_project_spec(root, skip_unknown=True)
+    except Fatal:
+        # A broken spec is reported by the paths that own it (`plan`/`apply`).
+        # Refusing an imperative `up` here would make an unrelated syntax error
+        # elsewhere in the project block a deployment that never used the spec.
+        return None
+    for env in environments:
+        if env.get("name") == name:
+            return env.get("egress")
+    return None
+
+
+def egress_enforceable(egress: object, agent: str | None) -> tuple[bool, str]:
+    """Whether a declaration can actually be ENFORCED here — `(ok, reason)`.
+
+    The reason is shown to the operator, so it must name the specific obstacle
+    rather than saying "unsupported". `advisory` deploys and states the limitation;
+    `strict` refuses (FR-007b).
+
+    An agent absent from AGENT_HONOURS_PROXY reads as NOT known to honour, so a
+    newly added agent is refused under strict until someone probes it — the safe
+    direction (data-model §4).
+
+    >>> egress_enforceable({"providers": []}, "claude")
+    (True, '')
+    >>> egress_enforceable({"providers": []}, "some-future-agent")[0]
+    False
+    """
+    if not is_egress_declared(egress):
+        return True, ""  # nothing declared, nothing to enforce
+    try:
+        ctx = resolve_build_context()
+    except Fatal:
+        ctx = None  # no checkout reachable (e.g. a bare PyPI install)
+    if ctx is None or not (Path(ctx) / "egress" / "Dockerfile").is_file():
+        return False, (
+            "the egress proxy image sources are not reachable "
+            "(expected image/egress/Dockerfile in a checkout)"
+        )
+    if not AGENT_HONOURS_PROXY.get(agent or "", False):
+        return False, (
+            f"agent {agent!r} is not known to honour proxy environment variables, "
+            f"so the declaration cannot be enforced for it. Known to honour: "
+            f"{', '.join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))}"
+        )
+    return True, ""
+
+
+def https_remote_host(url: str | None) -> str | None:
+    """The host of an HTTPS git remote, or None for anything else.
+
+    SSH remotes return None deliberately: `ssh` does not honour `https_proxy`, so
+    an SSH push is unaffected by the allowlist and warning about it would be noise.
+    That asymmetry is exactly why this defect is invisible to anyone testing with a
+    push key and fatal to anyone using the documented GH_TOKEN path.
+
+    >>> https_remote_host("https://github.com/you/acme")
+    'github.com'
+    >>> https_remote_host("https://github.com:443/you/acme")
+    'github.com'
+    >>> [https_remote_host(u) for u in ("git@github.com:you/acme.git", "ssh://git@h/x", None)]
+    [None, None, None]
+    """
+    if not url or not url.startswith("https://"):
+        return None
+    rest = url[len("https://") :]
+    authority = rest.split("/", 1)[0]
+    host = authority.rsplit("@", 1)[-1]  # strip any userinfo
+    host = host.split(":", 1)[0]  # strip any port
+    return host or None
+
+
+def egress_permits_host(entries: list[tuple[str, tuple[str, ...], str]], host: str) -> bool:
+    """Whether the effective allowlist admits `host` — evaluated with the SAME
+    patterns the proxy will use, so this check cannot disagree with enforcement.
+
+    >>> e = [("allow", ("*.githubusercontent.com", "github.com"), "declaration")]
+    >>> [egress_permits_host(e, h) for h in ("github.com", "raw.githubusercontent.com")]
+    [True, True]
+    >>> egress_permits_host(e, "gitlab.com")
+    False
+    """
+    return any(
+        re.fullmatch(egress_filter_line(pattern)[1:-1], host)
+        for _label, hosts, _src in entries
+        for pattern in hosts
+    )
+
+
+def check_egress_permits_push(egress: object, repo_url: str | None, mode: str) -> None:
+    """FR-003c — the check that protects the project's first hard constraint.
+
+    The proxy governs ALL HTTPS egress, so an enforced declaration that omits the
+    git remote makes `git push` fail with 403. Verified by probe: under
+    `providers: [anthropic]`, `git ls-remote https://github.com/…` returns
+    `CONNECT tunnel failed, response 403` while the declared provider still answers.
+
+    Both facts are known BEFORE anything runs, so this is said at deploy time.
+    Discovering it at push time instead means discovering it after the work exists
+    and before it is safe — the one ordering "commit AND push every change" forbids.
+
+    Says nothing when the remote is unknown: an environment may push somewhere this
+    tool never sees, and a warning on every deployment would be noise that trains
+    operators to ignore the one that matters.
+    """
+    host = https_remote_host(repo_url)
+    if host is None or not is_egress_declared(egress):
+        return
+    assert isinstance(egress, dict)  # narrowed by is_egress_declared
+    if egress_permits_host(resolve_provider_hosts(egress), host):
+        return
+    msg = (
+        f"egress: the declaration does not permit {host!r}, but this environment "
+        f"pushes over HTTPS to it. The proxy governs ALL egress, so `git push` will "
+        f"be refused — and it will be refused at push time, after the work exists. "
+        f"Add it:  egress.allow: [{host}]"
+    )
+    if mode == "strict":
+        die(msg)
+    warn(msg)
+
+
+def enforce_egress_declaration(egress: object, agent: str | None) -> bool:
+    """Apply FR-007b at deploy time. Returns whether the proxy should be deployed.
+
+    Fail-closed by construction: a declaration that cannot be enforced NEVER
+    deploys silently. Under `strict` it refuses; under `advisory` it deploys and
+    says plainly that the declaration is not being enforced — because the defect
+    this feature exists to fix is silence, not permissiveness.
+    """
+    if not is_egress_declared(egress):
+        return False
+    assert isinstance(egress, dict)
+    mode = egress.get("enforcement") or "advisory"
+    ok, reason = egress_enforceable(egress, agent)
+    if ok:
+        log(f"egress: enforcement={mode} (enforced)")
+        return True
+    if mode == "strict":
+        die(
+            f"egress: enforcement=strict and the declaration cannot be enforced — {reason}. "
+            f"Deploying would leave the environment unconstrained while the declaration "
+            f"reads as enforced. Set enforcement: advisory to deploy anyway, knowingly."
+        )
+    warn(
+        f"egress: enforcement=advisory and the declaration is NOT ENFORCED — {reason}. "
+        f"The environment can reach anything the network allows."
+    )
+    return False
 
 
 def is_egress_declared(egress: object) -> bool:
