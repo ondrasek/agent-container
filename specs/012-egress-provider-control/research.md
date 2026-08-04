@@ -195,6 +195,81 @@ comment — a new agent added without probing it must fail that test rather than
 
 ---
 
+## R10 (VERIFIED by running each) — Proxy image evaluation
+
+Four candidates, tested against C3's criteria on a real daemon. **Documentation would have chosen
+wrong**: the smallest, most obvious candidate crashes on the exact code path this feature depends
+on.
+
+| Candidate | Size | Rootless | Disallowed host | Survives refusal? |
+|---|---|---|---|---|
+| `vimagick/tinyproxy` | 3 MB | yes | — | **NO — SIGSEGV (exit 139)** |
+| `kalaksi/tinyproxy` | 7 MB | yes | `403 Filtered` | yes |
+| `ubuntu/squid` | 66 MB | only with `pid_filename none` | `403 Forbidden` | yes |
+| **Alpine + `tinyproxy` 1.11.2 (built here)** | **4 MB** | **yes, uid 65534** | **`403 Filtered`** | **yes** |
+
+### The finding that justifies T003 existing at all
+
+`vimagick/tinyproxy` **segfaults the instant it refuses a filtered domain** — reproducibly, twice
+out of two. It logs `Proxying refused on filtered domain`, then dies with exit 139. Every piece of
+documentation says tinyproxy supports domain filtering, and it does; that build just cannot survive
+using it. A proxy that dies on its first refusal is not a weakened control, it is **no control from
+the second request onward**.
+
+Note that `kalaksi/tinyproxy` runs the *same software* and does **not** crash. The defect is in the
+build, not in tinyproxy — which is precisely why the criterion had to be tested per-image rather
+than per-project.
+
+### Decision: build it here, from Alpine
+
+`image/egress/` — a Dockerfile installing `tinyproxy` from Alpine's package repository, run as
+uid 65534.
+
+**Rationale, in priority order:**
+
+1. **Supply chain.** This container *is* the egress control. Sourcing it from an unaudited personal
+   Docker Hub account would put the security component itself outside the trust boundary. Alpine's
+   package repo is the same class of dependency as the agent image's Debian base — already trusted
+   by construction.
+2. **It costs no publishing.** The tool **already builds its own image** on the target host
+   (`build: {context: image/}`), so a second build context is machinery that exists. Nothing new is
+   distributed; the context is one Dockerfile, negligible even over a remote context.
+3. **Smallest of the four** — 4 MB, and the version is pinned by us rather than by someone else's
+   rebuild cadence.
+
+**Rejected**: `vimagick` (crashes); `kalaksi` (works well, but a personal image in the supply chain
+of a security control); `ubuntu/squid` (excellent provenance and the most battle-tested forward
+proxy there is — but 16× the size, needs a config workaround to run rootless, and buys nothing the
+Alpine build lacks). Squid remains the fallback if Alpine's tinyproxy is ever unavailable.
+
+**Cost accepted**: `up` now builds two images instead of one.
+
+### R10a — `%{http_code}` cannot express a refused CONNECT (corrects the F9 amendment)
+
+Measured, and it invalidates an assertion added while resolving analysis finding F9:
+
+| Outcome | `curl -w '%{http_code}'` | curl exit | Visible with `-v` |
+|---|---|---|---|
+| allowed | `405` (the real API answered) | 0 | — |
+| **refused** | **`000`** | **56** | `< HTTP/1.1 403 Filtered` |
+| dropped | `000` | 28 (timeout) | nothing |
+
+`%{http_code}` reports the **tunnelled** response, which for a refused `CONNECT` never happens — so
+it reads `000` for refusals *and* drops alike. **Asserting on it would pass for a dropped
+connection**, which is the exact failure C3 forbids.
+
+**The correct assertion is the curl exit code: 56 = refused, 28 = dropped** — binary, non-timing,
+and it distinguishes the two cases that matter. Quickstart S3 and T039 are corrected accordingly.
+
+### R10b — the allowlist must ride the compose `configs` channel
+
+Discovered while probing: a host bind of the filter file **fails over the Lima/remote daemon**
+(`error while creating mount source path … permission denied`). Same lesson as Features 001/003 —
+injected material must travel by compose `configs`, never a bind. The generated allowlist is
+injected material, so this is a constraint on the implementation, not a probe artifact.
+
+---
+
 ## R8 — Constitution check
 
 | Principle | Effect |

@@ -66,16 +66,22 @@ Inside the container, with the same declaration in place, reach for a provider t
 declared:
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://api.openai.com/v1/models
+curl -s -o /dev/null --max-time 20 https://api.openai.com/v1/models; echo "exit=$?"
 ```
 
-**Expected**: **a refusal status code is printed** — `403` or similar, not `200`, and not an empty
-line. The assertion is on the *status*, not on elapsed time: "fast" has no threshold and a timing
-check would be flaky.
+**Expected**: **`exit=56`** — the proxy refused the `CONNECT` with a status. Confirm the status
+itself with `-v`, which shows `< HTTP/1.1 403 Filtered`.
 
-- An **empty** result means the proxy **dropped** the connection rather than refusing it — the
-  R1a failure, which produces the 30–40s hangs the research probe saw (C3).
-- A **200** means the request went around the proxy — check `NO_PROXY` (S6) before anything else.
+**Assert on the exit code, not on `%{http_code}`** (research R10a, measured): `%{http_code}` reports
+the *tunnelled* response, which for a refused `CONNECT` never happens — so it reads `000` for a
+refusal **and** for a dropped connection alike. Asserting on it would pass for a drop, the exact
+failure C3 forbids.
+
+| exit | Meaning |
+|---|---|
+| **56** | **refused** — correct |
+| 28 | **dropped**, not refused — the R1a failure, which produced the 30–40s hangs the probe saw |
+| 0 | the request went **around** the proxy — check `NO_PROXY` (S6) before anything else |
 
 ### S3a — An indirect endpoint is declarable, and replaces the vendor's hosts (FR-001a/FR-001b)
 
@@ -95,13 +101,13 @@ agent-container status dev --json | jq '.egress.hosts, .egress.host_source'
 `host_source` reads `declaration`. Then, inside the container:
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/v1/messages
+curl -s -o /dev/null --max-time 20 https://api.anthropic.com/v1/messages; echo "exit=$?"
 ```
 
-**Expected**: **refused.** An operator who routed through a gateway did so to close the direct
-path. If this succeeds, `hosts:` was implemented as additive — the declaration reads as constrained
-while the vendor path stays open, which is the silent over-permission this feature exists to
-prevent.
+**Expected**: **`exit=56`** — refused (see S3 on why the exit code, not `%{http_code}`). An operator
+who routed through a gateway did so to close the direct path. **`exit=0` means `hosts:` was
+implemented as additive** — the declaration reads as constrained while the vendor path stays open,
+the silent over-permission this feature exists to prevent.
 
 ### S4 — The built-in default is disclosed (US2, SC-003) — the motivating defect
 
@@ -245,7 +251,7 @@ If it were implemented in this feature, S1 would fail — which is the guard wor
 |---|---|
 | Identity unchanged — nine volumes | S1 — **the blocking one** |
 | Gate green | Tier 1 |
-| Permitted path works, undeclared path returns a refusal **status** | S2, S3 |
+| Permitted path works, undeclared path refused (**curl exit 56**) | S2, S3 |
 | Built-in default disclosed once | S4 |
 | `NO_PROXY` cannot disable enforcement | S6 — **the silent-failure case** |
 | Strength stated honestly, no overclaim | S7 |
