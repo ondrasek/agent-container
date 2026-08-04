@@ -380,3 +380,76 @@ def test_build_outside_any_checkout_still_says_so(wiz, tmp_path, monkeypatch):
     msg = str(ei.value)
     assert "image/Dockerfile" in msg
     assert "AGENT_CONTAINER_REPO" in msg
+
+
+# --- Feature 012 US2: disclosure and the honesty statement ------------------
+
+
+def test_builtin_default_is_disclosed_when_nothing_is_declared(wiz, capsys):
+    """The motivating defect. Feature 010's probe ran opencode with NO credential
+    and it answered over the network, via a provider nobody declared."""
+    wiz.disclose_builtin_default(None, "opencode")
+    err = capsys.readouterr().err
+    assert "BUILT-IN DEFAULT PROVIDER" in err
+    assert "big-pickle" in err, "must name WHICH provider, not merely that one exists"
+    assert "egress.providers" in err, "must say how to constrain it"
+
+
+def test_no_disclosure_for_an_agent_without_a_builtin_default(wiz, capsys):
+    wiz.disclose_builtin_default(None, "claude")
+    assert capsys.readouterr().err == ""
+
+
+def test_no_disclosure_once_a_declaration_exists(wiz, capsys):
+    """With a declaration the operator has engaged with the question; repeating it
+    is the noise that trains people to ignore the message that matters."""
+    wiz.disclose_builtin_default({"providers": []}, "opencode")
+    assert capsys.readouterr().err == ""
+
+
+def test_builtin_default_outside_the_declared_set_is_reported(wiz, capsys):
+    """FR-003a — knowable before anything runs, so withholding it would be a choice."""
+    wiz.check_builtin_default_declared({"providers": ["anthropic"]}, "opencode", "advisory")
+    err = capsys.readouterr().err
+    assert "big-pickle" in err and "does NOT permit" in err
+
+
+def test_builtin_default_inside_the_declared_set_is_silent(wiz, capsys):
+    wiz.check_builtin_default_declared({"providers": ["big-pickle"]}, "opencode", "advisory")
+    assert capsys.readouterr().err == ""
+
+
+def test_builtin_default_outside_the_set_refuses_under_strict(wiz):
+    with pytest.raises(wiz.Fatal, match="big-pickle"):
+        wiz.check_builtin_default_declared({"providers": ["anthropic"]}, "opencode", "strict")
+
+
+def test_strength_statement_says_all_three_required_things(wiz):
+    """FR-008/FR-008a, contract C5."""
+    s = wiz.egress_strength_statement("claude")
+    assert "not packet-level" in s
+    assert "does not stop a process that ignores them" in s
+    assert "claude" in s and "opencode" in s, "must name which agents honour the proxy"
+    assert "~/.agent-env/env" in s, "FR-008a: a shell can override the proxy settings"
+
+
+def test_strength_statement_flags_an_agent_not_known_to_honour(wiz):
+    s = wiz.egress_strength_statement("some-future-agent")
+    assert "NOT including" in s
+
+
+def test_strength_statement_contains_no_overclaim(wiz):
+    """SC-004 tested as ABSENCE. This requirement is the one most easily satisfied
+    in appearance and violated in substance, so the assertion is for the phrasing
+    that would imply a stronger guarantee than a proxy can deliver."""
+    s = wiz.egress_strength_statement("claude").lower()
+    for overclaim in (
+        "guarantee",
+        "prevents all",
+        "blocks all",
+        "cannot reach",
+        "impossible",
+        "fully enforced",
+        "completely",
+    ):
+        assert overclaim not in s, f"overclaim in the honesty statement: {overclaim!r}"

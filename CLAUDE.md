@@ -34,27 +34,27 @@ those before changing behaviour in that area; do not re-summarise them here.
   `~/.config/agent-container/` · **derived host state** · **image sources** `image/`. Never
   "project directory". Config is two levels, project winning, same filename both. **Plaintext
   credentials are user-level only** (repo holds a locator, never a value). `-e` is repeatable and
-  replaces discovery; bare `./.env` unread. Context **is** `image/`; checkout marker is
-  `image/Dockerfile` + the bash completion, resolved at import so a wrong one fails silently.
-  Shell env at `~/.agent-env`. **Pre-011 layouts are refused, not ignored.**
+  replaces discovery; bare `./.env` unread. Context **is** `image/`. Shell env at `~/.agent-env`. **Pre-011 layouts are refused, not ignored.**
 - **Run mechanism is compose** (Compose v2), generated and run **on the target host** — context
-  and injected files travel to that daemon. A **host bind fails over a remote context**: injected
-  material must ride the compose `configs`/`secrets` channel. The 001/003 lesson.
+  and injected files travel to that daemon. A **host bind fails over a remote context** — and
+  `configs: {file:}` **is** a bind (measured); only `configs: {content:}` is API-delivered. Inline
+  non-secret injected material; the 001/003 lesson.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv,
   or printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a
   missing referenced file must `die` **before** compose. On-volume `auth.json` is
   **operator-interactive-login only**. Rotate = edit locally + `redeploy`.
 - **The supported-agent list is single-sourced.** `AGENTS` in `bin/agent-container` is canonical;
-  a test parses `image/entrypoint.sh`, `image/Dockerfile`, both completions, the `--agent` help
-  and `docs/execution.md`, failing on drift. A sibling test pins the completions' command list to
-  the CLI's commands. Adding either → both tests name what to update.
+  tests fail on drift across entrypoint, Dockerfile, completions, help and docs, and name what to
+  update. A sibling test pins the completions' command list to the CLI's.
 - **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates
   it `root:root` and rootless cannot write it, even under a dev-owned parent. `opencode` is the
   only agent with two volumes (XDG splits config from credentials).
-- **Packaging:** PyPI as the `agent_container` module (hatchling `force-include`); `REPO_ROOT`
-  resolves location-independently so a non-editable install works standalone — only `build` needs
-  a checkout. **PyYAML is the one third-party dep** (recorded Constitution VI deviation);
-  `yaml.safe_load` **only**. MIT.
+- **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently so a
+  non-editable install works standalone — only `build` needs a checkout. **PyYAML is the one
+  third-party dep**; `yaml.safe_load` **only** — never a regex over structured formats. MIT.
+- **Egress enforcement is proxy-level and says so.** A declaration governs **all** egress (it
+  breaks HTTPS `git push` unless declared — checked at deploy); absent ≠ `providers: []`; the
+  strength statement is tested for **absence** of overclaim.
 - **Every substantive merge to `main` is a release.** Once `ci` passes, python-semantic-release
   bumps from Conventional Commits (`feat`→minor, `fix`→patch, breaking→minor pre-1.0;
   docs/ci/chore/test/style cut none), tags, and publishes via OIDC Trusted Publishing. No manual
@@ -67,14 +67,15 @@ lifecycle, volumes · 001,002) · `docs/credentials.md` (injection, managers · 
 `docs/execution.md` (modes, `--agent`/`--task`/`--workspace`, clone-on-start · 004,010) ·
 `docs/shell-integration.md` (`attach --print`, `host env` · 005) · `docs/agent-as-code.md`
 (declarative `.agent-container/` · 006,008) · `docs/agent-interface.md` (`--json`, `context`,
-`skill` · 009) · specs/007 (wizard).
+`skill` · 009) · `docs/egress.md` (declaration, enforcement, honesty · 012) ·
+`docs/threat-model.md` (**reconcile every feature** — Constitution) · specs/007 (wizard).
 
 ## Architecture (keep these layers separate)
 
-- **Container image** (`Dockerfile`) — base OS + tmux + sshd + nvim + git + the agent CLIs and their runtimes.
-- **Orchestration** (`bin/agent-container` + compose/quadlet) — launch, name, attach, tear down.
-- **Entrypoint** (`entrypoint.sh`) — git identity, credential injection, sshd + default tmux session.
-- **Attach** — thin client-side `ssh … -t tmux attach` helper across hosts/containers.
+- **Container image** (`image/`) — base OS, tmux, sshd, nvim, git, the agent CLIs.
+- **Orchestration** (`bin/agent-container` + compose) — launch, name, attach, tear down.
+- **Entrypoint** — git identity, credential injection, sshd + default tmux session.
+- **Attach** — thin client-side `ssh … -t tmux attach` across hosts/containers.
 
 Don't bake host-specific orchestration into the image.
 
@@ -85,18 +86,16 @@ Don't bake host-specific orchestration into the image.
 - Treat **commit-and-push** as a property of the agent config, not something enforced by git
   hooks alone (they can be bypassed).
 - **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of
-  truth for the fast checks (ruff check+format · ty · bandit `-ll` · vulture · xenon B/CC≤10 ·
-  refurb · `--self-test` · pytest · shell suites). The local Stop hook runs it (`exit 2` feeds
-  failures back); CI's `quality-gate` job runs the *same* script as a hard gate. It **excludes**
-  the acceptance tier — CI-authoritative (`pytest -m acceptance bin/tests`; on macOS+Lima the
-  work dir must be Lima-shared). A gate failure blocks the release.
+  truth for the fast checks (ruff · ty · bandit · vulture · xenon · refurb · `--self-test` ·
+  pytest · shell suites). The local Stop hook runs it; CI runs the *same* script as a hard gate.
+  It **excludes** the CI-authoritative acceptance tier (`pytest -m acceptance bin/tests`; on
+  macOS+Lima the work dir must be Lima-shared). A gate failure blocks the release. **Read its exit
+  code unpiped** — `| tail` reports tail's status, not the gate's.
 - **Run the full suite, not just your new tests** — changing a shared contract is exactly when a
   pre-existing test still pins the old shape.
-- **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: a
-  local `commit-msg` hook (`.githooks/`, `git config core.hooksPath .githooks`, once per clone)
-  running `cz check`; the `commits` CI job; and a GitHub ruleset on `main`. Types: `feat`/`fix`/
-  `docs`/`style`/`refactor`/`perf`/`test`/`build`/`ci`/`chore`/`revert` (+ `!`/`BREAKING
-  CHANGE`). `--no-verify` bypasses the local hook only.
+- **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: the
+  local `commit-msg` hook (`git config core.hooksPath .githooks`, once per clone), the `commits`
+  CI job, and a ruleset on `main`. `--no-verify` bypasses only the first.
 - **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, plus one proving that
   check can fail.
 - Justify any new tool or dependency against the constraints above — especially "not

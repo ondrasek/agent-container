@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def test_project_name(wiz):
     assert wiz.compose_project("acme") == "agent-container-acme"
@@ -146,3 +148,191 @@ def test_shellenv_mounts_at_agent_env_with_an_unchanged_name(wiz):
     assert mounts["agent-container-acme-shellenv"] == "/home/dev/.agent-env"
     assert "agent-container-acme-shellenv" in m["volumes"]  # name unchanged
     assert not any(v.endswith(":/home/dev/.agent-container") for v in mounts.values())
+
+
+# --- Feature 012: the egress proxy in the generated model --------------------
+
+
+def _model(wiz, tmp_path, **kw):
+    return wiz.build_compose_model("acme", tmp_path / "image", **kw)
+
+
+def test_no_declaration_leaves_the_model_byte_identical(wiz, tmp_path):
+    """FR-004/FR-012 — the guarantee every existing environment depends on.
+
+    Byte-identical, not merely equivalent: this is compared as serialized JSON
+    because that is what actually reaches the daemon.
+    """
+    import json
+
+    before = json.dumps(_model(wiz, tmp_path), indent=2, sort_keys=True)
+    after = json.dumps(_model(wiz, tmp_path, egress_filter_body=None), indent=2, sort_keys=True)
+    assert before == after
+    assert "egress" not in before
+    assert wiz.EGRESS_SERVICE_KEY not in _model(wiz, tmp_path)["services"]
+
+
+def test_declaration_adds_exactly_one_service_and_no_volume(wiz, tmp_path):
+    """The proxy must not touch the nine-volume identity contract (Constitution IV)."""
+    body = "^api\\.anthropic\\.com$\n"
+    plain, withp = _model(wiz, tmp_path), _model(wiz, tmp_path, egress_filter_body=body)
+    assert set(withp["services"]) - set(plain["services"]) == {"egress"}
+    assert withp["volumes"] == plain["volumes"], "the volume set must be untouched"
+    egress = withp["services"]["egress"]
+    assert "ports" not in egress, "the proxy must not be published to the host"
+    assert "volumes" not in egress
+    assert "env_file" not in egress, "an operator env-file must not reach the security control"
+    # `content:`, not `file:` — a file: config is a read-only BIND of the local path
+    # and cannot reach a daemon that does not share the filesystem (remote hosts).
+    assert withp["configs"]["egress_filter"] == {"content": body}
+    assert "file" not in withp["configs"]["egress_filter"]
+
+
+def test_proxy_container_name_is_outside_the_environment_namespace(wiz, tmp_path):
+    """Compose would name it `agent-container-acme-egress-1`, which begins with
+    CONTAINER_PREFIX — and six sites treat any `agent-container-*` container as a
+    deployable environment to list, pick or tear down."""
+    cn = _model(wiz, tmp_path, egress_filter_body="")["services"]["egress"]["container_name"]
+    assert not cn.startswith(wiz.CONTAINER_PREFIX), f"{cn} would be scanned as an environment"
+
+
+def test_agent_is_pointed_at_the_proxy_in_both_cases(wiz, tmp_path):
+    """Lowercase variants matter: curl, git and most HTTP clients read
+    `https_proxy`, not `HTTPS_PROXY`."""
+    env = _model(wiz, tmp_path, egress_filter_body="")["services"]["agent"]["environment"]
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        assert env[k] == f"http://egress:{wiz.EGRESS_PORT}"
+    assert env["NO_PROXY"] == env["no_proxy"] == wiz.EGRESS_NO_PROXY
+
+
+# --- FR-003c: the check that protects "commit AND push every change" ---------
+
+
+def test_push_check_fires_for_an_https_remote_not_in_the_allowlist(wiz):
+    """Probe-verified failure: under `providers: [anthropic]`, git over HTTPS to
+    github.com returns `CONNECT tunnel failed, response 403` — at push time."""
+    with pytest.raises(wiz.Fatal, match="does not permit 'github.com'"):
+        wiz.check_egress_permits_push(
+            {"providers": ["anthropic"]}, "https://github.com/you/acme", "strict"
+        )
+
+
+def test_push_check_is_silent_when_the_host_is_declared(wiz):
+    wiz.check_egress_permits_push(
+        {"providers": ["anthropic"], "allow": ["github.com"]},
+        "https://github.com/you/acme",
+        "strict",
+    )
+
+
+def test_push_check_is_silent_for_ssh_remotes(wiz):
+    """ssh does not honour https_proxy, so an SSH push is unaffected. This
+    asymmetry is why the defect is invisible to anyone testing with a push key."""
+    for url in ("git@github.com:you/acme.git", "ssh://git@github.com/you/acme"):
+        wiz.check_egress_permits_push({"providers": ["anthropic"]}, url, "strict")
+
+
+def test_push_check_is_silent_when_nothing_is_declared(wiz):
+    wiz.check_egress_permits_push(None, "https://github.com/you/acme", "strict")
+
+
+def test_push_check_warns_rather_than_dies_under_advisory(wiz):
+    wiz.check_egress_permits_push(
+        {"providers": ["anthropic"]}, "https://github.com/you/acme", "advisory"
+    )
+
+
+def test_push_check_uses_the_same_patterns_as_the_proxy(wiz):
+    """The check and the enforcement must not be able to disagree — a wildcard the
+    proxy would admit must not be reported as refused."""
+    e = [("allow", ("*.githubusercontent.com",), "declaration")]
+    assert wiz.egress_permits_host(e, "raw.githubusercontent.com")
+    assert not wiz.egress_permits_host(e, "githubusercontent.com.attacker.net")
+
+
+# --- C6: NO_PROXY cannot silently disable enforcement -----------------------
+
+DECL = {"providers": ["anthropic"]}
+
+
+def test_env_file_keys_reads_names_never_values(wiz, tmp_path):
+    """The one place the tool opens an env file. Names only — a value must never be
+    returned or logged, so the C6 check cannot become a secret-exposure path."""
+    f = tmp_path / "e.env"
+    f.write_text("# comment\nexport NO_PROXY=*\nGH_TOKEN=ghp_supersecret\nmalformed\n\n")
+    keys = wiz.env_file_keys(f)
+    assert keys == {"NO_PROXY", "GH_TOKEN"}
+    assert not any("ghp_supersecret" in k for k in keys)
+
+
+def test_operator_no_proxy_in_an_env_file_is_refused(wiz, tmp_path):
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=*\n")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+    msg = str(e.value)
+    assert "NO_PROXY" in msg and str(f) in msg, "must name the variable AND the file"
+
+
+def test_a_harmless_looking_no_proxy_is_refused_too(wiz, tmp_path):
+    """No subset comparison is attempted, deliberately. A check that judged some
+    values 'safe' would fail OPEN on the ones it did not anticipate — reproducing
+    the bypass it exists to prevent, while passing its own tests."""
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=localhost\n")
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+
+
+def test_operator_https_proxy_is_refused(wiz, tmp_path):
+    """Redirecting the agent at a DIFFERENT proxy defeats the allowlist just as
+    completely as skipping one."""
+    f = tmp_path / "dev.env"
+    f.write_text("https_proxy=http://elsewhere:3128\n")
+    with pytest.raises(wiz.Fatal, match="https_proxy"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+
+
+def test_a_credential_named_no_proxy_is_refused(wiz):
+    """`stage_declared_credentials` validates names against [A-Za-z_][A-Za-z0-9_]*,
+    which NO_PROXY matches — and then writes the name into the merged env file."""
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", None, ["GH_TOKEN", "NO_PROXY"])
+
+
+def test_a_sidecar_override_setting_no_proxy_is_refused(wiz, tmp_path):
+    """The override rides as the SECOND -f and wins the compose merge. Detected via
+    yaml.safe_load — the old column-0 scanner returned [] for this exact shape."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  agent:\n    environment:\n      NO_PROXY: '*'\n")
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", None, None, o)
+
+
+def test_flow_style_override_is_also_caught(wiz, tmp_path):
+    """The form the regex scanner silently missed."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services: {agent: {environment: {NO_PROXY: '*'}}}\n")
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", None, None, o)
+
+
+def test_no_declaration_means_no_refusal(wiz, tmp_path):
+    """Today's behaviour is untouched for anyone not using the feature."""
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=*\n")
+    wiz.refuse_operator_proxy_vars(None, "claude", [f])
+
+
+def test_unenforced_declaration_means_no_refusal(wiz, tmp_path):
+    """An unenforced declaration makes no guarantee for NO_PROXY to contradict, so
+    refusing would be noise — the operator has already been told it is not enforced."""
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=*\n")
+    wiz.refuse_operator_proxy_vars(DECL, "some-future-agent", [f])
+
+
+def test_unrelated_env_vars_are_untouched(wiz, tmp_path):
+    f = tmp_path / "dev.env"
+    f.write_text("GH_TOKEN=x\nFOO=bar\n")
+    wiz.refuse_operator_proxy_vars(DECL, "claude", [f])

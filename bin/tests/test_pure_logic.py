@@ -698,3 +698,117 @@ def test_no_tool_owned_file_remains_in_a_consolidated_project_root(wiz, tmp_path
     stray = [e.name for e in root.iterdir() if e.is_file() and e.name in consumed]
     assert stray == [], f"tool-owned files left in the project root: {stray}"
     assert not list(root.glob("agent-container.*")), "old-layout names still present"
+
+
+# --- Feature 012: per-agent facts are fixtures, not comments -----------------
+
+
+def test_builtin_default_fixture_covers_exactly_the_agents(wiz):
+    """Every supported agent must have a recorded answer to "does it reach a
+    provider with no operator credential?". A fifth agent added to AGENTS without
+    probing it FAILS here rather than silently inheriting "no default" — the
+    defect Feature 012 exists to surface is precisely an unnoticed default."""
+    assert set(wiz.AGENT_BUILTIN_DEFAULT) == set(wiz.AGENTS), (
+        f"AGENT_BUILTIN_DEFAULT disagrees with AGENTS: "
+        f"missing={sorted(set(wiz.AGENTS) - set(wiz.AGENT_BUILTIN_DEFAULT))} "
+        f"extra={sorted(set(wiz.AGENT_BUILTIN_DEFAULT) - set(wiz.AGENTS))}"
+    )
+    # opencode's value is not a guess: Feature 010's probe ran it with no
+    # credential and it answered over the network.
+    assert wiz.AGENT_BUILTIN_DEFAULT["opencode"] == "big-pickle"
+    for agent, provider in wiz.AGENT_BUILTIN_DEFAULT.items():
+        assert provider is None or provider in wiz.PROVIDERS, (
+            f"{agent}'s built-in default {provider!r} is not in PROVIDERS, so the "
+            f"tool cannot say what it may reach"
+        )
+
+
+def test_honours_proxy_fixture_covers_exactly_the_agents(wiz):
+    """FR-008's honest-strength claim rests on this table, and every entry in it
+    was established by RUNNING the agent against a black-holed proxy (research
+    R1), never read from documentation."""
+    assert set(wiz.AGENT_HONOURS_PROXY) == set(wiz.AGENTS), (
+        f"AGENT_HONOURS_PROXY disagrees with AGENTS: "
+        f"missing={sorted(set(wiz.AGENTS) - set(wiz.AGENT_HONOURS_PROXY))} "
+        f"extra={sorted(set(wiz.AGENT_HONOURS_PROXY) - set(wiz.AGENTS))}"
+    )
+
+
+def test_unprobed_agent_defaults_to_not_honouring(wiz):
+    """The safe default, and the opposite of what a hand-maintained comment gives.
+
+    An agent absent from the table must read as NOT known to honour the proxy, so
+    `strict` refuses it until someone probes it. `.get(agent)` truthiness is the
+    contract; a KeyError or a True default would both be wrong.
+    """
+    assert wiz.AGENT_HONOURS_PROXY.get("some-future-agent") is None
+    assert not wiz.AGENT_HONOURS_PROXY.get("some-future-agent", False)
+
+
+def test_every_provider_maps_to_at_least_one_host(wiz):
+    for name, hosts in wiz.PROVIDERS.items():
+        assert hosts, f"provider {name!r} maps to no hosts, so declaring it permits nothing"
+        assert all(wiz.HOSTNAME_RE.fullmatch(h) for h in hosts), f"{name}: non-hostname in {hosts}"
+
+
+# --- the threat model tracks the feature (Constitution 2.2.0) ---------------
+# Parsed with a regex rather than a parser, deliberately and with the irony noted:
+# docs/threat-model.md §5 T12 catalogues regex scanners that missed shapes they
+# were not written for. This one reads a MARKDOWN TABLE THIS REPO AUTHORS — not
+# adversarial input, and markdown has no stdlib parser. The failure mode differs.
+
+
+# Resolved through a FUNCTION, not bound at import. A module-level
+# `_THREAT_MODEL = _ROOT / …` would capture the real path before any test could
+# monkeypatch `_ROOT`, so the guard-can-fail proofs would copy a file into a fake
+# root, corrupt it, and then silently assert against the REAL document — passing
+# for the wrong reason. That is the exact defect class this file exists to catch.
+def _threat_model_path() -> Path:
+    return _ROOT / "docs" / "threat-model.md"
+
+
+_TM_ROW = re.compile(r"^\|\s*(\d{3})[^|]*\|\s*(✅|⬜)\s*\|([^|]*)\|", re.M)
+
+
+def _tm_rows() -> list[tuple[str, str, str]]:
+    return [m.groups() for m in _TM_ROW.finditer(_threat_model_path().read_text(encoding="utf-8"))]
+
+
+def test_threat_model_names_every_feature(wiz):
+    """Constitution 2.2.0: the maintenance table names every feature.
+
+    A MISSING ROW IS THE COMMON FAILURE — a feature lands, nobody re-reads the
+    threat model, and the document still reads as current because absence is
+    invisible. This turns that into a gate failure.
+
+    CEILING, STATED: this checks that a row EXISTS, never that the analysis behind
+    it happened. A green gate here means "the table has rows", not "the threat
+    model is current". Reading it as the latter is the failure this guard cannot
+    catch.
+    """
+    text = _threat_model_path().read_text(encoding="utf-8")
+    documented = {num for num, _mark, _threats in _tm_rows()}
+    if "001–011" in text:  # a single baseline row covers the pre-012 features
+        documented |= {f"{n:03d}" for n in range(1, 12)}
+    on_disk = {d.name[:3] for d in (_ROOT / "specs").iterdir() if d.is_dir()}
+    missing = sorted(on_disk - documented)
+    assert not missing, (
+        f"docs/threat-model.md has no maintenance row for: {missing}. Add one "
+        f"recording which threats the feature mitigates, leaves open, and NEWLY "
+        f"INTRODUCES — or the posture silently stops describing the system."
+    )
+
+
+def test_threat_model_reconciled_rows_name_their_threats(wiz):
+    """A ✅ with an empty threats cell is a ticked box, not an analysis.
+
+    This is the T12 shape the document itself catalogues — a check that passes
+    while the thing it names is broken. Requiring the row to SAY something is the
+    cheapest defence against reconciling by checkbox.
+    """
+    empty = [num for num, mark, threats in _tm_rows() if mark == "✅" and not threats.strip()]
+    assert not empty, (
+        f"feature(s) {empty} are marked reconciled but name no threats. Write "
+        f"'none' explicitly if the feature genuinely touched no boundary — silence "
+        f"and 'nothing changed' must not look identical."
+    )

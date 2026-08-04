@@ -709,3 +709,72 @@ def test_bare_dotenv_refuses_only_when_no_agent_container_env_resolves(wiz, tmp_
 
     (root / ".agent-container" / "acme.env").write_text("GH_TOKEN=y\n")
     wiz.refuse_superseded_layout("acme", root)  # now silent: the stray .env is someone else's
+
+
+# --- FR-003b: a credential failure is never blamed on the declaration --------
+
+
+def test_credential_failure_names_the_credential_never_the_declaration(wiz, tmp_path, monkeypatch):
+    """FR-003b as a PROHIBITION, which is the only form it can take.
+
+    The earlier wording assumed the tool could tell that a declared provider needs a
+    particular credential. It cannot: PROVIDERS is provider->hosts, CRED_PROVIDER is
+    credential->provider for delivery routing and covers two of five, and
+    AGENT_BUILTIN_DEFAULT is the inverse relation. Any inference would false-positive
+    on a provider reached WITHOUT a credential — the very case Feature 010 found.
+
+    So what is testable is that the failure points at the thing that is wrong.
+    Blaming the provider list sends the operator to edit the one part that is correct.
+    """
+    monkeypatch.delenv("MISSING_KEY_VAR", raising=False)
+    cred = {"name": "ANTHROPIC_API_KEY", "source": "env", "var": "MISSING_KEY_VAR"}
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.resolve_credential_value(cred, tmp_path, "prod")
+    msg = str(e.value)
+    assert "ANTHROPIC_API_KEY" in msg and "MISSING_KEY_VAR" in msg
+    assert "prod" in msg, "a multi-environment apply must say WHICH environment"
+    # Only ATTRIBUTION terms are forbidden. A vendor name may legitimately appear —
+    # here it is part of the credential's own name (ANTHROPIC_API_KEY), which is the
+    # thing the message is supposed to point at.
+    for forbidden in ("egress", "allowlist", "declaration", "declared provider"):
+        assert forbidden not in msg.lower(), f"credential failure blamed on {forbidden!r}"
+
+
+def test_credential_failure_still_names_its_source_kind(wiz, tmp_path):
+    cred = {"name": "K", "source": "file", "path": str(tmp_path / "nope")}
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.resolve_credential_value(cred, tmp_path)
+    assert "nope" in str(e.value), "must name the unresolvable source, not just the credential"
+
+
+def test_no_credential_value_reaches_any_generated_artifact(wiz, tmp_path, monkeypatch):
+    """SC-007 (T039a). A 100% security criterion needs a test, not a paragraph.
+
+    The SENTINEL is the load-bearing detail. Asserting "no key-shaped string
+    appears" tests the imagination of whoever wrote the pattern — a real key that
+    does not match it passes cleanly. Seeding a KNOWN value through the credential
+    path and asserting its absence tests the actual path, and fails loudly when a
+    new surface starts carrying it.
+    """
+    import json as _json
+
+    sentinel = "sk-ant-SENTINEL-must-not-appear-anywhere"
+    monkeypatch.setenv("ACC_SENTINEL_VAR", sentinel)
+    egress = {"providers": ["anthropic"], "allow": ["github.com"]}
+
+    # Every artifact Feature 012 generates, in one place.
+    artifacts = [
+        _json.dumps(wiz.build_compose_model("acme", tmp_path / "image", egress_filter_body=None)),
+        wiz.build_egress_config(wiz.resolve_provider_hosts(egress)),
+        _json.dumps(wiz.egress_payload(egress, "claude")),
+        wiz.egress_strength_statement("claude"),
+        _json.dumps(
+            wiz.plan_payload(
+                [({"name": "acme", "egress": egress}, "acme", "local", None, "absent", "")]
+            )
+        ),  # fmt: skip
+        str(wiz.egress_config_token(egress)),
+    ]
+    for blob in artifacts:
+        assert sentinel not in blob, "a credential value reached a generated artifact"
+        assert "ACC_SENTINEL_VAR" not in blob, "even the variable NAME need not travel"

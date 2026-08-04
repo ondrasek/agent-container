@@ -29,6 +29,13 @@ code** (`--foreground` is headless-only and is refused elsewhere).
 > *any* one exits — so a one-shot sidecar that exits first would abort the agent
 > and pin the reported code to that forced stop. Keep headless-foreground sidecars
 > long-lived.
+>
+> **The [egress proxy](./egress.md) is such a service.** An enforced declaration adds
+> a second, long-lived container to the project, so the same rule applies to it: if
+> the proxy exits first, the run aborts. That is **fail-closed and correct** — an
+> agent should not keep working once its egress control is gone — but the reported
+> exit code then reflects the forced stop rather than the agent's own result. Stated
+> here so it reads as a behaviour, not as a mystery.
 
 ### Re-`up` of a finished headless run
 
