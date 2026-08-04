@@ -250,3 +250,91 @@ def test_push_check_uses_the_same_patterns_as_the_proxy(wiz):
     e = [("allow", ("*.githubusercontent.com",), "declaration")]
     assert wiz.egress_permits_host(e, "raw.githubusercontent.com")
     assert not wiz.egress_permits_host(e, "githubusercontent.com.attacker.net")
+
+
+# --- C6: NO_PROXY cannot silently disable enforcement -----------------------
+
+DECL = {"providers": ["anthropic"]}
+
+
+def test_env_file_keys_reads_names_never_values(wiz, tmp_path):
+    """The one place the tool opens an env file. Names only — a value must never be
+    returned or logged, so the C6 check cannot become a secret-exposure path."""
+    f = tmp_path / "e.env"
+    f.write_text("# comment\nexport NO_PROXY=*\nGH_TOKEN=ghp_supersecret\nmalformed\n\n")
+    keys = wiz.env_file_keys(f)
+    assert keys == {"NO_PROXY", "GH_TOKEN"}
+    assert not any("ghp_supersecret" in k for k in keys)
+
+
+def test_operator_no_proxy_in_an_env_file_is_refused(wiz, tmp_path):
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=*\n")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+    msg = str(e.value)
+    assert "NO_PROXY" in msg and str(f) in msg, "must name the variable AND the file"
+
+
+def test_a_harmless_looking_no_proxy_is_refused_too(wiz, tmp_path):
+    """No subset comparison is attempted, deliberately. A check that judged some
+    values 'safe' would fail OPEN on the ones it did not anticipate — reproducing
+    the bypass it exists to prevent, while passing its own tests."""
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=localhost\n")
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+
+
+def test_operator_https_proxy_is_refused(wiz, tmp_path):
+    """Redirecting the agent at a DIFFERENT proxy defeats the allowlist just as
+    completely as skipping one."""
+    f = tmp_path / "dev.env"
+    f.write_text("https_proxy=http://elsewhere:3128\n")
+    with pytest.raises(wiz.Fatal, match="https_proxy"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+
+
+def test_a_credential_named_no_proxy_is_refused(wiz):
+    """`stage_declared_credentials` validates names against [A-Za-z_][A-Za-z0-9_]*,
+    which NO_PROXY matches — and then writes the name into the merged env file."""
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", None, ["GH_TOKEN", "NO_PROXY"])
+
+
+def test_a_sidecar_override_setting_no_proxy_is_refused(wiz, tmp_path):
+    """The override rides as the SECOND -f and wins the compose merge. Detected via
+    yaml.safe_load — the old column-0 scanner returned [] for this exact shape."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  agent:\n    environment:\n      NO_PROXY: '*'\n")
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", None, None, o)
+
+
+def test_flow_style_override_is_also_caught(wiz, tmp_path):
+    """The form the regex scanner silently missed."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services: {agent: {environment: {NO_PROXY: '*'}}}\n")
+    with pytest.raises(wiz.Fatal, match="NO_PROXY"):
+        wiz.refuse_operator_proxy_vars(DECL, "claude", None, None, o)
+
+
+def test_no_declaration_means_no_refusal(wiz, tmp_path):
+    """Today's behaviour is untouched for anyone not using the feature."""
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=*\n")
+    wiz.refuse_operator_proxy_vars(None, "claude", [f])
+
+
+def test_unenforced_declaration_means_no_refusal(wiz, tmp_path):
+    """An unenforced declaration makes no guarantee for NO_PROXY to contradict, so
+    refusing would be noise — the operator has already been told it is not enforced."""
+    f = tmp_path / "dev.env"
+    f.write_text("NO_PROXY=*\n")
+    wiz.refuse_operator_proxy_vars(DECL, "some-future-agent", [f])
+
+
+def test_unrelated_env_vars_are_untouched(wiz, tmp_path):
+    f = tmp_path / "dev.env"
+    f.write_text("GH_TOKEN=x\nFOO=bar\n")
+    wiz.refuse_operator_proxy_vars(DECL, "claude", [f])

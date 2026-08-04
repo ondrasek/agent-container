@@ -875,7 +875,11 @@ def _resolve_env_files(name: str, override: list[Path] | None) -> list[Path]:
 
 
 def resolve_env_file(name: str) -> Path | None:
-    # Secret hygiene: only existence checks; contents are never read.
+    # Secret hygiene: RESOLUTION does only existence checks and never reads contents.
+    # Feature 012's C6 check (env_file_keys) is the one place that opens an env file,
+    # and it extracts variable NAMES only — never values, which are never returned or
+    # logged. Amended here rather than left saying "contents are never read", because
+    # a stale hygiene claim is worse than none: it is exactly what a reviewer trusts.
     for candidate in env_file_candidates(name, Path.cwd()):
         if candidate.is_file():
             return candidate
@@ -3164,6 +3168,12 @@ def compose_up_exec(
     # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
     # the operator hears it now, not after the agent has done a session of work.
     check_egress_permits_push(egress, spec.repo, (egress or {}).get("enforcement") or "advisory")
+    # C6 backstop for the imperative path, where `env_file` IS the operator's file.
+    # The apply path checks earlier, before staging, so it can name the operator's
+    # file rather than the tool-generated merge (which they have never heard of).
+    refuse_operator_proxy_vars(
+        egress, spec.agent, env_file, override=resolve_sidecar_override(name)
+    )
     egress_file = (
         stage_egress_injection(host_name, name, resolve_provider_hosts(egress))
         if enforce_egress_declaration(egress, spec.agent)
@@ -5282,6 +5292,116 @@ def egress_enforceable(egress: object, agent: str | None) -> tuple[bool, str]:
     return True, ""
 
 
+# The variables that decide where a request goes. NO_PROXY is the bypass C6 exists
+# for; the *_PROXY pair is included because redirecting the agent at a different
+# proxy defeats the allowlist just as completely as skipping one.
+PROXY_ENV_KEYS = (
+    "NO_PROXY",
+    "no_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+)
+
+
+def env_file_keys(path: Path) -> set[str]:
+    """The variable names an env file defines.
+
+    NAMES ONLY — values are never read, returned or logged. This is the first place
+    the tool looks inside an env file at all (it otherwise passes paths to compose,
+    which reads them client-side), so the boundary is drawn deliberately: C6 needs
+    to know THAT `NO_PROXY` is set, never what it is set to.
+
+    >>> import tempfile, pathlib
+    >>> p = pathlib.Path(tempfile.mkdtemp()) / "e"
+    >>> _ = p.write_text("# c\\nexport NO_PROXY=*\\nA=1\\nmalformed\\n")
+    >>> sorted(env_file_keys(p))
+    ['A', 'NO_PROXY']
+    """
+    keys: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return keys
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        name = name.removeprefix("export ").strip()
+        if name:
+            keys.add(name)
+    return keys
+
+
+def find_operator_proxy_var(
+    env_files: list[Path] | Path | None,
+    cred_names: list[str] | None = None,
+    override: Path | None = None,
+) -> tuple[str, str] | None:
+    """Locate an operator-supplied proxy variable — `(where, key)` or None.
+
+    Three routes, all verified live:
+      * an env file (the discovery chain, or an explicit `-e`);
+      * a DECLARED CREDENTIAL named `NO_PROXY` — `stage_declared_credentials`
+        validates names against `[A-Za-z_][A-Za-z0-9_]*`, which matches, and then
+        writes the name into the merged env file;
+      * a sidecar override setting `agent.environment.NO_PROXY`, which rides as the
+        second `-f` and therefore WINS the compose merge.
+    """
+    files = [env_files] if isinstance(env_files, Path) else list(env_files or [])
+    for f in files:
+        for key in sorted(env_file_keys(f) & set(PROXY_ENV_KEYS)):
+            return str(f), key
+    for cname in cred_names or []:
+        if cname in PROXY_ENV_KEYS:
+            return "the declared credentials", cname
+    if override is not None:
+        agent_env = (_yaml_document(override.read_text()).get("services") or {}).get(
+            AGENT_SERVICE_KEY
+        ) or {}
+        env = agent_env.get("environment") if isinstance(agent_env, dict) else None
+        names = env if isinstance(env, dict) else {}
+        for key in sorted(set(names) & set(PROXY_ENV_KEYS)):
+            return str(override), key
+    return None
+
+
+def refuse_operator_proxy_vars(
+    egress: object,
+    agent: str | None,
+    env_files: list[Path] | Path | None,
+    cred_names: list[str] | None = None,
+    override: Path | None = None,
+) -> None:
+    """C6 — the feature's most likely SILENT failure.
+
+    An operator `NO_PROXY` would leave the declaration reading as enforced while
+    enforcing nothing. **No subset comparison is attempted**: deciding whether one
+    `NO_PROXY` is "wider" than another means comparing `*`, `.suffix`, bare hosts,
+    IP literals, CIDR blocks and ports — forms that are not even consistent between
+    HTTP clients — and a comparison erring PERMISSIVELY reproduces exactly the
+    bypass this rule prevents, while passing every test one would think to write.
+
+    So: any value is refused, and the refusal names the file and the variable.
+    Only fires when the declaration would actually be enforced — an unenforced
+    declaration has no guarantee for the variable to contradict.
+    """
+    if not is_egress_declared(egress) or not egress_enforceable(egress, agent)[0]:
+        return
+    found = find_operator_proxy_var(env_files, cred_names, override)
+    if found is None:
+        return
+    where, key = found
+    die(
+        f"egress: {key} is set by {where}, which would override the proxy settings "
+        f"the declaration relies on — silently, while the declaration still reads as "
+        f"enforced. Remove it; the tool sets the proxy variables itself. (No value is "
+        f"accepted here: judging one {key} 'safe' means a comparison that fails open.)"
+    )
+
+
 def https_remote_host(url: str | None) -> str | None:
     """The host of an HTTPS git remote, or None for anything else.
 
@@ -6167,6 +6287,18 @@ def do_aac_apply(
     for env, name, host_name, _host_rec, _state, _detail in todo:
         c = env.get("container") or {}
         base_env = (root / c["env_file"]).resolve() if c.get("env_file") else resolve_env_file(name)
+        # C6 BEFORE staging: stage_declared_credentials merges base_env into a
+        # tool-generated <name>.cred.env, so a check placed after it could only name
+        # that file — satisfying the requirement and failing the operator, who has
+        # never seen it. Credential NAMES are checked here too: `NO_PROXY` matches
+        # the name charset and would be written straight into the merged file.
+        refuse_operator_proxy_vars(
+            env.get("egress"),
+            (c.get("agent") or "claude"),
+            base_env,
+            [str(cr.get("name")) for cr in (env.get("credentials") or [])],
+            resolve_sidecar_override(name),
+        )
         staged_creds[name] = stage_declared_credentials(
             host_name, name, env.get("credentials"), root, base_env
         )
