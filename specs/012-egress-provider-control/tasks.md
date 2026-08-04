@@ -114,9 +114,9 @@ T012.
 
 ### Enforcement mode
 
-- [ ] T021 [US1] Implement the `advisory` / `strict` decision in `bin/agent-container`: advisory deploys and states the declaration is unenforced; strict refuses, naming the agent and why (FR-007b, data-model §5)
-- [ ] T022 [US1] Make the **effective** mode visible before deploying, in `bin/agent-container` (FR-007b)
-- [ ] T023 [P] [US1] Add tests in `bin/tests/test_agent_as_code.py` covering the four cells of data-model §5's mode table, including strict refusing on a proxy that cannot start (SC-004a — zero deployments proceeding with an unenforceable declaration)
+- [X] T021 [US1] Implement the `advisory` / `strict` decision in `bin/agent-container`: advisory deploys and states the declaration is unenforced; strict refuses, naming the agent and why (FR-007b, data-model §5)
+- [X] T022 [US1] Make the **effective** mode visible before deploying, in `bin/agent-container` (FR-007b)
+- [X] T023 [P] [US1] Add tests in `bin/tests/test_agent_as_code.py` covering the four cells of data-model §5's mode table, including strict refusing on a proxy that cannot start (SC-004a — zero deployments proceeding with an unenforceable declaration)
 
 ### All egress, not just providers (scope decision, 2026-08-04)
 
@@ -124,7 +124,7 @@ T012.
 - [X] T020b [P] [US1] Add tests for `allow` in `bin/tests/test_agent_as_code.py`: plain host, `*.` form, and that `*.example.com` does **not** match `example.com.attacker.net`
 - [X] T020c [US1] **Refuse or warn at deploy when HTTPS push is configured and the remote's host is not in the effective allowlist** (FR-003c) — refuse under `strict`, warn under `advisory`, naming the host to add. **This is the task that protects Hard Constraint #1.** Verified by probe: under `providers: [anthropic]`, `git ls-remote https://github.com/…` returns `CONNECT tunnel failed, response 403`
 - [X] T020d [P] [US1] Add a test in `bin/tests/test_compose.py` proving T020c fires for an HTTPS remote absent from the allowlist and stays silent for an SSH remote (which ignores `https_proxy`) or when the host is declared
-- [ ] T020e [US1] Report an operator override that redefines the `egress` service, set `enforced` false, and refuse under `strict` (contract C2). Permitted but never silent — claiming enforcement for a proxy the tool did not configure is the overclaim SC-004 exists to prevent
+- [X] T020e [US1] Report an operator override that redefines the `egress` service, set `enforced` false, and refuse under `strict` (contract C2). Permitted but never silent — claiming enforcement for a proxy the tool did not configure is the overclaim SC-004 exists to prevent
 
 ### Error attribution
 

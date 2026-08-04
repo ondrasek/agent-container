@@ -1436,3 +1436,77 @@ def test_egress_not_a_mapping_dies(wiz, tmp_path):
     root = _project(tmp_path, "environments:\n  - name: acme\n    host: local\n    egress: nope\n")
     with pytest.raises(wiz.Fatal, match="egress: must be a mapping"):
         wiz.load_project_spec(root)
+
+
+# --- FR-007b: the advisory/strict decision (data-model §5) -------------------
+
+
+def _enf(wiz, agent="claude", mode=None, override=None):
+    e = {"providers": ["anthropic"]}
+    if mode:
+        e["enforcement"] = mode
+    return wiz.enforce_egress_declaration(e, agent, override)
+
+
+def test_mode_table_enforceable_advisory_deploys_with_proxy(wiz):
+    assert _enf(wiz) is True
+
+
+def test_mode_table_enforceable_strict_deploys_with_proxy(wiz):
+    assert _enf(wiz, mode="strict") is True
+
+
+def test_mode_table_unenforceable_advisory_deploys_without_proxy(wiz):
+    """Deploys, and says so. The defect this feature fixes is silence, not
+    permissiveness — so advisory must NOT refuse, but must never be quiet."""
+    assert _enf(wiz, agent="some-future-agent") is False
+
+
+def test_mode_table_unenforceable_strict_refuses(wiz):
+    """SC-004a: zero deployments proceeding with an unenforceable declaration."""
+    with pytest.raises(wiz.Fatal) as e:
+        _enf(wiz, agent="some-future-agent", mode="strict")
+    msg = str(e.value)
+    assert "not known to honour" in msg
+    assert "advisory" in msg, "must name the way out, not just refuse"
+
+
+def test_undeclared_never_deploys_a_proxy(wiz):
+    assert wiz.enforce_egress_declaration(None, "claude") is False
+
+
+# --- T020e: an operator override of the proxy is permitted, never silent ----
+
+
+def test_override_redefining_egress_makes_it_unenforceable(wiz, tmp_path):
+    """The override is operator-owned and host-side, so redefining the proxy is
+    legitimate authority. Claiming ENFORCED for a proxy the tool did not configure
+    is not — that is the overclaim SC-004 exists to prevent."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    assert wiz.override_redefines_egress(o) is True
+    ok, reason = wiz.egress_enforceable({"providers": ["anthropic"]}, "claude", o)
+    assert ok is False
+    assert "redefines" in reason and str(o) in reason
+
+
+def test_override_redefining_egress_is_refused_under_strict(wiz, tmp_path):
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services: {egress: {image: someone/else}}")  # flow style
+    with pytest.raises(wiz.Fatal, match="redefines"):
+        _enf(wiz, mode="strict", override=o)
+
+
+def test_override_of_an_unrelated_service_is_fine(wiz, tmp_path):
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  redis:\n    image: redis:7\n")
+    assert wiz.override_redefines_egress(o) is False
+    assert _enf(wiz, override=o) is True
+
+
+def test_json_reports_the_override_as_not_enforced(wiz, tmp_path):
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    p = wiz.egress_payload({"providers": ["anthropic"]}, "claude", o)
+    assert p["declared"] is True and p["enforced"] is False
+    assert "redefines" in p["not_enforced_reason"]
