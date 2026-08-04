@@ -280,7 +280,7 @@ def test_env_live_config_parses_inspect_env(wiz, monkeypatch):
         wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 0, out, "")
     )
     cfg = wiz.env_live_config(LOCAL_HOST, "acme")
-    assert cfg == {"mode": "headless", "agent": "codex", "repo": None}
+    assert cfg == {"mode": "headless", "agent": "codex", "repo": None, "egress": None}
     # a failed inspect → None (never a fabricated config)
     monkeypatch.setattr(
         wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 1, "", "no such")
@@ -1510,3 +1510,53 @@ def test_json_reports_the_override_as_not_enforced(wiz, tmp_path):
     p = wiz.egress_payload({"providers": ["anthropic"]}, "claude", o)
     assert p["declared"] is True and p["enforced"] is False
     assert "redefines" in p["not_enforced_reason"]
+
+
+# --- T011g: an edited declaration must drift ---------------------------------
+
+
+def test_editing_the_declaration_registers_as_drift(wiz):
+    """Before this, `apply` compared only mode/agent/repo — so editing
+    `egress.providers` reported "matching" and never redeployed. The declaration
+    changed and the running proxy did not, silently and indefinitely."""
+    spec = wiz.ExecSpec()
+    before = wiz.env_desired_config(spec, {"providers": ["anthropic"]})
+    after = wiz.env_desired_config(spec, {"providers": ["anthropic", "openai"]})
+    assert before["egress"] != after["egress"]
+    assert wiz.config_drift(after, before) == [("egress", after["egress"], before["egress"])]
+
+
+def test_tightening_enforcement_mode_registers_as_drift(wiz):
+    """advisory and strict produce an IDENTICAL compose model when the declaration
+    is enforceable, so without the mode in the token, tightening to strict would
+    report matching and never take effect."""
+    spec = wiz.ExecSpec()
+    adv = wiz.env_desired_config(spec, {"providers": ["anthropic"]})
+    strict = wiz.env_desired_config(spec, {"providers": ["anthropic"], "enforcement": "strict"})
+    assert adv["egress"] != strict["egress"]
+
+
+def test_adding_or_removing_a_declaration_registers_as_drift(wiz):
+    spec = wiz.ExecSpec()
+    none_ = wiz.env_desired_config(spec, None)
+    airgap = wiz.env_desired_config(spec, {"providers": []})
+    assert none_["egress"] is None
+    assert airgap["egress"] is not None, "air-gapped is DECLARED; it must not read as absent"
+    assert wiz.config_drift(airgap, none_)
+
+
+def test_fingerprint_moves_when_the_generator_changes(wiz, monkeypatch):
+    """The token hashes the GENERATED BODY, so it also moves when the PROVIDERS
+    table drifts under a tool upgrade or the anchoring changes — both of which
+    change what the proxy enforces while the declaration text stays identical."""
+    decl = {"providers": ["anthropic"]}
+    before = wiz.egress_fingerprint(decl)
+    monkeypatch.setitem(wiz.PROVIDERS, "anthropic", ("api.anthropic.com", "extra.example"))
+    assert wiz.egress_fingerprint(decl) != before
+
+
+def test_unchanged_declaration_does_not_drift(wiz):
+    """The other half: a no-op apply must stay a no-op, or every run recreates."""
+    spec = wiz.ExecSpec()
+    d = {"providers": ["anthropic"], "allow": ["github.com"]}
+    assert wiz.config_drift(wiz.env_desired_config(spec, d), wiz.env_desired_config(spec, d)) == []

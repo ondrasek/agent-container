@@ -3199,6 +3199,11 @@ def compose_up_exec(
         if enforce_egress_declaration(egress, spec.agent, resolve_sidecar_override(name))
         else None
     )
+    # Published so `apply` can read it back and notice an edited declaration. NOT in
+    # ExecSpec.compose_environment(): that is a pure function of the 004 execution
+    # options with no access to the declaration, and an exact-equality test pins it.
+    _token = egress_config_token(egress)
+    _egress_env = {} if _token is None else {"AGENT_CONTAINER_EGRESS": _token}
     model = build_compose_model(
         name,
         build_ctx,
@@ -3208,7 +3213,7 @@ def compose_up_exec(
         mounts,
         injected_configs=injected,
         restart=spec.restart_policy(),
-        environment=spec.compose_environment(),
+        environment=spec.compose_environment() | _egress_env,
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
         egress_filter_body=egress_body,
@@ -5634,6 +5639,52 @@ def enforce_egress_declaration(
     return False
 
 
+def egress_fingerprint(egress: object) -> str | None:
+    """A stable token for the effective allowlist AS THE PROXY WILL RECEIVE IT.
+
+    Hashes the GENERATED BODY, not the declared inputs — so it also moves when the
+    PROVIDERS table drifts under a tool upgrade, or when the anchoring in
+    egress_filter_line changes. Digesting the inputs would miss both, and both
+    change what the proxy enforces.
+
+    None when undeclared. That is distinct from the air-gapped `providers: []`,
+    whose empty body hashes to a real digest — the two states must never collapse
+    (data-model §2), so presence is decided by is_egress_declared, never by the
+    digest being falsy.
+
+    >>> egress_fingerprint(None) is None
+    True
+    >>> egress_fingerprint({"providers": []}) == egress_fingerprint({"providers": [], "allow": []})
+    True
+    >>> egress_fingerprint({"providers": ["anthropic"]}) != egress_fingerprint({"providers": []})
+    True
+    """
+    if not is_egress_declared(egress):
+        return None
+    assert isinstance(egress, dict)
+    body = build_egress_filter(resolve_provider_hosts(egress))
+    return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def egress_config_token(egress: object) -> str | None:
+    """The value compared for drift: enforcement mode AND allowlist fingerprint.
+
+    The mode rides along because advisory and strict produce an IDENTICAL compose
+    model when the declaration is enforceable — so without it, tightening
+    `enforcement: advisory` to `strict` would report "matching" and never redeploy.
+
+    >>> egress_config_token({"providers": [], "enforcement": "strict"})[:6]
+    'strict'
+    >>> egress_config_token(None) is None
+    True
+    """
+    fp = egress_fingerprint(egress)
+    if fp is None:
+        return None
+    assert isinstance(egress, dict)
+    return f"{egress.get('enforcement') or 'advisory'}:{fp}"
+
+
 def is_egress_declared(egress: object) -> bool:
     """Whether an environment DECLARES egress at all.
 
@@ -5876,19 +5927,27 @@ def env_live_config(host_rec: dict, name: str) -> dict[str, str | None] | None:
         k, _, v = str(item).partition("=")
         env[k] = v
     return {
+        # Absent key -> None, which is a FIRST-CLASS value here: it differs from any
+        # present token, so declared->undeclared and undeclared->declared both drift.
+        "egress": env.get("AGENT_CONTAINER_EGRESS"),
         "mode": env.get("AGENT_CONTAINER_MODE"),
         "agent": env.get("AGENT_CONTAINER_AGENT"),
         "repo": env.get("AGENT_CONTAINER_CLONE_URL"),
     }
 
 
-def env_desired_config(spec: ExecSpec) -> dict[str, str | None]:
+def env_desired_config(spec: ExecSpec, egress: object = None) -> dict[str, str | None]:
     """The declared agent-config in the same shape env_live_config returns — the
-    clone URL only applies to a non-bind workspace (mirrors compose_environment)."""
+    clone URL only applies to a non-bind workspace (mirrors compose_environment).
+
+    `egress` defaults to None so every pre-012 call site keeps its meaning: an
+    environment with no declaration compares None on both sides.
+    """
     return {
         "mode": spec.mode,
         "agent": spec.agent,
         "repo": spec.repo if (spec.repo and spec.workspace != "bind") else None,
+        "egress": egress_config_token(egress),
     }
 
 
@@ -5907,12 +5966,14 @@ def config_drift(
     """
     return [
         (field, desired.get(field), live.get(field))
-        for field in ("mode", "agent", "repo")
+        for field in ("mode", "agent", "repo", "egress")
         if desired.get(field) != live.get(field)
     ]
 
 
-def env_reconcile(host_rec: dict, name: str, spec: ExecSpec) -> tuple[str, str]:
+def env_reconcile(
+    host_rec: dict, name: str, spec: ExecSpec, egress: object = None
+) -> tuple[str, str]:
     """Reconcile the declared env's DETERMINISTIC identity (Constitution IV — no state
     file) against reality, returning (state, detail):
       absent   — no container for the identity
@@ -5930,7 +5991,7 @@ def env_reconcile(host_rec: dict, name: str, spec: ExecSpec) -> tuple[str, str]:
     live = env_live_config(host_rec, name)
     if live is None:
         return "matching", ""  # running but not inspectable — existence-level match
-    diffs = config_drift(env_desired_config(spec), live)
+    diffs = config_drift(env_desired_config(spec, egress), live)
     if not diffs:
         return "matching", ""
     # Redact any credential embedded in the repo/clone URL before it reaches the
@@ -6041,7 +6102,7 @@ def _reconcile_plan(environments: list[dict], host_override: str | None):
             continue
         host_name, host_rec = resolve_deploy_host(host_override or binding_name)
         ensure_tunnel(host_rec)
-        state, detail = env_reconcile(host_rec, name, env_exec_spec(env))
+        state, detail = env_reconcile(host_rec, name, env_exec_spec(env), env.get("egress"))
         plans.append((env, name, host_name, host_rec, state, detail))
         log(f"  {name} → host={host_name}: {state}" + (f" ({detail})" if detail else ""))
     return plans
