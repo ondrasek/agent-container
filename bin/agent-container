@@ -6307,10 +6307,24 @@ def _refuse_git_tracked_plaintext(path: Path, root: Path, name: str) -> None:
         )
 
 
-def resolve_credential_value(cred: dict, root: Path) -> str:
+def resolve_credential_value(cred: dict, root: Path, env_name: str | None = None) -> str:
     """Resolve one credential reference to its value, IN MEMORY (FR-011/012). A
-    missing/unavailable source dies naming it (FR-016)."""
+    missing/unavailable source dies naming it (FR-016).
+
+    FR-003b — the vocabulary invariant. Every failure here names THE CREDENTIAL and
+    its source, and nothing on this path may attribute a credential problem to the
+    `egress` declaration. The tool does NOT infer that a declared provider requires
+    a particular credential: no such mapping exists, and any inference would
+    false-positive on a provider reached WITHOUT one — the exact case Feature 010
+    discovered and Feature 012 exists to surface.
+
+    `env_name` prefixes the environment in a multi-environment apply, so the
+    operator is told not just which credential failed but which environment
+    declared it.
+    """
     src, name = cred["source"], cred["name"]
+    if env_name:
+        name = f"{env_name}/{name}"
     if src == "env":
         v = os.environ.get(cred["var"])
         if v is None:
@@ -6387,7 +6401,7 @@ def stage_declared_credentials(
             # newline-terminated); do NOT run the env-var mangle checks. do_up re-stages
             # this host-side 0600 file into the correct channel (0600 here is fine — it
             # is read only by the operator uid running the CLI before re-staging).
-            value = resolve_credential_value(cred, root)
+            value = resolve_credential_value(cred, root, name)
             if not value.endswith("\n"):
                 value += "\n"
             f = d / f"{name}.cred.{target}"
@@ -6402,7 +6416,7 @@ def stage_declared_credentials(
             continue
         # Drop a spurious trailing newline (a key file often ends in one) so the
         # value is delivered byte-clean to both the apikey file and the env var.
-        value = resolve_credential_value(cred, root).rstrip("\n")
+        value = resolve_credential_value(cred, root, name).rstrip("\n")
         cname = cred["name"]
         provider = CRED_PROVIDER.get(cname)
         if provider:

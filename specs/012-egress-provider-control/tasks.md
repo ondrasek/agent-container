@@ -128,8 +128,8 @@ T012.
 
 ### Error attribution
 
-- [ ] T023a [US1] Implement FR-003b as an **ordering-and-vocabulary invariant**, not a new check: credential resolution already fails naming the credential and its source, so ensure the egress code cannot re-attribute that failure to the `egress` declaration, and thread environment context into the message. **Do NOT infer that a declared provider requires a credential** — no such mapping exists (`PROVIDERS` is provider→hosts; `CRED_PROVIDER` is credential→provider for delivery routing and covers 2 of 5), and any inference false-positives on a provider reached without one, which is the very case Feature 010 found
-- [ ] T023b [P] [US1] Add a **negative** test in `bin/tests/test_credentialing.py`: a credential failure names the credential and its source and mentions neither `egress` nor any provider name (FR-003b)
+- [X] T023a [US1] Implement FR-003b as an **ordering-and-vocabulary invariant**, not a new check: credential resolution already fails naming the credential and its source, so ensure the egress code cannot re-attribute that failure to the `egress` declaration, and thread environment context into the message. **Do NOT infer that a declared provider requires a credential** — no such mapping exists (`PROVIDERS` is provider→hosts; `CRED_PROVIDER` is credential→provider for delivery routing and covers 2 of 5), and any inference false-positives on a provider reached without one, which is the very case Feature 010 found
+- [X] T023b [P] [US1] Add a **negative** test in `bin/tests/test_credentialing.py`: a credential failure names the credential and its source and mentions neither `egress` nor any provider name (FR-003b)
 
 ### Lifecycle
 
