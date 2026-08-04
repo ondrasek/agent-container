@@ -330,7 +330,7 @@ adjacent). Additive — with no `.agent-container/` up the tree, the tool behave
 exactly as today.
 
 ```bash
-# .agent-container/project.yaml declares one or more environments (name/host/container/credentials)
+# .agent-container/environments.yaml declares one or more environments (name/host/container/credentials)
 agent-container plan        # per-environment: absent / matching / drifted (no mutation)
 agent-container apply        # discover -> validate -> plan -> converge (idempotent)
 agent-container destroy      # remove only what the spec owns (by deterministic identity)

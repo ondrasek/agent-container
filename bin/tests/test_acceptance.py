@@ -1352,7 +1352,7 @@ environments:
 
 def _write_project(proj: Path, name: str, agent: str = "claude") -> None:
     (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
-    (proj / ".agent-container" / "project.yaml").write_text(
+    (proj / ".agent-container" / "environments.yaml").write_text(
         _AAC_PROJECT.format(name=name, agent=agent)
     )
     (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
@@ -1373,9 +1373,9 @@ def test_declarative_apply_ro_spec_credential_drift_destroy(acc):
 
     # T010 / FR-020: the governing spec is delivered READ-ONLY in-container — a
     # write must fail, and the in-container copy matches the host spec.
-    w = _exec(name, ["sh", "-c", "echo pwned >> /workspace/.agent-container/project.yaml"])
+    w = _exec(name, ["sh", "-c", "echo pwned >> /workspace/.agent-container/environments.yaml"])
     assert w.returncode != 0, "FR-020 breach: the in-container spec was writable"
-    shown = _exec(name, ["cat", "/workspace/.agent-container/project.yaml"])
+    shown = _exec(name, ["cat", "/workspace/.agent-container/environments.yaml"])
     assert shown.returncode == 0 and f"name: {name}" in shown.stdout
 
     # T013 / SC-004: the referenced credential reached the container as an env var,
@@ -1425,7 +1425,7 @@ def test_declarative_provisioned_host_hetzner(acc):
     hostname = "aac-prov-acc"  # RFC-1123 (no underscore)
     proj = acc.tmp / "provproj"
     (proj / ".agent-container").mkdir(parents=True)
-    (proj / ".agent-container" / "project.yaml").write_text(
+    (proj / ".agent-container" / "environments.yaml").write_text(
         f"environments:\n  - name: {name}\n"
         f"    host: {{ provision: hetzner, name: {hostname}, server_type: cx22, location: nbg1 }}\n"
         f"    container:\n      env_file: ./ci.env\n"
@@ -1479,7 +1479,7 @@ def test_declarative_command_source_injects_without_plaintext(acc):
     secret = "sk-from-resolver-008"
     proj = acc.tmp / "cred008"
     (proj / ".agent-container").mkdir(parents=True)
-    spec_file = proj / ".agent-container" / "project.yaml"
+    spec_file = proj / ".agent-container" / "environments.yaml"
     spec_file.write_text(_CMD_CRED_PROJECT.format(name=name))
     (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
     acc.register(name)
@@ -1504,7 +1504,7 @@ def test_declarative_command_source_injects_without_plaintext(acc):
     bad_name = "aac008b"
     bad_proj = acc.tmp / "cred008bad"
     (bad_proj / ".agent-container").mkdir(parents=True)
-    (bad_proj / ".agent-container" / "project.yaml").write_text(
+    (bad_proj / ".agent-container" / "environments.yaml").write_text(
         _CMD_CRED_PROJECT.format(name=bad_name).replace(
             '["printenv", "RESOLVER_SRC_008"]', '["printenv", "NO_SUCH_VAR_008"]'
         )
@@ -1523,7 +1523,7 @@ def test_declarative_encrypted_source_refused_with_migration(acc):
     with an actionable migration rather than a generic enum error."""
     proj = acc.tmp / "cred008mig"
     (proj / ".agent-container").mkdir(parents=True)
-    (proj / ".agent-container" / "project.yaml").write_text(
+    (proj / ".agent-container" / "environments.yaml").write_text(
         "environments:\n  - name: aac008mig\n    host: local\n"
         "    credentials:\n"
         "      - { name: K, source: encrypted, path: ./k.age, decrypt: 'age -d' }\n"

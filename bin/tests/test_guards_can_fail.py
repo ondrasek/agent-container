@@ -122,3 +122,40 @@ def test_orchestration_guard_fails_when_a_volume_is_dropped(wiz, fake_root):
     compose.write_text("\n".join(kept) + "\n")
     with pytest.raises(AssertionError, match="out of sync with per_container_volumes"):
         tpl.test_orchestration_templates_mount_the_full_volume_set(wiz)
+
+
+# --- the file-kind guard (011 FR-016) ---------------------------------------
+
+
+def test_kind_guard_would_catch_the_coexistence_bug(wiz, tmp_path):
+    """Prove the regression test can actually fail.
+
+    Restore the old behaviour — select spec files by 'any *.yaml here' rather than
+    by kind — and the spec/sidecar coexistence test must break. Without this, the
+    coexistence test could pass for reasons unrelated to the fix and nobody would
+    know it had stopped protecting anything.
+    """
+    import pytest as _pytest
+
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    (root / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: acme\n    host: local\n"
+    )
+    (root / ".agent-container" / "acme.services.yaml").write_text(
+        "services:\n  redis:\n    image: redis:7\n"
+    )
+    # Sanity: with kind-based selection the two coexist.
+    assert [e["name"] for e in wiz.load_project_spec(root)] == ["acme"]
+
+    original = wiz._spec_yaml_files
+    try:
+        wiz._spec_yaml_files = lambda r: sorted(  # the pre-fix glob
+            p
+            for p in (r / wiz.PROJECT_MARKER).rglob("*")
+            if p.is_file() and p.suffix in (".yaml", ".yml")
+        )
+        with _pytest.raises(wiz.Fatal, match="unknown top-level key 'services'"):
+            wiz.load_project_spec(root, skip_unknown=True)
+    finally:
+        wiz._spec_yaml_files = original

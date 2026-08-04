@@ -16,7 +16,7 @@ containing a `.agent-container/` directory; that ancestor is the project root (t
 tool reports which one it chose). Git-independent.
 
 ```yaml
-# .agent-container/project.yaml
+# .agent-container/environments.yaml
 environments:
   - name: acme                 # -> the deterministic identity (container/volumes/port)
     host: local                # a registered/known host name
@@ -29,6 +29,11 @@ environments:
     credentials:               # references, never values (US2 — see Roadmap)
       - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
 ```
+
+A spec file is identified by **kind**: `environments.yaml`, or `<prefix>.environments.yaml` when
+you split the spec across files. The suffix names the top-level key the file contains — the same
+rule that makes `prod.services.yaml` a sidecar override — so both kinds live in
+`.agent-container/` without colliding. See [`docs/layout.md`](layout.md).
 
 Parsed with **`yaml.safe_load`** (never `yaml.load` — an untrusted `!!python/...`
 tag can never construct an object or run code). The spec is **validated before any

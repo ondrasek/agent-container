@@ -212,6 +212,11 @@ NO_JSON_COMMANDS = frozenset({"host env", "completions", "attach", "menu"})
 # parameter — the flag is per-command (clarified), but its declaration is not
 # copy-pasted 20 times.
 JSON_OPT = typer.Option(False, "--json", help="Emit machine-readable JSON (agent-facing).")
+SKIP_UNKNOWN_OPT = typer.Option(
+    False,
+    "--skip-unknown-files",
+    help="Ignore unrecognised YAML in .agent-container/ with a warning instead of refusing.",
+)
 
 
 def run_child(argv: list[str]) -> subprocess.CompletedProcess:
@@ -4790,9 +4795,57 @@ def project_config_dir(cwd: Path | None = None) -> Path | None:
     return None if root is None else root / PROJECT_MARKER
 
 
-def _spec_yaml_files(root: Path) -> list[Path]:
+# A file in `.agent-container/` is identified by KIND, and the rule is one line:
+# THE SUFFIX NAMES THE TOP-LEVEL YAML KEY THE FILE CONTAINS. `acme.services.yaml`
+# holds `services:`; `prod.environments.yaml` holds `environments:`. Nothing here
+# is new except that the spec file finally carries the marker the sidecar always
+# had — which is why the two could not previously share a directory (the spec
+# loader claimed EVERY *.yaml by glob and died on the sidecar's `services:` key).
+SPEC_KIND_SUFFIXES: tuple[str, ...] = (".environments.yaml", ".environments.yml")
+SIDECAR_KIND_SUFFIXES: tuple[str, ...] = (".services.yaml", ".services.yml")
+YAML_SUFFIXES: tuple[str, ...] = (".yaml", ".yml")
+
+
+def _is_spec_file(name: str) -> bool:
+    """True for a declarative-spec file: `environments.yaml` (bare, the common
+    single-file case) or `<anything>.environments.yaml` (split across files).
+
+    >>> [_is_spec_file(n) for n in ("environments.yaml", "prod.environments.yml")]
+    [True, True]
+    >>> [_is_spec_file(n) for n in ("acme.services.yaml", "project.yaml", "enviroments.yaml")]
+    [False, False, False]
+    """
+    return name in ("environments.yaml", "environments.yml") or name.endswith(SPEC_KIND_SUFFIXES)
+
+
+def _is_known_kind(name: str) -> bool:
+    """True for any filename whose kind the tool recognises. Anything else that is
+    still YAML is unrecognised — refused by default, so a typo like
+    `enviroments.yaml` fails loudly rather than silently loading no environments.
+
+    >>> [_is_known_kind(n) for n in ("environments.yaml", "acme.services.yml")]
+    [True, True]
+    >>> _is_known_kind("enviroments.yaml")
+    False
+    """
+    return _is_spec_file(name) or name.endswith(SIDECAR_KIND_SUFFIXES)
+
+
+def _unrecognised_yaml(root: Path) -> list[Path]:
     d = root / PROJECT_MARKER
-    return sorted(p for p in d.rglob("*") if p.is_file() and p.suffix in (".yaml", ".yml"))
+    return sorted(
+        p
+        for p in d.rglob("*")
+        if p.is_file() and p.suffix in YAML_SUFFIXES and not _is_known_kind(p.name)
+    )
+
+
+def _spec_yaml_files(root: Path) -> list[Path]:
+    """The declarative-spec files ONLY. Selected by kind, never by 'every .yaml
+    here' — that glob is what made a spec and a sidecar override unable to coexist
+    in the directory Feature 011 mandated for both."""
+    d = root / PROJECT_MARKER
+    return sorted(p for p in d.rglob("*") if p.is_file() and _is_spec_file(p.name))
 
 
 def _enum_field(block: dict, key: str, allowed: tuple[str, ...], where: str) -> None:
@@ -4909,16 +4962,40 @@ def validate_environment(env: object, where: str) -> None:
             die(f"{where}: unknown key {k!r}")
 
 
-def load_project_spec(root: Path) -> list[dict]:
+def load_project_spec(root: Path, skip_unknown: bool = False) -> list[dict]:
     """Read + validate the `.agent-container/` YAML into a list of environment
     dicts. `yaml.safe_load` ONLY (never `yaml.load` — an untrusted `!!python/...`
     tag must never construct an object). On any error `die` naming the offending
-    file+field with no partial change (FR-003)."""
+    file+field with no partial change (FR-003).
+
+    Only files whose KIND is the declarative spec are read (`environments.yaml` or
+    `*.environments.yaml`), so a sidecar override sharing the directory is left
+    alone rather than parsed as a spec. An unrecognised `*.yaml` is REFUSED by
+    default — a typo like `enviroments.yaml` must fail loudly, not silently load
+    no environments — and `skip_unknown` downgrades that to a warning for an
+    operator who deliberately keeps unrelated YAML there."""
     import yaml
+
+    unknown = _unrecognised_yaml(root)
+    if unknown:
+        listing = "\n".join(f"  {p.name}" for p in unknown)
+        if skip_unknown:
+            warn(f"ignoring unrecognised YAML in {root / PROJECT_MARKER}:\n{listing}")
+        else:
+            die(
+                f"{root / PROJECT_MARKER}: unrecognised YAML file(s):\n{listing}\n"
+                f"A file's suffix names the top-level key it contains:\n"
+                f"  *.environments.yaml  (or bare environments.yaml)  ->  environments:\n"
+                f"  *.services.yaml                                   ->  services:\n"
+                f"Rename it, or pass --skip-unknown-files to ignore it with a warning."
+            )
 
     files = _spec_yaml_files(root)
     if not files:
-        die(f"{root / PROJECT_MARKER}: no .yaml/.yml spec files found")
+        die(
+            f"{root / PROJECT_MARKER}: no declarative spec found "
+            f"(expected environments.yaml or *.environments.yaml)"
+        )
     environments: list[dict] = []
     for f in files:
         try:
@@ -5204,7 +5281,7 @@ def _reconcile_plan(environments: list[dict], host_override: str | None):
     return plans
 
 
-def do_aac_status(host_override: str | None = None) -> None:
+def do_aac_status(host_override: str | None = None, skip_unknown: bool = False) -> None:
     """`status`/`plan`: print the per-resource plan and mutate NOTHING (FR-008)."""
     root = find_project_root()
     if root is None:
@@ -5213,7 +5290,7 @@ def do_aac_status(host_override: str | None = None) -> None:
             "inert here (use the imperative commands, or create a .agent-container/ spec)"
         )
     log(f"project root: {root}")
-    environments = load_project_spec(root)
+    environments = load_project_spec(root, skip_unknown)
     _precheck_environments(environments, host_override)
     _reconcile_plan(environments, host_override)
 
@@ -5447,7 +5524,9 @@ def stage_declared_credentials(
     return configs, merged, ssh
 
 
-def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
+def do_aac_apply(
+    host_override: str | None = None, yes: bool = False, skip_unknown: bool = False
+) -> None:
     """`apply`: discover → validate → plan → (confirm) → converge by driving `do_up`
     per environment. Idempotent (matching ⇒ no change, SC-002). The `.agent-container/`
     spec is delivered read-only (FR-020)."""
@@ -5458,7 +5537,7 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
             "inert here (use the imperative commands, or create a .agent-container/ spec)"
         )
     log(f"project root: {root}")
-    environments = load_project_spec(root)
+    environments = load_project_spec(root, skip_unknown)
     _precheck_environments(
         environments, host_override
     )  # reject unsupported/unsafe envs before ANY deploy (FR-003)
@@ -5547,7 +5626,10 @@ def do_aac_apply(host_override: str | None = None, yes: bool = False) -> None:
 
 
 def do_aac_destroy(
-    host_override: str | None = None, yes: bool = False, deprovision: bool = False
+    host_override: str | None = None,
+    yes: bool = False,
+    deprovision: bool = False,
+    skip_unknown: bool = False,
 ) -> None:
     """`destroy`: remove ONLY the resources the spec declares/owns — by deterministic
     identity (SC-007). A referenced host is NEVER deprovisioned (FR-009/017); a
@@ -5558,7 +5640,7 @@ def do_aac_destroy(
     if root is None:
         die("no .agent-container/ project found up the tree")
     log(f"project root: {root}")
-    environments = load_project_spec(root)
+    environments = load_project_spec(root, skip_unknown)
     # Fail before any change if a --deprovision would need a cloud token it lacks.
     if deprovision and not os.environ.get("HCLOUD_TOKEN"):
         if any(isinstance(e.get("host"), dict) for e in environments):
@@ -6181,6 +6263,7 @@ def apply(
         None, "--host", help="Override the host for every environment (default: the spec's host)."
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation prompt."),
+    skip_unknown_files: bool = SKIP_UNKNOWN_OPT,
     as_json: bool = JSON_OPT,
 ) -> None:
     """Reconcile the `.agent-container/` project: discover → validate → plan → converge.
@@ -6188,28 +6271,30 @@ def apply(
     Idempotent — an already-satisfied spec makes no changes. The governing spec is
     delivered read-only into the container (FR-020)."""
     set_json_mode(as_json)
-    do_aac_apply(host, yes)
+    do_aac_apply(host, yes, skip_unknown_files)
     emit_action("apply", host=host)
 
 
 @app.command()
 def plan(
     host: str | None = typer.Option(None, "--host", help="Override the host for the plan."),
+    skip_unknown_files: bool = SKIP_UNKNOWN_OPT,
     as_json: bool = JSON_OPT,
 ) -> None:
     """Show the per-environment reconcile plan (absent/matching/drifted); mutate nothing."""
     set_json_mode(as_json)
-    do_aac_status(host)
+    do_aac_status(host, skip_unknown_files)
 
 
 @app.command()
 def status(
     host: str | None = typer.Option(None, "--host", help="Override the host for the status."),
+    skip_unknown_files: bool = SKIP_UNKNOWN_OPT,
     as_json: bool = JSON_OPT,
 ) -> None:
     """Alias of `plan` — the current state of each declared environment vs the spec."""
     set_json_mode(as_json)
-    do_aac_status(host)
+    do_aac_status(host, skip_unknown_files)
 
 
 @app.command()
@@ -6222,13 +6307,14 @@ def destroy(
         help="Also deprovision each spec-PROVISIONED host (US4). A referenced host is "
         "never touched; requires HCLOUD_TOKEN.",
     ),
+    skip_unknown_files: bool = SKIP_UNKNOWN_OPT,
     as_json: bool = JSON_OPT,
 ) -> None:
     """Remove ONLY the resources the `.agent-container/` spec declares and owns
     (by deterministic identity). A referenced host is never deprovisioned; a
     spec-provisioned host is deprovisioned only with --deprovision."""
     set_json_mode(as_json)
-    do_aac_destroy(host, yes, deprovision)
+    do_aac_destroy(host, yes, deprovision, skip_unknown_files)
     emit_action("destroy", host=host, deprovisioned=deprovision)
 
 
@@ -6248,7 +6334,9 @@ def credential_locators(root: Path | None) -> list[dict]:
         return []
     out: list[dict] = []
     try:
-        environments = load_project_spec(root)
+        # `context` describes the world read-only and already tolerates a bad spec,
+        # so an unrecognised stray file must not blank it out entirely.
+        environments = load_project_spec(root, skip_unknown=True)
     except Fatal:
         return []  # an invalid spec is reported elsewhere; context still describes the world
     for env in environments:
