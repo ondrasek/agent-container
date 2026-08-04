@@ -2,6 +2,161 @@
 
 <!-- version list -->
 
+## v0.20.0 (2026-08-04)
+
+### Bug Fixes
+
+- Deliver the allowlist by content, and stop stranding the proxy
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`1b392ea`](https://github.com/ondrasek/agent-container/commit/1b392ead962c3b6fd9f6af61aa0e3ebac9c554ba))
+
+- Make `plan`/`status --json` actually emit something
+  ([#009](https://github.com/ondrasek/agent-container/pull/9),
+  [`c3dbb18`](https://github.com/ondrasek/agent-container/commit/c3dbb1809abbae429e2503d3b144198eab5125aa))
+
+- Name the environment in credential failures, never the declaration
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`3fa500f`](https://github.com/ondrasek/agent-container/commit/3fa500fd5f15f36166b4583fbdf54a9c3dc1e5b0))
+
+- **image**: Use apk's canonical fuzzy-version syntax
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`3abcaaf`](https://github.com/ondrasek/agent-container/commit/3abcaafa6e4c9fe51972d28a087eae0e7f28f6b8))
+
+- **specs**: Packet filtering is a scope decision, not an impossibility
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`1ecfc91`](https://github.com/ondrasek/agent-container/commit/1ecfc9104f905094fb8ab3b8e382c2256b01912a))
+
+- **specs**: Refuse any operator NO_PROXY rather than comparing
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`d5f3362`](https://github.com/ondrasek/agent-container/commit/d5f3362d8ec27bbf9cb975fcfc8a54d9fabe49b7))
+
+- **specs**: Scope SC-002 to what the proxy can actually guarantee
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`c550d42`](https://github.com/ondrasek/agent-container/commit/c550d42beb6706d76b416ef8c354d1e5994d8f5e))
+
+### Documentation
+
+- Add a threat model, and require it be kept current
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`46dbe3c`](https://github.com/ondrasek/agent-container/commit/46dbe3ca429a47b84be91ad7613bb543717539b5))
+
+- Document egress control, and correct a false claim in CLAUDE.md
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`3cce53a`](https://github.com/ondrasek/agent-container/commit/3cce53aad0d7ea549a8a03c9bfb5bde71692f6e2))
+
+- **specs**: Add US4/US5 — enforcement the agent cannot switch off
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`4a02451`](https://github.com/ondrasek/agent-container/commit/4a02451987de677a5856d57d32dbc23dd6e352fb))
+
+- **specs**: Choose the egress proxy by running four of them
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`8f00e70`](https://github.com/ondrasek/agent-container/commit/8f00e70f84ddca969ed4d1653d08d70500607372))
+
+- **specs**: Clarify Feature 012 egress-provider-control
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`eabc412`](https://github.com/ondrasek/agent-container/commit/eabc412ada8604f76d1489080792a8b1fb20a281))
+
+- **specs**: Clarify US4/US5 — one destination list, and DNS as a third enforcement surface
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`e7fce2e`](https://github.com/ondrasek/agent-container/commit/e7fce2e522629777d050150662a23740a81b0dd6))
+
+- **specs**: Close the remaining Feature 012 analysis findings
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`feea858`](https://github.com/ondrasek/agent-container/commit/feea85883fa0b1299808326a41973200f285a7b3))
+
+- **specs**: Close the US4/US5 clarification — sidecars are inside the boundary
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`519b964`](https://github.com/ondrasek/agent-container/commit/519b9645bb96b2f5b25433f919ffe27763ba7aa8))
+
+- **specs**: Correct FR-007's delivery route in Feature 012
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`b1ac59f`](https://github.com/ondrasek/agent-container/commit/b1ac59f466ddd805ae83c862a145192f4a1db678))
+
+- **specs**: One typed egress.allow list, replacing two keys
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`32f2522`](https://github.com/ondrasek/agent-container/commit/32f2522c307d2824a509ac0e01e1f7e247cd3452))
+
+- **specs**: Plan Feature 012 egress-provider-control
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`7e8da72`](https://github.com/ondrasek/agent-container/commit/7e8da72f3412466bee78e0271074045a057b539e))
+
+- **specs**: Plan Phase B — transparent egress enforcement
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`92983ef`](https://github.com/ondrasek/agent-container/commit/92983ef165804f2701e1673279bc6574a520b727))
+
+- **specs**: Record FR-010's real dependency in Feature 012
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`133ef3f`](https://github.com/ondrasek/agent-container/commit/133ef3f69945f32ea05b1882320793d9a78e643c))
+
+- **specs**: Specify Feature 012 egress-provider-control
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`438e800`](https://github.com/ondrasek/agent-container/commit/438e8000e31a22cae5a974cc2183023d5bd42635))
+
+- **specs**: Task Feature 012 egress-provider-control
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`678e87b`](https://github.com/ondrasek/agent-container/commit/678e87b2ab486950daf844ee7e5113ae7263a056))
+
+- **specs**: Task Phase B — transparent egress enforcement
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`14f7747`](https://github.com/ondrasek/agent-container/commit/14f7747995c4ab4f0ed19f124d1213797910c7bd))
+
+- **specs**: The egress declaration governs ALL egress
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`5cbf5e6`](https://github.com/ondrasek/agent-container/commit/5cbf5e64ce25ed9c9de48ce0c0fb2be5ce7ba7d4))
+
+### Features
+
+- Anchor the egress allowlist and stop parsing YAML with regex
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`f026cc6`](https://github.com/ondrasek/agent-container/commit/f026cc67ac4c27a5104cd4389b64e3f03485a548))
+
+- Declare permitted model providers per environment
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`4f20221`](https://github.com/ondrasek/agent-container/commit/4f20221e70435fdb13fce9e575667d5a1911c3e5))
+
+- Disclose an operator override of the egress proxy
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`0221832`](https://github.com/ondrasek/agent-container/commit/0221832e728b14f07840d2ea1137de7ad997c429))
+
+- Disclose the built-in default provider, honestly
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`642110d`](https://github.com/ondrasek/agent-container/commit/642110d7a3eae52d0822674f09c97bfbb3955b07))
+
+- Enforce the egress declaration, and refuse to break git push
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`52f4098`](https://github.com/ondrasek/agent-container/commit/52f40989e8531dc34e74676fe2e6e82f352abb8e))
+
+- Expose the egress facts through --json
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`0f45366`](https://github.com/ondrasek/agent-container/commit/0f453663e434920fc7ef025b79544db221a17991))
+
+- Make an edited egress declaration trigger a redeploy
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`698e8d0`](https://github.com/ondrasek/agent-container/commit/698e8d0e2989dfb3d489aca77adee419ee2d648d))
+
+- Refuse an operator NO_PROXY that would silently disable egress
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`d827bdb`](https://github.com/ondrasek/agent-container/commit/d827bdb9e2836b3200a7f3d45d14469a9b861c46))
+
+- **specs**: Let Feature 012 declare indirect provider endpoints
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`763a166`](https://github.com/ondrasek/agent-container/commit/763a166d22218fd9da54a1bdb3a7cb310b37cbaf))
+
+### Testing
+
+- Gate the threat model, and close the US4/US5 analysis findings
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`1f7988f`](https://github.com/ondrasek/agent-container/commit/1f7988f92c68049615a7d9751fcebbe592ef1c70))
+
+- Verify egress against real containers; identity unchanged
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`87ed5b1`](https://github.com/ondrasek/agent-container/commit/87ed5b1b556d17815c34c740273eb2b1797e0d71))
+
+- **specs**: Give SC-007 a verifying task in Feature 012
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`e13b579`](https://github.com/ondrasek/agent-container/commit/e13b579afeecd42c0b63dcccb186dc768911b582))
+
+
 ## v0.19.0 (2026-08-04)
 
 ### Bug Fixes
