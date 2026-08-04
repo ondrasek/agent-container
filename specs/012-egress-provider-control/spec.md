@@ -72,6 +72,27 @@ This feature makes the set of reachable providers **declared, enforced and visib
   `host:port` implied only that port — an inconsistency operators would trip over for as long as
   the tool exists. Pre-1.0, and the cost is paid once.
 
+- Q: How is name resolution handled, given DNS is both a dependency of the mechanism and a live
+  exfiltration channel? → A: **A caching DNS proxy in the egress sidecar, with all port-53 traffic
+  forced to it, resolving only declared names.** Upstream is operator-selectable from well-known
+  providers and defaults to one of them rather than the host's resolver.
+
+  **The forcing is what makes it binding.** Without redirecting port 53, an agent queries `8.8.8.8`
+  directly and the allowlist is advisory again — the same failure US4 exists to end, reappearing
+  one protocol lower.
+
+  **Allowlist-only resolution is the requirement; a trusted upstream is not a substitute.** A cache
+  that forwards faithfully still resolves `<payload>.attacker.com`: it asks Cloudflare, which asks
+  the attacker's nameserver, and the data has left. The exfiltration is in the *question*, not the
+  answer. Verified by probe — `api.anthropic.com` → `NOERROR`, and both `api.openai.com` and
+  `ZXhmaWx0cmF0ZWQtZGF0YQ.attacker.example.com` → `NXDOMAIN`.
+
+  **Implementation: `dnsmasq`** (operator-confirmed). ~1 MB from Alpine, already does caching,
+  per-domain forwarding and a catch-all refusal (`local=/#/` plus `server=/<name>/<upstream>`), and
+  logs every refusal — which gives FR-020d a record for free. It is driven from the **same**
+  `egress.allow` list as the proxy and the netfilter rules, so one declaration governs three
+  enforcement surfaces and they cannot drift apart.
+
 ### Session 2026-08-04 — scope corrected after a design probe
 
 - Q: The mechanism is a forward proxy on `HTTPS_PROXY`. That intercepts **every** HTTPS request,
@@ -430,8 +451,27 @@ that host on that port becomes reachable.
 - **FR-019**: **No capability may be added to the agent container** (Constitution II). The
   privilege required to program the network stack MUST sit on the **proxy** container, which runs
   no untrusted code. The agent joins that container's network namespace and gains nothing.
-- **FR-020**: Name resolution MUST keep working, since no declared destination is reachable without
-  it. It is a dependency of the mechanism, not a permission the operator has to think about.
+- **FR-020**: Name resolution MUST be served by a **caching resolver in the egress sidecar**, not by
+  the host's resolver and not by whatever the agent points at. It is a dependency of the mechanism,
+  not a permission the operator has to think about — but it is also an enforcement surface.
+- **FR-020a**: **All** port-53 traffic MUST be forced to that resolver by the network stack, exactly
+  as HTTP/HTTPS is. Without this an agent simply queries `8.8.8.8` directly and every guarantee
+  below evaporates — the allowlist would be advisory again, which is the failure US4 exists to end.
+- **FR-020b**: Resolution MUST be **allowlist-only**: declared names resolve, everything else is
+  refused. **This is the requirement, and forwarding to a trusted upstream is not a substitute for
+  it.** A cache that forwards faithfully still resolves `<payload>.attacker.com` — it asks
+  Cloudflare, which asks the attacker's nameserver, and the data has left. **The exfiltration is in
+  the question, not the answer**, so only refusing to ask closes it.
+- **FR-020c**: The upstream resolver MUST be operator-selectable from a set of well-known providers
+  (Cloudflare, Google, Quad9, OpenDNS), and MUST default to one of them rather than the host's
+  resolver — otherwise the environment's entire declared destination set leaks to whoever operates
+  the host's DNS. Encrypted transport (DoT/DoH) SHOULD be used where the provider supports it, so
+  the host network cannot read the queries either.
+- **FR-020d**: A refused resolution MUST be recorded, for the same reason a refused connection is:
+  it is the operator's only signal that something reached for a destination they did not declare.
+- **FR-020e**: A refusal MUST be distinguishable from a genuine "no such host". An undeclared name
+  failing to resolve is a **policy** outcome, and presenting it as a DNS fault would send an
+  operator to debug their network instead of their declaration.
 - **FR-021**: Where transparent enforcement cannot be delivered on a host, the existing
   `enforcement` setting governs (FR-007b) — refuse under `strict`, deploy and state the limitation
   under `advisory`. **FR-004 is unaffected**: an environment with no declaration stays unrestricted.
@@ -493,6 +533,11 @@ that host on that port becomes reachable.
   port — **zero** cases where declaring one destination admits another.
 - **SC-011** *(US4)*: The agent container's capability set is **identical** to an undeclared
   deployment's — **zero** added privileges on the container running untrusted code.
+- **SC-012** *(US5)*: An undeclared name does not resolve — verified including a
+  tunnelling-shaped query (`<payload>.attacker.example.com`), with **zero** resolutions of
+  undeclared names.
+- **SC-013** *(US5)*: An agent querying a public resolver directly is forced to the sidecar
+  resolver — **zero** queries leaving the environment unmediated.
 
 ## Assumptions
 
