@@ -17,7 +17,6 @@ die() { log "FATAL: $*"; exit 1; }
 
 SQUID_HTTP_PORT=3128
 SQUID_TLS_PORT=3129
-DNS_PORT=53
 
 # Resolved at RUNTIME, never hard-coded: the uid depends on the base image's
 # package layout and would silently drift on a rebuild. If it drifted while
@@ -47,14 +46,16 @@ install_rules() {
     iptables -t nat -A OUTPUT -p tcp --dport 80 \
         -m owner ! --uid-owner "$SQUID_UID" -j REDIRECT --to-port "$SQUID_HTTP_PORT"
 
-    # FR-020a: ALL port-53 traffic goes to our resolver, so an agent pointing at
-    # 8.8.8.8 is answered by us. Without this the DNS allowlist would be advisory
-    # — and DNS is an exfiltration channel whose payload rides in the QUESTION,
-    # so an agent choosing its own resolver defeats it entirely.
-    iptables -t nat -A OUTPUT -p udp --dport 53 \
-        -m owner ! --uid-owner "$UNBOUND_UID" -j REDIRECT --to-port "$DNS_PORT"
-    iptables -t nat -A OUTPUT -p tcp --dport 53 \
-        -m owner ! --uid-owner "$UNBOUND_UID" -j REDIRECT --to-port "$DNS_PORT"
+    # FR-020a needs NO DNS RULE AT ALL, and that is the finding rather than an
+    # omission (research R18, measured). The default-deny policy below already
+    # makes every resolver except ours UNREACHABLE — an agent querying 8.8.8.8
+    # cannot open the connection, so there is nothing to redirect. A REDIRECT
+    # would merely *answer* such an agent; the DROP means it cannot ask.
+    #
+    # Four NAT approaches were tried and all failed here (REDIRECT needs
+    # route_localnet with /proc/sys read-only; DNAT gets no reply and breaks
+    # direct queries). Do not re-add one: it would be a moving part that buys
+    # nothing, and its absence is deliberate.
 
     iptables -A OUTPUT -o lo -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT

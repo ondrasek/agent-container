@@ -656,3 +656,55 @@ address has to reach the agent another way.
 **Until this is settled, FR-020a is not met and T128 is not startable.** The DNS allowlist would be
 advisory: an agent that picks its own resolver walks around it, and DNS is the channel whose
 payload rides in the *question*.
+
+---
+
+## R18 (VERIFIED) — FR-020a is met by DROPPING port 53, not by redirecting it
+
+R17 left this unresolved after four NAT approaches failed. The answer is that **the NAT was the
+wrong idea**, and the default-deny policy US5 already requires does the job on its own.
+
+### The route that looked most promising is closed
+
+```console
+$ docker compose up -d          # agent: network_mode: service:egress, dns: [127.0.0.1]
+Error response from daemon: conflicting options: dns and the network mode
+```
+
+**`dns:` cannot be combined with `network_mode: service:`.** The daemon refuses at create time, so
+the resolver address cannot be delivered that way at all.
+
+### What actually works — measured
+
+With **no DNS NAT of any kind**, only `-P OUTPUT DROP` plus an ACCEPT for unbound's own uid:
+
+| From the agent | Result |
+|---|---|
+| reach `8.8.8.8:53` | **blocked (exit 1)** |
+| query our resolver for a declared name | `NOERROR` |
+| `/etc/resolv.conf` writable | **yes** |
+| after rewriting it to our resolver | declared names resolve |
+| reach `8.8.8.8:53`, after the rewrite | **still blocked** |
+
+**Decision: drop port 53 rather than redirect it, and have the agent's entrypoint point
+`/etc/resolv.conf` at the sidecar resolver.**
+
+### Why this is stronger than the redirect, not a workaround
+
+A REDIRECT *answers* an agent that queries `8.8.8.8` — it silently substitutes our resolver. A DROP
+means **the agent cannot reach any resolver but ours**, because reaching one requires a connection
+default-deny does not permit. The property FR-020a wants — "all port-53 traffic is forced to the
+sidecar resolver" — is delivered by making every other resolver *unreachable*.
+
+It also removes a moving part: no `route_localnet`, no NAT rule whose reply path has to be
+un-mangled by conntrack, and nothing that breaks a direct `@127.0.0.1` query (which the DNAT
+attempt did).
+
+**The resolv.conf rewrite is not the enforcement**, and must not be described as such. It is the
+*usability* half — without it the agent's normal lookups fail. An agent that rewrites the file back
+loses working DNS and gains nothing, because every resolver except ours is unreachable either way.
+That asymmetry is what makes a writable `resolv.conf` acceptable here.
+
+**Consequence for T128 and FR-020a**: the netfilter rule set gains no DNS entry at all. The work
+moves to `image/entrypoint.sh` — one line, in the container the agent already controls, whose
+failure mode is a broken lookup rather than a silent bypass.

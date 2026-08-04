@@ -328,7 +328,7 @@ it must fail (quickstart S12).
 **Independent test**: declare one HTTPS provider; confirm SSH, FTP and an arbitrary high port all
 fail, then declare SSH to one host and confirm only that host on that port opens (quickstart S13/S14).
 
-- [ ] T128 [US5] **BLOCKED (research R17)** — force all port-53 traffic to the sidecar resolver (FR-020a). REDIRECT needs `route_localnet` and `/proc/sys` is read-only; DNAT gets no reply and breaks direct queries. Try `dns: [<egress-ip>]` on the agent service first, so the normal path needs no NAT and NAT only catches a hardcoded resolver — confirm compose allows `dns:` alongside `network_mode: service:`. **Until this lands the DNS allowlist is advisory** so an agent cannot select its own resolver
+- [ ] T128 [US5] Deliver FR-020a by **DROPPING** port 53 rather than redirecting it (research R18, measured): default-deny already makes every resolver except the sidecar's unreachable, so no DNS NAT rule is needed at all. Add the resolv.conf line to `image/entrypoint.sh` — that is the **usability** half, not the enforcement, and must not be described as enforcement. `dns:` on the agent service is **impossible**: the daemon rejects it against `network_mode: service:`
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding
