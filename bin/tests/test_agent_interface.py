@@ -353,7 +353,7 @@ def test_plan_payload_names_fields_explicitly(wiz):
                 "field": "f",
             }
         ],
-        "egress": {"providers": ["anthropic"]},
+        "egress": {"allow": [{"provider": "anthropic"}]},
     }
     (row,) = wiz.plan_payload([(env, "acme", "local", None, "drifted", "agent: 'claude'→'codex'")])
     # The KEY SET is the guard: a new field cannot reach stdout without someone
@@ -405,30 +405,32 @@ def test_json_reports_undeclared_as_unrestricted_not_empty(wiz):
 
 
 def test_json_reports_air_gapped_as_declared_not_unrestricted(wiz):
-    e = _row(wiz, {"providers": []})["egress"]
+    e = _row(wiz, {"allow": []})["egress"]
     assert e["declared"] is True and e["unrestricted"] is False
-    assert e["hosts"] == []
+    assert e["destinations"] == []
 
 
 def test_json_reports_the_effective_allowlist_not_the_default(wiz):
     """FR-001b. Reporting the tool's default while enforcing an operator override
     would state a permission set the proxy does not enforce."""
-    e = _row(wiz, {"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]})["egress"]
-    assert e["hosts"] == [{"label": "anthropic", "host": "gw.corp", "host_source": "declaration"}]
-    assert all(h["host"] != "api.anthropic.com" for h in e["hosts"])
+    e = _row(wiz, {"allow": [{"provider": "anthropic", "hosts": ["gw.corp"]}]})["egress"]
+    assert e["destinations"] == [
+        {"label": "anthropic", "host": "gw.corp", "port": None, "source": "declaration"}
+    ]
+    assert all(h["host"] != "api.anthropic.com" for h in e["destinations"])
 
 
 def test_json_marks_tool_supplied_hosts_as_such(wiz):
-    e = _row(wiz, {"providers": ["anthropic"]})["egress"]
-    assert e["hosts"] == [
-        {"label": "anthropic", "host": "api.anthropic.com", "host_source": "tool"}
+    e = _row(wiz, {"allow": [{"provider": "anthropic"}]})["egress"]
+    assert e["destinations"] == [
+        {"label": "anthropic", "host": "api.anthropic.com", "port": None, "source": "tool"}
     ]
 
 
 def test_json_separates_declared_from_enforced(wiz):
     """A declaration can exist and not be in force. SC-004's honesty requirement
     applies to the machine-readable surface too, not only to prose."""
-    e = _row(wiz, {"providers": ["anthropic"]}, agent="some-future-agent")["egress"]
+    e = _row(wiz, {"allow": [{"provider": "anthropic"}]}, agent="some-future-agent")["egress"]
     assert e["declared"] is True
     assert e["enforced"] is False
     assert "not known to honour" in e["not_enforced_reason"]

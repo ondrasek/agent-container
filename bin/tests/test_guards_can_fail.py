@@ -203,19 +203,24 @@ def test_replacement_guard_fails_if_hosts_are_made_additive(wiz, monkeypatch):
     still deploys, still enforces something, and still looks constrained. Prove
     the test that pins it can actually fail.
     """
-    real = wiz.resolve_provider_hosts
+    real = wiz.resolve_destinations
 
     def additive(egress):
         out = []
-        for name, hosts, source in real(egress):
-            extra = wiz.PROVIDERS.get(name, ())
-            out.append((name, tuple(dict.fromkeys((*hosts, *extra))), source))
+        for name, host, port, source in real(egress):
+            out.append((name, host, port, source))
+            for extra in wiz.PROVIDERS.get(name, ()):
+                if extra != host:
+                    out.append((name, extra, port, source))
         return out
 
-    monkeypatch.setattr(wiz, "resolve_provider_hosts", additive)
-    ((_n, hosts, _s),) = wiz.resolve_provider_hosts(
-        {"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]}
-    )
+    monkeypatch.setattr(wiz, "resolve_destinations", additive)
+    hosts = [
+        h
+        for _n, h, _p, _s in wiz.resolve_destinations(
+            {"allow": [{"provider": "anthropic", "hosts": ["gw.corp"]}]}
+        )
+    ]
     assert "api.anthropic.com" in hosts, "the additive stand-in must reproduce the bug"
     assert "gw.corp" in hosts
 

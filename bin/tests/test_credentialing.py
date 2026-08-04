@@ -760,12 +760,12 @@ def test_no_credential_value_reaches_any_generated_artifact(wiz, tmp_path, monke
 
     sentinel = "sk-ant-SENTINEL-must-not-appear-anywhere"
     monkeypatch.setenv("ACC_SENTINEL_VAR", sentinel)
-    egress = {"providers": ["anthropic"], "allow": ["github.com"]}
+    egress = {"allow": [{"provider": "anthropic"}, {"host": "github.com"}]}
 
     # Every artifact Feature 012 generates, in one place.
     artifacts = [
         _json.dumps(wiz.build_compose_model("acme", tmp_path / "image", egress_filter_body=None)),
-        wiz.build_egress_config(wiz.resolve_provider_hosts(egress)),
+        wiz.build_squid_acl(wiz.resolve_destinations(egress)),
         _json.dumps(wiz.egress_payload(egress, "claude")),
         wiz.egress_strength_statement("claude"),
         _json.dumps(

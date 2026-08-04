@@ -209,17 +209,17 @@ def test_agent_is_pointed_at_the_proxy_in_both_cases(wiz, tmp_path):
 
 
 def test_push_check_fires_for_an_https_remote_not_in_the_allowlist(wiz):
-    """Probe-verified failure: under `providers: [anthropic]`, git over HTTPS to
+    """Probe-verified failure: under `allow: [{provider: anthropic}]`, git over HTTPS to
     github.com returns `CONNECT tunnel failed, response 403` — at push time."""
     with pytest.raises(wiz.Fatal, match="does not permit 'github.com'"):
         wiz.check_egress_permits_push(
-            {"providers": ["anthropic"]}, "https://github.com/you/acme", "strict"
+            {"allow": [{"provider": "anthropic"}]}, "https://github.com/you/acme", "strict"
         )
 
 
 def test_push_check_is_silent_when_the_host_is_declared(wiz):
     wiz.check_egress_permits_push(
-        {"providers": ["anthropic"], "allow": ["github.com"]},
+        {"allow": [{"provider": "anthropic"}, {"host": "github.com"}]},
         "https://github.com/you/acme",
         "strict",
     )
@@ -229,7 +229,7 @@ def test_push_check_is_silent_for_ssh_remotes(wiz):
     """ssh does not honour https_proxy, so an SSH push is unaffected. This
     asymmetry is why the defect is invisible to anyone testing with a push key."""
     for url in ("git@github.com:you/acme.git", "ssh://git@github.com/you/acme"):
-        wiz.check_egress_permits_push({"providers": ["anthropic"]}, url, "strict")
+        wiz.check_egress_permits_push({"allow": [{"provider": "anthropic"}]}, url, "strict")
 
 
 def test_push_check_is_silent_when_nothing_is_declared(wiz):
@@ -238,21 +238,21 @@ def test_push_check_is_silent_when_nothing_is_declared(wiz):
 
 def test_push_check_warns_rather_than_dies_under_advisory(wiz):
     wiz.check_egress_permits_push(
-        {"providers": ["anthropic"]}, "https://github.com/you/acme", "advisory"
+        {"allow": [{"provider": "anthropic"}]}, "https://github.com/you/acme", "advisory"
     )
 
 
 def test_push_check_uses_the_same_patterns_as_the_proxy(wiz):
     """The check and the enforcement must not be able to disagree — a wildcard the
     proxy would admit must not be reported as refused."""
-    e = [("allow", ("*.githubusercontent.com",), "declaration")]
+    e = [("allow", "*.githubusercontent.com", None, "declaration")]
     assert wiz.egress_permits_host(e, "raw.githubusercontent.com")
     assert not wiz.egress_permits_host(e, "githubusercontent.com.attacker.net")
 
 
 # --- C6: NO_PROXY cannot silently disable enforcement -----------------------
 
-DECL = {"providers": ["anthropic"]}
+DECL = {"allow": [{"provider": "anthropic"}]}
 
 
 def test_env_file_keys_reads_names_never_values(wiz, tmp_path):

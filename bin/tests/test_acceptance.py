@@ -1873,7 +1873,7 @@ def test_undeclared_provider_is_refused_not_dropped(acc):
     000 for a refusal and a drop alike (research R10a, measured).
     """
     laptop = _gen_keypair(acc.tmp / "laptop12a")
-    proj = _egress_project(acc, "acc12a", "    egress:\n      providers: [anthropic]\n")
+    proj = _egress_project(acc, "acc12a", "    egress:\n      allow: [{provider: anthropic}]\n")
     acc.register("acc12a")
     r = acc.cli(["up", "acc12a", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
     assert r.returncode == 0, f"deploy with a declaration failed:\n{r.stderr}"
@@ -1894,7 +1894,7 @@ def test_undeclared_provider_is_refused_not_dropped(acc):
 def test_operator_no_proxy_is_refused_at_deploy(acc):
     """Quickstart S6 — the feature's most likely silent failure. If this deploys,
     the declaration reads as enforced while enforcing nothing."""
-    proj = _egress_project(acc, "acc12b", "    egress:\n      providers: [anthropic]\n")
+    proj = _egress_project(acc, "acc12b", "    egress:\n      allow: [{provider: anthropic}]\n")
     (proj / ".agent-container" / "acc12b.env").write_text("GH_TOKEN=x\nNO_PROXY=*\n")
     acc.register("acc12b")
     r = acc.cli(["up", "acc12b"], cwd=proj)
@@ -1922,7 +1922,7 @@ def test_teardown_leaves_no_proxy_behind(acc):
     it — including after the declaration is DROPPED, when the regenerated file no
     longer declares the service that is still running."""
     laptop = _gen_keypair(acc.tmp / "laptop12d")
-    proj = _egress_project(acc, "acc12d", "    egress:\n      providers: [anthropic]\n")
+    proj = _egress_project(acc, "acc12d", "    egress:\n      allow: [{provider: anthropic}]\n")
     acc.register("acc12d")
     assert acc.cli(
         ["up", "acc12d", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj

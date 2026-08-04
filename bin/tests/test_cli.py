@@ -403,25 +403,31 @@ def test_no_disclosure_for_an_agent_without_a_builtin_default(wiz, capsys):
 def test_no_disclosure_once_a_declaration_exists(wiz, capsys):
     """With a declaration the operator has engaged with the question; repeating it
     is the noise that trains people to ignore the message that matters."""
-    wiz.disclose_builtin_default({"providers": []}, "opencode")
+    wiz.disclose_builtin_default({"allow": []}, "opencode")
     assert capsys.readouterr().err == ""
 
 
 def test_builtin_default_outside_the_declared_set_is_reported(wiz, capsys):
     """FR-003a — knowable before anything runs, so withholding it would be a choice."""
-    wiz.check_builtin_default_declared({"providers": ["anthropic"]}, "opencode", "advisory")
+    wiz.check_builtin_default_declared(
+        {"allow": [{"provider": "anthropic"}]}, "opencode", "advisory"
+    )
     err = capsys.readouterr().err
     assert "big-pickle" in err and "does NOT permit" in err
 
 
 def test_builtin_default_inside_the_declared_set_is_silent(wiz, capsys):
-    wiz.check_builtin_default_declared({"providers": ["big-pickle"]}, "opencode", "advisory")
+    wiz.check_builtin_default_declared(
+        {"allow": [{"provider": "big-pickle"}]}, "opencode", "advisory"
+    )
     assert capsys.readouterr().err == ""
 
 
 def test_builtin_default_outside_the_set_refuses_under_strict(wiz):
     with pytest.raises(wiz.Fatal, match="big-pickle"):
-        wiz.check_builtin_default_declared({"providers": ["anthropic"]}, "opencode", "strict")
+        wiz.check_builtin_default_declared(
+            {"allow": [{"provider": "anthropic"}]}, "opencode", "strict"
+        )
 
 
 def test_strength_statement_says_all_three_required_things(wiz):
