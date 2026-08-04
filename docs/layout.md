@@ -20,14 +20,36 @@ name used two ways anywhere else in the docs, this file wins.
 ```text
 my-service/                          ← PROJECT ROOT
 ├── .agent-container/                ← PROJECT CONFIG — like .git/ or .github/
-│   ├── environments.yaml               declarative spec (any *.yaml/*.yml is read)
+│   ├── environments.yaml               declarative spec — holds `environments:`
+│   ├── prod.environments.yaml          another spec file; specs may be split
 │   ├── prod.env                        per-environment env file
 │   ├── .env                            shared default for every environment here
-│   ├── prod.services.yaml              sidecar override
+│   ├── prod.services.yaml              sidecar override — holds `services:`
 │   └── prod.config/                    canonical agent config
 ├── src/                             ← your code; the tool owns none of it
 └── README.md
 ```
+
+### A YAML file's suffix names the top-level key it contains
+
+One rule, and it is the whole convention:
+
+| Filename | Contains | Read as |
+|---|---|---|
+| `environments.yaml`, `*.environments.yaml` | `environments:` | the declarative spec |
+| `*.services.yaml` | `services:` | a sidecar override |
+
+Both kinds share the directory, which is exactly what the suffix makes possible: before it, the
+spec loader claimed *every* `*.yaml` here and refused the sidecar's `services:` key — so a project
+could not use both features at once. `.yml` works everywhere `.yaml` does.
+
+Any **other** `*.yaml` in this directory is **refused**, naming it — so `enviroments.yaml` tells
+you about the typo instead of silently loading no environments. Pass `--skip-unknown-files` to
+downgrade that to a warning if you deliberately keep unrelated YAML here.
+
+> **Migrating.** `project.yaml`, or any other name that used to be read because it merely ended in
+> `.yaml`, must be renamed to `environments.yaml` or `<prefix>.environments.yaml`. The tool refuses
+> and names the file rather than ignoring it.
 
 Discovery walks **up**, so every command behaves identically from any subdirectory. Nothing
 depends on an absolute path — copy or vendor the project anywhere.

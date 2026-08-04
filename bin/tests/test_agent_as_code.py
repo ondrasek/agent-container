@@ -18,10 +18,15 @@ LOCAL_HOST = {"driver": "docker", "context": "", "address": "localhost"}
 
 
 def _project(tmp_path, yaml_text: str):
-    """Create tmp project with .agent-container/project.yaml; return its root."""
+    """Create tmp project with .agent-container/environments.yaml; return its root.
+
+    The filename is load-bearing: a spec file is identified by KIND, and the suffix
+    names the top-level key it contains. `project.yaml` (what this helper used
+    before, and what the docs showed) is no longer a recognised kind.
+    """
     root = tmp_path / "proj"
     (root / ".agent-container").mkdir(parents=True)
-    (root / ".agent-container" / "project.yaml").write_text(yaml_text)
+    (root / ".agent-container" / "environments.yaml").write_text(yaml_text)
     return root
 
 
@@ -289,11 +294,16 @@ def test_env_live_config_parses_inspect_env(wiz, monkeypatch):
 def test_stage_agent_container_spec_ro_targets(wiz, tmp_path):
     root = _project(tmp_path, MINIMAL)
     (root / ".agent-container" / "sub").mkdir()
-    (root / ".agent-container" / "sub" / "extra.yaml").write_text("environments: []\n")
+    (root / ".agent-container" / "sub" / "extra.environments.yaml").write_text("environments: []\n")
+    # Delivery is deliberately WIDER than loading: every file in the directory rides
+    # read-only (.env and .services.yaml included), while only spec-kind files are
+    # parsed as spec. A non-spec file appearing here is correct, not a leak.
+    (root / ".agent-container" / "acme.services.yaml").write_text("services:\n  x:\n    image: a\n")
     entries = wiz.stage_agent_container_spec("local", "acme", root)
     targets = sorted(t for _n, _f, t in entries)
-    assert "/workspace/.agent-container/project.yaml" in targets
-    assert "/workspace/.agent-container/sub/extra.yaml" in targets
+    assert "/workspace/.agent-container/environments.yaml" in targets
+    assert "/workspace/.agent-container/sub/extra.environments.yaml" in targets
+    assert "/workspace/.agent-container/acme.services.yaml" in targets
     # every target is under the read-only spec dir
     assert all(t.startswith("/workspace/.agent-container/") for _n, _f, t in entries)
 
@@ -437,7 +447,11 @@ def test_credential_unknown_key_dies(wiz):
 def test_non_utf8_spec_dies_cleanly(wiz, tmp_path):
     root = tmp_path / "proj"
     (root / ".agent-container").mkdir(parents=True)
-    (root / ".agent-container" / "bad.yaml").write_bytes(b"environments:\n  - name: \x80\n")
+    # Must be a RECOGNISED spec kind, or the file-kind refusal fires first and this
+    # never exercises the decode path it exists to cover.
+    (root / ".agent-container" / "environments.yaml").write_bytes(
+        b"environments:\n  - name: \x80\n"
+    )
     with pytest.raises(wiz.Fatal, match="cannot read spec file"):
         wiz.load_project_spec(root)
 
@@ -1146,3 +1160,67 @@ def test_delivered_spec_path_and_read_only_survive_feature_011(wiz):
     src = (Path(__file__).resolve().parents[1] / "agent-container").read_text()
     marker = 'target.startswith(INJECT_AAC_DIR + "/")'
     assert marker in src, "the delivered-spec containment check disappeared"
+
+
+# --- file kinds: a spec and a sidecar must share one directory (011 amendment) ---
+# The rule, one line: THE SUFFIX NAMES THE TOP-LEVEL YAML KEY THE FILE CONTAINS.
+
+
+def test_spec_and_sidecar_override_coexist(wiz, tmp_path):
+    """The regression this amendment exists for.
+
+    Feature 011 put both the declarative spec and `<name>.services.yaml` in
+    `.agent-container/`. The spec loader claimed EVERY *.yaml by glob and died on
+    the sidecar's `services:` key — so two documented features could not be used
+    together at all. Neither suite caught it: the spec tests never wrote a
+    sidecar, and the sidecar tests never wrote a spec.
+    """
+    root = _project(tmp_path, MINIMAL)
+    (root / ".agent-container" / "acme.services.yaml").write_text(
+        "services:\n  redis:\n    image: redis:7\n"
+    )
+    envs = wiz.load_project_spec(root)
+    assert [e["name"] for e in envs] == ["acme"]
+
+
+def test_spec_files_selected_by_kind_not_by_glob(wiz, tmp_path):
+    """Bare `environments.yaml` and prefixed `*.environments.yaml` are both specs;
+    a sidecar is not, and its environments are never merged in."""
+    root = _project(tmp_path, MINIMAL)
+    (root / ".agent-container" / "prod.environments.yaml").write_text(
+        MINIMAL.replace("acme", "prod")
+    )
+    (root / ".agent-container" / "acme.services.yaml").write_text("services:\n  x:\n    image: a\n")
+    assert sorted(e["name"] for e in wiz.load_project_spec(root)) == ["acme", "prod"]
+
+
+def test_unrecognised_yaml_is_refused_naming_it(wiz, tmp_path):
+    """A typo must fail LOUDLY. Silently skipping `enviroments.yaml` would report
+    'no environments' with no hint that a file was ignored — trading a loud bug
+    for a quiet one."""
+    root = _project(tmp_path, MINIMAL)
+    (root / ".agent-container" / "enviroments.yaml").write_text(MINIMAL)
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "enviroments.yaml" in msg
+    assert "--skip-unknown-files" in msg, "the refusal must name its own escape hatch"
+
+
+def test_skip_unknown_downgrades_refusal_to_warning(wiz, tmp_path):
+    """The operator-requested escape hatch: keep unrelated YAML, get a warning."""
+    root = _project(tmp_path, MINIMAL)
+    (root / ".agent-container" / "notes.yaml").write_text("anything: at all\n")
+    assert [e["name"] for e in wiz.load_project_spec(root, skip_unknown=True)] == ["acme"]
+
+
+def test_pre_amendment_spec_filename_is_refused(wiz, tmp_path):
+    """`project.yaml` — what the docs showed and the test helper used — is no
+    longer a recognised kind. Refused, not silently ignored, so an operator on the
+    old name is told rather than left with an empty plan."""
+    root = tmp_path / "proj"
+    (root / ".agent-container").mkdir(parents=True)
+    (root / ".agent-container" / "project.yaml").write_text(MINIMAL)
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    assert "project.yaml" in str(e.value)

@@ -186,7 +186,7 @@ _SECRET = "sk-THIS-MUST-NEVER-APPEAR"
 def _project(tmp_path, yaml_text: str):
     root = tmp_path / "proj"
     (root / ".agent-container").mkdir(parents=True)
-    (root / ".agent-container" / "project.yaml").write_text(yaml_text)
+    (root / ".agent-container" / "environments.yaml").write_text(yaml_text)
     return root
 
 
