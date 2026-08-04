@@ -2216,58 +2216,60 @@ def resolve_sidecar_override(name: str) -> Path | None:
     return None
 
 
-def _yaml_toplevel_keys(text: str) -> list[str]:
-    """Top-level mapping keys of a YAML/JSON document, best-effort. JSON is a YAML
-    subset, so a JSON override parses exactly; a YAML override is scanned for
-    column-0 `key:` lines (comments / list items / nested lines ignored). This is
-    a GUARDRAIL, not a full parser — compose does the authoritative parse when it
-    runs; the scan only catches the two footguns (non-services-only; agent redef)."""
+def _yaml_document(text: str) -> dict:
+    """Parse an override document with a REAL parser. `yaml.safe_load` only — never
+    `yaml.load` (an untrusted `!!python/...` tag must never construct an object),
+    and never a regex scan.
+
+    This replaced two column-0 regex scanners that silently returned NOTHING for
+    flow style (`services: {agent: {...}}`) and for quoted keys (`"agent":`). Both
+    forms therefore passed validation, and since the override rides as the second
+    `-f` it WINS the compose merge — so an operator could redefine the agent
+    service, or set `agent.environment.NO_PROXY`, past a guard that reported no
+    problem. A scanner only recognises the shape it was written for; the guard
+    passed while the thing it named was broken.
+
+    Returns {} for anything that is not a mapping, so callers can treat "no keys"
+    and "not a mapping" alike — compose does the authoritative parse either way.
+
+    >>> sorted(_yaml_document("services: {agent: {image: x}}"))
+    ['services']
+    >>> list(_yaml_document('services:\\n  "agent":\\n    image: x\\n')["services"])
+    ['agent']
+    >>> _yaml_document("- not a mapping")
+    {}
+    """
+    import yaml
+
     try:
-        obj = json.loads(text)
-        return [str(k) for k in obj] if isinstance(obj, dict) else []
-    except json.JSONDecodeError, ValueError:
-        pass
-    keys = []
-    for line in text.splitlines():
-        if not line or line[0].isspace() or line.lstrip().startswith("#") or line.startswith("---"):
-            continue
-        m = re.match(r"([A-Za-z0-9_.-]+)\s*:", line)
-        if m:
-            keys.append(m.group(1))
-    return keys
+        obj = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _yaml_toplevel_keys(text: str) -> list[str]:
+    """Top-level mapping keys of a YAML/JSON document. JSON is a YAML subset, so
+    both parse through the same path.
+
+    >>> _yaml_toplevel_keys("services:\\n  a: {}\\nvolumes: {}\\n")
+    ['services', 'volumes']
+    """
+    return [str(k) for k in _yaml_document(text)]
 
 
 def _yaml_service_keys(text: str) -> list[str]:
-    """Service keys declared under a top-level `services:` mapping, best-effort
-    (JSON parsed exactly; YAML scanned at the first indent level under services)."""
-    try:
-        obj = json.loads(text)
-        svc = obj.get("services") if isinstance(obj, dict) else None
-        return [str(k) for k in svc] if isinstance(svc, dict) else []
-    except json.JSONDecodeError, ValueError:
-        pass
-    lines = text.splitlines()
-    keys: list[str] = []
-    indent: int | None = None
-    in_services = False
-    for line in lines:
-        if re.match(r"services\s*:", line):  # column-0 services:
-            in_services = True
-            continue
-        if in_services:
-            if line and not line[0].isspace() and not line.lstrip().startswith("#"):
-                break  # dedented back to another top-level key
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            cur = len(line) - len(line.lstrip())
-            if indent is None:
-                indent = cur
-            if cur == indent:
-                m = re.match(r"([A-Za-z0-9_.-]+)\s*:", stripped)
-                if m:
-                    keys.append(m.group(1))
-    return keys
+    """Service keys declared under a top-level `services:` mapping.
+
+    >>> _yaml_service_keys("services: {agent: {image: x}}")     # flow style
+    ['agent']
+    >>> _yaml_service_keys('services:\\n  "agent": {}\\n')        # quoted key
+    ['agent']
+    >>> _yaml_service_keys("services:\\n  redis: {}\\n  db: {}\\n")
+    ['redis', 'db']
+    """
+    svc = _yaml_document(text).get("services")
+    return [str(k) for k in svc] if isinstance(svc, dict) else []
 
 
 def validate_sidecar_override(path: Path) -> None:
@@ -4969,6 +4971,12 @@ def validate_provision_table(table: dict, env_name: str, where: str) -> None:
 
 
 HOSTNAME_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$")
+# The label group repeats without bound, so the regex alone accepts an arbitrarily
+# long name. tinyproxy reads its filter with a 512-byte fgets and regcomps each
+# chunk SEPARATELY, so one over-long entry becomes a prefix pattern PLUS a suffix
+# pattern — both unanchored, i.e. silent over-permission. 253 is the DNS limit and
+# is far below the buffer, so the split can never happen.
+HOSTNAME_MAX = 253
 
 
 def validate_egress(egress: object, where: str) -> None:
@@ -4987,11 +4995,25 @@ def validate_egress(egress: object, where: str) -> None:
     if not isinstance(egress, dict):
         die(f"{where}: must be a mapping")
     for k in egress:
-        if k not in {"providers", "enforcement"}:
+        if k not in {"providers", "allow", "enforcement"}:
             die(f"{where}: unknown key {k!r}")
     _enum_field(egress, "enforcement", ENFORCEMENT_MODES, where)
     if "providers" not in egress:
-        return
+        # The FOURTH state: `egress:` present without `providers`. Neither declared
+        # nor undeclared. Reading it as unrestricted would let `enforcement: strict`
+        # sit in a file enforcing nothing; reading it as empty would air-gap on a key
+        # added for an unrelated reason. Both silent, so refuse and say which.
+        die(
+            f"{where}: missing 'providers'. An egress block must say what is permitted — "
+            f"write `providers: []` for an environment that may reach nothing, or remove "
+            f"the egress block entirely for unrestricted (the default)"
+        )
+    allow = egress.get("allow")
+    if allow is not None:
+        if not isinstance(allow, list):
+            die(f"{where}: 'allow' must be a list of hostnames")
+        for i, h in enumerate(allow):
+            validate_egress_host(h, f"{where} allow[{i}]", allow_wildcard=True)
     providers = egress.get("providers")
     # A bare string is the common mistake; iterating its characters would treat
     # "anthropic" as nine providers, so die naming the field instead.
@@ -5031,26 +5053,112 @@ def validate_provider_entry(entry: object, where: str) -> None:
     if not isinstance(hosts, list) or not hosts:
         die(f"{where}: 'hosts' must be a non-empty list of hostnames")
     for h in hosts:
-        if not isinstance(h, str) or not HOSTNAME_RE.fullmatch(h):
-            die(
-                f"{where}: {h!r} is not a hostname. Give a bare host "
-                f"(no scheme, no port, no path) — a URL would be accepted and then "
-                f"never match, silently permitting nothing"
-            )
+        validate_egress_host(h, where)
+
+
+def validate_egress_host(h: object, where: str, *, allow_wildcard: bool = False) -> None:
+    """One allowlist hostname. `allow_wildcard` permits a leading `*.` meaning the
+    domain and its subdomains (FR-001d) — used by `allow:`, not by a provider's
+    `hosts:` override."""
+    if not isinstance(h, str):
+        die(f"{where}: {h!r} is not a hostname (expected a string)")
+    bare = h[2:] if (allow_wildcard and h.startswith("*.")) else h
+    if not HOSTNAME_RE.fullmatch(bare):
+        hint = " (a leading '*.' matches the domain and its subdomains)" if allow_wildcard else ""
+        die(
+            f"{where}: {h!r} is not a hostname. Give a bare host (no scheme, no "
+            f"port, no path){hint} — a URL would be accepted and then never match, "
+            f"silently permitting nothing"
+        )
+    if len(bare) > HOSTNAME_MAX:
+        die(
+            f"{where}: {h!r} is {len(bare)} characters, over the {HOSTNAME_MAX}-character "
+            f"DNS limit. An over-long entry splits across the proxy's line buffer into "
+            f"two UNANCHORED patterns, silently permitting far more than it names"
+        )
+
+
+def egress_filter_line(host: str) -> str:
+    """One tinyproxy filter pattern for `host`, ANCHORED and ESCAPED.
+
+    THIS IS THE SECURITY BOUNDARY OF THE FEATURE. tinyproxy matches filter entries
+    with `regexec` and they are UNANCHORED by default, so writing a hostname
+    verbatim produces a SUBSTRING allowlist: `api.anthropic.com` would also permit
+    `api.anthropic.com.attacker.net` and `evil-api.anthropic.com`. The dots must be
+    escaped too, or `.` matches any character.
+
+    A leading `*.` (FR-001d) means the domain AND its subdomains — and matches the
+    bare domain as well, since an operator writing `*.githubusercontent.com`
+    reasonably expects the parent to work.
+
+    >>> egress_filter_line("api.anthropic.com")
+    '^api\\\\.anthropic\\\\.com$'
+    >>> egress_filter_line("*.githubusercontent.com")
+    '^([A-Za-z0-9_-]+\\\\.)*githubusercontent\\\\.com$'
+    """
+    if host.startswith("*."):
+        return rf"^([A-Za-z0-9_-]+\.)*{re.escape(host[2:])}$"
+    return rf"^{re.escape(host)}$"
+
+
+def build_egress_filter(entries: list[tuple[str, tuple[str, ...], str]]) -> str:
+    """The generated tinyproxy filter file — with `FilterDefaultDeny Yes` this is an
+    ALLOWLIST, so an EMPTY body denies everything (the air-gapped state, FR-011).
+
+    Callers must have established that egress IS declared (is_egress_declared);
+    this function cannot tell an air-gapped environment from an unrestricted one,
+    because both arrive as an empty list.
+
+    >>> print(build_egress_filter([("anthropic", ("api.anthropic.com",), "tool")]))
+    # anthropic (tool)
+    ^api\\.anthropic\\.com$
+    <BLANKLINE>
+    >>> build_egress_filter([])
+    ''
+    """
+    out: list[str] = []
+    for label, hosts, source in entries:
+        out.append(f"# {label} ({source})")
+        out.extend(egress_filter_line(h) for h in hosts)
+    return "".join(f"{line}\n" for line in out)
+
+
+def is_egress_declared(egress: object) -> bool:
+    """Whether an environment DECLARES egress at all.
+
+    Absent means unrestricted; `providers: []` means air-gapped. Both resolve to an
+    empty allowlist, so presence can never be inferred from the resolved hosts —
+    a consumer that tried would render every undeclared environment air-gapped,
+    the upgrade catastrophe data-model §2 exists to prevent. Presence lives here,
+    in one place, not in each caller's discipline.
+
+    >>> is_egress_declared(None), is_egress_declared({"providers": []})
+    (False, True)
+    """
+    return isinstance(egress, dict) and "providers" in egress
 
 
 def resolve_provider_hosts(egress: dict | None) -> list[tuple[str, tuple[str, ...], str]]:
-    """The EFFECTIVE allowlist: (provider name, hosts, source) per declared entry.
+    """The EFFECTIVE allowlist: (label, hosts, source) per declared entry.
 
     An explicit `hosts:` REPLACES the tool's mapping for that entry — it is never
     added to it (FR-001b). An operator who routes through a gateway is usually
     doing so to CLOSE the direct vendor path; extending would leave it open while
     the declaration reads as constrained.
 
+    `allow:` entries (FR-001c) ride the same list under the label `allow`, because
+    the proxy governs ALL egress and there is exactly one allowlist. The split is
+    for readability, not privilege.
+
+    CALLERS MUST GATE ON is_egress_declared() FIRST — `[]` here means both
+    "unrestricted" and "air-gapped", which are opposites.
+
     >>> resolve_provider_hosts({"providers": ["anthropic"]})
     [('anthropic', ('api.anthropic.com',), 'tool')]
     >>> resolve_provider_hosts({"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]})
     [('anthropic', ('gw.corp',), 'declaration')]
+    >>> resolve_provider_hosts({"providers": [], "allow": ["github.com"]})
+    [('allow', ('github.com',), 'declaration')]
     >>> resolve_provider_hosts({"providers": []})
     []
     >>> resolve_provider_hosts(None)
@@ -5064,6 +5172,9 @@ def resolve_provider_hosts(egress: dict | None) -> list[tuple[str, tuple[str, ..
             out.append((entry, PROVIDERS[entry], "tool"))
         else:
             out.append((entry["name"], tuple(entry["hosts"]), "declaration"))
+    extra = egress.get("allow") or []
+    if extra:
+        out.append(("allow", tuple(extra), "declaration"))
     return out
 
 

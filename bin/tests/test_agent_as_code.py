@@ -1336,12 +1336,100 @@ def test_egress_unknown_keys_die(wiz, tmp_path):
 
 
 def test_egress_enforcement_enum(wiz, tmp_path):
-    ok = _egress(tmp_path, "      enforcement: strict\n", "ok")
+    ok = _egress(tmp_path, "      providers: [anthropic]\n      enforcement: strict\n", "ok")
     (env,) = wiz.load_project_spec(ok)
     assert env["egress"]["enforcement"] == "strict"
-    bad = _egress(tmp_path, "      enforcement: paranoid\n", "bad")
+    bad = _egress(tmp_path, "      providers: []\n      enforcement: paranoid\n", "bad")
     with pytest.raises(wiz.Fatal, match="enforcement='paranoid'"):
         wiz.load_project_spec(bad)
+
+
+def test_egress_without_providers_is_refused_as_the_fourth_state(wiz, tmp_path):
+    """`egress:` present with no `providers` is neither declared nor undeclared.
+
+    Reading it as unrestricted would let `enforcement: strict` sit in a file
+    enforcing nothing; reading it as empty would air-gap on a key added for an
+    unrelated reason. Both are silent, so it is refused — and the message must
+    offer BOTH real states, since the operator's intent is genuinely ambiguous.
+    """
+    root = _egress(tmp_path, "      enforcement: strict\n", "fourth")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "missing 'providers'" in msg
+    assert "providers: []" in msg and "remove the egress block" in msg
+
+
+def test_is_egress_declared_separates_absent_from_empty(wiz):
+    """The presence gate T011f exists for: both states resolve to an empty
+    allowlist, so presence can never be read off the resolved hosts."""
+    assert wiz.is_egress_declared(None) is False
+    assert wiz.is_egress_declared({"providers": []}) is True
+    assert wiz.resolve_provider_hosts(None) == wiz.resolve_provider_hosts({"providers": []}) == []
+
+
+def test_egress_filter_is_anchored_against_suffix_attack(wiz):
+    """THE security boundary. tinyproxy matches filter lines UNANCHORED, so a bare
+    hostname is a substring allowlist."""
+    import re as _re
+
+    pat = wiz.egress_filter_line("api.anthropic.com")
+    rx = _re.compile(pat)
+    assert rx.fullmatch("api.anthropic.com")
+    for attack in (
+        "api.anthropic.com.attacker.net",
+        "evil-api.anthropic.com",
+        "apiXanthropicYcom",
+        "notapi.anthropic.com",
+    ):
+        assert not rx.match(attack), f"{pat!r} permits {attack!r}"
+
+
+def test_egress_wildcard_matches_subdomains_but_not_suffix_attack(wiz):
+    import re as _re
+
+    rx = _re.compile(wiz.egress_filter_line("*.githubusercontent.com"))
+    assert rx.fullmatch("objects.githubusercontent.com")
+    assert rx.fullmatch("raw.githubusercontent.com")
+    assert rx.fullmatch("githubusercontent.com"), "the bare domain must match too"
+    for attack in ("githubusercontent.com.attacker.net", "evilgithubusercontent.com"):
+        assert not rx.match(attack), f"wildcard permits {attack!r}"
+
+
+def test_egress_empty_filter_body_denies_everything(wiz):
+    """`providers: []` must produce an EMPTY allowlist body. With
+    `FilterDefaultDeny Yes` that denies everything; an empty file that somehow
+    meant allow-all would invert the air-gapped state, silently and totally."""
+    assert wiz.build_egress_filter([]) == ""
+
+
+def test_egress_host_length_is_capped(wiz, tmp_path):
+    """An over-long entry splits across tinyproxy's 512-byte line buffer into two
+    UNANCHORED patterns. Reachable through the FR-001a hosts: escape hatch."""
+    long_host = ".".join(["a" * 60] * 8)  # 487 chars, regex-valid, over the DNS limit
+    assert wiz.HOSTNAME_RE.fullmatch(long_host), "fixture must pass the shape check"
+    root = _egress(
+        tmp_path,
+        f"      providers:\n        - name: x\n          hosts: ['{long_host}']\n",
+        "long",
+    )
+    with pytest.raises(wiz.Fatal, match="over the 253-character DNS limit"):
+        wiz.load_project_spec(root)
+
+
+def test_egress_allow_carries_non_provider_hosts(wiz, tmp_path):
+    """FR-001c. The proxy governs ALL egress, so git remotes and registries must be
+    declarable — there is no hidden baseline (FR-001e)."""
+    root = _egress(
+        tmp_path,
+        "      providers: [anthropic]\n      allow: [github.com, '*.githubusercontent.com']\n",
+        "allow",
+    )
+    (env,) = wiz.load_project_spec(root)
+    entries = wiz.resolve_provider_hosts(env["egress"])
+    assert ("allow", ("github.com", "*.githubusercontent.com"), "declaration") in entries
+    body = wiz.build_egress_filter(entries)
+    assert "^github\\.com$" in body
 
 
 def test_egress_not_a_mapping_dies(wiz, tmp_path):

@@ -1,0 +1,6 @@
+# Deny-all, then re-admit. The context is already one directory, but this makes the
+# narrowness structural rather than incidental — the context may cross the network to
+# a remote daemon (the Feature 009 measurement: an unprotected context shipped 2234
+# files / 23.4 MB, including a planted .env and an API key).
+*
+!Dockerfile
