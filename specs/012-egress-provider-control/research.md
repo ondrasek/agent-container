@@ -289,12 +289,32 @@ Empty denies everything. Image is **3.9 MB**, rootless, config parses with no de
 
 ---
 
-### R10b — the allowlist must ride the compose `configs` channel
+### R10b (CORRECTED) — `configs: file:` **is** a bind; only `content:` is API-delivered
 
-Discovered while probing: a host bind of the filter file **fails over the Lima/remote daemon**
-(`error while creating mount source path … permission denied`). Same lesson as Features 001/003 —
-injected material must travel by compose `configs`, never a bind. The generated allowlist is
-injected material, so this is a constraint on the implementation, not a probe artifact.
+The original text said injected material must travel by compose `configs` "never a bind", implying
+the `configs` channel is not one. **That is wrong**, and the code was written to match it.
+
+Measured, twice, on Docker 29.1.5 / Compose 5.3.1:
+
+| Form | `inspect .Mounts` |
+|---|---|
+| `configs: {c1: {file: /path}}` | `[{"Type":"bind","Source":"/Users/…","RW":false}]` |
+| `configs: {c1: {content: "…"}}` | `[]` — genuinely API-delivered |
+
+So a `file:` config **is a read-only bind of the local path**, and fails at container create with
+`bind source path does not exist` whenever the daemon cannot see it. It works today only because
+`STATE_DIR` lives under `$HOME`, which Lima happens to share — the exact macOS+Lima caveat in
+CLAUDE.md. **Against a remote host reached through an ssh-forwarded socket — the project's
+canonical target — the allowlist would never arrive**, so the security control would fail to
+deploy on the deployment mode it most exists for.
+
+**Decision**: the allowlist rides `content:`, inline in the generated model. It is not a
+credential (only hostnames the operator wrote down), so inlining costs nothing under Constitution
+III, and it closes the live-edit window a bind leaves open — with a bind, a write to the source
+path would alter the allowlist of the *running* proxy.
+
+**Worth naming**: the false claim was in the code's docstring *and* here, so the two corroborated
+each other. Two statements of the same untested belief are not evidence; only running it was.
 
 ---
 

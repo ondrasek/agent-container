@@ -95,7 +95,7 @@ T012.
 - [X] T011f Make `resolve_provider_hosts` unable to confuse **absent** with **empty**, and refuse the fourth state (`egress:` with `enforcement:` but no `providers`) — data-model §2. Presence must live in the type, not in one caller's discipline
 - [ ] T011g Add the effective allowlist to drift detection. `env_reconcile`/`env_desired_config` (`:5237`) compare only mode/agent/clone-url, so editing `egress.providers` and re-running `apply` reports **matching** and never redeploys — the declaration changes and the running proxy does not. Hostnames only, never a credential
 - [X] T011h Keep the proxy container out of the environment-scanning surface. Compose names an unnamed service's container `<project>-<service>-1` → `agent-container-acme-egress-1`, which starts with `CONTAINER_PREFIX`; **six** sites treat any `agent-container-*` container as an environment (`:1104`, `:2674`, `:3481`, `:3511`, `:2700`, and the wizard pickers)
-- [ ] T011i Ensure teardown covers the proxy on the **fallback** path. `down_container` (`:3210`) issues a project-scoped `compose down`, but its fallback (`:3229`) does `rm -f <container_name(name)>` plus explicit volume removal — that branch strands a proxy container
+- [X] T011i Ensure teardown covers the proxy on the **fallback** path. `down_container` (`:3210`) issues a project-scoped `compose down`, but its fallback (`:3229`) does `rm -f <container_name(name)>` plus explicit volume removal — that branch strands a proxy container
 
 ### Compose model
 
@@ -133,7 +133,7 @@ T012.
 
 ### Lifecycle
 
-- [ ] T024 [US1] Verify `down`, `redeploy` and `wipe` tear the proxy down with no new step, because it shares the compose project — add the assertion to `bin/tests/test_lifecycle.py` (contract C2, quickstart S9)
+- [X] T024 [US1] Verify `down`, `redeploy` and `wipe` tear the proxy down with no new step, because it shares the compose project — add the assertion to `bin/tests/test_lifecycle.py` (contract C2, quickstart S9)
 - [ ] T025 [US1] Handle the headless-foreground consequence in `bin/agent-container`: `--abort-on-container-exit --exit-code-from agent` stops every service when any exits, so a crashing proxy aborts the run. Fail-closed and correct — **state it** in `docs/execution.md` rather than let a headless user discover it (research R4)
 
 **Checkpoint**: US1 is independently deliverable and testable. Run quickstart S2, S3, S5, S6, S9.

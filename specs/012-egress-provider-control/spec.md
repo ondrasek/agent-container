@@ -72,6 +72,38 @@ This feature makes the set of reachable providers **declared, enforced and visib
   `host:port` implied only that port — an inconsistency operators would trip over for as long as
   the tool exists. Pre-1.0, and the cost is paid once.
 
+- Q: What happens to the environment-variable mechanism once transparent enforcement lands? → A:
+  **Keep both, layered.** The variables stop being the enforcement and become the **diagnostics**.
+  A transparently-redirected connection arrives as a raw TLS stream, so the proxy can only refuse it
+  by closing the socket; a client that used `CONNECT` gets a real `403 Filtered` it can report. So
+  the variables are what turn *"connection reset"* into *"refused: api.openai.com is not declared"*.
+  Netfilter remains the boundary underneath, and C6's refusals keep their point — an agent that
+  unsets the variables loses good error messages and gains no reach.
+- Q: The published port must move to the egress service under a shared network namespace. Hard cut
+  or a compatibility path? → A: **Hard cut, and refuse.** A container deployed under the old
+  arrangement is refused with a message naming what to do, exactly as Feature 011 refuses a pre-011
+  layout. Pre-1.0, and a silent partial migration of a port binding would leave an environment
+  reachable at an address the tool no longer believes in.
+- Q: Do operator sidecars from `<name>.services.yaml` sit inside or outside the enforcement
+  boundary? → A: **Inside by default, with an explicit, disclosed opt-out.**
+
+  **Why this is not cosmetic.** Any sidecar the agent can talk to, which itself has unrestricted
+  egress, **is a bypass** — the agent does not need to escape the namespace, only to ask something
+  that already has the access. This is concrete, not theoretical: redis `REPLICAOF <host> <port>`
+  and `MIGRATE` open outbound connections to an arbitrary address; postgres `COPY … FROM PROGRAM`
+  executes a command; any operator-written service that fetches a URL on request is an open proxy.
+  A design that locks the agent down and leaves sidecars untouched produces an environment
+  reporting `enforced: true` while a two-line redis command walks straight out — the overclaim
+  failure this feature exists to prevent, in its most concrete form.
+
+  Sidecars therefore join the enforcement namespace and are subject to the same default-deny.
+  Agent↔sidecar traffic is on loopback and needs no rule. A sidecar that legitimately needs the
+  internet is **declared**, in the same `egress.allow` list as everything else.
+
+  **Rejected: an automatic allowance for the project network.** Convenient, and exactly the hidden
+  baseline FR-001e forbids — `enforced: true` would silently mean "plus anything your sidecars can
+  reach".
+
 - Q: How is name resolution handled, given DNS is both a dependency of the mechanism and a live
   exfiltration channel? → A: **A caching DNS proxy in the egress sidecar, with all port-53 traffic
   forced to it, resolving only declared names.** Upstream is operator-selectable from well-known
@@ -476,6 +508,22 @@ that host on that port becomes reachable.
   `enforcement` setting governs (FR-007b) — refuse under `strict`, deploy and state the limitation
   under `advisory`. **FR-004 is unaffected**: an environment with no declaration stays unrestricted.
   Default-deny applies to environments that opted in, never retroactively to those that did not.
+- **FR-023**: Operator sidecars declared in `<name>.services.yaml` MUST join the enforcement
+  boundary by default and be subject to the same default-deny. **Any sidecar the agent can reach
+  that has unrestricted egress is a bypass** — the agent need not escape the namespace, only ask
+  something that already has the access (redis `REPLICAOF`/`MIGRATE`, postgres `COPY … FROM
+  PROGRAM`, any service that fetches a URL on request).
+- **FR-023a**: An operator MUST be able to place a specific sidecar **outside** the boundary, since
+  a service that syncs from an upstream on its own schedule is a legitimate case that routing
+  through the agent's allowlist would break. It MUST be explicit — never a default, never inferred.
+- **FR-023b**: Any sidecar outside the boundary MUST be **named in the enforcement statement**.
+  `enforced: true` must never quietly mean "except for these containers"; an undisclosed exemption
+  is the same overclaim as an undisclosed baseline (FR-001e).
+- **FR-023c**: The tool MUST NOT grant an automatic allowance for the project network to reach
+  sidecars. That is the hidden baseline FR-001e forbids, arriving by a different route.
+- **FR-023d**: `validate_sidecar_override` currently checks a sidecar override's **shape**, not its
+  egress posture. Under this feature that channel becomes security-relevant, and the guard MUST be
+  extended accordingly — a service defined there now lands inside or beside a security boundary.
 - **FR-022**: FR-008's honesty statement MUST be **revised, not merely extended**, once transparent
   enforcement is in force. The current wording says packet filtering "needs privileges this
   container deliberately does not have" — which is true of the **agent** container and false of the
@@ -538,6 +586,11 @@ that host on that port becomes reachable.
   undeclared names.
 - **SC-013** *(US5)*: An agent querying a public resolver directly is forced to the sidecar
   resolver — **zero** queries leaving the environment unmediated.
+- **SC-014** *(US4)*: An operator sidecar cannot be used to launder egress — verified by driving a
+  sidecar to open an outbound connection to an undeclared host and confirming it **fails**. **Zero**
+  reachable undeclared destinations via a sidecar.
+- **SC-015** *(US4)*: Every sidecar placed outside the boundary is named in the enforcement
+  statement — **zero** undisclosed exemptions.
 
 ## Assumptions
 
