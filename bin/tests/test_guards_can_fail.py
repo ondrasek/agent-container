@@ -159,3 +159,56 @@ def test_kind_guard_would_catch_the_coexistence_bug(wiz, tmp_path):
             wiz.load_project_spec(root, skip_unknown=True)
     finally:
         wiz._spec_yaml_files = original
+
+
+# --- Feature 012: the per-agent fact fixtures --------------------------------
+
+
+def test_builtin_default_guard_fails_when_an_agent_is_unprobed(wiz, monkeypatch):
+    """A fifth agent added to AGENTS without a recorded built-in default must
+    BREAK the guard. Without this proof the guard could be vacuously true and
+    nobody would notice it had stopped protecting anything — which is exactly how
+    the opencode default went unnoticed until Feature 010 probed for it.
+    """
+    monkeypatch.setattr(wiz, "AGENTS", (*wiz.AGENTS, "newagent"))
+    with pytest.raises(AssertionError, match="AGENT_BUILTIN_DEFAULT disagrees with AGENTS"):
+        tpl.test_builtin_default_fixture_covers_exactly_the_agents(wiz)
+
+
+def test_honours_proxy_guard_fails_when_an_agent_is_unprobed(wiz, monkeypatch):
+    """Same for proxy adherence — the fact FR-008's honesty claim rests on."""
+    monkeypatch.setattr(wiz, "AGENTS", (*wiz.AGENTS, "newagent"))
+    with pytest.raises(AssertionError, match="AGENT_HONOURS_PROXY disagrees with AGENTS"):
+        tpl.test_honours_proxy_fixture_covers_exactly_the_agents(wiz)
+
+
+def test_builtin_default_guard_fails_on_a_provider_it_cannot_name(wiz, monkeypatch):
+    """A default pointing at a provider absent from PROVIDERS means the tool
+    cannot answer "what can this agent reach?" — FR-005's whole promise."""
+    monkeypatch.setattr(
+        wiz, "AGENT_BUILTIN_DEFAULT", {**wiz.AGENT_BUILTIN_DEFAULT, "claude": "ghost-vendor"}
+    )
+    with pytest.raises(AssertionError, match="is not in PROVIDERS"):
+        tpl.test_builtin_default_fixture_covers_exactly_the_agents(wiz)
+
+
+def test_replacement_guard_fails_if_hosts_are_made_additive(wiz, monkeypatch):
+    """FR-001b is invisible in a passing deployment: an additive implementation
+    still deploys, still enforces something, and still looks constrained. Prove
+    the test that pins it can actually fail.
+    """
+    real = wiz.resolve_provider_hosts
+
+    def additive(egress):
+        out = []
+        for name, hosts, source in real(egress):
+            extra = wiz.PROVIDERS.get(name, ())
+            out.append((name, tuple(dict.fromkeys((*hosts, *extra))), source))
+        return out
+
+    monkeypatch.setattr(wiz, "resolve_provider_hosts", additive)
+    ((_n, hosts, _s),) = wiz.resolve_provider_hosts(
+        {"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]}
+    )
+    assert "api.anthropic.com" in hosts, "the additive stand-in must reproduce the bug"
+    assert "gw.corp" in hosts

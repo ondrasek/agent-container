@@ -1224,3 +1224,127 @@ def test_pre_amendment_spec_filename_is_refused(wiz, tmp_path):
     with pytest.raises(wiz.Fatal) as e:
         wiz.load_project_spec(root)
     assert "project.yaml" in str(e.value)
+
+
+# --- Feature 012: the egress declaration (contracts C1) ----------------------
+
+
+def _egress(tmp_path, block: str, sub: str = ""):
+    return _project(
+        tmp_path / (sub or "e"),
+        "environments:\n  - name: acme\n    host: local\n    egress:\n" + block,
+    )
+
+
+def test_egress_absent_empty_and_populated_are_three_distinct_states(wiz, tmp_path):
+    """data-model §2. Absent must NEVER coerce to empty: absent is unrestricted,
+    empty is air-gapped. Conflating them would turn every existing environment
+    air-gapped on upgrade — a silent, total change of behaviour."""
+    absent = _project(tmp_path / "a", MINIMAL)
+    (env,) = wiz.load_project_spec(absent)
+    assert "egress" not in env
+    assert wiz.resolve_provider_hosts(env.get("egress")) == []
+
+    empty = _egress(tmp_path, "      providers: []\n", "b")
+    (env,) = wiz.load_project_spec(empty)
+    assert env["egress"]["providers"] == []  # declared, and declared EMPTY
+    assert wiz.resolve_provider_hosts(env["egress"]) == []
+
+    populated = _egress(tmp_path, "      providers: [anthropic]\n", "c")
+    (env,) = wiz.load_project_spec(populated)
+    assert wiz.resolve_provider_hosts(env["egress"]) == [
+        ("anthropic", ("api.anthropic.com",), "tool")
+    ]
+
+
+def test_egress_providers_bare_string_dies_naming_the_field(wiz, tmp_path):
+    """Must not iterate the characters — "anthropic" is one provider, not nine."""
+    root = _egress(tmp_path, "      providers: anthropic\n")
+    with pytest.raises(wiz.Fatal, match="'providers' must be a list"):
+        wiz.load_project_spec(root)
+
+
+def test_egress_unknown_name_short_form_dies_listing_known(wiz, tmp_path):
+    root = _egress(tmp_path, "      providers: [nosuchvendor]\n")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "nosuchvendor" in msg and "anthropic" in msg
+    assert "hosts:" in msg, "must point at the escape hatch it is telling them they need"
+
+
+def test_egress_unknown_name_long_form_is_accepted(wiz, tmp_path):
+    """FR-001a: the whole point of the escape hatch. A corporate gateway has a
+    name the tool has never heard of; the hosts are authoritative."""
+    root = _egress(
+        tmp_path,
+        "      providers:\n        - name: corp-llm\n          hosts: [gw.corp.internal]\n",
+    )
+    (env,) = wiz.load_project_spec(root)
+    assert wiz.resolve_provider_hosts(env["egress"]) == [
+        ("corp-llm", ("gw.corp.internal",), "declaration")
+    ]
+
+
+def test_egress_hosts_replace_never_extend(wiz, tmp_path):
+    """FR-001b — the load-bearing sub-decision, invisible in a passing deploy.
+
+    An operator routing through a gateway is closing the direct vendor path.
+    Additive semantics would leave api.anthropic.com reachable while the
+    declaration reads as constrained.
+    """
+    root = _egress(
+        tmp_path, "      providers:\n        - name: anthropic\n          hosts: [gw.corp]\n"
+    )
+    (env,) = wiz.load_project_spec(root)
+    ((name, hosts, source),) = wiz.resolve_provider_hosts(env["egress"])
+    assert name == "anthropic" and source == "declaration"
+    assert hosts == ("gw.corp",)
+    assert "api.anthropic.com" not in hosts, "hosts: must REPLACE the mapping, not extend it"
+
+
+def test_egress_long_form_without_hosts_dies(wiz, tmp_path):
+    root = _egress(tmp_path, "      providers:\n        - name: anthropic\n")
+    with pytest.raises(wiz.Fatal, match="requires 'hosts'"):
+        wiz.load_project_spec(root)
+
+
+@pytest.mark.parametrize(
+    "bad", ["https://gw.corp", "gw.corp:8443", "gw.corp/v1", "gw corp", "-gw.corp"]
+)
+def test_egress_non_hostname_dies_naming_the_field(wiz, tmp_path, bad):
+    """A URL accepted here would never match a CONNECT target — permitting
+    nothing, silently. Refuse it at parse time instead."""
+    root = _egress(
+        tmp_path, f"      providers:\n        - name: x\n          hosts: ['{bad}']\n", sub=bad[:4]
+    )
+    with pytest.raises(wiz.Fatal, match="is not a hostname"):
+        wiz.load_project_spec(root)
+
+
+def test_egress_unknown_keys_die(wiz, tmp_path):
+    with pytest.raises(wiz.Fatal, match="unknown key 'bogus'"):
+        wiz.load_project_spec(_egress(tmp_path, "      bogus: 1\n", "k1"))
+    with pytest.raises(wiz.Fatal, match="unknown provider key 'bogus'"):
+        wiz.load_project_spec(
+            _egress(
+                tmp_path,
+                "      providers:\n        - name: x\n          hosts: [a.b]\n          bogus: 1\n",
+                "k2",
+            )
+        )
+
+
+def test_egress_enforcement_enum(wiz, tmp_path):
+    ok = _egress(tmp_path, "      enforcement: strict\n", "ok")
+    (env,) = wiz.load_project_spec(ok)
+    assert env["egress"]["enforcement"] == "strict"
+    bad = _egress(tmp_path, "      enforcement: paranoid\n", "bad")
+    with pytest.raises(wiz.Fatal, match="enforcement='paranoid'"):
+        wiz.load_project_spec(bad)
+
+
+def test_egress_not_a_mapping_dies(wiz, tmp_path):
+    root = _project(tmp_path, "environments:\n  - name: acme\n    host: local\n    egress: nope\n")
+    with pytest.raises(wiz.Fatal, match="egress: must be a mapping"):
+        wiz.load_project_spec(root)

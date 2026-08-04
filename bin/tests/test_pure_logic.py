@@ -698,3 +698,54 @@ def test_no_tool_owned_file_remains_in_a_consolidated_project_root(wiz, tmp_path
     stray = [e.name for e in root.iterdir() if e.is_file() and e.name in consumed]
     assert stray == [], f"tool-owned files left in the project root: {stray}"
     assert not list(root.glob("agent-container.*")), "old-layout names still present"
+
+
+# --- Feature 012: per-agent facts are fixtures, not comments -----------------
+
+
+def test_builtin_default_fixture_covers_exactly_the_agents(wiz):
+    """Every supported agent must have a recorded answer to "does it reach a
+    provider with no operator credential?". A fifth agent added to AGENTS without
+    probing it FAILS here rather than silently inheriting "no default" — the
+    defect Feature 012 exists to surface is precisely an unnoticed default."""
+    assert set(wiz.AGENT_BUILTIN_DEFAULT) == set(wiz.AGENTS), (
+        f"AGENT_BUILTIN_DEFAULT disagrees with AGENTS: "
+        f"missing={sorted(set(wiz.AGENTS) - set(wiz.AGENT_BUILTIN_DEFAULT))} "
+        f"extra={sorted(set(wiz.AGENT_BUILTIN_DEFAULT) - set(wiz.AGENTS))}"
+    )
+    # opencode's value is not a guess: Feature 010's probe ran it with no
+    # credential and it answered over the network.
+    assert wiz.AGENT_BUILTIN_DEFAULT["opencode"] == "big-pickle"
+    for agent, provider in wiz.AGENT_BUILTIN_DEFAULT.items():
+        assert provider is None or provider in wiz.PROVIDERS, (
+            f"{agent}'s built-in default {provider!r} is not in PROVIDERS, so the "
+            f"tool cannot say what it may reach"
+        )
+
+
+def test_honours_proxy_fixture_covers_exactly_the_agents(wiz):
+    """FR-008's honest-strength claim rests on this table, and every entry in it
+    was established by RUNNING the agent against a black-holed proxy (research
+    R1), never read from documentation."""
+    assert set(wiz.AGENT_HONOURS_PROXY) == set(wiz.AGENTS), (
+        f"AGENT_HONOURS_PROXY disagrees with AGENTS: "
+        f"missing={sorted(set(wiz.AGENTS) - set(wiz.AGENT_HONOURS_PROXY))} "
+        f"extra={sorted(set(wiz.AGENT_HONOURS_PROXY) - set(wiz.AGENTS))}"
+    )
+
+
+def test_unprobed_agent_defaults_to_not_honouring(wiz):
+    """The safe default, and the opposite of what a hand-maintained comment gives.
+
+    An agent absent from the table must read as NOT known to honour the proxy, so
+    `strict` refuses it until someone probes it. `.get(agent)` truthiness is the
+    contract; a KeyError or a True default would both be wrong.
+    """
+    assert wiz.AGENT_HONOURS_PROXY.get("some-future-agent") is None
+    assert not wiz.AGENT_HONOURS_PROXY.get("some-future-agent", False)
+
+
+def test_every_provider_maps_to_at_least_one_host(wiz):
+    for name, hosts in wiz.PROVIDERS.items():
+        assert hosts, f"provider {name!r} maps to no hosts, so declaring it permits nothing"
+        assert all(wiz.HOSTNAME_RE.fullmatch(h) for h in hosts), f"{name}: non-hostname in {hosts}"

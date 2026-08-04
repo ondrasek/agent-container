@@ -539,6 +539,49 @@ EXEC_MODES = ("interactive", "headless")
 AGENTS = ("claude", "codex", "pi", "opencode")
 WORKSPACE_MODES = ("persistent", "bind", "ephemeral")
 
+# --- Feature 012: egress and provider control --------------------------------
+# An operator declares a PROVIDER NAME; the proxy needs HOSTNAMES. The mapping is
+# ours and will drift as vendors change endpoints, so it is versioned with the
+# tool and exposed via --json (FR-005) rather than discovered when a request is
+# refused. An operator reaching a provider INDIRECTLY (a gateway, a self-hosted
+# or vendor-compatible endpoint) overrides the hosts per entry (FR-001a) — and
+# that override REPLACES this mapping rather than extending it (FR-001b).
+PROVIDERS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("api.anthropic.com",),
+    "openai": ("api.openai.com",),
+    "google": ("generativelanguage.googleapis.com", "aiplatform.googleapis.com"),
+    "openrouter": ("openrouter.ai",),
+    "big-pickle": ("api.big-pickle.com",),
+}
+
+# Which agents reach a provider with NO operator credential at all. This is the
+# defect Feature 012 exists to surface: Feature 010's probe ran opencode with no
+# credential and it answered, over the network, via a provider nobody declared.
+# A FIXTURE, NOT A COMMENT — a test pins it to AGENTS exactly, so a fifth agent
+# added without probing FAILS rather than silently inheriting "no default".
+AGENT_BUILTIN_DEFAULT: dict[str, str | None] = {
+    "claude": None,
+    "codex": None,
+    "pi": None,
+    "opencode": "big-pickle",
+}
+
+# Which agents honour HTTPS_PROXY/HTTP_PROXY — the fact that decides whether a
+# declaration is ENFORCEABLE (FR-008) and whether `strict` may deploy. Every
+# entry here was established by RUNNING the agent against a black-holed proxy
+# (research R1), never read from documentation. Also a pinned fixture: an agent
+# absent from this table is treated as NOT known to honour, so `strict` refuses
+# it until someone probes it — the safe default, and the opposite of what a
+# hand-maintained comment would give.
+AGENT_HONOURS_PROXY: dict[str, bool] = {
+    "claude": True,
+    "codex": True,
+    "pi": True,
+    "opencode": True,
+}
+
+ENFORCEMENT_MODES = ("advisory", "strict")
+
 
 def validate_private_key(path: Path) -> None:
     """Fail fast if `path` is not a readable, unencrypted OpenSSH private key.
@@ -4925,6 +4968,105 @@ def validate_provision_table(table: dict, env_name: str, where: str) -> None:
         )
 
 
+HOSTNAME_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$")
+
+
+def validate_egress(egress: object, where: str) -> None:
+    """Validate the optional `egress:` block (Feature 012, contracts C1).
+
+    Three states are DISTINCT and must never be conflated: absent (unrestricted —
+    this function is not called at all), `providers: []` (air-gapped, refuse
+    everything), and a non-empty list. Coercing absent to empty would turn every
+    existing environment air-gapped on upgrade.
+
+    A provider entry is EITHER a bare name the tool knows, OR a `{name, hosts}`
+    mapping for an indirect endpoint (FR-001a) whose name need NOT be known —
+    there, the hosts are authoritative and the name is a label.
+    """
+    where = f"{where} egress"
+    if not isinstance(egress, dict):
+        die(f"{where}: must be a mapping")
+    for k in egress:
+        if k not in {"providers", "enforcement"}:
+            die(f"{where}: unknown key {k!r}")
+    _enum_field(egress, "enforcement", ENFORCEMENT_MODES, where)
+    if "providers" not in egress:
+        return
+    providers = egress.get("providers")
+    # A bare string is the common mistake; iterating its characters would treat
+    # "anthropic" as nine providers, so die naming the field instead.
+    if not isinstance(providers, list):
+        got = type(providers).__name__
+        die(f"{where}: 'providers' must be a list, got {got} (a single provider is a 1-item list)")
+    for i, entry in enumerate(providers):
+        validate_provider_entry(entry, f"{where} providers[{i}]")
+
+
+def validate_provider_entry(entry: object, where: str) -> None:
+    """One provider declaration: a known name, or a `{name, hosts}` override."""
+    if isinstance(entry, str):
+        if entry not in PROVIDERS:
+            die(
+                f"{where}: unknown provider {entry!r}. Known: "
+                f"{', '.join(sorted(PROVIDERS))}. For an endpoint the tool does not "
+                f"know (a gateway, a self-hosted or vendor-compatible deployment), "
+                f"give it explicit hosts: {{ name: {entry}, hosts: [<host>] }}"
+            )
+        return
+    if not isinstance(entry, dict):
+        die(f"{where}: must be a provider name (string) or a {{name, hosts}} mapping")
+    for k in entry:
+        if k not in {"name", "hosts"}:
+            die(f"{where}: unknown provider key {k!r}")
+    name = entry.get("name")
+    if not name or not isinstance(name, str):
+        die(f"{where}: missing required string 'name'")
+    hosts = entry.get("hosts")
+    if hosts is None:
+        # The mapping form exists ONLY to carry hosts. Without them it is the short
+        # form written the long way, so say that rather than silently accepting it.
+        die(
+            f"{where}: the mapping form requires 'hosts' — for the tool's own hosts, write {name!r}"
+        )
+    if not isinstance(hosts, list) or not hosts:
+        die(f"{where}: 'hosts' must be a non-empty list of hostnames")
+    for h in hosts:
+        if not isinstance(h, str) or not HOSTNAME_RE.fullmatch(h):
+            die(
+                f"{where}: {h!r} is not a hostname. Give a bare host "
+                f"(no scheme, no port, no path) — a URL would be accepted and then "
+                f"never match, silently permitting nothing"
+            )
+
+
+def resolve_provider_hosts(egress: dict | None) -> list[tuple[str, tuple[str, ...], str]]:
+    """The EFFECTIVE allowlist: (provider name, hosts, source) per declared entry.
+
+    An explicit `hosts:` REPLACES the tool's mapping for that entry — it is never
+    added to it (FR-001b). An operator who routes through a gateway is usually
+    doing so to CLOSE the direct vendor path; extending would leave it open while
+    the declaration reads as constrained.
+
+    >>> resolve_provider_hosts({"providers": ["anthropic"]})
+    [('anthropic', ('api.anthropic.com',), 'tool')]
+    >>> resolve_provider_hosts({"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]})
+    [('anthropic', ('gw.corp',), 'declaration')]
+    >>> resolve_provider_hosts({"providers": []})
+    []
+    >>> resolve_provider_hosts(None)
+    []
+    """
+    if not egress:
+        return []
+    out: list[tuple[str, tuple[str, ...], str]] = []
+    for entry in egress.get("providers") or []:
+        if isinstance(entry, str):
+            out.append((entry, PROVIDERS[entry], "tool"))
+        else:
+            out.append((entry["name"], tuple(entry["hosts"]), "declaration"))
+    return out
+
+
 def validate_environment(env: object, where: str) -> None:
     """Validate one environment against the pinned schema (contracts §Schema).
     On any error `die` naming the offending field; make no partial change (FR-003)."""
@@ -4957,8 +5099,10 @@ def validate_environment(env: object, where: str) -> None:
         die(f"{where}: 'credentials' must be a list")
     for j, cred in enumerate(creds):
         validate_credential(cred, f"{where} credentials[{j}]")
+    if "egress" in env:
+        validate_egress(env.get("egress"), where)
     for k in env:
-        if k not in {"name", "host", "container", "credentials"}:
+        if k not in {"name", "host", "container", "credentials", "egress"}:
             die(f"{where}: unknown key {k!r}")
 
 
