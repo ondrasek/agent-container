@@ -481,3 +481,120 @@ worth confirming dnsmasq can emit it before the error path is designed around NX
 service:egress` the published port moves to the egress service. The port *number* is unchanged, so
 the identity lock passes — **which is exactly why it must be handled deliberately rather than left
 to a test that cannot see it.**
+
+---
+
+## R15 (VERIFIED) — T102/T104: the Phase B mechanism works, and the agent cannot switch it off
+
+Probed before writing any committed code, because if this failed the phase had no mechanism.
+
+**Architecture**: egress container holds `CAP_NET_ADMIN` and installs the rules; the agent joins its
+network namespace (`--network container:egress`) with **`CapAdd: []`** and **zero proxy environment
+variables**.
+
+### T104 — the agent gains nothing
+
+| | |
+|---|---|
+| agent `CapAdd` | **`[]`** |
+| egress `CapAdd` | `[CAP_NET_ADMIN]` |
+| agent `NetworkMode` | `container:<egress>` |
+| proxy env vars in the agent | **0** |
+
+Constitution II is *better* served than by Phase A: the container running untrusted code holds no
+privilege at all, and the privilege that exists sits where no untrusted code runs.
+
+### T102 — it splices, it does not bump
+
+Certificate seen by the agent for a **declared** host:
+
+```text
+subject=CN=api.anthropic.com
+issuer=C=US, O=Google Trust Services, CN=WE1
+```
+
+**The real certificate.** Had this shown a squid-generated CN, that would be `bump` — TLS
+terminated, every `Authorization` header visible, R2 and Constitution III broken. It is `splice`:
+squid reads the ClientHello SNI and passes bytes through without terminating.
+
+### The enforcement half — measured
+
+| Attempt | Exit | Meaning |
+|---|---|---|
+| declared HTTPS | **0** | reachable |
+| undeclared HTTPS | **35** | squid terminated on SNI |
+| undeclared **after `unset` of every proxy variable** | **35** | *unchanged* — **this is the feature** |
+| `http://example.com:8080` | **28** | dropped by default-deny |
+| `http://example.com:1337` | **28** | dropped |
+| ssh to an undeclared host:22 | **1** | dropped |
+
+**Under Phase A the third row returns 0.** The agent unset everything available to it and reached
+nothing. That difference is US4.
+
+Ports 8080/1337 failing is US5's default-deny working — the hole the first design sketch left, and
+the reason `-P OUTPUT DROP` is the policy rather than a REDIRECT of 80/443 alone.
+
+### Rule shape that made it work
+
+The proxy's own traffic must be exempted by **uid**, or the REDIRECT loops:
+
+```sh
+iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner "$SQUID_UID" -j REDIRECT --to-port 3129
+iptables -A OUTPUT -m owner --uid-owner "$SQUID_UID" -j ACCEPT
+iptables -P OUTPUT DROP
+```
+
+`-m owner` is available in the Alpine `iptables` package and is the cleanest exemption — the
+alternative (exempting by destination) would have to enumerate the allowlist twice, in two
+syntaxes, and could drift.
+
+**Consequence for T101**: the entrypoint must resolve the squid uid at runtime rather than
+hard-coding it, and must install rules **before** exec'ing squid — a window where the rules are
+absent but the proxy is up is a window where the agent is unconstrained.
+
+---
+
+## R16 (VERIFIED) — T103: allowlist-only DNS works, and FR-020e forces the resolver choice
+
+Both candidates run; the difference is the **response code**, which is exactly what FR-020e is
+about.
+
+### dnsmasq — works, but can only lie
+
+| Query | Result |
+|---|---|
+| declared `api.anthropic.com` | `NOERROR` → `160.79.104.10` |
+| declared wildcard `raw.githubusercontent.com` | `NOERROR` → `185.199.109.133` |
+| undeclared `api.openai.com` | **`NXDOMAIN`** |
+| tunnelling-shaped `ZXhmaWx0cmF0ZWQ.attacker.example.com` | **`NXDOMAIN`** |
+
+The allowlist itself is correct — including that a **tunnelling-shaped label does not resolve**,
+which is the point: DNS exfiltration rides in the *question*, so a faithful upstream carries it out
+regardless. Refusing to ask is the only thing that closes it.
+
+But `local=/#/` returns **NXDOMAIN**, which tells the client *"this name does not exist"* when the
+truth is *"policy forbids asking"*. `dnsmasq --help` has no rcode option; `--bogus-nxdomain` is
+unrelated. **dnsmasq cannot satisfy FR-020e.**
+
+### unbound — can say what it means
+
+`unbound 1.22.0` with `local-zone: "." refuse` plus per-name `forward-zone` entries:
+
+```text
+undeclared api.openai.com  ->  status: REFUSED
+```
+
+**Decision: unbound, not dnsmasq.** FR-020e requires a refusal be distinguishable from a genuine
+"no such host", and only one candidate can express it.
+
+**Why it matters beyond honesty**: NXDOMAIN is a *cacheable negative answer*, and a client that
+caches it will keep failing after the operator fixes the declaration — a policy error that presents
+as a DNS bug and outlives its cause. `REFUSED` is not cached the same way.
+
+**Cost, accepted**: unbound is heavier than dnsmasq's ~1 MB, and this replaces the R13 sketch.
+Recorded as superseding it, not contradicting it — R13 argued *allowlist-only resolution*, which
+stands; only the daemon changes, and it changes for a requirement R13 did not weigh.
+
+**Consequence for the plan**: the Phase B image is `squid + unbound + iptables`. The DNS surface's
+generator emits `forward-zone` blocks per declared name rather than dnsmasq `server=/…/` lines —
+a third rendering of the same list (data-model §7), which is why the renderings were kept separate.

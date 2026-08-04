@@ -265,11 +265,11 @@ do**, which no unit test can establish. Every evasion scenario drives the contai
 **Purpose**: If SNI filtering without decryption does not work, this phase has no mechanism and
 everything after it is wasted. Prove it first, as Phase A proved the proxy by running four of them.
 
-- [ ] T100 Create `image/egress/Dockerfile` for Phase B — Alpine + **squid 6.12** (`--with-openssl`, verified in research R12) + `dnsmasq` + `iptables`, replacing tinyproxy. Keep the rootless posture for squid itself; only the entrypoint needs `NET_ADMIN`
-- [ ] T101 Write `image/egress/entrypoint.sh`: install the netfilter rules, start dnsmasq, then **exec** squid so compose owns PID 1 and the container dies with the proxy
-- [ ] T102 **Prove peek-and-splice end to end by running it**: an allowed SNI splices through and the client sees the **real server certificate**; a disallowed SNI is terminated. Record in research R12b. **If the client sees a proxy-generated certificate, stop** — that is `bump`, not `splice`, and it breaks R2/Constitution III
-- [ ] T103 Settle FR-020e by running dnsmasq: does `local=/#/` return **NXDOMAIN** or can it return **REFUSED**? NXDOMAIN says "no such host" where the truth is "policy", and the error path must not be designed around the wrong signal. Record in research R13a
-- [ ] T104 Verify the agent container's capability set is **unchanged** with `network_mode: service:egress` — `CapAdd: []` on the agent, `[NET_ADMIN]` on the proxy (SC-011, quickstart S16). **This is the blocking check for the whole phase**
+- [ ] T100 Create `image/egress/Dockerfile` for Phase B — Alpine + **squid 6.12** (`--with-openssl`, R12) + **`unbound`** (R16 — dnsmasq cannot return REFUSED, so it cannot satisfy FR-020e) + `iptables`, replacing tinyproxy. Keep the rootless posture for squid itself; only the entrypoint needs `NET_ADMIN`
+- [ ] T101 Write `image/egress/entrypoint.sh`: resolve the squid uid at **runtime** (never hard-coded), install the netfilter rules, start unbound, then **exec** squid so compose owns PID 1. Rules go in **before** squid starts — a window where the proxy is up and the rules are not is a window where the agent is unconstrained (R15)
+- [X] T102 **Prove peek-and-splice end to end by running it**: an allowed SNI splices through and the client sees the **real server certificate**; a disallowed SNI is terminated. Record in research R12b. **If the client sees a proxy-generated certificate, stop** — that is `bump`, not `splice`, and it breaks R2/Constitution III
+- [X] T103 Settle FR-020e by running dnsmasq: does `local=/#/` return **NXDOMAIN** or can it return **REFUSED**? NXDOMAIN says "no such host" where the truth is "policy", and the error path must not be designed around the wrong signal. Record in research R13a
+- [X] T104 Verify the agent container's capability set is **unchanged** with `network_mode: service:egress` — `CapAdd: []` on the agent, `[NET_ADMIN]` on the proxy (SC-011, quickstart S16). **This is the blocking check for the whole phase**
 
 **Checkpoint**: the mechanism exists and does not decrypt. Do not proceed without T102 and T104.
 
@@ -283,7 +283,7 @@ everything after it is wasted. Prove it first, as Phase A proved the proxy by ru
 - [ ] T108 [P] Add a test asserting the squid rendering is unquoted and uses the leading-dot form, and that `*.example.com` from Phase A's syntax is **translated, not passed through** (FR-018a)
 - [ ] T109 Render the **netfilter** rules from `{host, port}` entries in `bin/agent-container` — default-deny OUTPUT, REDIRECT 80/443 to squid, REDIRECT 53 to dnsmasq, explicit ACCEPT per declared host+port (FR-017/FR-018)
 - [ ] T110 [P] Add a test proving the generated ruleset **denies by default** — an undeclared port produces no ACCEPT rule, and the policy is DROP rather than ACCEPT. The first design sketch got this wrong, and default-accept is worse than no control
-- [ ] T111 Render the **dnsmasq** config from the same list in `bin/agent-container` — allowlist-only resolution, upstream from FR-020c's enumerated set (FR-020/FR-020b/FR-020c)
+- [ ] T111 Render the **dnsmasq** config from the same list in `bin/agent-container` — `local-zone: "." refuse` plus a per-name `forward-zone`, upstream from FR-020c's enumerated set (FR-020/FR-020b/FR-020c)
 - [ ] T112 Migrate Phase A's two-key syntax to the unified list (FR-018b) — **removed, not deprecated**. Update `validate_egress`, `validate_provider_entry`, `resolve_provider_hosts` and the ~15 tests that pin the old shape
 - [ ] T113 [P] Add a test proving a Phase A two-key declaration is **refused with a migration message naming the replacement**, not silently ignored — the FR-005 refuse-don't-ignore precedent
 - [ ] T114 Prove the three renderings agree: one declaration, three surfaces, and a test that a host declared once appears in **all three** (or, for a ported entry, in netfilter only). Drift between surfaces is the failure this unified schema exists to prevent
