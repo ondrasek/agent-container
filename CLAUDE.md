@@ -67,7 +67,8 @@ lifecycle, volumes · 001,002) · `docs/credentials.md` (injection, managers · 
 `docs/execution.md` (modes, `--agent`/`--task`/`--workspace`, clone-on-start · 004,010) ·
 `docs/shell-integration.md` (`attach --print`, `host env` · 005) · `docs/agent-as-code.md`
 (declarative `.agent-container/` · 006,008) · `docs/agent-interface.md` (`--json`, `context`,
-`skill` · 009) · `docs/egress.md` (declaration, enforcement, honesty · 012) · specs/007 (wizard).
+`skill` · 009) · `docs/egress.md` (declaration, enforcement, honesty · 012) ·
+`docs/threat-model.md` (**reconcile every feature** — Constitution) · specs/007 (wizard).
 
 ## Architecture (keep these layers separate)
 

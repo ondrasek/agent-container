@@ -69,6 +69,10 @@ bypass-selection = true
 "bin/agent-container" = "agent_container/__init__.py"
 "completions/agent-container.bash" = "agent_container/completions/agent-container.bash"
 "completions/agent-container.zsh" = "agent_container/completions/agent-container.zsh"
+# The threat model ships with the artifact deliberately: a security posture that
+# lives only in the repo is unavailable to whoever installs the tool and has to
+# decide what it does and does not defend against.
+"docs/threat-model.md" = "agent_container/docs/threat-model.md"
 
 # Test layering (constitution Principle V — inverted pyramid): the fast,
 # runtime-free unit/contract tests are the default inner loop; the real-container

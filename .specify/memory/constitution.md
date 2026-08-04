@@ -1,6 +1,17 @@
 <!--
 SYNC IMPACT REPORT
 ==================
+Version change: 2.1.0 → 2.2.0   (MINOR)
+Bump rationale: Added a Development Workflow clause requiring
+  `docs/threat-model.md` to be reconciled with every feature that alters a trust
+  boundary, a credential path, or the network surface — MINOR under this file's
+  own rule (materially expanding guidance, no principle removed or redefined).
+  Placed in Development Workflow rather than as a principle: it is a cadence
+  obligation on how changes land, not a new invariant about what the system is.
+  The threat model itself is a docs artifact and ships in the wheel; the
+  requirement that it record UNMITIGATED risk is the load-bearing half, since a
+  document listing only successes is marketing. Prior reports retained below.
+
 Version change: 2.0.0 → 2.1.0   (MINOR)
 Bump rationale: Added Principle VII "Continuous Deployment" — a new principle
   (MINOR). `main` is always releasable and every substantive change is released
@@ -240,6 +251,18 @@ what changed.
 - **Spec and docs track behavior.** The specification, README, `docs/`, and
   CLAUDE.md MUST be updated in the same change as any change to behavior, scope,
   the identity contract, or the security posture — stale spec or docs are defects.
+- **The threat model tracks the feature.** `docs/threat-model.md` MUST be
+  reconciled in the same change as any feature that alters a trust boundary, a
+  credential path, or the network surface — recording which threats the change
+  mitigates, which it leaves open, and which it newly introduces. Its maintenance
+  table names every feature; a feature that lands without updating its row has not
+  landed.
+
+  **Rationale:** a security posture asserted once at design time and never
+  revisited becomes a claim rather than a description, and the gap is invisible
+  precisely because the document still reads as current. Recording what is *not*
+  mitigated is the load-bearing half — an honest list of open risks is what makes
+  the mitigated ones believable.
 
 Concrete workflow mechanics (CI suite composition, `uv build`, Trusted Publishing
 on `v*` tags, the commit-and-push cadence) live in CLAUDE.md.
@@ -263,4 +286,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.1.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-07-08
+**Version**: 2.2.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-05
