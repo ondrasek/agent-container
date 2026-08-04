@@ -745,3 +745,36 @@ def test_credential_failure_still_names_its_source_kind(wiz, tmp_path):
     with pytest.raises(wiz.Fatal) as e:
         wiz.resolve_credential_value(cred, tmp_path)
     assert "nope" in str(e.value), "must name the unresolvable source, not just the credential"
+
+
+def test_no_credential_value_reaches_any_generated_artifact(wiz, tmp_path, monkeypatch):
+    """SC-007 (T039a). A 100% security criterion needs a test, not a paragraph.
+
+    The SENTINEL is the load-bearing detail. Asserting "no key-shaped string
+    appears" tests the imagination of whoever wrote the pattern — a real key that
+    does not match it passes cleanly. Seeding a KNOWN value through the credential
+    path and asserting its absence tests the actual path, and fails loudly when a
+    new surface starts carrying it.
+    """
+    import json as _json
+
+    sentinel = "sk-ant-SENTINEL-must-not-appear-anywhere"
+    monkeypatch.setenv("ACC_SENTINEL_VAR", sentinel)
+    egress = {"providers": ["anthropic"], "allow": ["github.com"]}
+
+    # Every artifact Feature 012 generates, in one place.
+    artifacts = [
+        _json.dumps(wiz.build_compose_model("acme", tmp_path / "image", egress_filter_body=None)),
+        wiz.build_egress_config(wiz.resolve_provider_hosts(egress)),
+        _json.dumps(wiz.egress_payload(egress, "claude")),
+        wiz.egress_strength_statement("claude"),
+        _json.dumps(
+            wiz.plan_payload(
+                [({"name": "acme", "egress": egress}, "acme", "local", None, "absent", "")]
+            )
+        ),  # fmt: skip
+        str(wiz.egress_config_token(egress)),
+    ]
+    for blob in artifacts:
+        assert sentinel not in blob, "a credential value reached a generated artifact"
+        assert "ACC_SENTINEL_VAR" not in blob, "even the variable NAME need not travel"

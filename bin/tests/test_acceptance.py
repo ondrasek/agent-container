@@ -1845,3 +1845,103 @@ def test_explicit_env_file_works_against_a_non_default_context(acc):
     assert r.returncode == 0, f"-e against a non-default context failed:\n{r.stderr}"
     got = _exec("acc11r", ["bash", "-lc", 'printf %s "$REMOTE_MARK"']).stdout.strip()
     assert got == "yes", "the client-side env file did not reach a context-targeted deploy"
+
+
+# --- Feature 012: egress, against real containers ---------------------------
+
+
+def _egress_project(acc, name: str, egress_yaml: str):
+    proj = acc.tmp / f"proj{name}"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / f"{name}.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n"
+    )
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        f"environments:\n  - name: {name}\n    host: local\n"
+        f"    container:\n      agent: claude\n{egress_yaml}"
+    )
+    return proj
+
+
+def test_undeclared_provider_is_refused_not_dropped(acc):
+    """Quickstart S3 — the core case, and the one that distinguishes a REFUSAL
+    from a DROP. curl exit 56 = the proxy returned a status; 28 = it dropped the
+    connection (the R1a failure that produced 30-40s hangs); 0 = the request went
+    around the proxy entirely.
+
+    Asserting on %{http_code} would NOT work here: for a refused CONNECT it reads
+    000 for a refusal and a drop alike (research R10a, measured).
+    """
+    laptop = _gen_keypair(acc.tmp / "laptop12a")
+    proj = _egress_project(acc, "acc12a", "    egress:\n      providers: [anthropic]\n")
+    acc.register("acc12a")
+    r = acc.cli(["up", "acc12a", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
+    assert r.returncode == 0, f"deploy with a declaration failed:\n{r.stderr}"
+
+    declared = _exec("acc12a", ["curl", "-s", "-o", "/dev/null", "--max-time", "25",
+                                "https://api.anthropic.com/v1/messages"])  # fmt: skip
+    assert declared.returncode == 0, "the DECLARED provider must stay reachable"
+
+    undeclared = _exec("acc12a", ["curl", "-s", "-o", "/dev/null", "--max-time", "25",
+                                  "https://api.openai.com/v1/models"])  # fmt: skip
+    assert undeclared.returncode == 56, (
+        f"expected 56 (refused with a status); got {undeclared.returncode} — "
+        f"28 means the proxy DROPPED instead of refusing, 0 means the request "
+        f"bypassed the proxy entirely"
+    )
+
+
+def test_operator_no_proxy_is_refused_at_deploy(acc):
+    """Quickstart S6 — the feature's most likely silent failure. If this deploys,
+    the declaration reads as enforced while enforcing nothing."""
+    proj = _egress_project(acc, "acc12b", "    egress:\n      providers: [anthropic]\n")
+    (proj / ".agent-container" / "acc12b.env").write_text("GH_TOKEN=x\nNO_PROXY=*\n")
+    acc.register("acc12b")
+    r = acc.cli(["up", "acc12b"], cwd=proj)
+    assert r.returncode != 0, "an operator NO_PROXY must refuse the deploy"
+    assert "NO_PROXY" in r.stderr
+
+
+def test_no_declaration_deploys_exactly_as_before(acc):
+    """FR-004/FR-012 against a real container: an environment without an `egress:`
+    key gains no proxy service and no behaviour change."""
+    laptop = _gen_keypair(acc.tmp / "laptop12c")
+    proj = _egress_project(acc, "acc12c", "")
+    acc.register("acc12c")
+    r = acc.cli(["up", "acc12c", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
+    assert r.returncode == 0, f"an undeclared environment must deploy unchanged:\n{r.stderr}"
+    model = json.loads(
+        (acc.state_dir / "agent-container" / "local" / "acc12c.compose.yaml").read_text()
+    )
+    assert "egress" not in model["services"]
+    assert _exec("acc12c", ["true"]).returncode == 0
+
+
+def test_teardown_leaves_no_proxy_behind(acc):
+    """The proxy shares the compose project, and `down --remove-orphans` must clear
+    it — including after the declaration is DROPPED, when the regenerated file no
+    longer declares the service that is still running."""
+    laptop = _gen_keypair(acc.tmp / "laptop12d")
+    proj = _egress_project(acc, "acc12d", "    egress:\n      providers: [anthropic]\n")
+    acc.register("acc12d")
+    assert acc.cli(
+        ["up", "acc12d", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+
+    # Drop the declaration, redeploy: the generated file no longer has the service.
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: acc12d\n    host: local\n    container:\n      agent: claude\n"
+    )
+    assert acc.cli(["redeploy", "acc12d"], cwd=proj).returncode == 0
+    # -y is REQUIRED: `down` refuses a destructive action on a non-TTY without it.
+    # Without this the test failed while `down` had never run at all — asserting the
+    # end state without asserting the command succeeded cannot tell you which.
+    d = acc.cli(["down", "acc12d", "-y"], cwd=proj)
+    assert d.returncode == 0, f"down failed, so the teardown assertion is untestable:\n{d.stderr}"
+    ps = subprocess.run(
+        [RUNTIME, "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True
+    )
+    assert "agent-egress-acc12d" not in ps.stdout, (
+        "the proxy survived teardown — it carries restart: unless-stopped and is "
+        "invisible to list, to every wizard picker and to assert_host_empty"
+    )
