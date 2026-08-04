@@ -132,8 +132,8 @@ is silence; the failure mode being avoided is noise that trains operators to ign
 Wherever the tool reports enforcement, it MUST state (FR-008, SC-004):
 
 - a proxy **refuses requests from clients that honour it**;
-- it does **not** stop a process that ignores proxy settings and dials directly, because packet
-  filtering needs privileges Constitution II forbids;
+- it does **not** stop a process that ignores proxy settings and dials directly, because this
+  feature does not do packet filtering — a **scope decision, not an impossibility** (FR-008b);
 - **which agents are known to honour the proxy** — from the adherence fixture, currently all four.
 
 **Prohibited**: any phrasing implying a stronger guarantee than that. This is the requirement most

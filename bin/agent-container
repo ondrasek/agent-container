@@ -5276,8 +5276,8 @@ def egress_strength_statement(agent: str | None) -> str:
     return (
         f"egress enforcement is proxy-level, not packet-level. The proxy refuses "
         f"requests from clients that honour proxy settings; it does not stop a process "
-        f"that ignores them and opens a direct connection, because packet filtering "
-        f"needs privileges this container deliberately does not have. Known to honour "
+        f"that ignores them and opens a direct connection, because this feature does "
+        f"not do packet filtering. Known to honour "
         f"the proxy: {honours}"
         f"{'' if known else f' (NOT including {agent!r})'}. "
         f"A shell inside the container can also override the proxy settings via "

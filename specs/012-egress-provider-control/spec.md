@@ -259,9 +259,22 @@ discoverable after the container is gone.
   when the declaration cannot be enforced). The effective mode MUST be visible before deploying.
 - **FR-008**: The **strength** of the enforcement MUST be stated honestly. A proxy refuses
   requests from clients that honour it; it does **not** stop a process that ignores proxy settings
-  and opens a direct connection, because packet filtering needs privileges this feature may not
-  add. The tool MUST NOT imply a stronger guarantee than that, and MUST say which agents are
-  known to honour the proxy.
+  and opens a direct connection, because **this feature does not do packet filtering**. The tool
+  MUST NOT imply a stronger guarantee than that, and MUST say which agents are known to honour the
+  proxy.
+- **FR-008b** *(corrected 2026-08-04)*: The statement MUST describe that limit as a **scope
+  decision, not an impossibility**. Packet filtering *is* achievable here: `NET_ADMIN` on the
+  **proxy** container plus a shared network namespace (`network_mode: service:egress`) intercepts
+  unconditionally while the **agent** container gains no capability at all — the standard sidecar
+  pattern. Constitution II is per-container (*"a container runs untrusted agent code; it MUST hold
+  no more privilege than **its** work requires"*), and the capability would land on a container
+  running no untrusted code.
+
+  Earlier drafts of this spec asserted that packet filtering "needs privileges Constitution II
+  forbids". **That was wrong** — it conflated *the agent container* with *any container in the
+  deployment*. Saying so matters beyond accuracy: a false impossibility claim is an argument
+  against ever building the stronger mechanism, planted inside the requirement that exists to keep
+  the tool honest.
 - **FR-008a**: The honesty statement MUST also disclose that **a shell inside the container can
   override the proxy settings**, because `~/.agent-env/env` is sourced with `set -a` by every
   interactive shell — *after* the container environment, from a volume that survives teardown.
@@ -331,11 +344,16 @@ discoverable after the container is gone.
 
 ## Assumptions
 
-- **Enforcement is proxy-level, not packet-level.** A sidecar proxy genuinely refuses undeclared
-  hosts — stronger than configuring agents and hoping — but it binds only clients that honour
-  proxy settings. A process that ignores them and dials directly is not stopped, because packet
-  filtering needs privileges Constitution II forbids. FR-008 requires that limit be stated, not
-  implied away.
+- **Enforcement is proxy-level, not packet-level — by scope, not by necessity.** A sidecar proxy
+  genuinely refuses undeclared hosts (a real `403`, not "the agent was configured not to"), but it
+  binds only clients that honour proxy settings. A process that ignores them and dials directly is
+  not stopped. **This feature chooses not to do packet filtering; it is not prevented from it.**
+  `NET_ADMIN` on the proxy container plus `network_mode: service:egress` would intercept
+  unconditionally with the agent container holding no capability — Constitution II is
+  per-container, and the capability lands where no untrusted code runs. Deferred because it
+  demands SNI peeking (a `CONNECT`-based proxy cannot read a transparently redirected TLS stream),
+  moves the published-port binding to the egress service (an identity migration, Constitution IV),
+  and makes every non-HTTP protocol an explicit allow. See FR-008b.
 - **The compose project already carries helpers.** Feature 002 established that a helper service
   in the environment's compose project shares its lifecycle, so teardown of the environment tears
   down the proxy with it. This feature adds its service to the model the tool **generates**; the
