@@ -24,13 +24,53 @@ small comfort if the prompt containing your source goes somewhere you did not sa
 
 This feature makes the set of reachable providers **declared, enforced and visible**.
 
-> **The hard constraint.** The container is **rootless and immutable at runtime** (Constitution
-> II): no `sudo`, no capabilities added, nothing installed after build. Any control that requires
-> new privileges — packet filtering, raw sockets, per-container firewall rules — is out of scope
-> **by construction**, not by preference. Whatever this feature does, an unprivileged process
-> must be able to do.
+> **The hard constraint.** The **agent** container is rootless and immutable at runtime
+> (Constitution II): no `sudo`, no capabilities added, nothing installed after build. Nothing this
+> feature does may change that.
+>
+> **What that constraint does *not* forbid** (corrected 2026-08-05, US4): packet filtering by a
+> *different* container. Constitution II is per-container — the rule is that the container running
+> **untrusted agent code** holds no more privilege than its work requires. A proxy sidecar running
+> no untrusted code may hold `NET_ADMIN` and program the network namespace the agent joins, while
+> the agent itself gains nothing. This is the Istio/Linkerd sidecar pattern, and it was verified by
+> probe (research R11).
+>
+> The earlier reading of this constraint — that packet filtering was out of scope *by construction*
+> — conflated "the agent container" with "any container", and in doing so ruled out the only
+> mechanism that makes enforcement independent of the agent's cooperation.
 
 ## Clarifications
+
+### Session 2026-08-05 — US4/US5 clarification
+
+- Q: How is a non-HTTP destination declared, given FR-018 needs host **and** port granularity and
+  the schema has only `providers` (vendor names) and `allow` (bare hosts)? → A: **A single unified
+  list of typed entries, replacing both.** `egress.allow` becomes a list whose entries are one of:
+
+  ```yaml
+  egress:
+    allow:
+      - provider: anthropic                     # tool supplies the hosts
+      - provider: openai
+        hosts: [llm.corp.internal]              # REPLACES the tool's mapping (FR-001b)
+      - host: "*.githubusercontent.com"         # HTTPS, via the proxy
+      - host: github.com
+        port: 22                                # non-HTTP: a netfilter rule, not a proxy entry
+    enforcement: advisory
+  ```
+
+  **The port is what selects the mechanism**, and that is the property that makes one list
+  coherent rather than merely shorter: an entry **without** a port is HTTP/HTTPS and becomes a line
+  in the proxy's allowlist; an entry **with** a port is anything else and becomes an explicit
+  netfilter rule. The operator declares *destinations*; the tool decides which of its two
+  enforcement surfaces each one needs.
+
+  **Accepted cost — this re-specs syntax already implemented and tested on this branch.**
+  `providers:`/`allow:` as separate keys, their validation, `resolve_provider_hosts` and their
+  tests all change. Chosen over the compatible options because the alternative was a schema where
+  `allow` meant two different things and a bare host silently implied 80+443 while
+  `host:port` implied only that port — an inconsistency operators would trip over for as long as
+  the tool exists. Pre-1.0, and the cost is paid once.
 
 ### Session 2026-08-04 — scope corrected after a design probe
 
@@ -379,6 +419,14 @@ that host on that port becomes reachable.
 - **FR-018**: The declaration MUST be able to express **non-HTTP destinations** (SSH, FTP, gRPC, a
   database) as host **and port**, so an operator can permit exactly what the environment needs and
   nothing adjacent. Permitting a protocol generally is not sufficient granularity.
+- **FR-018a**: All destinations MUST be declared in **one list** (`egress.allow`) of typed entries
+  — `{provider}`, `{provider, hosts}`, `{host}`, or `{host, port}` — superseding the separate
+  `providers:` and `allow:` keys. **The presence of a port selects the enforcement surface**: no
+  port means HTTP/HTTPS through the proxy allowlist; a port means an explicit netfilter rule. The
+  operator declares destinations; the tool decides which surface each needs.
+- **FR-018b**: This supersedes FR-001/FR-001c's two-key syntax, which is **removed, not deprecated**
+  — one way to say a thing. The replacement semantics of an explicit `hosts:` (FR-001b) survive
+  unchanged, as does the `*.domain` form (FR-001d).
 - **FR-019**: **No capability may be added to the agent container** (Constitution II). The
   privilege required to program the network stack MUST sit on the **proxy** container, which runs
   no untrusted code. The agent joins that container's network namespace and gains nothing.
