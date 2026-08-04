@@ -166,7 +166,7 @@ def test_no_declaration_leaves_the_model_byte_identical(wiz, tmp_path):
     import json
 
     before = json.dumps(_model(wiz, tmp_path), indent=2, sort_keys=True)
-    after = json.dumps(_model(wiz, tmp_path, egress_filter_file=None), indent=2, sort_keys=True)
+    after = json.dumps(_model(wiz, tmp_path, egress_filter_body=None), indent=2, sort_keys=True)
     assert before == after
     assert "egress" not in before
     assert wiz.EGRESS_SERVICE_KEY not in _model(wiz, tmp_path)["services"]
@@ -174,34 +174,32 @@ def test_no_declaration_leaves_the_model_byte_identical(wiz, tmp_path):
 
 def test_declaration_adds_exactly_one_service_and_no_volume(wiz, tmp_path):
     """The proxy must not touch the nine-volume identity contract (Constitution IV)."""
-    f = tmp_path / "acme.egress.filter"
-    f.write_text("^api\\.anthropic\\.com$\n")
-    plain, withp = _model(wiz, tmp_path), _model(wiz, tmp_path, egress_filter_file=f)
+    body = "^api\\.anthropic\\.com$\n"
+    plain, withp = _model(wiz, tmp_path), _model(wiz, tmp_path, egress_filter_body=body)
     assert set(withp["services"]) - set(plain["services"]) == {"egress"}
     assert withp["volumes"] == plain["volumes"], "the volume set must be untouched"
     egress = withp["services"]["egress"]
     assert "ports" not in egress, "the proxy must not be published to the host"
     assert "volumes" not in egress
     assert "env_file" not in egress, "an operator env-file must not reach the security control"
-    assert withp["configs"]["egress_filter"]["file"] == str(f)
+    # `content:`, not `file:` — a file: config is a read-only BIND of the local path
+    # and cannot reach a daemon that does not share the filesystem (remote hosts).
+    assert withp["configs"]["egress_filter"] == {"content": body}
+    assert "file" not in withp["configs"]["egress_filter"]
 
 
 def test_proxy_container_name_is_outside_the_environment_namespace(wiz, tmp_path):
     """Compose would name it `agent-container-acme-egress-1`, which begins with
     CONTAINER_PREFIX — and six sites treat any `agent-container-*` container as a
     deployable environment to list, pick or tear down."""
-    f = tmp_path / "f"
-    f.write_text("")
-    cn = _model(wiz, tmp_path, egress_filter_file=f)["services"]["egress"]["container_name"]
+    cn = _model(wiz, tmp_path, egress_filter_body="")["services"]["egress"]["container_name"]
     assert not cn.startswith(wiz.CONTAINER_PREFIX), f"{cn} would be scanned as an environment"
 
 
 def test_agent_is_pointed_at_the_proxy_in_both_cases(wiz, tmp_path):
     """Lowercase variants matter: curl, git and most HTTP clients read
     `https_proxy`, not `HTTPS_PROXY`."""
-    f = tmp_path / "f"
-    f.write_text("")
-    env = _model(wiz, tmp_path, egress_filter_file=f)["services"]["agent"]["environment"]
+    env = _model(wiz, tmp_path, egress_filter_body="")["services"]["agent"]["environment"]
     for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
         assert env[k] == f"http://egress:{wiz.EGRESS_PORT}"
     assert env["NO_PROXY"] == env["no_proxy"] == wiz.EGRESS_NO_PROXY

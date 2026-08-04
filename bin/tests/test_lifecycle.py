@@ -59,10 +59,12 @@ def test_driver_redeploy_argv_force_recreates(wiz):
 
 
 def test_driver_down_argv_purge_and_rmi_local(wiz):
-    assert wiz.driver_down_argv(H, "p", F)[-1] == "down"
-    assert wiz.driver_down_argv(H, "p", F, purge=True)[-2:] == ["down", "--volumes"]
-    assert wiz.driver_down_argv(H, "p", F, purge=True, rmi_local=True)[-4:] == [
-        "down", "--volumes", "--rmi", "local",
+    assert wiz.driver_down_argv(H, "p", F)[-2:] == ["down", "--remove-orphans"]
+    assert wiz.driver_down_argv(H, "p", F, purge=True)[-3:] == [
+        "down", "--remove-orphans", "--volumes",
+    ]  # fmt: skip
+    assert wiz.driver_down_argv(H, "p", F, purge=True, rmi_local=True)[-5:] == [
+        "down", "--remove-orphans", "--volumes", "--rmi", "local",
     ]  # fmt: skip
 
 
@@ -387,3 +389,41 @@ def test_fresh_teardown_targets_every_volume_the_tool_creates(wiz):
     assert {"agent-container-acme-opencode", "agent-container-acme-opencode-data"} <= created
     # The pre-010 set is a strict subset: nothing was renamed or dropped (FR-014).
     assert {f"agent-container-acme-{s}" for s in _PRE_010_SUFFIXES} < created
+
+
+def _ok(argv):
+    import subprocess
+
+    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+
+# --- Feature 012: the proxy must not survive teardown -----------------------
+
+
+def test_fallback_teardown_removes_the_proxy_too(wiz, monkeypatch, tmp_path):
+    """The no-compose-file branch removes by EXACT NAME, and the proxy is
+    deliberately outside CONTAINER_PREFIX — so nothing else in that path would ever
+    match it. Without this it keeps running under `restart: unless-stopped`."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(wiz, "query", lambda argv: calls.append(list(argv)) or _ok(argv))
+    monkeypatch.setattr(wiz, "host_ps_rows", lambda *a, **k: [("agent-container-acme", "Up")])
+    monkeypatch.setattr(wiz, "compose_file_path", lambda h, n: tmp_path / "absent.yaml")
+    monkeypatch.setattr(wiz, "host_is_local", lambda h: False)
+    wiz.down_container("local", H, "acme", purge=False)
+    removed = [a[-1] for a in calls if "rm" in a and "-f" in a]
+    assert "agent-container-acme" in removed
+    assert wiz.egress_container_name("acme") in removed, "the proxy would be stranded"
+
+
+def test_teardown_removes_the_proxy_when_the_agent_is_already_gone(wiz, monkeypatch, tmp_path):
+    """`exists` comes from host_ps_rows, which filters on CONTAINER_PREFIX — so a
+    surviving proxy can NEVER make it true. The tool would otherwise report
+    'no container named …' while agent-egress-acme keeps running, unmentioned by
+    anything, forever."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(wiz, "query", lambda argv: calls.append(list(argv)) or _ok(argv))
+    monkeypatch.setattr(wiz, "host_ps_rows", lambda *a, **k: [])  # agent already gone
+    monkeypatch.setattr(wiz, "compose_file_path", lambda h, n: tmp_path / "absent.yaml")
+    wiz.down_container("local", H, "acme", purge=False)
+    removed = [a[-1] for a in calls if "rm" in a and "-f" in a]
+    assert wiz.egress_container_name("acme") in removed

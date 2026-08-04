@@ -657,9 +657,25 @@ def test_driver_up_and_down_argv(wiz, tmp_path):
         "--build",
     ]
     down = wiz.driver_down_argv(host, "agent-container-acme", f)
-    assert down[-1] == "down"
+    assert down[-2:] == ["down", "--remove-orphans"]
     down_purge = wiz.driver_down_argv(host, "agent-container-acme", f, purge=True)
-    assert down_purge[-2:] == ["down", "--volumes"]
+    assert down_purge[-3:] == ["down", "--remove-orphans", "--volumes"]
+
+
+def test_remove_orphans_is_on_down_only(wiz, tmp_path):
+    """Reproduced defect: dropping an `egress:` declaration regenerates a compose
+    file without the proxy service, and a plain `down` then leaves
+    `agent-egress-<name>` Up — under `restart: unless-stopped`, invisible to `list`,
+    to every wizard picker and to assert_host_empty — while STILL EXITING 0.
+
+    But the flag must NOT reach up/redeploy: there it would remove an operator's own
+    helper services from `<name>.services.yaml`, which are legitimately absent from
+    the generated file. This test is the guard on that asymmetry.
+    """
+    host, f = {"driver": "docker", "context": "lima"}, tmp_path / "acme.compose.yaml"
+    assert "--remove-orphans" in wiz.driver_down_argv(host, "p", f)
+    assert "--remove-orphans" not in wiz.driver_up_argv(host, "p", f)
+    assert "--remove-orphans" not in wiz.driver_redeploy_argv(host, "p", f)
 
 
 def test_driver_reachable_address(wiz):
@@ -709,7 +725,8 @@ def test_driver_argv_builders_merge_override_as_second_f(wiz, tmp_path):
         assert argv[6:10] == ["-f", str(f), "-f", str(ov)]
     down = wiz.driver_down_argv(DOCKER_H, "p", f, purge=True, rmi_local=True, override=ov)
     assert down[6:10] == ["-f", str(f), "-f", str(ov)]
-    assert down[-4:] == ["down", "--volumes", "--rmi", "local"]  # override doesn't disturb args
+    # override doesn't disturb args; --remove-orphans rides with the verb (down only)
+    assert down[-5:] == ["down", "--remove-orphans", "--volumes", "--rmi", "local"]
 
 
 def test_driver_argv_without_override_is_unchanged(wiz, tmp_path):

@@ -2404,7 +2404,15 @@ def driver_down_argv(
     rmi_local: bool = False,
     override: Path | None = None,
 ) -> list[str]:
-    args = ["down"]
+    # --remove-orphans is on DOWN ONLY, and it is load-bearing. Reproduced: drop an
+    # `egress:` declaration, regenerate, `up --force-recreate` — the old proxy keeps
+    # running, and a subsequent `down` with the new file leaves it Up, fails to remove
+    # the project network, and STILL EXITS 0. The stranded container carries
+    # `restart: unless-stopped` and is invisible to `list`, to every wizard picker and
+    # to assert_host_empty, so nothing would ever mention it again.
+    # NOT on up/redeploy: there it would destroy an operator's own helper services
+    # from <name>.services.yaml, which are legitimately not in the generated file.
+    args = ["down", "--remove-orphans"]
     if purge:
         args.append("--volumes")
     if rmi_local:  # wipe also removes the locally-built image (never a public one)
@@ -2451,7 +2459,7 @@ def build_compose_model(
     environment: dict[str, str] | None = None,
     workspace_mount: object = _WORKSPACE_DEFAULT,
     declare_workspace_volume: bool = True,
-    egress_filter_file: Path | None = None,
+    egress_filter_body: str | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
@@ -2488,7 +2496,7 @@ def build_compose_model(
         "volumes": workspace_mounts + other_volume_mounts(name) + list(extra_mounts or []),
     }
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
-    if egress_filter_file is not None:
+    if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
         # `https_proxy`, not `HTTPS_PROXY`. Compose applies `environment:` OVER
         # `env_file:`, so these win over an operator env-file — which is what C6
@@ -2544,7 +2552,7 @@ def build_compose_model(
     for cfg_name, local_file, target in injected_configs or []:
         svc_configs.append({"source": cfg_name, "target": target})
         model_configs[cfg_name] = {"file": str(local_file)}
-    if egress_filter_file is not None:
+    if egress_filter_body is not None:
         # A second service in the model the tool GENERATES — never the operator's
         # <name>.services.yaml, which is validated services-only and stays theirs.
         # No `ports:` (reachable only over the project network), no `volumes:` (the
@@ -2556,7 +2564,9 @@ def build_compose_model(
             "restart": restart,
             "configs": [{"source": "egress_filter", "target": EGRESS_FILTER_PATH}],
         }
-        model_configs["egress_filter"] = {"file": str(egress_filter_file)}
+        # `content:`, never `file:` — a file: config is a read-only BIND of the local
+        # path and cannot reach a daemon that does not share the filesystem.
+        model_configs["egress_filter"] = {"content": egress_filter_body}
     if svc_configs:
         service["configs"] = svc_configs
     if model_configs:
@@ -3075,28 +3085,30 @@ def stage_task_injection(
     return [("task", f, INJECT_TASK_PATH)]
 
 
-def stage_egress_injection(
-    host: str, name: str, entries: list[tuple[str, tuple[str, ...], str]]
-) -> Path:
-    """Stage the generated tinyproxy allowlist as a LOCAL file, for delivery over
-    the compose `configs` channel — NEVER a host bind, which fails over a remote or
-    Lima daemon (research R10b, and the 001/003 lesson).
+def build_egress_config(entries: list[tuple[str, tuple[str, ...], str]]) -> str:
+    """The allowlist body, for INLINE delivery via a compose `config` with `content:`.
 
-    Always writes a file, including for `providers: []`: `FilterDefaultDeny Yes`
-    makes the body an ALLOWLIST, so an EMPTY body denies everything (verified,
-    research R10c) — and tinyproxy refuses to start if `Filter` names a file that
-    does not exist. Callers gate on enforce_egress_declaration() first.
+    NOT `file:`. A `file:` config is materialised as a READ-ONLY BIND of the local
+    path — measured: `inspect .Mounts` reports
+    `{"Type":"bind","Source":"/Users/…","RW":false}` — so it fails at container
+    create with `bind source path does not exist` whenever the daemon cannot see
+    that path. Against a remote host reached through an ssh-forwarded socket, that
+    is always. It works today only because STATE_DIR sits under $HOME, which Lima
+    happens to share; the project's canonical target is a remote VPS, where it
+    would not.
 
-    Not a credential and not under /run: it is the proxy's configuration, and it
-    contains only hostnames the operator wrote down.
+    `content:` is genuinely API-delivered (`.Mounts == []`, verified), which also
+    closes the live-edit window a bind leaves open — with a bind, an in-container
+    write to the source path would alter the allowlist of the running proxy.
+
+    Earlier revisions of this docstring, and research R10b, asserted the exact
+    opposite. Both were wrong; corrected in the same change that fixes the code.
+
+    An EMPTY body is the air-gapped state, not a broken one: with
+    `FilterDefaultDeny Yes` the body is an ALLOWLIST, so empty denies everything
+    (verified, research R10c). Callers gate on enforce_egress_declaration() first.
     """
-    d = host_state_dir(host)
-    d.mkdir(parents=True, exist_ok=True)
-    d.chmod(0o700)
-    f = d / f"{name}.egress.filter"
-    f.write_text(build_egress_filter(entries))
-    f.chmod(0o644)
-    return f
+    return build_egress_filter(entries)
 
 
 def compose_up_exec(
@@ -3182,8 +3194,8 @@ def compose_up_exec(
     refuse_operator_proxy_vars(
         egress, spec.agent, env_file, override=resolve_sidecar_override(name)
     )
-    egress_file = (
-        stage_egress_injection(host_name, name, resolve_provider_hosts(egress))
+    egress_body = (
+        build_egress_config(resolve_provider_hosts(egress))
         if enforce_egress_declaration(egress, spec.agent, resolve_sidecar_override(name))
         else None
     )
@@ -3199,7 +3211,7 @@ def compose_up_exec(
         environment=spec.compose_environment(),
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
-        egress_filter_file=egress_file,
+        egress_filter_body=egress_body,
     )
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
@@ -3340,8 +3352,12 @@ def down_container(
             )
         else:
             # No compose file (e.g. a pre-compose container): fall back to rm and,
-            # on purge, explicit volume removal.
+            # on purge, explicit volume removal. The EGRESS PROXY must be named
+            # explicitly — it is deliberately outside CONTAINER_PREFIX, so nothing
+            # else in this path would ever match it. query() tolerates the nonzero
+            # from an absent container, so this is unconditional rather than probed.
             query(driver_runtime_argv(host_rec) + ["rm", "-f", cname])
+            query(driver_runtime_argv(host_rec) + ["rm", "-f", egress_container_name(name)])
             if purge:
                 for vname in vols:
                     query(driver_runtime_argv(host_rec) + ["volume", "rm", vname])
@@ -3350,6 +3366,11 @@ def down_container(
         if host_is_local(host_rec):
             wait_port_released(port_for_name(name))
     else:
+        # `exists` is computed from host_ps_rows, which filters on CONTAINER_PREFIX —
+        # so a SURVIVING PROXY can never make it true. Without this, the tool would
+        # report "no container named …" while agent-egress-<name> keeps running under
+        # `restart: unless-stopped`, unmentioned by anything, forever.
+        query(driver_runtime_argv(host_rec) + ["rm", "-f", egress_container_name(name)])
         log(f"no container named {cname} on {host_name}")
 
     if purge:
