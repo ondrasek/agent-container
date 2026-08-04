@@ -5798,8 +5798,39 @@ def _reconcile_plan(environments: list[dict], host_override: str | None):
     return plans
 
 
-def do_aac_status(host_override: str | None = None, skip_unknown: bool = False) -> None:
-    """`status`/`plan`: print the per-resource plan and mutate NOTHING (FR-008)."""
+def plan_payload(plans: list) -> list[dict]:
+    """The machine-readable form of a reconcile plan (Feature 009 FR-013).
+
+    Fields are named EXPLICITLY rather than dumping the environment dict: that dict
+    carries `credentials`, and while those are locators rather than values
+    (Feature 008), an allowlist here means a future spec key cannot start appearing
+    on stdout merely by existing (Constitution III).
+    """
+    out: list[dict] = []
+    for env, name, host_name, _host_rec, state, detail in plans:
+        container = env.get("container") or {}
+        out.append(
+            {
+                "name": name,
+                "host": host_name,
+                "state": state,
+                "detail": detail or None,
+                "agent": container.get("agent") or "claude",
+                "mode": container.get("mode") or "interactive",
+                "workspace": container.get("workspace") or "persistent",
+            }
+        )
+    return out
+
+
+def do_aac_status(host_override: str | None = None, skip_unknown: bool = False) -> list[dict]:
+    """`status`/`plan`: print the per-resource plan and mutate NOTHING (FR-008).
+
+    Returns the plan as data so the commands can emit it under `--json`. It used to
+    return None and log only to stderr, which meant `status --json` printed NOTHING
+    on stdout — a machine-readable command emitting nothing at all. The human path
+    is unchanged; the rows were already computed and simply discarded.
+    """
     root = find_project_root()
     if root is None:
         die(
@@ -5809,7 +5840,7 @@ def do_aac_status(host_override: str | None = None, skip_unknown: bool = False) 
     log(f"project root: {root}")
     environments = load_project_spec(root, skip_unknown)
     _precheck_environments(environments, host_override)
-    _reconcile_plan(environments, host_override)
+    return plan_payload(_reconcile_plan(environments, host_override))
 
 
 # --- Feature 006 US2: credential references (resolve at apply, inject at runtime) ---
@@ -6800,7 +6831,9 @@ def plan(
 ) -> None:
     """Show the per-environment reconcile plan (absent/matching/drifted); mutate nothing."""
     set_json_mode(as_json)
-    do_aac_status(host, skip_unknown_files)
+    rows = do_aac_status(host, skip_unknown_files)
+    if as_json:
+        emit_json({"environments": rows})
 
 
 @app.command()
@@ -6811,7 +6844,9 @@ def status(
 ) -> None:
     """Alias of `plan` — the current state of each declared environment vs the spec."""
     set_json_mode(as_json)
-    do_aac_status(host, skip_unknown_files)
+    rows = do_aac_status(host, skip_unknown_files)
+    if as_json:
+        emit_json({"environments": rows})
 
 
 @app.command()

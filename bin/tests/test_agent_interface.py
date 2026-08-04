@@ -330,3 +330,47 @@ def test_aac_apply_refuses_without_yes_on_non_tty(wiz, tmp_path, monkeypatch):
         wiz.do_aac_apply(yes=False)
     assert e.value.code == "confirmation_required"
     assert deployed == [], "nothing may be deployed (or PROVISIONED) without authorization"
+
+
+# --- plan/status emit a machine-readable payload (Feature 009 FR-013) --------
+
+
+def test_plan_payload_names_fields_explicitly(wiz):
+    """The environment dict carries `credentials`. Those are locators rather than
+    values (Feature 008), but the payload is an ALLOWLIST so a future spec key
+    cannot start appearing on stdout merely by existing (Constitution III).
+    """
+    env = {
+        "name": "acme",
+        "host": "local",
+        "container": {"agent": "codex", "mode": "headless", "workspace": "ephemeral"},
+        "credentials": [
+            {
+                "name": "ANTHROPIC_API_KEY",
+                "source": "onepassword",
+                "vault": "V",
+                "item": "i",
+                "field": "f",
+            }
+        ],
+        "egress": {"providers": ["anthropic"]},
+    }
+    (row,) = wiz.plan_payload([(env, "acme", "local", None, "drifted", "agent: 'claude'→'codex'")])
+    assert row == {
+        "name": "acme",
+        "host": "local",
+        "state": "drifted",
+        "detail": "agent: 'claude'→'codex'",
+        "agent": "codex",
+        "mode": "headless",
+        "workspace": "ephemeral",
+    }
+    assert "credentials" not in row, "the credentials block must not ride the payload"
+
+
+def test_plan_payload_defaults_match_the_execspec_defaults(wiz):
+    """An environment declaring no container block still reports what it will get,
+    rather than nulls the caller must interpret."""
+    (row,) = wiz.plan_payload([({"name": "acme"}, "acme", "local", None, "absent", "")])
+    assert (row["agent"], row["mode"], row["workspace"]) == ("claude", "interactive", "persistent")
+    assert row["detail"] is None
