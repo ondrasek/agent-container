@@ -3168,6 +3168,14 @@ def compose_up_exec(
     # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
     # the operator hears it now, not after the agent has done a session of work.
     check_egress_permits_push(egress, spec.repo, (egress or {}).get("enforcement") or "advisory")
+    _mode = (egress or {}).get("enforcement") or "advisory"
+    # US2: the disclosure (undeclared + the agent has a default) and FR-003a (declared
+    # but the default is outside the set) are mutually exclusive by construction —
+    # one asks the operator to decide, the other tells them a decision is incomplete.
+    disclose_builtin_default(egress, spec.agent)
+    check_builtin_default_declared(egress, spec.agent, _mode)
+    if is_egress_declared(egress):
+        log(egress_strength_statement(spec.agent))
     # C6 backstop for the imperative path, where `env_file` IS the operator's file.
     # The apply path checks earlier, before staging, so it can name the operator's
     # file rather than the tool-generated merge (which they have never heard of).
@@ -5254,6 +5262,80 @@ def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | Non
         if env.get("name") == name:
             return env.get("egress")
     return None
+
+
+def egress_strength_statement(agent: str | None) -> str:
+    """FR-008/FR-008a, contract C5 — the honest limits of what a proxy delivers.
+
+    Every clause here is load-bearing and the test asserts their PRESENCE plus the
+    ABSENCE of stronger phrasing, because this is the requirement most easily
+    satisfied in appearance and violated in substance.
+    """
+    honours = ", ".join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))
+    known = AGENT_HONOURS_PROXY.get(agent or "", False)
+    return (
+        f"egress enforcement is proxy-level, not packet-level. The proxy refuses "
+        f"requests from clients that honour proxy settings; it does not stop a process "
+        f"that ignores them and opens a direct connection, because packet filtering "
+        f"needs privileges this container deliberately does not have. Known to honour "
+        f"the proxy: {honours}"
+        f"{'' if known else f' (NOT including {agent!r})'}. "
+        f"A shell inside the container can also override the proxy settings via "
+        f"~/.agent-env/env, which is sourced by every interactive shell from a volume "
+        f"that survives teardown — the tool cannot see or prevent that."
+    )
+
+
+def disclose_builtin_default(egress: object, agent: str | None) -> None:
+    """FR-006, contract C4 — the specific defect that motivated this feature.
+
+    Feature 010's probe ran opencode with NO operator credential and it answered,
+    over the network, via a provider nobody declared. A default that works silently
+    is indistinguishable, to the operator, from no network activity at all.
+
+    Fires only when nothing is declared: with a declaration the operator has already
+    engaged with the question, and repeating it would be the noise that trains people
+    to ignore the message that matters.
+    """
+    if is_egress_declared(egress):
+        return
+    provider = AGENT_BUILTIN_DEFAULT.get(agent or "")
+    if provider is None:
+        return
+    warn(
+        f"agent {agent!r} has a BUILT-IN DEFAULT PROVIDER ({provider}): it can reach "
+        f"a model provider over the network without any credential you supplied, and "
+        f"this environment declares no egress restriction. To constrain it, declare "
+        f"`egress.providers` in the environment spec."
+    )
+
+
+def check_builtin_default_declared(egress: object, agent: str | None, mode: str) -> None:
+    """FR-003a — the one case knowable BEFORE anything runs.
+
+    The agent picks its provider at run time, so there is no general deploy-time
+    detection of undeclared egress. But an agent's built-in default is a fact the
+    tool holds, and so is the declared set; when the former is outside the latter,
+    waiting for a runtime refusal would be a choice to withhold.
+    """
+    if not is_egress_declared(egress):
+        return
+    provider = AGENT_BUILTIN_DEFAULT.get(agent or "")
+    if provider is None:
+        return
+    assert isinstance(egress, dict)  # narrowed by is_egress_declared
+    entries = resolve_provider_hosts(egress)
+    if any(egress_permits_host(entries, h) for h in PROVIDERS.get(provider, ())):
+        return
+    msg = (
+        f"agent {agent!r} has a built-in default provider ({provider}) that this "
+        f"declaration does NOT permit. The agent may try it and be refused at run "
+        f"time. Either declare it (`egress.providers: [{provider}]`) or configure the "
+        f"agent to use a declared provider."
+    )
+    if mode == "strict":
+        die(msg)
+    warn(msg)
 
 
 def override_redefines_egress(override: Path | None) -> bool:
