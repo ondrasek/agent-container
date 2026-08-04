@@ -749,3 +749,66 @@ def test_every_provider_maps_to_at_least_one_host(wiz):
     for name, hosts in wiz.PROVIDERS.items():
         assert hosts, f"provider {name!r} maps to no hosts, so declaring it permits nothing"
         assert all(wiz.HOSTNAME_RE.fullmatch(h) for h in hosts), f"{name}: non-hostname in {hosts}"
+
+
+# --- the threat model tracks the feature (Constitution 2.2.0) ---------------
+# Parsed with a regex rather than a parser, deliberately and with the irony noted:
+# docs/threat-model.md §5 T12 catalogues regex scanners that missed shapes they
+# were not written for. This one reads a MARKDOWN TABLE THIS REPO AUTHORS — not
+# adversarial input, and markdown has no stdlib parser. The failure mode differs.
+
+
+# Resolved through a FUNCTION, not bound at import. A module-level
+# `_THREAT_MODEL = _ROOT / …` would capture the real path before any test could
+# monkeypatch `_ROOT`, so the guard-can-fail proofs would copy a file into a fake
+# root, corrupt it, and then silently assert against the REAL document — passing
+# for the wrong reason. That is the exact defect class this file exists to catch.
+def _threat_model_path() -> Path:
+    return _ROOT / "docs" / "threat-model.md"
+
+
+_TM_ROW = re.compile(r"^\|\s*(\d{3})[^|]*\|\s*(✅|⬜)\s*\|([^|]*)\|", re.M)
+
+
+def _tm_rows() -> list[tuple[str, str, str]]:
+    return [m.groups() for m in _TM_ROW.finditer(_threat_model_path().read_text(encoding="utf-8"))]
+
+
+def test_threat_model_names_every_feature(wiz):
+    """Constitution 2.2.0: the maintenance table names every feature.
+
+    A MISSING ROW IS THE COMMON FAILURE — a feature lands, nobody re-reads the
+    threat model, and the document still reads as current because absence is
+    invisible. This turns that into a gate failure.
+
+    CEILING, STATED: this checks that a row EXISTS, never that the analysis behind
+    it happened. A green gate here means "the table has rows", not "the threat
+    model is current". Reading it as the latter is the failure this guard cannot
+    catch.
+    """
+    text = _threat_model_path().read_text(encoding="utf-8")
+    documented = {num for num, _mark, _threats in _tm_rows()}
+    if "001–011" in text:  # a single baseline row covers the pre-012 features
+        documented |= {f"{n:03d}" for n in range(1, 12)}
+    on_disk = {d.name[:3] for d in (_ROOT / "specs").iterdir() if d.is_dir()}
+    missing = sorted(on_disk - documented)
+    assert not missing, (
+        f"docs/threat-model.md has no maintenance row for: {missing}. Add one "
+        f"recording which threats the feature mitigates, leaves open, and NEWLY "
+        f"INTRODUCES — or the posture silently stops describing the system."
+    )
+
+
+def test_threat_model_reconciled_rows_name_their_threats(wiz):
+    """A ✅ with an empty threats cell is a ticked box, not an analysis.
+
+    This is the T12 shape the document itself catalogues — a check that passes
+    while the thing it names is broken. Requiring the row to SAY something is the
+    cheapest defence against reconciling by checkbox.
+    """
+    empty = [num for num, mark, threats in _tm_rows() if mark == "✅" and not threats.strip()]
+    assert not empty, (
+        f"feature(s) {empty} are marked reconciled but name no threats. Write "
+        f"'none' explicitly if the feature genuinely touched no boundary — silence "
+        f"and 'nothing changed' must not look identical."
+    )

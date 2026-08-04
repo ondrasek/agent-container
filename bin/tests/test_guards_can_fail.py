@@ -46,10 +46,16 @@ def fake_root(tmp_path, monkeypatch):
         "bin/agent-container",
         "orchestration/compose.yaml",
         "orchestration/agent-container.container",
+        "docs/threat-model.md",
     ):
         dst = root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REAL_ROOT / rel, dst)
+    # The threat-model guard reads specs/ to find features that need a row, so the
+    # fake root needs the directory NAMES (contents are irrelevant to it).
+    for spec_dir in (REAL_ROOT / "specs").iterdir():
+        if spec_dir.is_dir():
+            (root / "specs" / spec_dir.name).mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(tpl, "_ROOT", root)
     return root
 
@@ -212,3 +218,38 @@ def test_replacement_guard_fails_if_hosts_are_made_additive(wiz, monkeypatch):
     )
     assert "api.anthropic.com" in hosts, "the additive stand-in must reproduce the bug"
     assert "gw.corp" in hosts
+
+
+def test_threat_model_guard_fails_on_an_undocumented_feature(wiz, fake_root):
+    """Prove the coverage guard can fail — this repo's standing rule, and the only
+    reason to trust it.
+
+    A feature directory with no maintenance row is the mechanical half of the
+    failure the constitution's 2.2.0 clause targets.
+    """
+    (fake_root / "specs" / "018-brand-new-feature").mkdir(parents=True)
+    with pytest.raises(AssertionError, match="no maintenance row"):
+        tpl.test_threat_model_names_every_feature(wiz)
+
+
+def test_threat_model_guard_fails_on_a_ticked_but_empty_row(wiz, fake_root):
+    """A ✅ naming no threats must break. This is the T12 shape the document
+    itself catalogues: reconciling by checkbox looks identical to reconciling."""
+    tm = fake_root / "docs" / "threat-model.md"
+    tm.write_text(tm.read_text().replace("| 001–011 | ✅ |", "| 001–011 | ✅ |  |", 1))
+    with pytest.raises(AssertionError, match="name no threats"):
+        tpl.test_threat_model_reconciled_rows_name_their_threats(wiz)
+
+
+# --- late binding: what makes the two proofs above meaningful ---------------
+
+
+def test_threat_model_guard_reads_the_fake_root_not_the_real_document(wiz, fake_root):
+    """Directly pins the late binding that makes the two proofs above meaningful.
+
+    If the path is ever hoisted back to a module-level constant, this fails —
+    rather than the proofs quietly degrading into assertions about the real file.
+    """
+    (fake_root / "docs" / "threat-model.md").write_text("no table here\n", encoding="utf-8")
+    assert tpl._threat_model_path() == fake_root / "docs" / "threat-model.md"
+    assert tpl._tm_rows() == [], "the guard is reading the real document, not the fake root"

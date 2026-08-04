@@ -303,7 +303,7 @@ it must fail (quickstart S12).
 - [ ] T116 [US4] **Move the published port binding to the egress service** — a shared namespace has one port owner. The port *number* is unchanged, so the identity lock still passes; this is an announced **migration**, not an edit (Constitution IV, plan)
 - [ ] T117 [US4] Add a test in `bin/tests/test_compose.py` pinning the new port ownership **and** asserting `port_for_name` is unchanged, so the migration is visible in exactly one place
 - [ ] T118 [US4] Handle the migration for **already-running Phase A environments** in `bin/agent-container`: detect the old shape and recreate rather than leave a container whose port the tool no longer owns
-- [ ] T119 [US4] Implement FR-021 — when transparent enforcement cannot be delivered on a host, fall back to Phase A's mechanism under `advisory` and refuse under `strict`, **naming which mode was obtained**. Without this, `strict` cannot be honest about what it got
+- [ ] T119 [US4] Implement FR-021 — when transparent enforcement cannot be delivered on a host, fall back to Phase A's mechanism under `advisory` and refuse under `strict`, **naming which mode was obtained**. **Define the detection explicitly** (can the daemon grant `NET_ADMIN`? does `network_mode: service:` work on this runtime?) and prefer a positive probe over an assumption — an undetected failure silently downgrades to Phase A's strength while reporting the stronger one
 - [ ] T120 [US4] Place operator sidecars **inside** the boundary by default (FR-023), with an explicit opt-out (FR-023a)
 - [ ] T121 [US4] Name every out-of-boundary sidecar in the enforcement statement (FR-023b, **SC-015**) — otherwise `enforced: true` quietly means "except for these three containers", which is the overclaim SC-004 forbids wearing a different hat
 - [ ] T122 [US4] Extend `validate_sidecar_override` to check **egress posture**, not only shape (FR-023d) — it was cosmetic before this feature and is security-relevant after
@@ -340,7 +340,9 @@ fail, then declare SSH to one host and confirm only that host on that port opens
 - [ ] T134 [US5] Acceptance: an undeclared **non-standard HTTP port** (8080) and an arbitrary port (1337) both fail (SC-009, quickstart S13). **The first design sketch got this wrong** — redirecting only 80/443 under default-accept lets 8080 through, which is worse than no control
 - [ ] T135 [US5] Acceptance: a declared `{host, port: 22}` is reachable at **that host and that port only** — not the protocol generally, not another host (SC-010, quickstart S14)
 - [ ] T136 [US5] Acceptance: an undeclared name does not resolve, **including a tunnelling-shaped label** like `ZXhmaWx0cmF0ZWQ.attacker.example.com` (SC-012, quickstart S15)
+- [ ] T136a [US5] Acceptance: a **declared** name still resolves and the environment works end to end (US5 scenario 3). **An allowlist-only resolver that resolves NOTHING passes every other DNS test here** — the positive case is what separates "working" from "broken closed", and broken-closed is the failure this mechanism makes easy
 - [ ] T137 [US5] Acceptance: `dig @8.8.8.8` is forced to the sidecar resolver (SC-013, quickstart S15)
+- [ ] T137a [US5] Acceptance: on a host where transparent enforcement **cannot** be delivered, `advisory` deploys and names the fallback mechanism while `strict` refuses (US5 scenario 4, FR-007b). SC-004a asserted this for Phase A only; without it `enforced: true` is ambiguous between two mechanisms of very different strength
 - [ ] T138 [US5] Acceptance: `git push` over declared SSH **succeeds** (quickstart S18). If this fails the feature is unshippable, whatever else passes
 - [ ] T139 [US5] Acceptance: an environment with **no** declaration is untouched — no rules, no forced DNS, unrestricted (FR-004, quickstart S19). Default-deny applies to opt-in environments, **never retroactively**
 
@@ -356,6 +358,7 @@ fail, then declare SSH to one host and confirm only that host on that port opens
 - [ ] T143 [P] Update `docs/execution.md` and `docs/orchestration.md` for the shared namespace and the port-owner move
 - [ ] T144 Re-measure `CLAUDE.md` against its 2000-token budget with a real tokenizer, and update the egress invariant — it currently says "proxy-level", which Phase B falsifies
 - [ ] T145 Re-run the identity check against the T001 baseline. **It will pass** — the port number is unchanged — so verify the *port owner* separately; the lock cannot see that, which is why T116/T117 exist
+- [ ] T145a **Reconcile `docs/threat-model.md`** — Constitution 2.2.0 makes this MUST for any feature altering a trust boundary, and Phase B alters it more than anything else in the project. Flip the `012 Phase B` row to ✅ and record what actually changed: **T4 → mitigated**, **T5 → mitigated**, and §5's four "not mitigated" bullets under T4 rewritten. Also record what Phase B **newly introduces** — a container holding `NET_ADMIN`, and a resolver the whole environment depends on. **By the constitution's own words, Phase B has not landed until this row is updated**
 - [ ] T146 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier, and verify quickstart S12–S19 by hand
 
 ---
@@ -399,7 +402,7 @@ failure modes are disjoint.
 | 7 — B1 image | 5 |
 | 8 — B2 generation | 10 |
 | 9 — US4 | 14 |
-| 10 — US5 | 12 |
-| 11 — polish | 7 |
-| **Phase B total** | **48** |
-| **Feature total** | **112** (64 Phase A + 48 Phase B) |
+| 10 — US5 | 14 |
+| 11 — polish | 8 |
+| **Phase B total** | **51** |
+| **Feature total** | **115** (64 Phase A + 51 Phase B) |
