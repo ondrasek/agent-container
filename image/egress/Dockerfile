@@ -18,7 +18,13 @@ FROM alpine:3.21
 
 # Pinned: the filter semantics below (FilterType, FilterDefaultDeny) are version
 # -specific, and an unpinned rebuild could change them under us.
-RUN apk add --no-cache 'tinyproxy~=1.11'
+# `~1.11` is apk's fuzzy-version syntax. The pin is real, not decorative:
+# `tinyproxy~99.99` exits 1 (measured), so a version that cannot satisfy it
+# fails the build rather than silently installing something else.
+# Written `~` and not `~=`: the latter also works today, but only because
+# apk's parser tolerates the stray `=` — undocumented tolerance is the kind
+# of thing that stops being tolerated in a future apk.
+RUN apk add --no-cache 'tinyproxy~1.11'
 
 # The static half of the configuration is BAKED. Only the allowlist varies per
 # environment, and it arrives as a compose `config` at /etc/tinyproxy/filter —
