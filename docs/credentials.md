@@ -308,3 +308,23 @@ or `GH_TOKEN` (HTTPS alternative).
 > **Superseded:** earlier revisions listed "SSH-based git push — explicitly
 > rejected for the MVP." Feature 003 makes an **ephemeral SSH deploy key the
 > documented default**; HTTPS + `GH_TOKEN` is the retained alternative.
+
+## Providers are not credentials (Feature 012)
+
+Declaring `egress.providers` says **where an environment may go**. It does not say what authorises
+it, and it never implies storing a key.
+
+The two are neighbours in the same file, not a hierarchy — and the tool deliberately does **not**
+infer one from the other:
+
+- a provider can be reached **with no credential at all** (that is the defect Feature 012 exists to
+  surface — `opencode`'s built-in default);
+- a credential can exist for a provider that is not declared;
+- no provider→credential mapping exists, and inventing one would false-positive on the first case.
+
+So a credential failure names **the credential and its source**, never the `egress` declaration.
+Blaming the provider list for a credential problem sends you to edit the one part that is correct.
+
+Secret values still live where they always did: user level, or behind a locator. `.agent-container/`
+travels with the repository and holds a locator, never a value — declaring a provider changes
+nothing about that.

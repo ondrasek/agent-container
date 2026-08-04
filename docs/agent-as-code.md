@@ -28,6 +28,11 @@ environments:
       env_file: ./acme.env     # non-secret env (relative to the project root)
     credentials:               # references, never values (US2 — see Roadmap)
       - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+    egress:                    # where this environment may go (Feature 012)
+      providers: [anthropic]   #   model vendors, by name
+      allow: [github.com]      #   everything else it needs — INCLUDING the git remote,
+                               #   because the proxy governs ALL egress, not just providers
+      enforcement: advisory    #   advisory (default) | strict
 ```
 
 A spec file is identified by **kind**: `environments.yaml`, or `<prefix>.environments.yaml` when

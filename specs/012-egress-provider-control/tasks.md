@@ -134,7 +134,7 @@ T012.
 ### Lifecycle
 
 - [X] T024 [US1] Verify `down`, `redeploy` and `wipe` tear the proxy down with no new step, because it shares the compose project — add the assertion to `bin/tests/test_lifecycle.py` (contract C2, quickstart S9)
-- [ ] T025 [US1] Handle the headless-foreground consequence in `bin/agent-container`: `--abort-on-container-exit --exit-code-from agent` stops every service when any exits, so a crashing proxy aborts the run. Fail-closed and correct — **state it** in `docs/execution.md` rather than let a headless user discover it (research R4)
+- [X] T025 [US1] Handle the headless-foreground consequence in `bin/agent-container`: `--abort-on-container-exit --exit-code-from agent` stops every service when any exits, so a crashing proxy aborts the run. Fail-closed and correct — **state it** in `docs/execution.md` rather than let a headless user discover it (research R4)
 
 **Checkpoint**: US1 is independently deliverable and testable. Run quickstart S2, S3, S5, S6, S9.
 
@@ -175,10 +175,10 @@ implement in this feature: T033 would fail, correctly.
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T035 [P] Write `docs/egress.md` covering the declaration, the three states, enforcement modes, the honest strength statement, and the `NO_PROXY` rule
-- [ ] T036 [P] Add the providers-vs-credentials distinction to `docs/credentials.md` — declaring a provider must not imply storing its credential in the project (FR-009); they are neighbours in the file, not a hierarchy
-- [ ] T037 [P] Update `docs/agent-as-code.md` with the `egress:` block in the example spec
-- [ ] T038 Add at most a one-line invariant to `CLAUDE.md` and re-measure the token budget with a real tokenizer — the file is at 1999/2000 and prune-before-adding applies
+- [X] T035 [P] Write `docs/egress.md` covering the declaration, the three states, enforcement modes, the honest strength statement, and the `NO_PROXY` rule
+- [X] T036 [P] Add the providers-vs-credentials distinction to `docs/credentials.md` — declaring a provider must not imply storing its credential in the project (FR-009); they are neighbours in the file, not a hierarchy
+- [X] T037 [P] Update `docs/agent-as-code.md` with the `egress:` block in the example spec
+- [X] T038 Add at most a one-line invariant to `CLAUDE.md` and re-measure the token budget with a real tokenizer — the file is at 1999/2000 and prune-before-adding applies
 - [ ] T039 Add acceptance tests in `bin/tests/test_acceptance.py` for quickstart S3 (undeclared refused — assert **curl exit 56**, never `%{http_code}`, which reads `000` for a refusal *and* a drop alike; research R10a), S4 (disclosure), S6 (`NO_PROXY` refused), S10 (rootlessness unchanged) and S11 (a pre-feature environment deploys identically)
 - [ ] T039a Add a test in `bin/tests/test_credentialing.py` asserting **no credential value** appears in the generated compose model, the proxy's generated config, or `--json` output, for an environment declaring **both** providers and credentials. Seed a recognisable **sentinel** value through each credential source and assert its absence in every generated artifact. Asserting "no key-shaped string" would test the assertion's imagination; asserting a *known* value is absent tests the actual path (FR-009, SC-007)
 - [ ] T040 Re-run the identity check from T001 and diff against the baseline — nine volumes, same names, same port. **This is the blocking check**; if any name drifted, nothing else matters
