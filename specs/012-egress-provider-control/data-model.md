@@ -211,3 +211,66 @@ Environment ──1:0..1── Provider declaration ──0..n── Provider �
 The one relationship that must **not** exist is Provider → Credential. Declaring a provider must
 not imply storing its credential in the project (FR-009, and Feature 011's rule that the repo holds
 a locator, never a value). They are neighbours in the file, not a hierarchy.
+
+---
+
+# Phase B additions (US4/US5)
+
+Phase A's entities above remain correct **until Phase B lands** (plan, opening decision). What
+follows supersedes them at that point, not before.
+
+## 7. Destination (supersedes Provider declaration, FR-018a/018b)
+
+One list, `egress.allow`, whose entries are one of four shapes:
+
+| Shape | Example | Surface |
+|---|---|---|
+| `{provider}` | `- provider: anthropic` | proxy allowlist (tool supplies hosts) |
+| `{provider, hosts}` | `- provider: openai`<br>`  hosts: [llm.corp.internal]` | proxy allowlist (hosts **replace**, FR-001b) |
+| `{host}` | `- host: github.com` | proxy allowlist |
+| `{host, port}` | `- host: github.com`<br>`  port: 22` | **netfilter rule** |
+
+**The port is the discriminator, and that is what makes one list coherent** rather than merely
+shorter: an entry without a port is HTTP/HTTPS and joins the proxy's allowlist; an entry with a
+port is anything else and becomes an explicit rule. The operator declares *destinations*; the tool
+decides which of its surfaces each needs. A separate `ports:` key would force the operator to
+classify their own traffic by mechanism — the tool's job, and a leak of implementation into the
+declaration.
+
+### Rendering is per-surface, and the renderings differ
+
+**A shared "hostname pattern" abstraction would be wrong** (research R12a). The same entry renders
+three ways:
+
+| Surface | `github.com` | subdomains |
+|---|---|---|
+| squid acl | `github.com` | `.github.com` (**leading dot**) |
+| tinyproxy regex *(Phase A)* | `^github\.com$` | `^([A-Za-z0-9_-]+\.)*github\.com$` |
+| dnsmasq | `server=/github.com/<upstream>` | same, covers subdomains |
+
+And in squid a **quoted** entry is a *file path*, not a value — quoting an allowlist entry, the
+natural instinct when generating config, yields an acl with no entries and a silently empty
+allowlist.
+
+## 8. Enforcement surface
+
+| Surface | Enforces | Failure seen by the agent |
+|---|---|---|
+| **netfilter** | every port and protocol; default-deny | connection refused/dropped |
+| **proxy (squid)** | HTTP/HTTPS by SNI, no decryption | `403` — *nameable* |
+| **resolver (dnsmasq)** | which names resolve at all | NXDOMAIN (see FR-020e) |
+
+The three are generated from **one** list so they cannot drift apart. That is the argument for
+unifying the schema — not brevity.
+
+## 9. Boundary membership (FR-023)
+
+| Member | Default | Why |
+|---|---|---|
+| agent container | **inside**, always | the thing being constrained |
+| egress sidecar | is the boundary | holds `NET_ADMIN` |
+| operator sidecars | **inside** | one the agent can reach with free egress **is** a bypass — `redis REPLICAOF`, `postgres COPY … FROM PROGRAM`, anything that fetches a URL. The agent needn't escape the namespace; it need only ask something that already has the access |
+
+A sidecar may be placed **outside** deliberately (FR-023a) — but it must then be **named in the
+enforcement statement** (FR-023b), or `enforced: true` quietly means "except for these three
+containers".

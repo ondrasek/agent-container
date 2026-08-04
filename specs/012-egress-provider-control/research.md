@@ -403,3 +403,81 @@ it uniquely satisfies.
 | **VI. Least dependencies** | Adds a proxy image to the deployment. Justified: it is the only way to enforce egress without privileges, and it is optional — absent a declaration, no sidecar is deployed. |
 
 No violations. R2 is the requirement that keeps Principle III on the right side of the ledger.
+
+---
+
+# Phase 0 Research — Phase B (US4/US5, transparent enforcement)
+
+## R12 (VERIFIED) — Alpine's squid can peek-and-splice, and R10 is superseded
+
+R10 chose tinyproxy on measured criteria. **Those criteria changed**, so R10 is superseded rather
+than contradicted: under transparent redirection a TLS connection arrives as a raw stream with no
+`CONNECT` request, so tinyproxy has **no hostname to read at all**. It is not a worse choice for
+US4; it is not a candidate.
+
+Verified against `alpine:3.21`:
+
+| Check | Result |
+|---|---|
+| squid version | **6.12** |
+| built with TLS | `--with-openssl`, `--enable-ssl-crtd` |
+| `ssl_bump peek step1` + `splice` accepted | **yes, 0 config errors** |
+| `acl … ssl::server_name` accepted | **yes** |
+
+**Decision**: squid with `ssl_bump peek` → `splice`. It reads the ClientHello's **SNI** and splices
+the connection through **without terminating TLS**, so R2 holds unchanged — no CA certificate, no
+`Authorization` header ever visible. `ssl_bump bump` would decrypt and is forbidden; the
+Constitution III gate in the plan flips if anyone reaches for it.
+
+**Cost, accepted**: 66 MB against tinyproxy's 4 MB. It wins on the one criterion it uniquely
+satisfies.
+
+### R12a — squid's allowlist syntax is NOT the tinyproxy syntax
+
+Two mistakes caught by running the parser, both of which would have shipped a broken or
+over-permissive allowlist:
+
+1. **A quoted string is a FILE PATH.** `acl x ssl::server_name "*.githubusercontent.com"` makes
+   squid try to *open a file* of that name: `ERROR: Can not open file *.githubusercontent.com for
+   reading`. Quoting an allowlist entry — the natural thing to do when generating YAML-derived
+   config — silently produces an acl with **no entries**.
+2. **Subdomains use a LEADING DOT, not `*.`** — `.githubusercontent.com`. The `*.` form Phase A
+   generates for tinyproxy regexes is not squid syntax.
+
+So the generator cannot emit one string for both surfaces. `egress_filter_line` (tinyproxy, anchored
+regex) and the squid acl form are **different renderings of the same entry**, and a shared
+"hostname pattern" abstraction would be wrong. That belongs in B2's design, not discovered in B4.
+
+---
+
+## R13 — DNS: the exfiltration is in the question
+
+A resolver that forwards faithfully to Cloudflare still resolves `<base64-payload>.attacker.com` —
+it dutifully asks upstream, which asks the attacker's nameserver, and **the payload has left**. DNS
+tunnelling survives a trusted upstream entirely.
+
+**Decision**: `dnsmasq` in the egress sidecar, **allowlist-only** (`local=/#/` returning NXDOMAIN
+for everything undeclared), with port 53 **redirected by netfilter** so an agent cannot pick its own
+resolver. Composes exactly with default-deny: *you can only resolve what you are allowed to reach.*
+
+**Open for B1** (FR-020e): `local=/#/` returns **NXDOMAIN**, which tells the client "no such host"
+rather than "refused". `REFUSED` is the more honest signal and distinguishes policy from reality —
+worth confirming dnsmasq can emit it before the error path is designed around NXDOMAIN.
+
+---
+
+## R14 — What Phase A leaves behind, and what breaks
+
+| Phase A asset | Under Phase B |
+|---|---|
+| the anchored tinyproxy filter generator | **replaced** — squid acl syntax (R12a) |
+| `egress_permits_host` | **kept** — still the pre-deploy check, must switch rendering |
+| the `NO_PROXY` refusal (C6) | **kept, and cheaper to justify** — the vars are now diagnostics, so an operator unsetting them loses good errors but gains no reach |
+| FR-003c's HTTPS push check | **kept, and needs an SSH arm** — default-deny kills `git push` over SSH unless port 22 is declared |
+| `--json` `enforced` field | **kept**, but its meaning strengthens — B5's problem |
+| the two-key schema | **migrated** at B2, per FR-018b and the plan's opening decision |
+
+**The identity migration is the item with no Phase A analogue.** Under `network_mode:
+service:egress` the published port moves to the egress service. The port *number* is unchanged, so
+the identity lock passes — **which is exactly why it must be handled deliberately rather than left
+to a test that cannot see it.**

