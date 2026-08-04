@@ -163,13 +163,31 @@ being pedantic.
 ### S7 — Enforcement strength is stated honestly (C5, SC-004)
 
 ```bash
-agent-container status dev --json | jq '.egress, .agent'
+agent-container status --json | jq '.data.environments[] | select(.name=="dev")'
 ```
 
-**Expected**: shows `enforcement`, `enforced`, the resolved `hosts` for each declared provider,
-`honours_proxy`, and `builtin_default_provider`. Read the prose output too and confirm it says a
-proxy binds clients that honour it and does **not** stop a process that dials directly. Any
-phrasing implying more than that fails SC-004.
+`status` takes **no** environment name — it reports every declared environment and the caller
+filters. That is more useful than one row, and it kept the CLI from growing an argument merely to
+match this document.
+
+**Expected**: `egress.enforcement`, `egress.enforced`, `egress.hosts` (the **effective** allowlist,
+each entry tagged `tool` or `declaration`), `honours_proxy`, and `builtin_default_provider`.
+
+Check the two pairs that must not be conflated:
+
+| Field | Undeclared | `providers: []` |
+|---|---|---|
+| `declared` | `false` | `true` |
+| `unrestricted` | **`true`** | **`false`** |
+
+Both have an empty `hosts` list and they are **opposites** — a caller must never have to infer
+which from emptiness.
+
+`declared` and `enforced` are likewise distinct: an advisory declaration that cannot be enforced
+reads `declared: true, enforced: false` with a `not_enforced_reason`. Then read the prose output
+and confirm it says a proxy binds clients that honour it, does **not** stop a process that dials
+directly, and that a shell can override it via `~/.agent-env/env` (FR-008a). Any phrasing implying
+more than that fails SC-004.
 
 ### S8 — Strict mode refuses what advisory permits (FR-007b, SC-004a)
 

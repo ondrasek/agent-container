@@ -356,16 +356,26 @@ def test_plan_payload_names_fields_explicitly(wiz):
         "egress": {"providers": ["anthropic"]},
     }
     (row,) = wiz.plan_payload([(env, "acme", "local", None, "drifted", "agent: 'claude'→'codex'")])
-    assert row == {
-        "name": "acme",
-        "host": "local",
-        "state": "drifted",
-        "detail": "agent: 'claude'→'codex'",
-        "agent": "codex",
-        "mode": "headless",
-        "workspace": "ephemeral",
+    # The KEY SET is the guard: a new field cannot reach stdout without someone
+    # deliberately updating this list. Exact-value equality would instead break on
+    # every legitimate addition, which trains people to widen the assertion.
+    assert set(row) == {
+        "name",
+        "host",
+        "state",
+        "detail",
+        "agent",
+        "mode",
+        "workspace",
+        "egress",
+        "builtin_default_provider",
+        "honours_proxy",
     }
+    assert (row["name"], row["host"], row["state"]) == ("acme", "local", "drifted")
+    assert (row["agent"], row["mode"], row["workspace"]) == ("codex", "headless", "ephemeral")
+    assert row["detail"] == "agent: 'claude'→'codex'"
     assert "credentials" not in row, "the credentials block must not ride the payload"
+    assert "vault" not in json.dumps(row), "no credential locator may appear anywhere in the row"
 
 
 def test_plan_payload_defaults_match_the_execspec_defaults(wiz):
@@ -374,3 +384,59 @@ def test_plan_payload_defaults_match_the_execspec_defaults(wiz):
     (row,) = wiz.plan_payload([({"name": "acme"}, "acme", "local", None, "absent", "")])
     assert (row["agent"], row["mode"], row["workspace"]) == ("claude", "interactive", "persistent")
     assert row["detail"] is None
+
+
+# --- Feature 012: egress facts in the plan payload (C7, FR-005/FR-013) ------
+
+
+def _row(wiz, egress, agent="claude"):
+    env = {"name": "acme", "container": {"agent": agent}}
+    if egress is not None:
+        env["egress"] = egress
+    (row,) = wiz.plan_payload([(env, "acme", "local", None, "absent", "")])
+    return row
+
+
+def test_json_reports_undeclared_as_unrestricted_not_empty(wiz):
+    """An empty host list means two opposite things — air-gapped or unrestricted.
+    A caller must never have to infer which."""
+    e = _row(wiz, None)["egress"]
+    assert e["declared"] is False and e["unrestricted"] is True and e["enforced"] is False
+
+
+def test_json_reports_air_gapped_as_declared_not_unrestricted(wiz):
+    e = _row(wiz, {"providers": []})["egress"]
+    assert e["declared"] is True and e["unrestricted"] is False
+    assert e["hosts"] == []
+
+
+def test_json_reports_the_effective_allowlist_not_the_default(wiz):
+    """FR-001b. Reporting the tool's default while enforcing an operator override
+    would state a permission set the proxy does not enforce."""
+    e = _row(wiz, {"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]})["egress"]
+    assert e["hosts"] == [{"label": "anthropic", "host": "gw.corp", "host_source": "declaration"}]
+    assert all(h["host"] != "api.anthropic.com" for h in e["hosts"])
+
+
+def test_json_marks_tool_supplied_hosts_as_such(wiz):
+    e = _row(wiz, {"providers": ["anthropic"]})["egress"]
+    assert e["hosts"] == [
+        {"label": "anthropic", "host": "api.anthropic.com", "host_source": "tool"}
+    ]
+
+
+def test_json_separates_declared_from_enforced(wiz):
+    """A declaration can exist and not be in force. SC-004's honesty requirement
+    applies to the machine-readable surface too, not only to prose."""
+    e = _row(wiz, {"providers": ["anthropic"]}, agent="some-future-agent")["egress"]
+    assert e["declared"] is True
+    assert e["enforced"] is False
+    assert "not known to honour" in e["not_enforced_reason"]
+
+
+def test_json_exposes_the_builtin_default_provider(wiz):
+    """FR-005: the operator learns what an agent can reach from the TOOL, not from
+    that agent's documentation."""
+    assert _row(wiz, None, agent="opencode")["builtin_default_provider"] == "big-pickle"
+    assert _row(wiz, None, agent="claude")["builtin_default_provider"] is None
+    assert _row(wiz, None, agent="claude")["honours_proxy"] is True

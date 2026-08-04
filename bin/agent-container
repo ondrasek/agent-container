@@ -5809,18 +5809,67 @@ def plan_payload(plans: list) -> list[dict]:
     out: list[dict] = []
     for env, name, host_name, _host_rec, state, detail in plans:
         container = env.get("container") or {}
+        agent = container.get("agent") or "claude"
         out.append(
             {
                 "name": name,
                 "host": host_name,
                 "state": state,
                 "detail": detail or None,
-                "agent": container.get("agent") or "claude",
+                "agent": agent,
                 "mode": container.get("mode") or "interactive",
                 "workspace": container.get("workspace") or "persistent",
+                "egress": egress_payload(env.get("egress"), agent),
+                "builtin_default_provider": AGENT_BUILTIN_DEFAULT.get(agent),
+                "honours_proxy": AGENT_HONOURS_PROXY.get(agent, False),
             }
         )
     return out
+
+
+def egress_payload(egress: object, agent: str) -> dict:
+    """The egress facts, machine-readable (FR-005/FR-013, contract C7).
+
+    `hosts` is the EFFECTIVE allowlist, so an operator `hosts:` override is
+    reported rather than the tool's default — reporting the default while
+    enforcing an override would state a permission set the proxy does not enforce.
+    `host_source` says which side supplied each entry.
+
+    `enforced` is the honest field: a declaration can exist and not be in force
+    (advisory mode with an unenforceable declaration), and a caller must be able to
+    tell those apart without parsing prose.
+
+    >>> p = egress_payload(None, "claude")
+    >>> p["declared"], p["enforced"], p["providers"]
+    (False, False, [])
+    """
+    if not is_egress_declared(egress):
+        return {
+            "declared": False,
+            "enforced": False,
+            "enforcement": None,
+            "providers": [],
+            "hosts": [],
+            "unrestricted": True,
+        }
+    assert isinstance(egress, dict)
+    entries = resolve_provider_hosts(egress)
+    ok, reason = egress_enforceable(egress, agent)
+    return {
+        "declared": True,
+        "enforced": ok,
+        "not_enforced_reason": None if ok else reason,
+        "enforcement": egress.get("enforcement") or "advisory",
+        "providers": [label for label, _h, _s in entries if label != "allow"],
+        "hosts": [
+            {"label": label, "host": h, "host_source": source}
+            for label, hosts, source in entries
+            for h in hosts
+        ],
+        # `providers: []` is air-gapped, NOT unrestricted — the opposite. Stated
+        # explicitly so a caller never has to infer it from an empty host list.
+        "unrestricted": False,
+    }
 
 
 def do_aac_status(host_override: str | None = None, skip_unknown: bool = False) -> list[dict]:

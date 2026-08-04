@@ -168,13 +168,20 @@ not a line in the docs.
 
 ## C7 — Machine-readable exposure
 
+**Landing site**: `plan`/`status` under `--json`, as `data.environments[]`. Those commands emitted
+*nothing* on stdout before this feature — a separate `fix(#009)` commit gave them a payload, since
+FR-013 names "the existing machine-readable interface" and `status` is where an operator asks what
+an environment is permitted to reach. They take **no** environment name; the caller filters.
+
 The existing `--json` envelope (Feature 009) gains, per environment:
 
 | Field | Meaning |
 |---|---|
-| `egress.providers` | the declared names |
-| `egress.hosts` | the **effective** allowlist — so an operator sees the mapping **before** a refusal, not after. Must reflect an operator `hosts:` override rather than the tool's default (FR-001b), or the JSON would state a permission set the proxy does not enforce |
-| `egress.host_source` | per entry: `tool` or `declaration` — which side supplied the hosts |
+| `egress.declared` | whether an `egress:` block exists at all |
+| `egress.unrestricted` | **the field that disambiguates an empty `hosts` list.** Undeclared and `providers: []` both have no hosts and are *opposites*; a caller must never infer which from emptiness |
+| `egress.providers` | the declared provider names (excludes `allow` entries) |
+| `egress.hosts` | the **effective** allowlist, each entry tagged `host_source`: `tool` or `declaration`. Must reflect an operator `hosts:` override rather than the tool's default (FR-001b), or the JSON would state a permission set the proxy does not enforce |
+| `egress.enforced` | whether the declaration is actually in force. **Distinct from `declared`** — an advisory declaration that cannot be enforced is `declared: true, enforced: false`, with `not_enforced_reason` |
 | `egress.enforcement` | the effective mode |
 | `egress.enforced` | whether the declaration is actually being enforced for this agent |
 | `agent.builtin_default_provider` | the disclosure, machine-readable |
