@@ -54,13 +54,25 @@ environments:
         - anthropic                       # short form — the tool supplies the hosts
         - name: openai                    # long form — an indirect endpoint (FR-001a)
           hosts: [llm.corp.internal]      #   REPLACES the tool's mapping (FR-001b)
+      allow:                              # non-provider hosts (FR-001c)
+        - github.com                      #   git push — see FR-003c
+        - "*.githubusercontent.com"       #   domain + subdomains (FR-001d)
       enforcement: advisory               # advisory (default) | strict
 ```
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `egress.providers` | list of names **or** `{name, hosts}` mappings | absent | absent ≠ empty — see below |
+| `egress.allow` | list of hosts, optionally `*.`-prefixed | `[]` | FR-001c/FR-001d — everything that is not a model vendor |
 | `egress.enforcement` | `advisory` \| `strict` | `advisory` | FR-007b |
+
+**`providers` vs `allow` is a readability split, not a privilege split.** Both feed one allowlist.
+`providers` carries vendor *names* the tool resolves to hosts and can drift with; `allow` carries
+plain hosts the operator owns. Merging them into one list would force `github.com` to masquerade as
+a provider and make the declaration harder to read, not easier.
+
+**There is no hidden baseline** (FR-001e). If a host is reachable, it is in one of these two lists.
+The proxy governs **all** HTTPS egress — that is why `allow` has to exist at all.
 
 The two entry forms are interchangeable within one list. The short form is the common case and
 keeps the declaration readable; the long form appears exactly where an indirect endpoint makes it
@@ -76,6 +88,18 @@ necessary, and is self-documenting there.
 
 Conflating "undeclared" with "empty" would turn every existing environment into an air-gapped one
 on upgrade. They are distinct by construction, and the schema must not coerce one into the other.
+
+**The fourth state, and why it is refused.** `egress:` present with `enforcement:` but **no**
+`providers` key is neither declared nor undeclared. Reading it as unrestricted would let
+`enforcement: strict` sit in a file enforcing nothing; reading it as empty would air-gap on a key
+the operator added for an unrelated reason. Both are silent, so **it is refused** — naming the
+missing `providers` key. An operator wanting "no egress at all" writes `providers: []`, which says
+so.
+
+**Presence must live in the type, not in a caller's discipline.** `resolve_provider_hosts` returns
+`[]` for both `None` and `{"providers": []}`, so any consumer taking `dict | None` and deriving the
+allowlist from the return value alone will render an **undeclared** environment air-gapped — the
+exact upgrade catastrophe above. Every consumer must branch on *presence* before resolving.
 
 ### Validation (extends `validate_environment`)
 

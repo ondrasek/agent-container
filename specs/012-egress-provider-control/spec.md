@@ -32,6 +32,30 @@ This feature makes the set of reachable providers **declared, enforced and visib
 
 ## Clarifications
 
+### Session 2026-08-04 — scope corrected after a design probe
+
+- Q: The mechanism is a forward proxy on `HTTPS_PROXY`. That intercepts **every** HTTPS request,
+  not only model-provider ones — so the earlier "controlling egress unrelated to model providers
+  is out of scope" could not be honoured by the thing being built. Which gives? → A: **The scope
+  gives. The declaration governs ALL egress, and the operator declares everything the environment
+  needs.** Truthful to the mechanism; the alternative was a permanent hidden allowlist that makes
+  the declaration mean less than it says.
+
+  **What forced it.** Verified by probe: with `providers: [anthropic]`, `git ls-remote
+  https://github.com/…` returns `CONNECT tunnel failed, response 403` while the declared provider
+  still answers. `image/entrypoint.sh` configures `credential.https://github.com.helper` from
+  `GH_TOKEN`, so **HTTPS push is the documented default** — and a silently unenforceable push
+  breaks the project's first hard constraint, *"every agent must commit AND push every change"*.
+  The failure is maximally cruel: the agent works perfectly all session and fails **only at push
+  time**, exactly when work would otherwise have been preserved. SSH push survives (`ssh` ignores
+  `https_proxy`), so it is invisible to anyone testing with a push key and fatal to anyone using
+  the documented token path.
+
+  Rejected — an unconditional built-in baseline (always permit `github.com` et al.): it keeps the
+  constraint safe but makes the declaration untruthful, and "I declared only `anthropic`" would
+  quietly mean "anthropic plus whatever we decided you also need". The whole feature exists to end
+  that kind of silence.
+
 ### Session 2026-07-29
 
 - Q: How is undeclared egress actually detected and prevented, given the container cannot add
@@ -166,6 +190,28 @@ discoverable after the container is gone.
   to close the direct vendor path — treating the list as additive would silently leave that path
   open while the declaration reads as constrained. The provider name remains the human-meaningful
   label the declaration is read by.
+- **FR-001c**: The declaration MUST be able to express **non-provider hosts** — git remotes,
+  package registries, anything else the environment legitimately reaches. The enforcement
+  mechanism is a forward proxy, which governs **all** HTTPS egress and cannot be narrowed to
+  model providers; so an environment that declares anything must be able to declare everything it
+  needs. Provider **names** stay the readable shorthand for model vendors; a separate list carries
+  plain hosts.
+- **FR-001d**: A non-provider host entry MUST support matching **a domain and its subdomains**,
+  since real dependencies span them (`*.githubusercontent.com`). Without it an operator would
+  enumerate hosts they cannot know in advance, and would reach for an over-broad workaround.
+- **FR-001e**: **The tool MUST NOT maintain a hidden always-permitted baseline.** If a host is
+  reachable, the declaration says so. A built-in exemption would make the permitted set differ
+  from the declared set — reintroducing, inside the feature, exactly the silence it exists to end.
+- **FR-003c**: When an environment is configured to **push over HTTPS** and the effective
+  allowlist does not cover that remote's host, the tool MUST say so **at deploy time**, naming the
+  host to add — refusing under `strict`, warning under `advisory`.
+
+  This protects the project's first hard constraint (*commit AND push every change*) at the only
+  moment it can still be protected. Both facts are known before anything runs: the remote is in
+  the environment's configuration and the allowlist is in the declaration. Discovering it instead
+  at push time means discovering it **after** the work exists and **before** it is safe — the one
+  ordering the constraint exists to prevent. This requirement is what makes FR-001e's
+  no-hidden-baseline rule safe to hold.
 - **FR-002**: The declaration MUST live in the **declarative spec**
   (`.agent-container/environments.yaml`), beside the credentials that authorise those providers —
   no new file and no new resolution path.
@@ -177,9 +223,19 @@ discoverable after the container is gone.
   to withhold. This is the concrete content of the earlier vague "at deploy time where that is
   possible" — the agent picks its provider at run time, so no *general* deploy-time detection
   exists, and claiming otherwise would be an untestable requirement.
-- **FR-003b**: A declared provider whose **credential cannot be resolved** MUST fail naming the
-  **missing credential**, never the declaration. Blaming the provider list for a credential
-  problem sends the operator to edit the one thing that is correct.
+- **FR-003b** *(rewritten 2026-08-04)*: A credential that cannot be resolved MUST fail naming
+  **that credential and its source**, before any container is touched. No failure message on the
+  egress path may attribute a credential problem to the `egress` declaration. **The tool MUST NOT
+  infer that a declared provider requires a particular credential** — no such association exists,
+  and inventing one would produce false failures.
+
+  **Why the earlier wording could not be built.** It presupposed the tool could tell that a
+  declared provider needs a given credential. It cannot: `PROVIDERS` maps provider→hosts,
+  `CRED_PROVIDER` maps credential-name→provider for *delivery routing only* and covers two of five
+  providers, and `AGENT_BUILTIN_DEFAULT` is the inverse relation entirely. Any inference would
+  false-positive on a provider reached without a credential — which is the exact case Feature 010
+  discovered and this feature exists to surface. So the requirement becomes a **prohibition** on
+  misattribution, which is both implementable and the thing the operator actually needed.
 - **FR-004**: An environment declaring **no** providers MUST be **unrestricted**, exactly as
   today — and the operator MUST be told once that the agent may reach a built-in default without
   their credential. Enforcement is opt-in; the defect being fixed is silence, not permissiveness.
@@ -206,6 +262,13 @@ discoverable after the container is gone.
   and opens a direct connection, because packet filtering needs privileges this feature may not
   add. The tool MUST NOT imply a stronger guarantee than that, and MUST say which agents are
   known to honour the proxy.
+- **FR-008a**: The honesty statement MUST also disclose that **a shell inside the container can
+  override the proxy settings**, because `~/.agent-env/env` is sourced with `set -a` by every
+  interactive shell — *after* the container environment, from a volume that survives teardown.
+  The tool cannot inspect it at deploy time (it is inside the container) and cannot prevent it
+  (the agent owns its shell). Omitting this would make FR-008 assert a guarantee that a single
+  line in a persistent file silently revokes — the precise shape of overclaim this feature was
+  written to eliminate, reappearing in the statement meant to prevent it.
 - **FR-009**: No provider declaration may expose a credential value, and declaring a provider
   MUST NOT imply storing its credential in the project (Constitution III, and the Feature 011
   rule that the repo holds a locator, never a value).
@@ -293,7 +356,6 @@ discoverable after the container is gone.
 
 - Network-level packet filtering, firewalls, or anything requiring added capabilities. A proxy
   is in scope precisely because it needs none.
-- Controlling egress unrelated to model providers (package registries, git remotes, telemetry).
 - Auditing the *content* of what an agent sends — this feature governs *where*, not *what*.
 - Per-request cost or token accounting (that is the observability feature).
 - Choosing or switching providers on the operator's behalf.

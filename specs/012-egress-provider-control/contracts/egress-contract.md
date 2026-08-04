@@ -64,10 +64,31 @@ services:
 | Guarantee | Why |
 |---|---|
 | The proxy is in the **generated** file, never `<name>.services.yaml` | that file is validated services-only and forbidden from redefining `agent`; it is operator-owned (research R4) |
-| The operator override still rides as the second `-f`, on top | an operator can override the proxy; that is a feature |
+| The operator override still rides as the second `-f`, on top | an operator can override the proxy — see the disclosure rule below |
 | No new volume | a tenth per-container volume is an identity migration (research R9) |
 | `down` / `redeploy` / `wipe` tear the proxy down | it is in the same project; nothing new to remember |
 | Absent a declaration, the model is **byte-identical to today** | FR-004/FR-012 — existing environments keep working |
+
+### Operator override of the proxy — permitted, never silent
+
+The override file is **operator-owned and host-side**; Feature 006 already establishes that an
+agent cannot reach it. So an operator redefining the `egress` service is not an attack — it is the
+same authority as choosing not to declare egress at all. Forbidding it would be theatre.
+
+**But it must never be silent.** If the merged override redefines the `egress` service:
+
+| Requirement | Why |
+|---|---|
+| The tool MUST report it at deploy | the operator may not remember what an old override file does |
+| `enforced` MUST read **false** in prose and `--json` | the tool did not define the running proxy and cannot vouch for its allowlist |
+| Under `strict`, deployment MUST be **refused** | strict means "refuse when the declaration cannot be enforced", and a proxy we did not define is exactly that |
+
+Claiming enforcement for a proxy the tool did not configure would be the overclaim SC-004 exists to
+prevent — inside the very mechanism meant to deliver it.
+
+**Detection must not use the column-0 regex scanner.** `_yaml_service_keys` returns `[]` for
+`services: {egress: {...}}` (flow style) and for a quoted `"egress":` key, so both slip past. PyYAML
+is already the project's one sanctioned dependency; `yaml.safe_load` closes this exactly.
 
 **Behaviour change to state, not discover**: a foreground headless run passes
 `--abort-on-container-exit --exit-code-from agent`, which stops every service when any one exits.

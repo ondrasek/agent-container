@@ -82,6 +82,21 @@ refused rather than silently allowed.
 **Independent test**: declare one provider, confirm the agent reaches it normally, then confirm an
 undeclared provider does not succeed silently (quickstart S2, S3).
 
+### Blockers found by the Phase 3 design fan-out — settle these first
+
+Each was **verified against the real code**, not inferred. They change signatures, so they precede
+T012.
+
+- [ ] T011a **Decide and record the single mechanism by which `up` sees the declaration.** `do_up` (`bin/agent-container:3126`) never calls `load_project_spec`; the declaration lives only on the `apply` path. Yet quickstart S2/S4/S6/S8 all drive the feature via `agent-container up dev`. Three design agents proposed three incompatible mechanisms. Every downstream signature depends on this — T012's parameter, T019's location, T021's call site, T022's log point. **Decide before writing code**, and cover `do_redeploy` (`:3387`), which duplicates the precheck sequence rather than routing through `do_up`
+- [ ] T011b Create `image/egress/` — Dockerfile (Alpine + tinyproxy, uid 65534) and `.dockerignore`. **It does not exist**; T002/T003 evaluated and chose it but committed no artifact, so any enforceability predicate keyed on its presence is vacuously false today. Use `FilterType` (not the deprecated `FilterExtended`) and drop `FilterCaseSensitive Off`, which is a documented no-op
+- [ ] T011c Generate filter entries **anchored and escaped** — `^<re.escape(host)>$`. tinyproxy matches filter lines with `regexec` **unanchored**, so a bare `api.anthropic.com` also permits `api.anthropic.com.attacker.net`. **This is the security boundary of the whole feature**; it gets its own test with that exact attacker string
+- [ ] T011d Cap total hostname length in `HOSTNAME_RE` (`:4971`). It accepts a **731-character** host (verified) because the label group repeats unbounded; tinyproxy reads its filter with a 512-byte `fgets` and regcomps each chunk, so one over-long entry becomes a prefix pattern **plus** a suffix pattern — silent over-permission reachable through the FR-001a `hosts:` path
+- [ ] T011e Replace `_yaml_service_keys` (`:2240`) with `yaml.safe_load`. The column-0 regex scanner returns `[]` for `services: {agent: {...}}` (flow style) and for a quoted `"agent":` key — both verified — so an operator override can set `agent.environment.NO_PROXY`, win the merge as the second `-f`, and defeat C6 entirely. PyYAML is already the sanctioned dependency
+- [ ] T011f Make `resolve_provider_hosts` unable to confuse **absent** with **empty**, and refuse the fourth state (`egress:` with `enforcement:` but no `providers`) — data-model §2. Presence must live in the type, not in one caller's discipline
+- [ ] T011g Add the effective allowlist to drift detection. `env_reconcile`/`env_desired_config` (`:5237`) compare only mode/agent/clone-url, so editing `egress.providers` and re-running `apply` reports **matching** and never redeploys — the declaration changes and the running proxy does not. Hostnames only, never a credential
+- [ ] T011h Keep the proxy container out of the environment-scanning surface. Compose names an unnamed service's container `<project>-<service>-1` → `agent-container-acme-egress-1`, which starts with `CONTAINER_PREFIX`; **six** sites treat any `agent-container-*` container as an environment (`:1104`, `:2674`, `:3481`, `:3511`, `:2700`, and the wizard pickers)
+- [ ] T011i Ensure teardown covers the proxy on the **fallback** path. `down_container` (`:3210`) issues a project-scoped `compose down`, but its fallback (`:3229`) does `rm -f <container_name(name)>` plus explicit volume removal — that branch strands a proxy container
+
 ### Compose model
 
 - [ ] T012 [US1] Extend `build_compose_model` in `bin/agent-container` to emit a second `egress` service — with the allowlist derived from the declaration — **only** when a declaration is present and enforceable (contract C2)
@@ -103,10 +118,18 @@ undeclared provider does not succeed silently (quickstart S2, S3).
 - [ ] T022 [US1] Make the **effective** mode visible before deploying, in `bin/agent-container` (FR-007b)
 - [ ] T023 [P] [US1] Add tests in `bin/tests/test_agent_as_code.py` covering the four cells of data-model §5's mode table, including strict refusing on a proxy that cannot start (SC-004a — zero deployments proceeding with an unenforceable declaration)
 
+### All egress, not just providers (scope decision, 2026-08-04)
+
+- [ ] T020a [US1] Implement `egress.allow` in `bin/agent-container` — non-provider hosts, with `*.domain` meaning domain-and-subdomains (FR-001c/FR-001d), folded into the same effective allowlist as `providers`
+- [ ] T020b [P] [US1] Add tests for `allow` in `bin/tests/test_agent_as_code.py`: plain host, `*.` form, and that `*.example.com` does **not** match `example.com.attacker.net`
+- [ ] T020c [US1] **Refuse or warn at deploy when HTTPS push is configured and the remote's host is not in the effective allowlist** (FR-003c) — refuse under `strict`, warn under `advisory`, naming the host to add. **This is the task that protects Hard Constraint #1.** Verified by probe: under `providers: [anthropic]`, `git ls-remote https://github.com/…` returns `CONNECT tunnel failed, response 403`
+- [ ] T020d [P] [US1] Add a test in `bin/tests/test_compose.py` proving T020c fires for an HTTPS remote absent from the allowlist and stays silent for an SSH remote (which ignores `https_proxy`) or when the host is declared
+- [ ] T020e [US1] Report an operator override that redefines the `egress` service, set `enforced` false, and refuse under `strict` (contract C2). Permitted but never silent — claiming enforcement for a proxy the tool did not configure is the overclaim SC-004 exists to prevent
+
 ### Error attribution
 
-- [ ] T023a [US1] Make a declared provider whose credential cannot be resolved fail naming the **missing credential**, not the declaration, in `bin/agent-container` (FR-003b). Blaming the provider list for a credential problem sends the operator to edit the one thing that is correct
-- [ ] T023b [P] [US1] Add a test in `bin/tests/test_credentialing.py` asserting that failure names the credential and does **not** name the `egress` block (FR-003b)
+- [ ] T023a [US1] Implement FR-003b as an **ordering-and-vocabulary invariant**, not a new check: credential resolution already fails naming the credential and its source, so ensure the egress code cannot re-attribute that failure to the `egress` declaration, and thread environment context into the message. **Do NOT infer that a declared provider requires a credential** — no such mapping exists (`PROVIDERS` is provider→hosts; `CRED_PROVIDER` is credential→provider for delivery routing and covers 2 of 5), and any inference false-positives on a provider reached without one, which is the very case Feature 010 found
+- [ ] T023b [P] [US1] Add a **negative** test in `bin/tests/test_credentialing.py`: a credential failure names the credential and its source and mentions neither `egress` nor any provider name (FR-003b)
 
 ### Lifecycle
 
@@ -215,8 +238,8 @@ cost is an identity migration plus an ingestion path that gets thrown away.
 |---|---|
 | 1 — Setup | 4 |
 | 2 — Foundational | 11 |
-| 3 — US1 | 16 |
+| 3 — US1 | 30 |
 | 4 — US2 | 8 |
 | 5 — US3 (deferred) | 3 |
 | 6 — Polish | 8 |
-| **Total** | **50** (47 in scope, 3 deferred) |
+| **Total** | **64** (61 in scope, 3 deferred) |
