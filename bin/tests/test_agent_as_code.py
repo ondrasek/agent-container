@@ -1480,19 +1480,41 @@ def test_mode_table_enforceable_strict_deploys_with_proxy(wiz):
     assert _enf(wiz, mode="strict") is True
 
 
-def test_mode_table_unenforceable_advisory_deploys_without_proxy(wiz):
-    """Deploys, and says so. The defect this feature fixes is silence, not
-    permissiveness — so advisory must NOT refuse, but must never be quiet."""
-    assert _enf(wiz, agent="some-future-agent") is False
+def test_mode_table_unenforceable_advisory_deploys_without_proxy(wiz, tmp_path):
+    """Deploys, and says so. The defect this feature fixes is SILENCE, not
+    permissiveness — advisory must not refuse, but must never be quiet.
+
+    The obstacle here is an operator override redefining the egress service.
+    Phase A used "an agent not known to honour the proxy", which is no longer an
+    obstacle at all: transparent enforcement needs nothing from the agent, so an
+    unprobed agent still gets the boundary. That change is the feature.
+    """
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    assert _enf(wiz, override=o) is False
 
 
-def test_mode_table_unenforceable_strict_refuses(wiz):
+def test_mode_table_unenforceable_strict_refuses(wiz, tmp_path):
     """SC-004a: zero deployments proceeding with an unenforceable declaration."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
     with pytest.raises(wiz.Fatal) as e:
-        _enf(wiz, agent="some-future-agent", mode="strict")
+        _enf(wiz, mode="strict", override=o)
     msg = str(e.value)
-    assert "not known to honour" in msg
+    assert "redefines" in msg
     assert "advisory" in msg, "must name the way out, not just refuse"
+
+
+def test_an_unprobed_agent_still_gets_the_boundary(wiz):
+    """The Phase A -> Phase B difference, stated as a test.
+
+    Under Phase A an agent absent from AGENT_HONOURS_PROXY could not be enforced,
+    because enforcement asked the agent to cooperate. Transparent enforcement asks
+    it for nothing, so the same agent now gets the full boundary — and `strict`
+    has no reason to refuse it.
+    """
+    assert wiz.egress_enforcement_mode({"allow": []}, "some-future-agent")[0] == "transparent"
+    assert _enf(wiz, agent="some-future-agent", mode="strict") is True
 
 
 def test_undeclared_never_deploys_a_proxy(wiz):

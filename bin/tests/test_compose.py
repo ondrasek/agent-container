@@ -370,10 +370,17 @@ def test_no_declaration_means_no_refusal(wiz, tmp_path):
 
 def test_unenforced_declaration_means_no_refusal(wiz, tmp_path):
     """An unenforced declaration makes no guarantee for NO_PROXY to contradict, so
-    refusing would be noise — the operator has already been told it is not enforced."""
+    refusing would be noise — the operator has already been told it is not enforced.
+
+    The obstacle is an override of the egress service. An unprobed AGENT no longer
+    qualifies: transparent enforcement asks the agent for nothing, so that
+    environment IS enforced and its NO_PROXY is refused like any other.
+    """
     f = tmp_path / "dev.env"
     f.write_text("NO_PROXY=*\n")
-    wiz.refuse_operator_proxy_vars(DECL, "some-future-agent", [f])
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    wiz.refuse_operator_proxy_vars(DECL, "claude", [f], None, o)
 
 
 def test_unrelated_env_vars_are_untouched(wiz, tmp_path):

@@ -5507,53 +5507,114 @@ def override_redefines_egress(override: Path | None) -> bool:
         return False
 
 
-def egress_enforceable(
+# The two mechanisms this feature can deliver, strongest first. They are NOT
+# interchangeable and must never be reported as one thing: `transparent` holds
+# even against an agent actively evading it; `cooperative` holds only against
+# accident and misconfiguration. Reporting `enforced: true` for both would make
+# the field mean whichever the operator happened to get (FR-021).
+EGRESS_TRANSPARENT = "transparent"
+EGRESS_UNENFORCED = "none"
+# There is deliberately NO `cooperative` mode returned by this predicate, and the
+# absence is a decision rather than an omission.
+#
+# FR-021 asks for a fallback to Phase A's proxy-variable mechanism under
+# `advisory` when transparent enforcement "cannot be delivered". Two things make
+# that unbuildable as written:
+#
+#   1. Nothing rules out transparent enforcement PER AGENT. Its whole point is
+#      that it needs nothing from the agent, so an agent nobody has probed still
+#      gets the boundary. Every obstacle that remains (no image, an overridden
+#      egress service) rules out the proxy too — there is nothing left to fall
+#      back TO.
+#   2. Whether the daemon grants NET_ADMIN and the kernel accepts the rules is
+#      not knowable before running the container. The entrypoint therefore FAILS
+#      CLOSED: it dies if it cannot install its rules, `compose up` fails, and no
+#      unconstrained container is left running.
+#
+# A silent downgrade to the weaker mechanism would be the exact failure this
+# feature exists to prevent — an environment reporting enforcement while an agent
+# can `unset HTTPS_PROXY` and walk out. FR-021 needs amending; see spec.
+
+
+def egress_enforcement_mode(
     egress: object, agent: str | None, override: Path | None = None
-) -> tuple[bool, str]:
-    """Whether a declaration can actually be ENFORCED here — `(ok, reason)`.
+) -> tuple[str, str]:
+    """Which mechanism this environment will actually get — `(mode, reason)`.
 
-    The reason is shown to the operator, so it must name the specific obstacle
-    rather than saying "unsupported". `advisory` deploys and states the limitation;
-    `strict` refuses (FR-007b).
+    `reason` is shown to the operator and must name the specific obstacle, never
+    "unsupported": the point of FR-021 is that an operator can tell WHICH
+    enforcement they obtained, and a vague message defeats that as thoroughly as
+    reporting nothing.
 
-    An agent absent from AGENT_HONOURS_PROXY reads as NOT known to honour, so a
-    newly added agent is refused under strict until someone probes it — the safe
-    direction (data-model §4).
+    Every obstacle here rules out enforcement ENTIRELY: there is no partial mode
+    to report, because the things that prevent the netfilter boundary (no image,
+    an operator-redefined egress service) prevent the proxy just as completely.
 
-    >>> egress_enforceable({"allow": []}, "claude")
-    (True, '')
-    >>> egress_enforceable({"allow": []}, "some-future-agent")[0]
-    False
+    What cannot be settled here: whether the daemon will actually grant
+    NET_ADMIN, and whether the kernel will accept the rules. Neither is knowable
+    without running the container. That case is handled by FAILING CLOSED rather
+    than by guessing — the entrypoint dies if it cannot install its rules, so
+    `compose up` fails and no unconstrained container is left running. A
+    pre-deploy guess would be worse than the absence of one: it would license a
+    deploy on a prediction.
+
+    >>> egress_enforcement_mode({"allow": []}, "claude")[0]
+    'transparent'
+    >>> egress_enforcement_mode(None, "claude")[0]
+    'none'
+    >>> egress_enforcement_mode({"allow": []}, "some-future-agent")[0]
+    'transparent'
     """
     if not is_egress_declared(egress):
-        return True, ""  # nothing declared, nothing to enforce
+        return EGRESS_UNENFORCED, ""
+
     try:
         ctx = resolve_build_context()
     except Fatal:
         ctx = None  # no checkout reachable (e.g. a bare PyPI install)
     if ctx is None or not (Path(ctx) / "egress" / "Dockerfile").is_file():
-        return False, (
-            "the egress proxy image sources are not reachable "
+        # Rules out BOTH: without the image there is no proxy either.
+        return EGRESS_UNENFORCED, (
+            "the egress image sources are not reachable "
             "(expected image/egress/Dockerfile in a checkout)"
         )
     if override_redefines_egress(override):
-        return False, (
-            f"the sidecar override {override} redefines the '{EGRESS_SERVICE_KEY}' "
-            f"service, so the running proxy is not the one this tool configured and "
-            f"its allowlist cannot be vouched for"
+        return EGRESS_UNENFORCED, (
+            f"the sidecar override {override} redefines the "
+            f"'{EGRESS_SERVICE_KEY}' service, so the running boundary is not the one "
+            f"this tool configured and its allowlist cannot be vouched for"
         )
-    if not AGENT_HONOURS_PROXY.get(agent or "", False):
-        return False, (
-            f"agent {agent!r} is not known to honour proxy environment variables, "
-            f"so the declaration cannot be enforced for it. Known to honour: "
-            f"{', '.join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))}"
-        )
-    return True, ""
+
+    # Transparent enforcement needs nothing FROM THE AGENT — that is its whole
+    # point — so there is no per-agent obstacle to check here. Proxy adherence
+    # only matters for the cooperative fallback, and is therefore checked in that
+    # branch rather than as a precondition of enforcement generally.
+    return EGRESS_TRANSPARENT, ""
+
+
+def egress_enforceable(
+    egress: object, agent: str | None, override: Path | None = None
+) -> tuple[bool, str]:
+    """Back-compat shim: enforced at all, by either mechanism.
+
+    Kept because `--json`'s `enforced` field and the strict/advisory decision both
+    want the coarse answer. Callers that must distinguish the two mechanisms —
+    anything reporting strength to an operator — MUST use
+    egress_enforcement_mode() instead, or they will describe a cooperative
+    deployment in the language of a boundary.
+    """
+    mode, reason = egress_enforcement_mode(egress, agent, override)
+    return mode != EGRESS_UNENFORCED, reason
 
 
 # The variables that decide where a request goes. NO_PROXY is the bypass C6 exists
 # for; the *_PROXY pair is included because redirecting the agent at a different
 # proxy defeats the allowlist just as completely as skipping one.
+#
+# Under Phase B these are no longer the enforcement — netfilter is — but the
+# refusal is KEPT: an operator value would still break the diagnostic layer that
+# turns a dropped connection into a nameable refusal, and a declaration whose
+# error messages silently stop working is its own kind of failure.
 PROXY_ENV_KEYS = (
     "NO_PROXY",
     "no_proxy",
@@ -5647,7 +5708,10 @@ def refuse_operator_proxy_vars(
     Only fires when the declaration would actually be enforced — an unenforced
     declaration has no guarantee for the variable to contradict.
     """
-    if not is_egress_declared(egress) or not egress_enforceable(egress, agent)[0]:
+    # The override MUST reach this check: an environment whose egress service is
+    # operator-redefined is not enforced, so there is no guarantee for NO_PROXY
+    # to contradict and refusing would be noise.
+    if not is_egress_declared(egress) or not egress_enforceable(egress, agent, override)[0]:
         return
     found = find_operator_proxy_var(env_files, cred_names, override)
     if found is None:

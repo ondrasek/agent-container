@@ -427,13 +427,20 @@ def test_json_marks_tool_supplied_hosts_as_such(wiz):
     ]
 
 
-def test_json_separates_declared_from_enforced(wiz):
+def test_json_separates_declared_from_enforced(wiz, tmp_path):
     """A declaration can exist and not be in force. SC-004's honesty requirement
-    applies to the machine-readable surface too, not only to prose."""
-    e = _row(wiz, {"allow": [{"provider": "anthropic"}]}, agent="some-future-agent")["egress"]
-    assert e["declared"] is True
-    assert e["enforced"] is False
-    assert "not known to honour" in e["not_enforced_reason"]
+    applies to the machine-readable surface too, not only to prose.
+
+    The obstacle is an operator override of the egress service — an unprobed
+    AGENT is no longer one, because transparent enforcement asks the agent for
+    nothing.
+    """
+    o = tmp_path / "acme.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    p = wiz.egress_payload({"allow": [{"provider": "anthropic"}]}, "claude", o)
+    assert p["declared"] is True
+    assert p["enforced"] is False
+    assert "redefines" in p["not_enforced_reason"]
 
 
 def test_json_exposes_the_builtin_default_provider(wiz):
