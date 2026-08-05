@@ -174,18 +174,62 @@ def test_no_declaration_leaves_the_model_byte_identical(wiz, tmp_path):
 
 def test_declaration_adds_exactly_one_service_and_no_volume(wiz, tmp_path):
     """The proxy must not touch the nine-volume identity contract (Constitution IV)."""
-    body = "^api\\.anthropic\\.com$\n"
-    plain, withp = _model(wiz, tmp_path), _model(wiz, tmp_path, egress_filter_body=body)
+    plain = _model(wiz, tmp_path)
+    withp = _model(wiz, tmp_path, egress_filter_body="api.anthropic.com\n")
     assert set(withp["services"]) - set(plain["services"]) == {"egress"}
     assert withp["volumes"] == plain["volumes"], "the volume set must be untouched"
     egress = withp["services"]["egress"]
-    assert "ports" not in egress, "the proxy must not be published to the host"
     assert "volumes" not in egress
     assert "env_file" not in egress, "an operator env-file must not reach the security control"
-    # `content:`, not `file:` — a file: config is a read-only BIND of the local path
-    # and cannot reach a daemon that does not share the filesystem (remote hosts).
-    assert withp["configs"]["egress_filter"] == {"content": body}
-    assert "file" not in withp["configs"]["egress_filter"]
+    assert egress["cap_add"] == ["NET_ADMIN"], "the only privilege, and not on the agent"
+    assert withp["configs"]["egress_acl"]["content"] == "api.anthropic.com\n"
+
+
+def test_the_published_port_moves_to_the_egress_service(wiz, tmp_path):
+    """T116/T117 — the identity migration the lock cannot see.
+
+    A shared network namespace has exactly ONE port owner, and the daemon refuses
+    `ports:` on a service using `network_mode: service:`. So the binding moves.
+
+    The port NUMBER is unchanged, which is why `port_for_name` and every consumer
+    still agree — and precisely why this needs its own test: the identity lock
+    compares names and numbers and would pass while the owning service changed
+    underneath it.
+    """
+    plain = _model(wiz, tmp_path)
+    withp = _model(wiz, tmp_path, egress_filter_body="")
+    port = f"{wiz.port_for_name('acme')}:2222"
+
+    assert plain["services"]["agent"]["ports"] == [port], "unchanged without a declaration"
+    assert "ports" not in withp["services"]["agent"], "the agent cannot publish in a shared netns"
+    assert withp["services"]["egress"]["ports"] == [port], "same NUMBER, different owner"
+    assert wiz.port_for_name("acme") == wiz.port_for_name("acme")
+
+
+def test_agent_joins_the_namespace_and_gains_no_capability(wiz, tmp_path):
+    """SC-011. The container running untrusted code must hold NOTHING."""
+    withp = _model(wiz, tmp_path, egress_filter_body="")
+    agent = withp["services"]["agent"]
+    assert agent["network_mode"] == "service:egress"
+    assert agent["depends_on"] == ["egress"]
+    assert "cap_add" not in agent, "the agent must gain no capability — this is the whole design"
+
+
+def test_all_three_surfaces_ride_the_configs_channel(wiz, tmp_path):
+    """One declaration, three injected artefacts, all by `content:` — never
+    `file:`, which is a bind of a local path and cannot reach a remote daemon."""
+    m = _model(
+        wiz,
+        tmp_path,
+        egress_filter_body="api.anthropic.com\n",
+        egress_unbound_body="server:\n",
+        egress_ports_body="iptables -A OUTPUT -p tcp -d 'github.com' --dport 22 -j ACCEPT\n",
+    )
+    cfgs = m["configs"]
+    for key in ("egress_acl", "egress_unbound", "egress_ports"):
+        assert "content" in cfgs[key] and "file" not in cfgs[key], f"{key} must be API-delivered"
+    targets = {c["source"]: c["target"] for c in m["services"]["egress"]["configs"]}
+    assert targets["egress_ports"].endswith("ports.rules")
 
 
 def test_proxy_container_name_is_outside_the_environment_namespace(wiz, tmp_path):

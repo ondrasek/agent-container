@@ -589,7 +589,11 @@ ENFORCEMENT_MODES = ("advisory", "strict")
 # `agent-container-*` container as an environment to list, pick or tear down.
 EGRESS_SERVICE_KEY = "egress"
 EGRESS_PORT = 8888
-EGRESS_FILTER_PATH = "/etc/tinyproxy/filter"
+EGRESS_ACL_PATH = "/etc/squid/allowed_sni.acl"
+EGRESS_UNBOUND_PATH = "/etc/unbound/allowed.conf"
+# A shell fragment the entrypoint SOURCES before flipping the policy to DROP,
+# so a declared {host, port} is permitted by the time anything can use it.
+EGRESS_PORTS_PATH = "/etc/egress/ports.rules"
 # The minimum for in-container traffic. The tool owns this value; an operator one is
 # refused rather than compared (contract C6) — deciding whether one NO_PROXY is
 # "wider" than another means comparing *, .suffix, IP, CIDR and port forms, and a
@@ -2464,6 +2468,8 @@ def build_compose_model(
     workspace_mount: object = _WORKSPACE_DEFAULT,
     declare_workspace_volume: bool = True,
     egress_filter_body: str | None = None,
+    egress_unbound_body: str | None = None,
+    egress_ports_body: str | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
@@ -2499,6 +2505,14 @@ def build_compose_model(
         "ports": [f"{port}:2222"],
         "volumes": workspace_mounts + other_volume_mounts(name) + list(extra_mounts or []),
     }
+    if egress_filter_body is not None:
+        # Joining the egress namespace means the agent CANNOT publish ports — the
+        # daemon refuses both together — so the binding moves there (above). The
+        # agent gains no capability: `cap_add` is absent here deliberately, and
+        # SC-011 asserts the set stays empty.
+        service.pop("ports", None)
+        service["network_mode"] = f"service:{EGRESS_SERVICE_KEY}"
+        service["depends_on"] = [EGRESS_SERVICE_KEY]
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
@@ -2566,11 +2580,28 @@ def build_compose_model(
             "container_name": egress_container_name(name),
             "build": {"context": str(Path(build_context) / "egress")},
             "restart": restart,
-            "configs": [{"source": "egress_filter", "target": EGRESS_FILTER_PATH}],
+            # THE ONLY PRIVILEGE IN THE DEPLOYMENT, and it is not on the agent.
+            # Constitution II is per-container: this one runs no untrusted code.
+            "cap_add": ["NET_ADMIN"],
+            # THE PUBLISHED PORT LIVES HERE NOW. A shared network namespace has
+            # exactly one port owner, and it is the container that owns the
+            # namespace. The port NUMBER is unchanged, so `port_for_name` and every
+            # consumer still agree — but which service publishes it is part of the
+            # deployed shape, and every Phase A environment has it on `agent`.
+            # That makes this a migration (T118), not an edit.
+            "ports": [f"{port}:2222"],
+            "configs": [
+                {"source": "egress_acl", "target": EGRESS_ACL_PATH},
+                {"source": "egress_unbound", "target": EGRESS_UNBOUND_PATH},
+                {"source": "egress_ports", "target": EGRESS_PORTS_PATH},
+            ],
         }
-        # `content:`, never `file:` — a file: config is a read-only BIND of the local
-        # path and cannot reach a daemon that does not share the filesystem.
-        model_configs["egress_filter"] = {"content": egress_filter_body}
+        # `content:`, never `file:` — a file: config is a read-only BIND of the
+        # local path and cannot reach a daemon that does not share the filesystem
+        # (research R10b, measured). All three surfaces ride the same channel.
+        model_configs["egress_acl"] = {"content": egress_filter_body}
+        model_configs["egress_unbound"] = {"content": egress_unbound_body or "\n"}
+        model_configs["egress_ports"] = {"content": egress_ports_body or "\n"}
     if svc_configs:
         service["configs"] = svc_configs
     if model_configs:
@@ -3172,11 +3203,22 @@ def compose_up_exec(
     refuse_operator_proxy_vars(
         egress, spec.agent, env_file, override=resolve_sidecar_override(name)
     )
-    egress_body = (
-        build_squid_acl(resolve_destinations(egress))
-        if enforce_egress_declaration(egress, spec.agent, resolve_sidecar_override(name))
-        else None
-    )
+    _enforced = enforce_egress_declaration(egress, spec.agent, resolve_sidecar_override(name))
+    if not redeploy and phase_a_port_owner_stale(host_rec, name, _enforced):
+        # T118. The running container predates the shared namespace, so it still
+        # owns the published port and compose cannot hand that port to the egress
+        # service while it holds it. Announced, not silent: an operator whose
+        # container is recreated deserves to know it was a migration and not a bug.
+        warn(
+            f"{name}: deployed before transparent egress enforcement — the published "
+            f"port moves to the egress service, so the container is being recreated. "
+            f"Volumes are preserved; the port number is unchanged."
+        )
+        down_container(host_name, host_rec, name, purge=False)
+    _dests = resolve_destinations(egress) if _enforced else []
+    egress_body = build_squid_acl(_dests) if _enforced else None
+    egress_unbound_body = build_unbound_conf(_dests) if _enforced else None
+    egress_ports_body = build_netfilter_rules(_dests) if _enforced else None
     # Published so `apply` can read it back and notice an edited declaration. NOT in
     # ExecSpec.compose_environment(): that is a pure function of the 004 execution
     # options with no access to the declaration, and an exact-equality test pins it.
@@ -3195,6 +3237,8 @@ def compose_up_exec(
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
         egress_filter_body=egress_body,
+        egress_unbound_body=egress_unbound_body,
+        egress_ports_body=egress_ports_body,
     )
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
@@ -5735,6 +5779,39 @@ def enforce_egress_declaration(
         f"The environment can reach anything the network allows."
     )
     return False
+
+
+def phase_a_port_owner_stale(host_rec: dict, name: str, enforced: bool) -> bool:
+    """Whether a RUNNING container still publishes the port the egress service now
+    owns — i.e. it was deployed before the shared-namespace migration.
+
+    THE IDENTITY LOCK CANNOT SEE THIS. Container name, port number and all nine
+    volume names are unchanged; only which service publishes the port moved. So a
+    baseline diff passes while the deployed shape is stale, and the environment
+    keeps running with Phase A's cooperative enforcement while its declaration
+    reads as a boundary.
+
+    Returns False when nothing is enforced (there is no egress service to own the
+    port) or when the container cannot be inspected — never a false "stale" from a
+    failed probe, which would recreate a healthy environment on every apply.
+    """
+    if not enforced:
+        return False
+    argv = driver_runtime_argv(host_rec) + [
+        "inspect",
+        container_name(name),
+        "--format",
+        "{{json .HostConfig.PortBindings}}",
+    ]
+    r = query(argv)
+    if r.returncode != 0:
+        return False
+    try:
+        bindings = json.loads(r.stdout)
+    except json.JSONDecodeError, ValueError:
+        return False
+    # A Phase A agent container binds 2222; a Phase B one publishes nothing.
+    return bool(bindings)
 
 
 def egress_fingerprint(egress: object) -> str | None:

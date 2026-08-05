@@ -427,3 +427,52 @@ def test_teardown_removes_the_proxy_when_the_agent_is_already_gone(wiz, monkeypa
     wiz.down_container("local", H, "acme", purge=False)
     removed = [a[-1] for a in calls if "rm" in a and "-f" in a]
     assert wiz.egress_container_name("acme") in removed
+
+
+# --- T118: the Phase A -> Phase B port-owner migration ----------------------
+
+
+def _inspect(wiz, monkeypatch, payload: str):
+    import subprocess
+
+    monkeypatch.setattr(
+        wiz, "query", lambda argv: subprocess.CompletedProcess(argv, 0, payload, "")
+    )
+
+
+def test_running_phase_a_container_is_detected_as_stale(wiz, monkeypatch):
+    """A container that still publishes 2222 predates the shared namespace.
+
+    THE IDENTITY LOCK CANNOT CATCH THIS: name, port number and all nine volume
+    names are unchanged — only the service that publishes the port moved. So the
+    baseline diff passes while the deployed shape is stale, and the environment
+    keeps Phase A's cooperative enforcement while its declaration reads as a
+    boundary.
+    """
+    _inspect(wiz, monkeypatch, '{"2222/tcp": [{"HostIp": "", "HostPort": "2206"}]}')
+    assert wiz.phase_a_port_owner_stale(H, "acme", enforced=True) is True
+
+
+def test_phase_b_container_publishes_nothing_and_is_not_stale(wiz, monkeypatch):
+    _inspect(wiz, monkeypatch, "{}")
+    assert wiz.phase_a_port_owner_stale(H, "acme", enforced=True) is False
+
+
+def test_unenforced_environment_is_never_stale(wiz, monkeypatch):
+    """With nothing enforced there is no egress service to own the port, so a
+    published binding on the agent is CORRECT rather than left over."""
+    _inspect(wiz, monkeypatch, '{"2222/tcp": [{"HostPort": "2206"}]}')
+    assert wiz.phase_a_port_owner_stale(H, "acme", enforced=False) is False
+
+
+def test_failed_inspect_does_not_report_stale(wiz, monkeypatch):
+    """Never a false 'stale' from a failed probe — that would recreate a healthy
+    environment on every apply, which is worse than the migration it is chasing."""
+    import subprocess
+
+    monkeypatch.setattr(wiz, "query", lambda argv: subprocess.CompletedProcess(argv, 1, "", "boom"))
+    assert wiz.phase_a_port_owner_stale(H, "acme", enforced=True) is False
+    monkeypatch.setattr(
+        wiz, "query", lambda argv: subprocess.CompletedProcess(argv, 0, "not json", "")
+    )
+    assert wiz.phase_a_port_owner_stale(H, "acme", enforced=True) is False
