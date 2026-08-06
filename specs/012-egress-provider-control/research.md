@@ -752,3 +752,88 @@ while squid was listening on 3128/3129 and the direct-bridge probe reached it
 fine. Likely the same root cause — squid resolving upstream through a path the
 rules treat differently — but **not confirmed**, and recorded as open rather than
 assumed.
+
+### R19a — closing the resolver hole, and what it uncovered (measured, T128)
+
+**The hole is closed by rewriting the packet, not the configuration.** The task
+originally read "point the agent's `/etc/resolv.conf` at the sidecar resolver".
+That is **not implementable and would not have been sufficient**:
+
+- The agent image ends `USER dev`, and `/etc/resolv.conf` is a daemon-owned bind
+  mount. Nothing in the agent container may write it.
+- Even with write access, a rewrite is **advisory** — a hostile agent ignores
+  `resolv.conf` and queries `127.0.0.11` itself. US4 exists to remove exactly
+  that choice.
+
+So the rule set DNATs `127.0.0.11:53` to unbound instead. Two measurements
+governed the shape:
+
+| Attempt | Result |
+|---|---|
+| `-t nat -A OUTPUT` (append) | **dead rule.** The daemon has already installed its own DNAT for `127.0.0.11:53` → `127.0.0.11:<ephemeral>`, and iptables takes the first match. Undeclared names resolved. |
+| `-t nat -I OUTPUT 1` (insert) | undeclared → **REFUSED**, declared → resolves |
+
+**The rcode is the tell.** unbound answers REFUSED; the daemon's resolver answers
+NXDOMAIN. An NXDOMAIN for an undeclared name therefore means *the rules are in
+the wrong position*, not that the policy is off — the two failures look identical
+from the agent and are distinguishable only here.
+
+**The ephemeral port behind it is a second, separate hole.** The DNAT matches
+dport 53 only, while the daemon's resolver also answers on the high port its own
+rule targets. Asking that port directly walked straight past the rewrite
+(measured: it answered). A filter `-d 127.0.0.11 -j DROP` closes it and *cannot*
+catch the rewritten traffic, because by the filter table the destination is
+already `127.0.0.1`.
+
+Docker-specific: podman puts aardvark-dns on the gateway address, not loopback,
+where the default-deny policy already covers it.
+
+### R19b — the `curl` exit 7 from R19, resolved: two defects, not one
+
+R19 recorded an unconfirmed exit 7 on the DECLARED provider. It was **two**
+independent defects, both now measured.
+
+1. **`EGRESS_PORT` was still 8888** — Phase A's tinyproxy port. Phase B's squid
+   forward-proxy port is `3127`. The diagnostic layer pointed at nothing, and the
+   symptom was an unreachable *declared* destination, which reads as the
+   allowlist being wrong rather than as a stale constant.
+2. **The target named the service (`http://egress:8888`)**, so the proxy's own
+   address needed a DNS lookup that the allowlist refuses — measured as `curl`
+   exit 5, "couldn't resolve proxy", once R19a landed. The agent shares the
+   sidecar's netns, so the proxy *is* `127.0.0.1`. A security control whose own
+   address requires permission from that control is a loop.
+
+Both fixed. With the correct allowlist file the forward-proxy path is now clean:
+declared → exit 0, undeclared → refused with a status.
+
+### R19c — OPEN: the intercept path terminates TLS for a DECLARED host
+
+Found while verifying R19b, and **not fixed**. On the transparent path (no proxy
+variables at all — the path US4 exists for):
+
+| Request | Expected | Measured |
+|---|---|---|
+| undeclared host | cannot resolve | `curl` exit 6 ✅ the DNS allowlist holds |
+| **declared host** | exit 0, real server certificate | **exit 60 — certificate problem** ❌ |
+
+squid's own access log names the cause:
+
+```
+TCP_DENIED/000 0 CONNECT 160.79.104.10:443 - HIER_NONE/-
+```
+
+**The destination is logged as an IP, not a hostname.** `ssl::server_name` never
+matched, so `ssl_bump splice allowed_sni` did not fire and `ssl_bump terminate
+all` did — after presenting the intercept certificate, which is what `curl` exit
+60 reports.
+
+This matters beyond availability. The Dockerfile states the client must see the
+**real server certificate** and that a locally-issued CN means the configuration
+"has silently become `bump` and the boundary has inverted". A declared host is
+currently getting the intercept certificate on the transparent path, so the
+Constitution III gate in the plan is **not** presently satisfied there. The
+forward-proxy path is unaffected (`TCP_TUNNEL/200`, spliced, verified above).
+
+Do not close US4 on the strength of the DNS result alone: refusing everything
+undeclared while also breaking everything declared is the broken-closed failure
+T136a exists to catch.

@@ -588,7 +588,12 @@ ENFORCEMENT_MODES = ("advisory", "strict")
 # which begins with CONTAINER_PREFIX — and six separate sites treat any
 # `agent-container-*` container as an environment to list, pick or tear down.
 EGRESS_SERVICE_KEY = "egress"
-EGRESS_PORT = 8888
+# squid's NON-INTERCEPT forward-proxy port. Phase A used 8888 (tinyproxy); this is
+# a different daemon on a different port, and the constant moved with it rather
+# than being kept for continuity — a stale port here points the diagnostic layer
+# at nothing, and the symptom is an unreachable DECLARED destination, which reads
+# as the allowlist being wrong.
+EGRESS_PORT = 3127
 EGRESS_ACL_PATH = "/etc/squid/allowed_sni.acl"
 EGRESS_UNBOUND_PATH = "/etc/unbound/allowed.conf"
 # A shell fragment the entrypoint SOURCES before flipping the policy to DROP,
@@ -2654,7 +2659,12 @@ def build_compose_model(
         # `https_proxy`, not `HTTPS_PROXY`. Compose applies `environment:` OVER
         # `env_file:`, so these win over an operator env-file — which is what C6
         # requires of NO_PROXY precedence.
-        target = f"http://{EGRESS_SERVICE_KEY}:{EGRESS_PORT}"
+        # LOOPBACK, NOT THE SERVICE NAME. The agent shares this sidecar's network
+        # namespace, so the proxy IS 127.0.0.1 — naming it `egress:` would make
+        # the diagnostic layer depend on a DNS lookup that the allowlist itself
+        # refuses (measured: curl exit 5, "couldn't resolve proxy"). A security
+        # control whose own address needs permission from that control is a loop.
+        target = f"http://127.0.0.1:{EGRESS_PORT}"
         env |= {
             "HTTPS_PROXY": target,
             "HTTP_PROXY": target,

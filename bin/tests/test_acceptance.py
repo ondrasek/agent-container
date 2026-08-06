@@ -1969,9 +1969,11 @@ def _phase_b_project(acc, name: str, extra: str = ""):
 
 
 @pytest.mark.xfail(
-    reason="research R19: Docker's embedded resolver at 127.0.0.11 is reached over "
-    "loopback, which the OUTPUT rules permit, and forwards OUTSIDE the namespace. "
-    "Needs T128 (resolv.conf) AND a narrowed loopback ACCEPT. Kept failing rather "
+    reason="research R19c: the resolver hole T128 named is CLOSED — undeclared names "
+    "are refused even via the daemon's resolver. What still fails is the intercept "
+    "path for a DECLARED host: squid logs the destination as an IP, so "
+    "`ssl::server_name` never matches, `splice` does not fire and `terminate all` "
+    "does (curl exit 60, certificate problem). Tracked as T129b. Kept failing rather "
     "than weakened: the assertion is right, the integration is not.",
     strict=False,
 )
@@ -2041,13 +2043,6 @@ def test_agent_container_gains_no_capability(acc):
     assert "NET_ADMIN" in caps("agent-egress-accb3"), "the privilege belongs on the proxy"
 
 
-@pytest.mark.xfail(
-    reason="research R19: Docker's embedded resolver at 127.0.0.11 is reached over "
-    "loopback, which the OUTPUT rules permit, and forwards OUTSIDE the namespace. "
-    "Needs T128 (resolv.conf) AND a narrowed loopback ACCEPT. Kept failing rather "
-    "than weakened: the assertion is right, the integration is not.",
-    strict=False,
-)
 def test_declared_provider_still_resolves(acc):
     """US5 scenario 3 / T136a — the positive case.
 

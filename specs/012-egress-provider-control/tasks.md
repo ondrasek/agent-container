@@ -328,7 +328,23 @@ it must fail (quickstart S12).
 **Independent test**: declare one HTTPS provider; confirm SSH, FTP and an arbitrary high port all
 fail, then declare SSH to one host and confirm only that host on that port opens (quickstart S13/S14).
 
-- [ ] T128 [US5] **Two parts, both required (research R19)**: (a) point the agent's `/etc/resolv.conf` at the sidecar resolver in `image/entrypoint.sh`; (b) **narrow the loopback ACCEPT so it does not cover `127.0.0.11:53`** — Docker's embedded resolver sits there on every user-defined network, is reached over loopback, and forwards OUTSIDE the namespace. Without (b) the rewrite in (a) is advisory, which is the exact distinction US4 exists to make. Deliver FR-020a by **DROPPING** port 53 rather than redirecting it (research R18, measured): default-deny already makes every resolver except the sidecar's unreachable, so no DNS NAT rule is needed at all. Add the resolv.conf line to `image/entrypoint.sh` — that is the **usability** half, not the enforcement, and must not be described as enforcement. `dns:` on the agent service is **impossible**: the daemon rejects it against `network_mode: service:`
+- [X] T128 [US5] **DONE — but not as written; see research R19a.** The stated part (a), rewriting the agent's `/etc/resolv.conf`, is **not implementable and would not have sufficed**: the agent image ends `USER dev` and that file is a daemon-owned bind mount, and even with write access a rewrite is only ADVISORY — a hostile agent ignores it and queries `127.0.0.11` directly. Delivered instead by rewriting the PACKET in `image/egress/entrypoint.sh`: DNAT `127.0.0.11:53` to unbound, **INSERTED at the head of nat OUTPUT** (appended it is a dead rule — the daemon's own DNAT matches first, measured), plus a filter DROP for the ephemeral port behind it, which the dport-53 DNAT does not cover and which answered when asked directly. Measured: undeclared → REFUSED, declared → resolves, transparent undeclared → `curl` exit 6.
+- [X] T129a [US5] **`EGRESS_PORT` 8888 → 3127 and the proxy target moved to loopback** (research R19b).
+      8888 was Phase A's tinyproxy port; Phase B's squid forward-proxy port is 3127, so the diagnostic
+      layer pointed at nothing and the symptom was an unreachable DECLARED destination — which reads as
+      the allowlist being wrong. The target also named the service (`http://egress:8888`), making the
+      proxy's own address depend on a DNS lookup the allowlist refuses (`curl` exit 5). The agent shares
+      the sidecar's netns, so the proxy IS `127.0.0.1`. This resolves the exit 7 R19 left open.
+- [ ] T129b [US5] **OPEN, and it blocks closing US4 — the intercept path terminates TLS for a DECLARED
+      host** (research R19c). Transparent path, no proxy variables: undeclared → `curl` exit 6 (the DNS
+      allowlist holds) but **declared → exit 60, certificate problem**. squid logs
+      `TCP_DENIED/000 CONNECT 160.79.104.10:443` — the destination is an **IP, not a hostname**, so
+      `ssl::server_name` never matched, `ssl_bump splice allowed_sni` did not fire and `terminate all`
+      did. Beyond availability this touches Constitution III: the Dockerfile states a locally-issued CN
+      means the config "has silently become `bump`". The forward-proxy path is unaffected
+      (`TCP_TUNNEL/200`, spliced). Refusing everything undeclared while breaking everything declared is
+      precisely the broken-closed failure T136a exists to catch — do not sign off US4 on the DNS result
+      alone.
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding

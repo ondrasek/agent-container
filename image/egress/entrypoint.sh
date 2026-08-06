@@ -57,6 +57,39 @@ install_rules() {
     # direct queries). Do not re-add one: it would be a moving part that buys
     # nothing, and its absence is deliberate.
 
+    # DOCKER'S EMBEDDED RESOLVER IS A HOLE IN THE LOOPBACK ACCEPT (research R19).
+    # On every user-defined network — which is what compose creates — the daemon
+    # answers at 127.0.0.11 and forwards the query OUTSIDE this namespace, where
+    # none of these rules apply. It is reached over LOOPBACK, so a blanket
+    # `-o lo -j ACCEPT` leaves the DNS allowlist inert in exactly the deployment
+    # shape that matters.
+    #
+    # It cannot be closed by rewriting /etc/resolv.conf: that file is a
+    # daemon-owned bind mount and the agent runs as `dev`, so nothing in the
+    # agent container may write it — and even if it could, a rewrite is only
+    # ADVISORY. A hostile agent ignores resolv.conf and asks 127.0.0.11 itself.
+    # So the packet is rewritten instead, and the agent's own configuration is
+    # never trusted.
+    #
+    # INSERTED AT THE HEAD, not appended: the daemon has already installed its
+    # own DNAT here (127.0.0.11:53 -> 127.0.0.11:<ephemeral>) and iptables takes
+    # the first match. Measured — appended, these rules are dead and undeclared
+    # names resolve. The tell is the rcode: unbound REFUSES, the daemon's
+    # resolver returns NXDOMAIN, so an NXDOMAIN for an undeclared name means
+    # these rules are in the wrong position rather than that the policy is off.
+    iptables -t nat -I OUTPUT 1 -d 127.0.0.11 -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:53
+    iptables -t nat -I OUTPUT 2 -d 127.0.0.11 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1:53
+
+    # AND THE EPHEMERAL PORT BEHIND IT. The DNAT above matches dport 53 only,
+    # while the daemon's resolver also listens on a high port that its own rule
+    # forwards to — asking that port directly walks straight past the rewrite
+    # (measured: it answered). This DROP catches it, and cannot catch the
+    # rewritten traffic, because by the time the filter table runs the
+    # destination is already 127.0.0.1.
+    #
+    # Harmless under podman, which puts aardvark-dns on the gateway address
+    # rather than on loopback — there the default-deny policy already covers it.
+    iptables -A OUTPUT -d 127.0.0.11 -j DROP
     iptables -A OUTPUT -o lo -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     iptables -A OUTPUT -m owner --uid-owner "$SQUID_UID" -j ACCEPT
@@ -89,6 +122,10 @@ UNBOUND_PID=$!
 sleep 1
 kill -0 "$UNBOUND_PID" 2>/dev/null || die "unbound exited immediately — check /etc/unbound/allowed.conf"
 log "unbound up (pid ${UNBOUND_PID})"
+
+# This container's own resolution rides the SAME rewrite: squid's /etc/resolv.conf
+# still says 127.0.0.11 and lands on unbound, so squid can resolve declared names
+# and only declared names. No second mechanism, and nothing to keep in sync.
 
 # --- proxy -------------------------------------------------------------------
 # exec: squid becomes PID 1 so compose owns the lifecycle and a crash takes the

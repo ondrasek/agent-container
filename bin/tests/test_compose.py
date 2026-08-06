@@ -245,7 +245,11 @@ def test_agent_is_pointed_at_the_proxy_in_both_cases(wiz, tmp_path):
     `https_proxy`, not `HTTPS_PROXY`."""
     env = _model(wiz, tmp_path, egress_filter_body="")["services"]["agent"]["environment"]
     for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
-        assert env[k] == f"http://egress:{wiz.EGRESS_PORT}"
+        assert env[k] == f"http://127.0.0.1:{wiz.EGRESS_PORT}", (
+            "the proxy must be addressed on loopback: the agent shares the "
+            "sidecar's netns, and a service name would need the very DNS the "
+            "allowlist refuses"
+        )
     assert env["NO_PROXY"] == env["no_proxy"] == wiz.EGRESS_NO_PROXY
 
 
