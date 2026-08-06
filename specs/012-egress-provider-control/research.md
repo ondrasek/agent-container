@@ -972,3 +972,38 @@ cannot bind a port the still-running egress container holds. plan.md predicted
 exactly this shape — "which service owns the binding is part of the deployed
 shape ... that is a migration, not an edit" — but only for adopting the
 declaration, not for dropping it. Tracked as T129d.
+
+
+### R22 — the port-owner migration only ever ran one way (T129d)
+
+`redeploy` failed with `port is already allocated` when an `egress:` block was
+REMOVED. Three independent gaps, each of which alone was enough:
+
+1. **The detector returned `False` whenever enforcement was off.** It asked "does
+   the agent still publish, now that egress should own the port?" — a question
+   with no meaning in the drop direction, where the *egress* container is the one
+   holding it. Now symmetric: the probe targets whichever container must **not**
+   be publishing for the shape being deployed.
+2. **The whole migration was gated on `not redeploy`.** `redeploy` is precisely
+   how a declaration is added or removed, so the one command that triggers the
+   port move was the one command that could not survive it.
+3. **A silently wrong lookup.** The scoping helper first read the host key off the
+   host *record*, which does not carry it — yielding `""`, a path that never
+   exists, and therefore "no egress was ever deployed" for every environment.
+   **That failure is invisible**, because "no migration needed" is also the
+   correct answer in the common case. It takes the host name now.
+
+Scoped by reading the **previously generated compose model** — a file already on
+disk — rather than probing the runtime. An environment that has never carried a
+declaration must not pay a runtime `inspect` on every deploy to learn that nothing
+moved, and a unit test caught exactly that regression by counting the commands
+issued.
+
+The unit test `test_unenforced_environment_is_never_stale` asserted the old,
+false claim and has been **narrowed rather than deleted**: unenforced *and no
+prior egress service* is never stale. A companion test now covers the drop
+direction, so the both-ways property is pinned rather than assumed.
+
+**PEP 758 note:** Python 3.14 permits unparenthesized `except` tuples, and the
+formatter rewrites to that form. `except OSError, json.JSONDecodeError:` is
+correct here and is not the Python 2 syntax it resembles.

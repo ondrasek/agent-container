@@ -3389,15 +3389,21 @@ def compose_up_exec(
     if _override is not None:
         check_sidecar_egress_posture(_override, egress)
     _enforced = enforce_egress_declaration(egress, spec.agent, _override)
-    if not redeploy and phase_a_port_owner_stale(host_rec, name, _enforced):
-        # T118. The running container predates the shared namespace, so it still
-        # owns the published port and compose cannot hand that port to the egress
-        # service while it holds it. Announced, not silent: an operator whose
-        # container is recreated deserves to know it was a migration and not a bug.
+    # NOT gated on `not redeploy`: `redeploy` is precisely how a declaration is
+    # added or removed, so skipping the migration there meant the one command that
+    # triggers the port move was the one command that could not survive it.
+    if phase_a_port_owner_stale(host_rec, host_name, name, _enforced):
+        # T118 (adopting) and T129d (dropping). Compose cannot hand the published
+        # port to a different service while the current owner still holds it, and
+        # on the drop side that owner is an ORPHAN of the regenerated model — not
+        # something a plain recreate will stand down in time.
+        #
+        # Announced, not silent: an operator whose container is recreated deserves
+        # to know it was a migration and not a bug.
+        _moving = "to the egress service" if _enforced else "back to the container"
         warn(
-            f"{name}: deployed before transparent egress enforcement — the published "
-            f"port moves to the egress service, so the container is being recreated. "
-            f"Volumes are preserved; the port number is unchanged."
+            f"{name}: the published port moves {_moving}, so the deployment is being "
+            f"recreated. Volumes are preserved; the port number is unchanged."
         )
         down_container(host_name, host_rec, name, purge=False)
     _dests = resolve_destinations(egress) if _enforced else []
@@ -6129,7 +6135,30 @@ def enforce_egress_declaration(
     return False
 
 
-def phase_a_port_owner_stale(host_rec: dict, name: str, enforced: bool) -> bool:
+def _previous_model_had_egress(host_name: str, name: str) -> bool:
+    """Whether the last model written for this environment declared the egress
+    service — i.e. whether a port-owner migration back to the agent is even
+    possible.
+
+    Takes the host NAME, not the host record: the record does not carry its own
+    key, and reading one off it silently yields "" — which resolves to a path that
+    never exists, so every environment would look like it had no egress and the
+    drop-side migration would never fire. That failure is invisible, because "no
+    migration needed" is also the answer for the common case.
+
+    Reads the generated compose file rather than asking the runtime: this is
+    consulted on EVERY deploy, and an environment that has never had a declaration
+    must not pay a runtime probe to learn that nothing moved.
+    """
+    try:
+        model = json.loads(compose_file_path(host_name, name).read_text())
+    except OSError, json.JSONDecodeError, ValueError, AttributeError:
+        return False
+    services = model.get("services") if isinstance(model, dict) else None
+    return isinstance(services, dict) and EGRESS_SERVICE_KEY in services
+
+
+def phase_a_port_owner_stale(host_rec: dict, host_name: str, name: str, enforced: bool) -> bool:
     """Whether a RUNNING container still publishes the port the egress service now
     owns — i.e. it was deployed before the shared-namespace migration.
 
@@ -6139,26 +6168,43 @@ def phase_a_port_owner_stale(host_rec: dict, name: str, enforced: bool) -> bool:
     keeps running with Phase A's cooperative enforcement while its declaration
     reads as a boundary.
 
-    Returns False when nothing is enforced (there is no egress service to own the
-    port) or when the container cannot be inspected — never a false "stale" from a
-    failed probe, which would recreate a healthy environment on every apply.
+    SYMMETRIC, because the migration runs BOTH WAYS. Adopting a declaration moves
+    the binding from the agent to the egress service; DROPPING one moves it back.
+    Only the first direction was handled, so removing an `egress:` block failed the
+    redeploy with `port is already allocated` — compose cannot bind a port the
+    still-running egress container holds, and that container is an orphan of the
+    regenerated model rather than something the new model mentions.
+
+    Returns False when the container cannot be inspected — never a false "stale"
+    from a failed probe, which would recreate a healthy environment on every apply.
     """
-    if not enforced:
+    # Which container must NOT be publishing, given the shape being deployed.
+    holder = egress_container_name(name) if not enforced else container_name(name)
+    if not enforced and not _previous_model_had_egress(host_name, name):
+        # No egress service was ever deployed here, so the binding cannot be
+        # anywhere but the agent and there is nothing to migrate. Checked against
+        # the PREVIOUSLY GENERATED MODEL — a file read — rather than by probing the
+        # runtime, so an ordinary deployment gains no extra runtime call at all.
         return False
     argv = driver_runtime_argv(host_rec) + [
         "inspect",
-        container_name(name),
+        holder,
         "--format",
         "{{json .HostConfig.PortBindings}}",
     ]
     r = query(argv)
-    if r.returncode != 0:
+    # A probe that did not produce parseable output is NOT evidence of staleness.
+    # `stdout` can be absent entirely (no such container, or a driver that reports
+    # nothing), and treating that as "stale" would recreate a healthy environment
+    # on every deploy — the failure mode this guard exists to avoid.
+    if r.returncode != 0 or not isinstance(r.stdout, str) or not r.stdout.strip():
         return False
     try:
         bindings = json.loads(r.stdout)
     except json.JSONDecodeError, ValueError:
         return False
-    # A Phase A agent container binds 2222; a Phase B one publishes nothing.
+    # Adopting: a Phase A agent container binds 2222; a Phase B one publishes
+    # nothing. Dropping: the egress container is the one still holding it.
     return bool(bindings)
 
 

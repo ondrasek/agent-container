@@ -361,7 +361,7 @@ fail, then declare SSH to one host and confirm only that host on that port opens
       `returncode == 0` also passes when the agent genuinely REACHES the port. Now names both acceptable
       outcomes, rejects 2xx/3xx explicitly, and re-probes with the proxy variables REMOVED so the
       netfilter claim does not rest on the agent's cooperation.
-- [ ] T129d [US4] **`redeploy` fails with `port is already allocated` when the declaration is DROPPED.**
+- [X] T129d [US4] **DONE — the port-owner migration now runs BOTH ways** (research R22). Three gaps: the detector returned False whenever enforcement was off (the drop direction was unaskable); the migration was gated on `not redeploy`, so the one command that moves the port could not survive it; and the scoping helper read the host key off the host RECORD, which does not carry it, yielding a path that never exists — invisible, because "no migration needed" is also the right answer for the common case. Scoped via the previously generated compose model rather than a runtime probe, so an environment that never had a declaration pays nothing. `test_unenforced_environment_is_never_stale` narrowed rather than deleted, plus a companion test pinning the drop direction.
       The T118 port-owner migration run backwards: the binding must return from `egress` to `agent`, and
       compose cannot bind a port the still-running egress container still holds. **PRE-EXISTING** —
       verified by re-running against `8a6811b`, this session's starting commit; not a regression from
