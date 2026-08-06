@@ -431,7 +431,13 @@ def test_builtin_default_outside_the_set_refuses_under_strict(wiz):
 
 
 def test_strength_statement_says_all_three_required_things(wiz):
-    """FR-008/FR-008a, contract C5."""
+    """FR-008/FR-008a, contract C5 — the PROXY statement.
+
+    Scoped to the proxy explicitly. These clauses are not universal truths about
+    the feature; they are true of the fallback mechanism, and asserting them
+    unconditionally would force the packet-level statement to keep saying a thing
+    that is false of it.
+    """
     s = wiz.egress_strength_statement("claude")
     assert "not packet-level" in s
     assert "does not stop a process that ignores them" in s
@@ -444,18 +450,73 @@ def test_strength_statement_flags_an_agent_not_known_to_honour(wiz):
     assert "NOT including" in s
 
 
+# The phrasing that would overclaim for EITHER mechanism. Shared, because the
+# packet-level boundary is stronger but not unlimited, and the temptation to
+# describe it as absolute is exactly what FR-022 guards against — the same defect
+# as the proxy's, with the sign flipped.
+_OVERCLAIMS = (
+    "guarantee",
+    "prevents all",
+    "blocks all",
+    "cannot reach",
+    "impossible",
+    "fully enforced",
+    "completely",
+)
+
+
 def test_strength_statement_contains_no_overclaim(wiz):
     """SC-004 tested as ABSENCE. This requirement is the one most easily satisfied
     in appearance and violated in substance, so the assertion is for the phrasing
     that would imply a stronger guarantee than a proxy can deliver."""
     s = wiz.egress_strength_statement("claude").lower()
-    for overclaim in (
-        "guarantee",
-        "prevents all",
-        "blocks all",
-        "cannot reach",
-        "impossible",
-        "fully enforced",
-        "completely",
-    ):
+    for overclaim in _OVERCLAIMS:
         assert overclaim not in s, f"overclaim in the honesty statement: {overclaim!r}"
+
+
+# --- T140/T141: the PACKET-LEVEL statement -----------------------------------
+
+
+def test_transparent_statement_claims_the_stronger_thing_it_can_defend(wiz):
+    """FR-022. Under Phase B the proxy text is not merely cautious, it is FALSE —
+    it says the feature does not do packet filtering, and it does."""
+    s = wiz.egress_strength_statement("claude", transparent=True)
+    assert "packet-level" in s and "not packet-level" not in s
+    assert "does not depend on the agent's cooperation" in s, (
+        "the whole point of US4: routing is not the agent's choice"
+    )
+    assert "default-deny" in s
+    assert "no capability" in s, "the agent cannot change the rules it runs under"
+
+
+def test_transparent_statement_still_names_its_LIMITS(wiz):
+    """Describing the boundary as absolute would be the proxy's defect inverted.
+
+    Each clause is a limit that was MEASURED, not hedging: TLS is spliced rather
+    than terminated, and squid logs `ORIGINAL_DST` — it connects to the address the
+    CLIENT chose, so the name check does not constrain the address.
+    """
+    s = wiz.egress_strength_statement("claude", transparent=True)
+    assert "not content inspection" in s.lower() or "NOT content inspection" in s
+    assert "never terminated" in s, "TLS is spliced; what flows to a declared host is unseen"
+    assert "the address the CLIENT chose" in s, (
+        "a declared NAME does not constrain the ADDRESS — squid splices to ORIGINAL_DST"
+    )
+    assert "sidecars_outside" in s, "an unnamed exception is indistinguishable from a bug"
+
+
+def test_transparent_statement_contains_no_overclaim(wiz):
+    """The stronger statement is held to the SAME absence test. Being able to
+    defend more is not licence to claim everything."""
+    s = wiz.egress_strength_statement("claude", transparent=True).lower()
+    for overclaim in _OVERCLAIMS:
+        assert overclaim not in s, f"overclaim in the packet-level statement: {overclaim!r}"
+
+
+def test_the_two_statements_are_actually_different(wiz):
+    """A mode-aware statement that returns the same text for both modes would pass
+    every presence check above while telling the operator nothing about which
+    mechanism they got — the failure FR-021 exists to prevent."""
+    assert wiz.egress_strength_statement("claude") != wiz.egress_strength_statement(
+        "claude", transparent=True
+    )

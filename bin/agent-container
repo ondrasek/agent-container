@@ -3367,6 +3367,12 @@ def compose_up_exec(
     # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
     # the operator hears it now, not after the agent has done a session of work.
     _push_mode = (egress or {}).get("enforcement") or "advisory"
+    # Resolved ONCE and reused: the SSH push check and the strength statement must
+    # not be able to disagree about which mechanism is being deployed.
+    _transparent = (
+        egress_enforcement_mode(egress, spec.agent, resolve_sidecar_override(name))[0]
+        == "transparent"
+    )
     check_egress_permits_push(
         egress,
         spec.repo,
@@ -3374,8 +3380,7 @@ def compose_up_exec(
         # The SSH arm applies only where the boundary is packet-level. Asking here
         # rather than assuming: an environment that falls back to the proxy must not
         # be warned about an SSH push that will work perfectly well.
-        transparent=egress_enforcement_mode(egress, spec.agent, resolve_sidecar_override(name))[0]
-        == "transparent",
+        transparent=_transparent,
     )
     _mode = (egress or {}).get("enforcement") or "advisory"
     # US2: the disclosure (undeclared + the agent has a default) and FR-003a (declared
@@ -3384,7 +3389,11 @@ def compose_up_exec(
     disclose_builtin_default(egress, spec.agent)
     check_builtin_default_declared(egress, spec.agent, _mode)
     if is_egress_declared(egress):
-        log(egress_strength_statement(spec.agent))
+        # The statement must describe the mechanism this environment ACTUALLY gets.
+        # Printing the proxy text for a packet-level boundary understates it, and
+        # printing the boundary text for a proxy fallback overstates it — the second
+        # being the failure this whole requirement exists to prevent.
+        log(egress_strength_statement(spec.agent, transparent=_transparent))
     # C6 backstop for the imperative path, where `env_file` IS the operator's file.
     # The apply path checks earlier, before staging, so it can name the operator's
     # file rather than the tool-generated merge (which they have never heard of).
@@ -5660,15 +5669,38 @@ def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | Non
     return None
 
 
-def egress_strength_statement(agent: str | None) -> str:
+def egress_strength_statement(agent: str | None, *, transparent: bool = False) -> str:
     """FR-008/FR-008a, contract C5 — the honest limits of what a proxy delivers.
 
     Every clause here is load-bearing and the test asserts their PRESENCE plus the
     ABSENCE of stronger phrasing, because this is the requirement most easily
     satisfied in appearance and violated in substance.
+
+    TWO MECHANISMS, TWO DIFFERENT HONEST ANSWERS (FR-022). Under transparent
+    enforcement the old text is no longer merely cautious, it is FALSE: it says
+    this feature does not do packet filtering, and Phase B does exactly that. But
+    the correction runs in both directions — describing the boundary as absolute
+    would be the same defect with the sign flipped, so the residual limits are
+    named as specifically as the guarantees.
     """
     honours = ", ".join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))
     known = AGENT_HONOURS_PROXY.get(agent or "", False)
+    if transparent:
+        return (
+            "egress enforcement is packet-level. Routing is programmed into the network "
+            "stack, so it does not depend on the agent's cooperation: a process that "
+            "ignores proxy settings and opens a direct connection is denied by a "
+            "default-deny policy, and the container holds no capability with which to "
+            "change that. It is NOT content inspection and NOT an absolute boundary. "
+            "TLS is never terminated, so what travels to a DECLARED destination is "
+            "neither seen nor limited — anything reachable through a permitted host "
+            "remains reachable. Filtering of TLS uses the name the client asks for, and "
+            "the connection is spliced to the address the CLIENT chose, so a process "
+            "that opens a connection to an arbitrary address while presenting a "
+            "declared name is not stopped by the name check. Sidecars listed in "
+            "egress.sidecars_outside are outside the boundary entirely, and anything "
+            "they can reach is reachable through them."
+        )
     return (
         f"egress enforcement is proxy-level, not packet-level. The proxy refuses "
         f"requests from clients that honour proxy settings; it does not stop a process "
