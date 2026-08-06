@@ -708,3 +708,47 @@ That asymmetry is what makes a writable `resolv.conf` acceptable here.
 **Consequence for T128 and FR-020a**: the netfilter rule set gains no DNS entry at all. The work
 moves to `image/entrypoint.sh` — one line, in the container the agent already controls, whose
 failure mode is a broken lookup rather than a silent bypass.
+
+---
+
+## R19 (VERIFIED) — Docker's embedded DNS bypasses the boundary over loopback
+
+Found by the US4 acceptance tests failing against real containers. **The mechanism
+is sound; the integration has a hole**, and it only appears on the network compose
+actually creates.
+
+| Network | agent's nameserver | undeclared name |
+|---|---|---|
+| default bridge | `10.0.2.3` (external) | **refused** — dropped by policy |
+| **user-defined** (what compose makes) | **`127.0.0.11`** | **RESOLVES** |
+
+Docker runs an embedded resolver at `127.0.0.11` inside every container on a
+user-defined network. The agent reaches it **over loopback**, which
+`-A OUTPUT -o lo -j ACCEPT` permits, and the resolver then forwards the query
+**outside the network namespace** — where no rule of ours applies. The DNS
+allowlist is therefore inert in exactly the deployment shape that matters.
+
+The default-bridge probes that verified the mechanism (R15, R18) were not wrong,
+but they tested the easier case. **Compose always creates a user-defined network**,
+so every real deployment has this.
+
+### Two fixes, both required
+
+1. **Point the agent's `/etc/resolv.conf` at our resolver** (T128, already planned)
+   — otherwise ordinary lookups go to `127.0.0.11` by default.
+2. **Narrow the loopback ACCEPT so it does not cover `127.0.0.11:53`.** Without
+   this, a hostile agent simply queries the embedded resolver directly and the
+   rewrite in (1) is advisory — which is precisely the distinction US4 exists to
+   make. The loopback rule cannot stay a blanket ACCEPT.
+
+Until both land, `test_agent_cannot_switch_enforcement_off` and
+`test_declared_provider_still_resolves` are **expected failures**, marked as such
+with this finding named rather than deleted or weakened.
+
+### Also observed, unresolved
+
+In the same acceptance run the DECLARED provider was unreachable (`curl` exit 7)
+while squid was listening on 3128/3129 and the direct-bridge probe reached it
+fine. Likely the same root cause — squid resolving upstream through a path the
+rules treat differently — but **not confirmed**, and recorded as open rather than
+assumed.

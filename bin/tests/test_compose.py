@@ -475,3 +475,54 @@ def test_no_overlay_when_there_are_no_sidecars(wiz, tmp_path):
     assert wiz.build_sidecar_boundary_overlay(None, DECL_A) is None
     o = _override(tmp_path, "services:\n  only:\n    image: x\n")
     assert wiz.build_sidecar_boundary_overlay(o, {**DECL_A, "sidecars_outside": ["only"]}) is None
+
+
+def test_sidecar_holding_net_admin_is_refused(wiz, tmp_path):
+    """FR-023d — the check that matters most in this block.
+
+    A sidecar inside the shared namespace holding NET_ADMIN can FLUSH THE EGRESS
+    RULES. The agent needs no capability of its own: it only needs to ask. That is
+    the same shape as the laundering bypass, one layer down — and it would defeat
+    the boundary completely while the declaration still read as enforced.
+    """
+    o = _override(tmp_path, "services:\n  helper:\n    image: x\n    cap_add: [NET_ADMIN]\n")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.check_sidecar_egress_posture(o, DECL_A)
+    msg = str(e.value)
+    assert "NET_ADMIN" in msg and "sidecars_outside" in msg, "must name the intended escape hatch"
+
+
+def test_privileged_sidecar_is_refused(wiz, tmp_path):
+    o = _override(tmp_path, "services:\n  helper:\n    image: x\n    privileged: true\n")
+    with pytest.raises(wiz.Fatal, match="privileged"):
+        wiz.check_sidecar_egress_posture(o, DECL_A)
+
+
+def test_host_network_sidecar_is_refused(wiz, tmp_path):
+    """`network_mode: host` leaves the namespace entirely — the boundary would
+    simply not apply while the declaration read as enforced."""
+    o = _override(tmp_path, "services:\n  helper:\n    image: x\n    network_mode: host\n")
+    with pytest.raises(wiz.Fatal, match="network_mode: host"):
+        wiz.check_sidecar_egress_posture(o, DECL_A)
+
+
+def test_cap_prefix_and_case_do_not_evade_the_check(wiz, tmp_path):
+    """`CAP_NET_ADMIN`, `cap_net_admin` and `NET_ADMIN` are the same capability."""
+    for spelling in ("CAP_NET_ADMIN", "cap_net_admin", "Net_Admin"):
+        o = _override(tmp_path, f"services:\n  h:\n    image: x\n    cap_add: ['{spelling}']\n")
+        with pytest.raises(wiz.Fatal, match="NET_ADMIN"):
+            wiz.check_sidecar_egress_posture(o, DECL_A)
+
+
+def test_posture_check_ignores_a_sidecar_declared_outside(wiz, tmp_path):
+    """One deliberately outside is already declared unconstrained AND named as
+    such, and it is not in the namespace to dismantle. Refusing its capabilities
+    too would be theatre."""
+    o = _override(tmp_path, "services:\n  feed:\n    image: x\n    privileged: true\n")
+    wiz.check_sidecar_egress_posture(o, {**DECL_A, "sidecars_outside": ["feed"]})
+
+
+def test_posture_check_is_inert_without_a_declaration(wiz, tmp_path):
+    """No declaration, no boundary, no business refusing an operator's sidecar."""
+    o = _override(tmp_path, "services:\n  h:\n    image: x\n    privileged: true\n")
+    wiz.check_sidecar_egress_posture(o, None)

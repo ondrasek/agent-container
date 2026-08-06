@@ -2308,6 +2308,67 @@ def _yaml_service_keys(text: str) -> list[str]:
     return [str(k) for k in svc] if isinstance(svc, dict) else []
 
 
+# Capabilities a sidecar must not hold once it shares the agent's network
+# namespace. NET_ADMIN is the fatal one: a sidecar holding it can FLUSH THE
+# IPTABLES RULES of the namespace it shares, and the agent does not need the
+# capability itself — it only needs to ask something that has it. `privileged`
+# grants it and more. `network_mode: host` leaves the namespace altogether, which
+# is the boundary simply not applying.
+EGRESS_FORBIDDEN_SIDECAR_CAPS = ("NET_ADMIN", "NET_RAW", "SYS_ADMIN", "ALL")
+
+
+def check_sidecar_egress_posture(path: Path, egress: object) -> None:
+    """Refuse a sidecar that could dismantle the boundary it sits inside (FR-023d).
+
+    `validate_sidecar_override` checks SHAPE — services-only, does not redefine
+    the agent. That was cosmetic before this feature and is security-relevant
+    after: a helper service is now inside the enforcement namespace, so what it is
+    permitted to hold is part of the security model.
+
+    Only applies to sidecars INSIDE the boundary. One deliberately placed outside
+    (`sidecars_outside`) is already declared as unconstrained and named as such —
+    refusing its capabilities too would be theatre, since it is not in the
+    namespace to dismantle.
+    """
+    if not is_egress_declared(egress):
+        return
+    try:
+        doc = _yaml_document(path.read_text())
+    except OSError:
+        return
+    services = doc.get("services")
+    if not isinstance(services, dict):
+        return
+    outside = set(sidecars_outside_boundary(egress))
+    for name, spec in services.items():
+        if str(name) in outside or not isinstance(spec, dict):
+            continue
+        if spec.get("privileged"):
+            die(
+                f"sidecar override {path}: service '{name}' is `privileged` and would "
+                f"share the agent's network namespace, so it could flush the egress "
+                f"rules — and the agent only has to ask it. Declare it in "
+                f"`egress.sidecars_outside` if it genuinely needs its own privileges; "
+                f"it will then be named as outside the boundary."
+            )
+        caps = spec.get("cap_add")
+        held = [str(c).upper().removeprefix("CAP_") for c in caps] if isinstance(caps, list) else []
+        bad = sorted(set(held) & set(EGRESS_FORBIDDEN_SIDECAR_CAPS))
+        if bad:
+            die(
+                f"sidecar override {path}: service '{name}' requests {bad}, which would "
+                f"let it reprogram the network namespace it shares with the agent. The "
+                f"agent needs no capability of its own to use it — only to ask. Move the "
+                f"service to `egress.sidecars_outside` if that is intended."
+            )
+        if str(spec.get("network_mode") or "") == "host":
+            die(
+                f"sidecar override {path}: service '{name}' uses `network_mode: host`, "
+                f"which leaves the enforcement namespace entirely — the boundary would "
+                f"simply not apply to it while the declaration read as enforced."
+            )
+
+
 def validate_sidecar_override(path: Path) -> None:
     """Guardrail on an operator sidecar override (FR-004/FR-018): it must be a
     non-empty compose `services:`-only fragment and MUST NOT redefine the agent
@@ -3282,6 +3343,8 @@ def compose_up_exec(
     # a renamed sidecar would otherwise sit inside the boundary while the
     # declaration says it is outside, or vice versa.
     verify_sidecars_outside_resolve(egress, _override)
+    if _override is not None:
+        check_sidecar_egress_posture(_override, egress)
     _enforced = enforce_egress_declaration(egress, spec.agent, _override)
     if not redeploy and phase_a_port_owner_stale(host_rec, name, _enforced):
         # T118. The running container predates the shared namespace, so it still

@@ -1945,3 +1945,123 @@ def test_teardown_leaves_no_proxy_behind(acc):
         "the proxy survived teardown — it carries restart: unless-stopped and is "
         "invisible to list, to every wizard picker and to assert_host_empty"
     )
+
+
+# --- Feature 012 Phase B: US4 evasion, against real containers --------------
+# These CANNOT be unit-tested. US4's claim is about what a HOSTILE PROCESS
+# cannot do, so each scenario drives the container adversarially rather than
+# cooperatively — a cooperative test would pass against Phase A too and prove
+# nothing new.
+
+
+def _phase_b_project(acc, name: str, extra: str = ""):
+    proj = acc.tmp / f"proj{name}"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / f"{name}.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        f"environments:\n  - name: {name}\n    host: local\n"
+        f"    container:\n      agent: claude\n"
+        f"    egress:\n      allow:\n        - provider: anthropic\n{extra}"
+    )
+    return proj
+
+
+@pytest.mark.xfail(
+    reason="research R19: Docker's embedded resolver at 127.0.0.11 is reached over "
+    "loopback, which the OUTPUT rules permit, and forwards OUTSIDE the namespace. "
+    "Needs T128 (resolv.conf) AND a narrowed loopback ACCEPT. Kept failing rather "
+    "than weakened: the assertion is right, the integration is not.",
+    strict=False,
+)
+def test_agent_cannot_switch_enforcement_off(acc):
+    """SC-008, quickstart S12 — THE test for US4.
+
+    Under Phase A the same call SUCCEEDS: the agent unsets HTTPS_PROXY and walks
+    out. Here routing is done by the network stack, so unsetting every variable
+    the agent can see changes nothing.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB1")
+    proj = _phase_b_project(acc, "accb1")
+    acc.register("accb1")
+    r = acc.cli(["up", "accb1", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
+    assert r.returncode == 0, f"deploy failed:\n{r.stderr}"
+
+    declared = _exec("accb1", ["curl", "-s", "-o", "/dev/null", "--max-time", "25",
+                               "https://api.anthropic.com/v1/messages"])  # fmt: skip
+    assert declared.returncode == 0, "the DECLARED provider must stay reachable"
+
+    evade = _exec("accb1", ["sh", "-c",
+        "unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy; "
+        "curl -s -o /dev/null --max-time 25 https://api.openai.com/v1/models"])  # fmt: skip
+    assert evade.returncode != 0, (
+        "the agent unset every proxy variable and still reached an undeclared host — "
+        "enforcement is cooperative, not transparent"
+    )
+
+
+def test_agent_cannot_reach_a_non_standard_port(acc):
+    """SC-009, quickstart S13. The hole the first design sketch left: redirecting
+    only 80/443 under a default-ACCEPT policy lets 8080 straight through, which is
+    WORSE than no control because the declaration still reads as constraining."""
+    laptop = _gen_keypair(acc.tmp / "lapB2")
+    proj = _phase_b_project(acc, "accb2")
+    acc.register("accb2")
+    assert acc.cli(
+        ["up", "accb2", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+    for port in ("8080", "1337"):
+        r = _exec("accb2", ["curl", "-s", "-o", "/dev/null", "--max-time", "10",
+                            f"http://example.com:{port}/"])  # fmt: skip
+        assert r.returncode != 0, f"port {port} reachable under default-deny"
+
+
+def test_agent_container_gains_no_capability(acc):
+    """SC-011, quickstart S16 — the BLOCKING check.
+
+    If the agent shows any capability the design has inverted its own principle,
+    granting privilege to the container that runs untrusted code.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB3")
+    proj = _phase_b_project(acc, "accb3")
+    acc.register("accb3")
+    assert acc.cli(
+        ["up", "accb3", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+
+    def caps(container):
+        r = subprocess.run(
+            [RUNTIME, "inspect", container, "--format", "{{.HostConfig.CapAdd}}"],
+            capture_output=True, text=True,
+        )  # fmt: skip
+        return r.stdout.strip()
+
+    assert caps("agent-container-accb3") in ("[]", "<no value>", ""), "the AGENT must hold nothing"
+    assert "NET_ADMIN" in caps("agent-egress-accb3"), "the privilege belongs on the proxy"
+
+
+@pytest.mark.xfail(
+    reason="research R19: Docker's embedded resolver at 127.0.0.11 is reached over "
+    "loopback, which the OUTPUT rules permit, and forwards OUTSIDE the namespace. "
+    "Needs T128 (resolv.conf) AND a narrowed loopback ACCEPT. Kept failing rather "
+    "than weakened: the assertion is right, the integration is not.",
+    strict=False,
+)
+def test_declared_provider_still_resolves(acc):
+    """US5 scenario 3 / T136a — the positive case.
+
+    An allowlist-only resolver that resolves NOTHING passes every refusal test
+    here. This is what separates "working" from "broken closed", and broken-closed
+    is the failure this mechanism makes easy.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB4")
+    proj = _phase_b_project(acc, "accb4")
+    acc.register("accb4")
+    assert acc.cli(
+        ["up", "accb4", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+    r = _exec("accb4", ["getent", "hosts", "api.anthropic.com"])
+    assert r.returncode == 0 and r.stdout.strip(), "a DECLARED name must resolve"
+    u = _exec("accb4", ["getent", "hosts", "api.openai.com"])
+    assert u.returncode != 0, "an undeclared name must not resolve"
