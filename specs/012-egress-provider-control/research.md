@@ -1007,3 +1007,41 @@ direction, so the both-ways property is pinned rather than assumed.
 **PEP 758 note:** Python 3.14 permits unparenthesized `except` tuples, and the
 formatter rewrites to that form. `except OSError, json.JSONDecodeError:` is
 correct here and is not the Python 2 syntax it resembles.
+
+
+### R23 — the two remaining tier failures were a COLD IMAGE BUILD, not a defect
+
+The full tier ended `50 passed, 2 skipped, 2 failed`, and both fixes under test
+(T129d, SC-009) passed. The two failures were
+`test_headless_foreground_propagates_exit_code` and, cascading from it,
+`test_host_rm_destroy_emptiness_guard_against_real_containers` — which correctly
+refused to destroy a host while the first test's container was still present.
+
+| Run | Duration | Result |
+|---|---|---|
+| the pair, cold caches | **10 m 08 s** | both fail |
+| the headless test alone | **4.85 s** | passes |
+| the pair, warm caches | **12.24 s** | both pass |
+
+`acc.cli` has a **600-second timeout**, and 10 m 08 s lands exactly on it: the CLI
+call was killed mid-deploy while the agent image built, so the test observed a
+timeout rather than the agent's exit code.
+
+**Not caused by the Phase B work, and that is checked rather than asserted.** The
+agent image's build context is deny-by-default and allow-lists exactly
+`Dockerfile` and `entrypoint.sh` — with a packaging test
+(`test_dockerignore_allowlists_every_dockerfile_copy_source`) failing if that
+drifts from the Dockerfile. Everything changed here (`image/egress/*`, `bin/*`)
+is outside that context and cannot invalidate the agent image's cache.
+
+**Two wrong explanations were offered before this one**, both discarded on
+evidence: that the run was contaminated by editing `bin/agent-container` mid-tier
+(refuted — it reproduced in isolation), and that the test failed intrinsically
+(refuted — it passes alone in 4.85 s). Recorded because the *shape* recurs: a
+timeout and a defect are indistinguishable from the assertion alone, and only the
+duration told them apart.
+
+**Methodology, now a rule here:** do not edit the CLI script or touch the runtime
+while an acceptance tier is running. The harness invokes `bin/agent-container`
+fresh per call, so a mid-run edit makes the whole verdict untrustworthy even when
+it is not the cause.
