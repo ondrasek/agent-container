@@ -2469,7 +2469,10 @@ def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dic
         "services": {
             svc: {
                 "network_mode": f"service:{EGRESS_SERVICE_KEY}",
-                "depends_on": [EGRESS_SERVICE_KEY],
+                # `service_healthy` for the same reason as the agent: a sidecar
+                # placed inside the boundary and started before it serves gets
+                # bare connection refusals for everything, declared or not.
+                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}},
             }
             for svc in inside
         }
@@ -2652,7 +2655,10 @@ def build_compose_model(
         # SC-011 asserts the set stays empty.
         service.pop("ports", None)
         service["network_mode"] = f"service:{EGRESS_SERVICE_KEY}"
-        service["depends_on"] = [EGRESS_SERVICE_KEY]
+        # `service_healthy`, not the list form: the list form waits only for the
+        # container to be STARTED, which is true long before squid and unbound are
+        # serving. This is what closes the window described on the healthcheck.
+        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}}
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
@@ -2740,6 +2746,33 @@ def build_compose_model(
                 {"source": "egress_unbound", "target": EGRESS_UNBOUND_PATH},
                 {"source": "egress_ports", "target": EGRESS_PORTS_PATH},
             ],
+            # READINESS IS PART OF THE CONTRACT, not a detail. `up` otherwise
+            # returns while the boundary is starting: netfilter is already
+            # installed (the entrypoint does that FIRST, deliberately), so the
+            # agent's traffic is redirected at a port nothing is listening on yet
+            # and every call fails with a bare connection refusal. Measured — a
+            # declared destination gave curl exit 7 immediately after `up` and
+            # exit 0 three seconds later.
+            #
+            # It fails CLOSED during that window, which is the right direction and
+            # is by design. But an agent that starts working immediately sees a
+            # refusal indistinguishable from "this destination is not declared",
+            # so the window is a correctness problem for the DIAGNOSTIC layer even
+            # though it is not a hole.
+            #
+            # BOTH daemons are probed, not just squid: a resolver that is not yet
+            # answering fails every name lookup, and that failure also looks like
+            # a policy refusal from inside the container.
+            "healthcheck": {
+                "test": [
+                    "CMD-SHELL",
+                    "nc -z 127.0.0.1 3127 && nc -z -u -w1 127.0.0.1 53",
+                ],
+                "interval": "2s",
+                "timeout": "2s",
+                "retries": 15,
+                "start_period": "2s",
+            },
         }
         # `content:`, never `file:` — a file: config is a read-only BIND of the
         # local path and cannot reach a daemon that does not share the filesystem

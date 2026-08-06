@@ -345,6 +345,15 @@ fail, then declare SSH to one host and confirm only that host on that port opens
       (`TCP_TUNNEL/200`, spliced). Refusing everything undeclared while breaking everything declared is
       precisely the broken-closed failure T136a exists to catch — do not sign off US4 on the DNS result
       alone.
+- [X] T129c [US4] **Readiness gate on the egress boundary** (research R20). `up` returned while the
+      boundary was still starting: netfilter is installed first (by design), so a DECLARED destination
+      gave curl exit 7 immediately after deploy and exit 0 three seconds later. It fails CLOSED, so this
+      is not a hole — but a bare refusal for a declared destination is indistinguishable from the
+      refusal an UNdeclared one gets, which defeats the diagnostic layer FR-021/FR-022 exist for. Added
+      a healthcheck probing BOTH squid and unbound, and `depends_on: {condition: service_healthy}` on
+      the agent and on any sidecar placed inside the boundary. This was the last Phase B acceptance
+      failure; `test_agent_cannot_switch_enforcement_off` — THE test for US4 — now passes
+      unconditionally and its xfail marker is removed.
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding

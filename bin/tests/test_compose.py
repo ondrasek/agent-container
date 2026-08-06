@@ -211,7 +211,12 @@ def test_agent_joins_the_namespace_and_gains_no_capability(wiz, tmp_path):
     withp = _model(wiz, tmp_path, egress_filter_body="")
     agent = withp["services"]["agent"]
     assert agent["network_mode"] == "service:egress"
-    assert agent["depends_on"] == ["egress"]
+    # `service_healthy`, not the bare list: the list form waits only for the
+    # container to be STARTED, and netfilter is installed before squid serves —
+    # so the agent would run against a boundary that refuses everything, which
+    # is indistinguishable from "nothing is declared" (measured: curl exit 7
+    # immediately after `up`, exit 0 three seconds later).
+    assert agent["depends_on"] == {"egress": {"condition": "service_healthy"}}
     assert "cap_add" not in agent, "the agent must gain no capability — this is the whole design"
 
 

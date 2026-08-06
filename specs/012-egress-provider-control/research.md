@@ -889,12 +889,44 @@ Both that and `debug_options` only took effect after a container restart with th
 directive baked into the mounted config. Any squid experiment here must restart
 the container, not reconfigure.
 
-### OPEN — `test_undeclared_provider_is_refused_not_dropped` still fails
+### R20 — the last failure was a READINESS RACE, not a defect in the boundary
 
-With the fix the Phase B acceptance selection goes from 1 passing to 2, but this
-one still reports `curl` exit 7 for the DECLARED provider inside the deployed
-agent. Isolated probes of the same path pass, so the remaining difference is in
-the full deployment rather than in squid's configuration. **Not diagnosed** — an
-attempt to reproduce it by hand used the wrong config schema (`environments:` as
-a mapping; the tool takes a list in `environments.yaml`) and so proved nothing
-about the product. Recorded as open rather than guessed at.
+`test_undeclared_provider_is_refused_not_dropped` kept reporting `curl` exit 7
+for the DECLARED provider while isolated probes of the identical path passed.
+Reproduced and measured:
+
+| When | Result |
+|---|---|
+| immediately after `up` returns | **exit 7** |
+| ~3 s later | **exit 0** |
+| and thereafter | exit 0 |
+
+`up` returns when compose reports the containers STARTED, which is true long
+before squid and unbound are serving. The entrypoint installs netfilter FIRST —
+deliberately — so during that window the agent's traffic is redirected at ports
+nothing is listening on yet.
+
+**It fails CLOSED, which is the right direction and by design.** This is not a
+hole. But it is a real problem for the DIAGNOSTIC layer that FR-021/FR-022 exist
+to provide: a bare connection refusal for a *declared* destination is
+indistinguishable from the refusal a destination gets for not being declared. An
+agent starting work immediately after deploy sees the allowlist appear wrong.
+
+Fixed with a healthcheck on the egress service and
+`depends_on: {egress: {condition: service_healthy}}` on the agent — the list form
+waits only for STARTED. **Both daemons are probed, not just squid**: a resolver
+that is not yet answering fails every name lookup, and that failure also reads as
+a policy refusal from inside the container. The same condition is applied to
+operator sidecars placed inside the boundary, which would otherwise hit the
+identical window.
+
+Two process notes, both of which cost time here:
+
+- **`uv run --project … agent-container` runs the INSTALLED console script**, not
+  the working tree. A first reproduction attempt deployed a stale build and
+  showed `https_proxy=http://egress:8888` — a value already fixed in source.
+  Probe through `bin/agent-container` directly. (The acceptance harness is fine:
+  it uses `uv run --no-project --script`.)
+- The wrong config schema proves nothing. `environments.yaml` takes a **list**
+  under `environments:`; written as a mapping the declaration is simply not the
+  shape the tool reads, and the deployment comes up with no boundary at all.

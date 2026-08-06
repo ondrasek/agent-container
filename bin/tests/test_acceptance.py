@@ -1968,15 +1968,6 @@ def _phase_b_project(acc, name: str, extra: str = ""):
     return proj
 
 
-@pytest.mark.xfail(
-    reason="research R19c: the resolver hole T128 named is CLOSED — undeclared names "
-    "are refused even via the daemon's resolver. What still fails is the intercept "
-    "path for a DECLARED host: squid logs the destination as an IP, so "
-    "`ssl::server_name` never matches, `splice` does not fire and `terminate all` "
-    "does (curl exit 60, certificate problem). Tracked as T129b. Kept failing rather "
-    "than weakened: the assertion is right, the integration is not.",
-    strict=False,
-)
 def test_agent_cannot_switch_enforcement_off(acc):
     """SC-008, quickstart S12 — THE test for US4.
 
