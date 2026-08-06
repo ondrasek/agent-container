@@ -335,7 +335,7 @@ fail, then declare SSH to one host and confirm only that host on that port opens
       the allowlist being wrong. The target also named the service (`http://egress:8888`), making the
       proxy's own address depend on a DNS lookup the allowlist refuses (`curl` exit 5). The agent shares
       the sidecar's netns, so the proxy IS `127.0.0.1`. This resolves the exit 7 R19 left open.
-- [ ] T129b [US5] **OPEN, and it blocks closing US4 — the intercept path terminates TLS for a DECLARED
+- [X] T129b [US5] **DONE — cause found and fixed; see research R19c-resolved.** It was `http_access`, not `ssl_bump` and not SNI parsing: an intercepted TLS connection arrives as a synthesised CONNECT to the destination IP, so `dstdomain` cannot match and `deny all` fired before `ssl_bump` ran. Deferred to `ssl_bump` on that port via `acl tls_intercept myportname tlsintercept` — `myportname`, NOT `localport`, which never matches on an intercepted connection because squid reports the original port 443 and the scoping silently becomes a no-op. Proven to defer rather than permit by isolating it from DNS: a host unbound resolves but squid's ACL omits is still terminated (exit 35, no tunnel). Constitution III verified — declared host returns exit 0, i.e. curl verified the chain against public CAs, which the self-signed intercept cert cannot satisfy.
       host** (research R19c). Transparent path, no proxy variables: undeclared → `curl` exit 6 (the DNS
       allowlist holds) but **declared → exit 60, certificate problem**. squid logs
       `TCP_DENIED/000 CONNECT 160.79.104.10:443` — the destination is an **IP, not a hostname**, so

@@ -837,3 +837,64 @@ forward-proxy path is unaffected (`TCP_TUNNEL/200`, spliced, verified above).
 Do not close US4 on the strength of the DNS result alone: refusing everything
 undeclared while also breaking everything declared is the broken-closed failure
 T136a exists to catch.
+
+
+### R19c resolved — `http_access` was denying the intercepted connection before
+### `ssl_bump` could splice it (measured, T129b)
+
+The cause was **not** SNI parsing, and not `ssl_bump`. squid reads the SNI
+correctly — `parseSniExtension: host_name=api.anthropic.com` appears in the debug
+log. The connection never got that far in the decision:
+
+An intercepted TLS connection reaches `http_access` as a **synthesised CONNECT to
+the destination IP**. There is no Host header and the ClientHello has not been
+peeked, so `acl allowed_http dstdomain` cannot match, `http_access deny all`
+fires, and the connection is closed before `ssl_bump` runs. **The allowlist was
+being enforced by the one component that cannot see the hostname.**
+
+Fixed by deferring the decision on that port to `ssl_bump`, which runs after the
+peek and does hold the SNI:
+
+```
+acl tls_intercept myportname tlsintercept
+http_access allow tls_intercept
+```
+
+**`myportname`, not `localport`.** First attempt used `localport 3129` and failed
+identically: on a NAT-intercepted connection squid reports the **original**
+destination port (443), so the ACL never matches and the scoping silently becomes
+a no-op — indistinguishable from a working rule from outside the container. The
+`https_port` is now named and the ACL matches the name.
+
+**This defers, it does not permit**, and that was proven rather than argued — by
+isolating the check from DNS. With a host that unbound *will* resolve but that is
+absent from squid's ACL, the connection is still terminated:
+
+| Path | Measured |
+|---|---|
+| declared, transparent | exit 0, `TCP_TUNNEL/200 CONNECT api.anthropic.com:443` — **spliced** |
+| resolvable but not in the ACL | **exit 35, no tunnel** — `ssl_bump` terminated it |
+| undeclared (unresolvable) | exit 6 — the DNS allowlist refuses first |
+
+Constitution III holds: `curl` returns **0** for the declared host, meaning it
+verified the chain against public CAs. The self-signed intercept certificate
+cannot satisfy that — presenting it is exactly the `curl` exit 60 seen before the
+fix. So the client is seeing the real server certificate and the proxy is not
+bumping.
+
+**A methodology note that cost real time:** `squid -k reconfigure` silently does
+not apply under `squid -N`. An `http_access allow all` experiment run that way
+appeared to *refute* the http_access hypothesis, which was correct all along.
+Both that and `debug_options` only took effect after a container restart with the
+directive baked into the mounted config. Any squid experiment here must restart
+the container, not reconfigure.
+
+### OPEN — `test_undeclared_provider_is_refused_not_dropped` still fails
+
+With the fix the Phase B acceptance selection goes from 1 passing to 2, but this
+one still reports `curl` exit 7 for the DECLARED provider inside the deployed
+agent. Isolated probes of the same path pass, so the remaining difference is in
+the full deployment rather than in squid's configuration. **Not diagnosed** — an
+attempt to reproduce it by hand used the wrong config schema (`environments:` as
+a mapping; the tool takes a list in `environments.yaml`) and so proved nothing
+about the product. Recorded as open rather than guessed at.
