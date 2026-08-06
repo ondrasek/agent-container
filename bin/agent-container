@@ -3366,7 +3366,17 @@ def compose_up_exec(
     egress = resolve_egress_declaration(name)
     # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
     # the operator hears it now, not after the agent has done a session of work.
-    check_egress_permits_push(egress, spec.repo, (egress or {}).get("enforcement") or "advisory")
+    _push_mode = (egress or {}).get("enforcement") or "advisory"
+    check_egress_permits_push(
+        egress,
+        spec.repo,
+        _push_mode,
+        # The SSH arm applies only where the boundary is packet-level. Asking here
+        # rather than assuming: an environment that falls back to the proxy must not
+        # be warned about an SSH push that will work perfectly well.
+        transparent=egress_enforcement_mode(egress, spec.agent, resolve_sidecar_override(name))[0]
+        == "transparent",
+    )
     _mode = (egress or {}).get("enforcement") or "advisory"
     # US2: the disclosure (undeclared + the agent has a default) and FR-003a (declared
     # but the default is outside the set) are mutually exclusive by construction —
@@ -6019,9 +6029,15 @@ def https_remote_host(url: str | None) -> str | None:
     """The host of an HTTPS git remote, or None for anything else.
 
     SSH remotes return None deliberately: `ssh` does not honour `https_proxy`, so
-    an SSH push is unaffected by the allowlist and warning about it would be noise.
+    an SSH push is unaffected by the PROXY and warning about it here would be noise.
     That asymmetry is exactly why this defect is invisible to anyone testing with a
     push key and fatal to anyone using the documented GH_TOKEN path.
+
+    It does NOT follow that SSH is safe under Phase B. Transparent enforcement is
+    default-deny at the packet level, which kills port 22 unless it is declared —
+    the same Hard Constraint #1 collision arriving from the opposite direction, with
+    SSH as the casualty rather than the survivor. `ssh_remote_endpoint` covers that
+    case; this function stays about the proxy.
 
     >>> https_remote_host("https://github.com/you/acme")
     'github.com'
@@ -6037,6 +6053,66 @@ def https_remote_host(url: str | None) -> str | None:
     host = authority.rsplit("@", 1)[-1]  # strip any userinfo
     host = host.split(":", 1)[0]  # strip any port
     return host or None
+
+
+def ssh_remote_endpoint(url: str | None) -> tuple[str, int] | None:
+    """The `(host, port)` an SSH git remote will actually connect to, or None.
+
+    Both spellings git uses, because only one of them carries a port and an
+    operator who wrote the other still cannot push:
+
+    >>> ssh_remote_endpoint("git@github.com:you/acme.git")
+    ('github.com', 22)
+    >>> ssh_remote_endpoint("ssh://git@github.com:2222/you/acme")
+    ('github.com', 2222)
+    >>> [ssh_remote_endpoint(u) for u in ("https://github.com/you/acme", "", None)]
+    [None, None, None]
+
+    A non-numeric or out-of-range port is treated as NOT an SSH remote rather than
+    coerced to 22: guessing would produce a check against an endpoint the push will
+    never use, and a check that passes for the wrong endpoint is worse than none.
+    """
+    if not url:
+        return None
+    if url.startswith("ssh://"):
+        authority = url[len("ssh://") :].split("/", 1)[0]
+        hostport = authority.rsplit("@", 1)[-1]
+        if ":" in hostport:
+            host, _, raw = hostport.partition(":")
+            if not raw.isdigit() or not 0 < int(raw) < 65536:
+                return None
+            return (host, int(raw)) if host else None
+        return (hostport, 22) if hostport else None
+    # scp-like: user@host:path. Rejected when the part after ':' looks like a port,
+    # because `host:2222` is not scp-like syntax at all — git reads it as a path.
+    if "://" in url or ":" not in url:
+        return None
+    authority, _, _path = url.partition(":")
+    host = authority.rsplit("@", 1)[-1]
+    return (host, 22) if host else None
+
+
+def egress_permits_endpoint(
+    entries: list[tuple[str, str, int | None, str]], host: str, port: int
+) -> bool:
+    """Whether the allowlist admits `host` on `port` as a NON-HTTP destination.
+
+    The complement of `egress_permits_host`: that one considers only portless
+    entries (the proxy's surface), this one only entries carrying a port (the
+    netfilter surface). Keeping them separate is the point of FR-018a — the port
+    selects the mechanism, so a declaration that permits a host over HTTPS says
+    nothing about reaching it on 22.
+    """
+    for _label, pattern, entry_port, _src in entries:
+        if entry_port != port:
+            continue
+        token = squid_acl_line(pattern)
+        if token.startswith("."):
+            if host == token[1:] or host.endswith(token):
+                return True
+        elif host == token:
+            return True
+    return False
 
 
 def egress_permits_host(entries: list[tuple[str, str, int | None, str]], host: str) -> bool:
@@ -6071,7 +6147,9 @@ def egress_permits_host(entries: list[tuple[str, str, int | None, str]], host: s
     return False
 
 
-def check_egress_permits_push(egress: object, repo_url: str | None, mode: str) -> None:
+def check_egress_permits_push(
+    egress: object, repo_url: str | None, mode: str, *, transparent: bool = False
+) -> None:
     """FR-003c — the check that protects the project's first hard constraint.
 
     The proxy governs ALL HTTPS egress, so an enforced declaration that omits the
@@ -6087,11 +6165,36 @@ def check_egress_permits_push(egress: object, repo_url: str | None, mode: str) -
     tool never sees, and a warning on every deployment would be noise that trains
     operators to ignore the one that matters.
     """
-    host = https_remote_host(repo_url)
-    if host is None or not is_egress_declared(egress):
+    if not is_egress_declared(egress):
         return
     assert isinstance(egress, dict)  # narrowed by is_egress_declared
-    if egress_permits_host(resolve_destinations(egress), host):
+    dests = resolve_destinations(egress)
+
+    # THE SSH ARM (FR-003c, T132). Only under transparent enforcement: the proxy
+    # cannot see an SSH connection, so under Phase A this would be a warning about
+    # a push that works — and a check that cries wolf on a healthy environment is
+    # how operators learn to ignore the one that matters.
+    #
+    # Under Phase B it is the reverse of the HTTPS case. Default-deny is at the
+    # packet level, so port 22 is closed unless declared, and the SAME hard
+    # constraint breaks with SSH as the casualty instead of the survivor.
+    ssh = ssh_remote_endpoint(repo_url) if transparent else None
+    if ssh is not None and not egress_permits_endpoint(dests, *ssh):
+        ssh_host, ssh_port = ssh
+        _push_refusal(
+            f"egress: the declaration does not permit {ssh_host!r} on port {ssh_port}, "
+            f"but this environment pushes over SSH to it. Transparent enforcement is "
+            f"DEFAULT-DENY at the packet level, so `git push` will be refused — and it "
+            f"will be refused at push time, after the work exists. Add it:  "
+            f"egress.allow: [{{host: {ssh_host}, port: {ssh_port}}}]",
+            mode,
+        )
+        return
+
+    host = https_remote_host(repo_url)
+    if host is None:
+        return
+    if egress_permits_host(dests, host):
         return
     msg = (
         f"egress: the declaration does not permit {host!r}, but this environment "
@@ -6099,6 +6202,16 @@ def check_egress_permits_push(egress: object, repo_url: str | None, mode: str) -
         f"be refused — and it will be refused at push time, after the work exists. "
         f"Add it:  egress.allow: [{host}]"
     )
+    _push_refusal(msg, mode)
+
+
+def _push_refusal(msg: str, mode: str) -> None:
+    """`strict` refuses, `advisory` warns — the same escalation for both arms.
+
+    Shared so the two cannot drift into treating the same class of breakage
+    differently, which would make the severity depend on the remote's URL scheme
+    rather than on what the operator asked for.
+    """
     if mode == "strict":
         die(msg)
     warn(msg)

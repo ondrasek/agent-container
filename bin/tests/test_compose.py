@@ -278,11 +278,74 @@ def test_push_check_is_silent_when_the_host_is_declared(wiz):
     )
 
 
-def test_push_check_is_silent_for_ssh_remotes(wiz):
-    """ssh does not honour https_proxy, so an SSH push is unaffected. This
-    asymmetry is why the defect is invisible to anyone testing with a push key."""
+def test_push_check_is_silent_for_ssh_remotes_under_PROXY_enforcement(wiz):
+    """ssh does not honour https_proxy, so an SSH push is unaffected BY THE PROXY.
+    This asymmetry is why the defect is invisible to anyone testing with a push key.
+
+    Narrowed deliberately — the old name claimed SSH is always safe, which Phase B
+    made false. Under a packet-level boundary port 22 is closed unless declared.
+    """
     for url in ("git@github.com:you/acme.git", "ssh://git@github.com/you/acme"):
         wiz.check_egress_permits_push({"allow": [{"provider": "anthropic"}]}, url, "strict")
+
+
+# --- T132: the SSH arm, which exists only under transparent enforcement -------
+
+
+@pytest.mark.parametrize(
+    "url,host,port",
+    [
+        ("git@github.com:you/acme.git", "github.com", 22),
+        ("ssh://git@github.com/you/acme", "github.com", 22),
+        ("ssh://git@git.example.com:2222/you/acme", "git.example.com", 2222),
+    ],
+)
+def test_push_check_fires_for_an_undeclared_ssh_remote_under_transparent(wiz, url, host, port):
+    """Default-deny is at the PACKET level, so port 22 is closed unless declared —
+    Hard Constraint #1 breaking with SSH as the casualty rather than the survivor."""
+    with pytest.raises(wiz.Fatal, match=f"does not permit '{host}' on port {port}"):
+        wiz.check_egress_permits_push(
+            {"allow": [{"provider": "anthropic"}]}, url, "strict", transparent=True
+        )
+
+
+def test_push_check_is_silent_when_the_ssh_endpoint_is_declared(wiz):
+    wiz.check_egress_permits_push(
+        {"allow": [{"provider": "anthropic"}, {"host": "github.com", "port": 22}]},
+        "git@github.com:you/acme.git",
+        "strict",
+        transparent=True,
+    )
+
+
+def test_declaring_the_host_over_https_does_not_open_port_22(wiz):
+    """FR-018a: the port SELECTS the mechanism. A portless entry is the proxy's
+    surface and says nothing about reaching the same host on 22 — so accepting it
+    here would report a push as safe that default-deny will refuse."""
+    with pytest.raises(wiz.Fatal, match="on port 22"):
+        wiz.check_egress_permits_push(
+            {"allow": [{"host": "github.com"}]},
+            "git@github.com:you/acme.git",
+            "strict",
+            transparent=True,
+        )
+
+
+def test_declaring_a_different_port_does_not_open_22(wiz):
+    with pytest.raises(wiz.Fatal, match="on port 22"):
+        wiz.check_egress_permits_push(
+            {"allow": [{"host": "github.com", "port": 2222}]},
+            "git@github.com:you/acme.git",
+            "strict",
+            transparent=True,
+        )
+
+
+def test_ssh_endpoint_parsing_rejects_a_non_numeric_port(wiz):
+    """Coercing it to 22 would check an endpoint the push never uses, and a check
+    that passes for the WRONG endpoint is worse than no check."""
+    assert wiz.ssh_remote_endpoint("ssh://git@h:notaport/x") is None
+    assert wiz.ssh_remote_endpoint("ssh://git@h:99999/x") is None
 
 
 def test_push_check_is_silent_when_nothing_is_declared(wiz):

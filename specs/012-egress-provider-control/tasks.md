@@ -371,8 +371,8 @@ fail, then declare SSH to one host and confirm only that host on that port opens
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding
-- [ ] T132 [US5] Add the **SSH arm to FR-003c's deploy-time check** — default-deny kills `git push` over SSH unless port 22 is declared. Hard Constraint #1 breaking from the opposite direction to Phase A's HTTPS case
-- [ ] T133 [P] [US5] Add a test for T132: fires for an SSH remote with no `{host, port: 22}` entry, silent when declared
+- [X] T132 [US5] Add the **SSH arm to FR-003c's deploy-time check** — default-deny kills `git push` over SSH unless port 22 is declared. Hard Constraint #1 breaking from the opposite direction to Phase A's HTTPS case — **DONE.** The SSH arm fires only under TRANSPARENT enforcement — under the proxy, `ssh` does not honour `https_proxy` and the push genuinely works, so warning there would train operators to ignore the check. `ssh_remote_endpoint` parses both spellings git accepts and returns None for a non-numeric or out-of-range port rather than coercing to 22: a check that passes for the WRONG endpoint is worse than no check. Escalation is shared with the HTTPS arm, so severity cannot come to depend on the remote's URL scheme.
+- [X] T133 [P] [US5] Add a test for T132: fires for an SSH remote with no `{host, port: 22}` entry, silent when declared — **DONE.** Fires for all three SSH spellings; silent when `{host, port: 22}` is declared. Also pins FR-018a's port-selects-the-mechanism rule from the direction that matters: declaring the host PORTLESS (the proxy's surface) or on a DIFFERENT port must NOT report an SSH push as safe. `test_push_check_is_silent_for_ssh_remotes` renamed and narrowed — its old name claimed SSH is always unaffected, which Phase B falsified.
 
 ### Default-deny acceptance (US5)
 
