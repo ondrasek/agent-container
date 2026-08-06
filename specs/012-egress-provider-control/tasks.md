@@ -354,6 +354,20 @@ fail, then declare SSH to one host and confirm only that host on that port opens
       the agent and on any sidecar placed inside the boundary. This was the last Phase B acceptance
       failure; `test_agent_cannot_switch_enforcement_off` — THE test for US4 — now passes
       unconditionally and its xfail marker is removed.
+- [X] T129e [US4] **Fix the SC-009 assertion, which failed while the port was properly closed** (research
+      R21). `curl` exits 0 for a 403, and an undeclared port is now REFUSED WITH A STATUS rather than
+      dropped — the improvement R1a wanted. Measured: `http_code=403` from Squid with the proxy vars set,
+      exit 6 with them unset. Inverting the assertion would be worse than leaving it broken, since
+      `returncode == 0` also passes when the agent genuinely REACHES the port. Now names both acceptable
+      outcomes, rejects 2xx/3xx explicitly, and re-probes with the proxy variables REMOVED so the
+      netfilter claim does not rest on the agent's cooperation.
+- [ ] T129d [US4] **`redeploy` fails with `port is already allocated` when the declaration is DROPPED.**
+      The T118 port-owner migration run backwards: the binding must return from `egress` to `agent`, and
+      compose cannot bind a port the still-running egress container still holds. **PRE-EXISTING** —
+      verified by re-running against `8a6811b`, this session's starting commit; not a regression from
+      T128/T129a/T129b/T129c. plan.md anticipated this shape for ADOPTING a declaration but not for
+      dropping one. Likely needs the old container stopped before the rebind rather than a plain
+      recreate.
 - [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
 - [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
 - [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding

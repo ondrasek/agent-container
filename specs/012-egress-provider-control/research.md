@@ -930,3 +930,45 @@ Two process notes, both of which cost time here:
 - The wrong config schema proves nothing. `environments.yaml` takes a **list**
   under `environments:`; written as a mapping the declaration is simply not the
   shape the tool reads, and the deployment comes up with no boundary at all.
+
+
+### R21 — two failures the Phase B *selection* never ran, and what each was
+
+The full acceptance tier surfaced two failures that a `-k` selection had hidden.
+**The selection pattern was `nonstandard` while the test is named
+`non_standard`**, so it silently matched nothing — a green selection was reported
+as "all egress tests pass" when one of them had not executed. A `-k` filter that
+matches no test is indistinguishable from one whose tests all passed.
+
+**1. `test_agent_cannot_reach_a_non_standard_port` — a stale assertion, not a
+hole.** Measured directly:
+
+| Probe | Result |
+|---|---|
+| `curl http://example.com:8080/` with proxy vars | `http_code=403`, body from **Squid** |
+| same, with the proxy vars UNSET | **exit 6** — nothing answers |
+
+The port is closed. The test asserted `returncode != 0`, but once the diagnostic
+proxy actually works an undeclared port is **refused with a status** rather than
+dropped, and `curl` exits **0 for a 403**. So the assertion pinned the old
+failure mode and failed while the boundary was behaving correctly — and better
+than before.
+
+Inverting it to `returncode == 0` would have been worse than leaving it broken:
+that also passes when the agent genuinely REACHES the port, which is the entire
+hole SC-009 exists to catch. The assertion now names both acceptable outcomes
+(transport failure, or a 403 from the proxy), rejects a 2xx/3xx explicitly, and
+adds a second probe with the proxy variables removed — because the netfilter
+claim must not rest on the agent's cooperation.
+
+**2. `test_teardown_leaves_no_proxy_behind` — a real defect, and it PREDATES this
+work.** Verified by checking the pre-session source out and re-running: it fails
+identically at `8a6811b`. Not a regression from T128/T129a/T129b/T129c.
+
+`redeploy` fails with **`port is already allocated`** on the transition where the
+declaration is DROPPED. This is the T118 port-owner migration running backwards:
+the binding must move from the `egress` service back to `agent`, and compose
+cannot bind a port the still-running egress container holds. plan.md predicted
+exactly this shape — "which service owns the binding is part of the deployed
+shape ... that is a migration, not an edit" — but only for adopting the
+declaration, not for dropping it. Tracked as T129d.

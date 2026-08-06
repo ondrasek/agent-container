@@ -2004,10 +2004,33 @@ def test_agent_cannot_reach_a_non_standard_port(acc):
     assert acc.cli(
         ["up", "accb2", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
     ).returncode == 0  # fmt: skip
+    # NOT `returncode != 0`. Once the diagnostic proxy actually works, an
+    # undeclared port is REFUSED WITH A STATUS rather than dropped, and `curl`
+    # exits 0 for a 403 — so the old assertion failed while the port was properly
+    # closed. Inverting it would be worse: `returncode == 0` also passes when the
+    # agent genuinely REACHES the port, which is the hole this test exists for.
+    #
+    # What must hold is that the agent never gets a response from the ORIGIN. So
+    # both acceptable outcomes are named, and 200 is rejected explicitly.
     for port in ("8080", "1337"):
-        r = _exec("accb2", ["curl", "-s", "-o", "/dev/null", "--max-time", "10",
-                            f"http://example.com:{port}/"])  # fmt: skip
-        assert r.returncode != 0, f"port {port} reachable under default-deny"
+        r = _exec("accb2", ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                            "--max-time", "10", f"http://example.com:{port}/"])  # fmt: skip
+        code = (r.stdout or "").strip()
+        assert r.returncode != 0 or code == "403", (
+            f"port {port} reachable under default-deny "
+            f"(exit {r.returncode}, http_code {code!r}; 403 = the proxy refused it, "
+            "a 2xx/3xx means the origin answered and the port is OPEN)"
+        )
+        # And with the proxy variables removed, nothing may answer at all — that is
+        # the netfilter claim, which must not rest on the agent's cooperation.
+        bare = _exec("accb2", ["env", "-u", "http_proxy", "-u", "https_proxy",
+                               "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY",
+                               "curl", "-s", "-o", "/dev/null", "--max-time", "10",
+                               f"http://example.com:{port}/"])  # fmt: skip
+        assert bare.returncode != 0, (
+            f"port {port} reachable with the proxy variables UNSET — the boundary "
+            "is depending on the agent's cooperation, which is what US4 removes"
+        )
 
 
 def test_agent_container_gains_no_capability(acc):
