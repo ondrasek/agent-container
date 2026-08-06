@@ -387,3 +387,91 @@ def test_unrelated_env_vars_are_untouched(wiz, tmp_path):
     f = tmp_path / "dev.env"
     f.write_text("GH_TOKEN=x\nFOO=bar\n")
     wiz.refuse_operator_proxy_vars(DECL, "claude", [f])
+
+
+# --- T120-T123: the sidecar boundary ----------------------------------------
+
+DECL_A = {"allow": [{"provider": "anthropic"}]}
+
+
+def _override(tmp_path, body: str):
+    o = tmp_path / "dev.services.yaml"
+    o.write_text(body)
+    return o
+
+
+def test_sidecars_join_the_boundary_by_default(wiz, tmp_path):
+    """FR-023. ANY sidecar the agent can reach with free egress IS a bypass — the
+    agent need not escape anything, only ask something that already has the
+    access (`redis REPLICAOF`, `postgres COPY … FROM PROGRAM`). Inside is the
+    default because "a redis is a bypass" is not obvious to whoever adds one.
+    """
+    o = _override(tmp_path, "services:\n  redis:\n    image: redis:7\n  db:\n    image: pg\n")
+    overlay = wiz.build_sidecar_boundary_overlay(o, DECL_A)
+    assert set(overlay["services"]) == {"redis", "db"}
+    assert overlay["services"]["redis"]["network_mode"] == "service:egress"
+
+
+def test_declared_opt_out_leaves_a_sidecar_outside(wiz, tmp_path):
+    """FR-023a. Some sidecars legitimately need their own egress — a feed sync on
+    its own schedule. That must be a CALL, not a default."""
+    o = _override(tmp_path, "services:\n  redis:\n    image: redis:7\n  feed:\n    image: f\n")
+    overlay = wiz.build_sidecar_boundary_overlay(o, {**DECL_A, "sidecars_outside": ["feed"]})
+    assert set(overlay["services"]) == {"redis"}, "feed must be left alone"
+
+
+def test_opt_out_naming_a_missing_service_is_refused(wiz, tmp_path):
+    """The failure this prevents is a RENAME. A spec naming the old service while
+    the override declares a new one leaves reality and the declaration disagreeing
+    — and which way round is unknowable from here, so it is refused, not guessed.
+    """
+    o = _override(tmp_path, "services:\n  redis:\n    image: redis:7\n")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.verify_sidecars_outside_resolve({**DECL_A, "sidecars_outside": ["typo"]}, o)
+    msg = str(e.value)
+    assert "typo" in msg and "redis" in msg, "must name both the miss and what IS declared"
+
+
+def test_opt_out_with_no_sidecars_at_all_is_refused(wiz):
+    with pytest.raises(wiz.Fatal, match="no sidecars"):
+        wiz.verify_sidecars_outside_resolve({**DECL_A, "sidecars_outside": ["ghost"]}, None)
+
+
+def test_opt_out_may_not_name_the_agent_or_the_proxy(wiz, tmp_path):
+    """Neither is an operator sidecar. The agent outside the boundary is the
+    feature switched off while still reporting a declaration; the egress service
+    outside its own namespace is incoherent."""
+    for svc in ("agent", "egress"):
+        root = tmp_path / svc
+        (root / ".agent-container").mkdir(parents=True)
+        (root / ".agent-container" / "environments.yaml").write_text(
+            "environments:\n  - name: acme\n    host: local\n    egress:\n"
+            "      allow: []\n"
+            f"      sidecars_outside: [{svc}]\n"
+        )
+        with pytest.raises(wiz.Fatal, match="may only name operator sidecars"):
+            wiz.load_project_spec(root)
+
+
+def test_boundary_overlay_rides_as_the_LAST_compose_layer(wiz, tmp_path):
+    """Order is the point. After the operator's override, or their `network_mode`
+    would win and their sidecar would sit outside the boundary while the
+    declaration said otherwise."""
+    argv = wiz.driver_compose_argv(
+        {"driver": "docker", "context": ""},
+        "p",
+        tmp_path / "gen.yaml",
+        "up",
+        override=tmp_path / "side.yaml",
+        boundary=tmp_path / "b.yaml",
+    )
+    fs = [argv[i + 1] for i, a in enumerate(argv) if a == "-f"]
+    assert fs[-1].endswith("b.yaml"), "the boundary must be layered last"
+    assert fs.index(str(tmp_path / "side.yaml")) < fs.index(str(tmp_path / "b.yaml"))
+
+
+def test_no_overlay_when_there_are_no_sidecars(wiz, tmp_path):
+    """No third `-f` for an environment without sidecars — the argv is unchanged."""
+    assert wiz.build_sidecar_boundary_overlay(None, DECL_A) is None
+    o = _override(tmp_path, "services:\n  only:\n    image: x\n")
+    assert wiz.build_sidecar_boundary_overlay(o, {**DECL_A, "sidecars_outside": ["only"]}) is None

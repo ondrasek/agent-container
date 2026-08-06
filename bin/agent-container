@@ -2337,27 +2337,86 @@ def validate_sidecar_override(path: Path) -> None:
 
 
 def driver_compose_argv(
-    host: dict, project: str, file: Path, *args: str, override: Path | None = None
+    host: dict,
+    project: str,
+    file: Path,
+    *args: str,
+    override: Path | None = None,
+    boundary: Path | None = None,
 ) -> list[str]:
-    """`<runtime> --context/-connection X compose -p <project> -f <file> [-f <override>] …`.
+    """`<runtime> compose -p <project> -f <file> [-f <override>] [-f <boundary>] …`.
 
-    When a sidecar `override` is given it rides as a SECOND `-f` right after the
-    generated compose file, so compose's native multi-file merge folds the helper
-    services into the same project (US4). Order matters: the override is layered
-    ON TOP of the generated file.
+    THREE LAYERS, AND THE ORDER IS THE POINT. The generated file first; the
+    operator's sidecar override second, so their helpers fold into the same
+    project (US4); and — when a declaration is enforced — the tool's BOUNDARY
+    OVERLAY last, placing each sidecar in the egress namespace.
+
+    The overlay must come after the override, or an operator's `network_mode`
+    would win and their sidecar would sit outside the boundary while the
+    declaration said otherwise. It is a separate file rather than an edit to
+    theirs because the override is operator-owned: the tool reads it, never
+    rewrites it.
 
     >>> from pathlib import Path
     >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "agent-container-acme", Path("/s/acme.compose.yaml"), "up", "-d")
     ['docker', '--context', 'lima', 'compose', '-p', 'agent-container-acme', '-f', '/s/acme.compose.yaml', 'up', '-d']
     >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "p", Path("/s/a.yaml"), "up", override=Path("/s/side.yaml"))
     ['docker', '--context', 'lima', 'compose', '-p', 'p', '-f', '/s/a.yaml', '-f', '/s/side.yaml', 'up']
+    >>> driver_compose_argv({"driver": "docker", "context": ""}, "p", Path("/a.yaml"), "up", override=Path("/s.yaml"), boundary=Path("/b.yaml"))[-7:]
+    ['-f', '/a.yaml', '-f', '/s.yaml', '-f', '/b.yaml', 'up']
     """
-    files = ["-f", str(file)] + (["-f", str(override)] if override else [])
+    files = ["-f", str(file)]
+    if override:
+        files += ["-f", str(override)]
+    if boundary:
+        files += ["-f", str(boundary)]
     return driver_runtime_argv(host) + ["compose", "-p", project, *files, *args]
 
 
+def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dict | None:
+    """A compose fragment placing each operator sidecar in the egress namespace.
+
+    ANY SIDECAR THE AGENT CAN REACH THAT HAS FREE EGRESS **IS** A BYPASS. The
+    agent need not escape anything — it need only ask something that already has
+    the access: `redis REPLICAOF <host> <port>`, `postgres COPY … FROM PROGRAM`,
+    or any service that fetches a URL on request. Locking the agent down while
+    leaving sidecars outside produces an environment reporting `enforced: true`
+    while two lines of redis walk straight out.
+
+    So the default is INSIDE, and `sidecars_outside` is the deliberate exception
+    (FR-023a) — verified to name real services before we get here.
+
+    Returns None when there is nothing to place, so no third `-f` is emitted and
+    the argv for an environment without sidecars is unchanged.
+    """
+    if override is None:
+        return None
+    try:
+        services = _yaml_service_keys(override.read_text())
+    except OSError:
+        return None
+    outside = set(sidecars_outside_boundary(egress))
+    inside = [svc for svc in services if svc not in outside]
+    if not inside:
+        return None
+    return {
+        "services": {
+            svc: {
+                "network_mode": f"service:{EGRESS_SERVICE_KEY}",
+                "depends_on": [EGRESS_SERVICE_KEY],
+            }
+            for svc in inside
+        }
+    }
+
+
 def driver_up_argv(
-    host: dict, project: str, file: Path, override: Path | None = None, foreground: bool = False
+    host: dict,
+    project: str,
+    file: Path,
+    override: Path | None = None,
+    foreground: bool = False,
+    boundary: Path | None = None,
 ) -> list[str]:
     """Bring the deployment up. Detached by default (`-d`). A headless FOREGROUND
     run (Feature 004) instead runs ATTACHED with `--abort-on-container-exit
@@ -2377,18 +2436,33 @@ def driver_up_argv(
             "--exit-code-from",
             "agent",
             override=override,
+            boundary=boundary,
         )
-    return driver_compose_argv(host, project, file, "up", "-d", "--build", override=override)
+    return driver_compose_argv(
+        host, project, file, "up", "-d", "--build", override=override, boundary=boundary
+    )
 
 
 def driver_redeploy_argv(
-    host: dict, project: str, file: Path, override: Path | None = None
+    host: dict,
+    project: str,
+    file: Path,
+    override: Path | None = None,
+    boundary: Path | None = None,
 ) -> list[str]:
     """Deliberately non-idempotent (FR-010): rebuild the image and recreate the
     container even with no change. Named volumes are external-by-name so they are
     re-attached, not recreated (FR-008)."""
     return driver_compose_argv(
-        host, project, file, "up", "-d", "--build", "--force-recreate", override=override
+        host,
+        project,
+        file,
+        "up",
+        "-d",
+        "--build",
+        "--force-recreate",
+        override=override,
+        boundary=boundary,
     )
 
 
@@ -3203,7 +3277,12 @@ def compose_up_exec(
     refuse_operator_proxy_vars(
         egress, spec.agent, env_file, override=resolve_sidecar_override(name)
     )
-    _enforced = enforce_egress_declaration(egress, spec.agent, resolve_sidecar_override(name))
+    _override = resolve_sidecar_override(name)
+    # Refuse an opt-out naming a service that does not exist, BEFORE staging:
+    # a renamed sidecar would otherwise sit inside the boundary while the
+    # declaration says it is outside, or vice versa.
+    verify_sidecars_outside_resolve(egress, _override)
+    _enforced = enforce_egress_declaration(egress, spec.agent, _override)
     if not redeploy and phase_a_port_owner_stale(host_rec, name, _enforced):
         # T118. The running container predates the shared namespace, so it still
         # owns the published port and compose cannot hand that port to the egress
@@ -3249,16 +3328,46 @@ def compose_up_exec(
             "committed-and-pushed is LOST on teardown (FR-015)."
         )
     project = compose_project(name)
-    override = resolve_sidecar_override(name)  # validated; merged as a 2nd -f (US4)
+    override = _override  # validated; merged as a 2nd -f (US4)
     if override is not None:
         log(f"sidecar override={override}")
+    boundary_file = None
+    if _enforced:
+        overlay = build_sidecar_boundary_overlay(override, egress)
+        if overlay is not None:
+            boundary_file = host_state_dir(host_name) / f"{name}.boundary.yaml"
+            boundary_file.write_text(json.dumps(overlay, indent=2) + "\n")
+            log(f"sidecars inside the egress boundary: {', '.join(overlay['services'])}")
+        outside = sidecars_outside_boundary(egress)
+        if outside:
+            # FR-023b/SC-015. NAMED, always — an unnamed exception is
+            # indistinguishable from a bug, and `enforced: true` would otherwise
+            # quietly mean "except for these".
+            warn(
+                f"egress: {', '.join(outside)} "
+                + ("is" if len(outside) == 1 else "are")
+                + " OUTSIDE the enforcement boundary by declaration. The agent can reach "
+                + ("it" if len(outside) == 1 else "them")
+                + ", and anything "
+                + ("it" if len(outside) == 1 else "they")
+                + " can reach is reachable through "
+                + ("it" if len(outside) == 1 else "them")
+                + "."
+            )
     # Headless --foreground streams the run attached and propagates the agent's
     # exit code (FR-002/SC-004); everything else brings the deployment up detached.
     foreground = spec.foreground and spec.mode == "headless" and not redeploy
     if redeploy:
-        argv = driver_redeploy_argv(host_rec, project, compose_file, override)
+        argv = driver_redeploy_argv(host_rec, project, compose_file, override, boundary_file)
     else:
-        argv = driver_up_argv(host_rec, project, compose_file, override, foreground=foreground)
+        argv = driver_up_argv(
+            host_rec,
+            project,
+            compose_file,
+            override,
+            foreground=foreground,
+            boundary=boundary_file,
+        )
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
         # The container's exit code IS the agent result — surface it as our own.
@@ -5175,7 +5284,7 @@ def validate_egress(egress: object, where: str) -> None:
             f"(`{{host: github.com, port: 22}}`) selects netfilter instead of the proxy."
         )
     for k in egress:
-        if k not in {"allow", "enforcement"}:
+        if k not in {"allow", "enforcement", "sidecars_outside"}:
             die(f"{where}: unknown key {k!r}")
     _enum_field(egress, "enforcement", ENFORCEMENT_MODES, where)
     if "allow" not in egress:
@@ -5188,6 +5297,18 @@ def validate_egress(egress: object, where: str) -> None:
             f"write `allow: []` for an environment that may reach nothing, or remove "
             f"the egress block entirely for unrestricted (the default)"
         )
+    outside = egress.get("sidecars_outside")
+    if outside is not None:
+        if not isinstance(outside, list) or not all(isinstance(x, str) and x for x in outside):
+            die(f"{where}: 'sidecars_outside' must be a list of sidecar service names")
+        if AGENT_SERVICE_KEY in outside or EGRESS_SERVICE_KEY in outside:
+            # Neither is an operator sidecar. The agent outside the boundary is the
+            # feature switched off while still reporting a declaration; the egress
+            # service outside its own namespace is incoherent.
+            die(
+                f"{where}: 'sidecars_outside' may only name operator sidecars, not "
+                f"'{AGENT_SERVICE_KEY}' or '{EGRESS_SERVICE_KEY}'"
+            )
     entries = egress.get("allow")
     if not isinstance(entries, list):
         got = type(entries).__name__
@@ -5489,6 +5610,63 @@ def check_builtin_default_declared(egress: object, agent: str | None, mode: str)
     if mode == "strict":
         die(msg)
     warn(msg)
+
+
+def sidecars_outside_boundary(egress: object) -> list[str]:
+    """Operator sidecars deliberately placed OUTSIDE the enforcement boundary.
+
+    Declared in the SPEC, beside the allowlist — not in the override file. The
+    override is operator-owned and shape-validated by design (Feature 002), and
+    giving it security meaning would erode the line between "the operator's helper
+    services" and "the tool's security model". Every other security decision lives
+    host-side in the spec Feature 006 establishes an agent cannot rewrite; this is
+    one, so it lives there too.
+
+    >>> sidecars_outside_boundary({"allow": [], "sidecars_outside": ["feed"]})
+    ['feed']
+    >>> sidecars_outside_boundary({"allow": []}), sidecars_outside_boundary(None)
+    ([], [])
+    """
+    if not isinstance(egress, dict):
+        return []
+    named = egress.get("sidecars_outside")
+    return [str(x) for x in named] if isinstance(named, list) else []
+
+
+def verify_sidecars_outside_resolve(egress: object, override: Path | None) -> None:
+    """Refuse an opt-out naming a sidecar that does not exist.
+
+    THE FAILURE THIS PREVENTS IS A RENAME. A typo that matches nothing leaves the
+    sidecar INSIDE the boundary, which is safe; but a service renamed in the
+    override while the spec still names the old one would leave the NEW service
+    silently inside and the operator believing it is outside — or, read the other
+    way round, leave an exception in the spec that no longer describes anything
+    while the operator believes it still does.
+
+    Either way the declaration stops matching reality, and the direction that
+    matters is unknowable from here — so both are refused rather than guessed.
+    """
+    named = sidecars_outside_boundary(egress)
+    if not named:
+        return
+    if override is None:
+        die(
+            f"egress: 'sidecars_outside' names {named} but this environment declares "
+            f"no sidecars (no <name>.services.yaml). Remove the entries, or add the "
+            f"services they refer to."
+        )
+    try:
+        declared = set(_yaml_service_keys(override.read_text()))
+    except OSError as e:
+        die(f"egress: cannot read the sidecar override {override} ({e})")
+    missing = sorted(set(named) - declared)
+    if missing:
+        die(
+            f"egress: 'sidecars_outside' names {missing}, which {override} does not "
+            f"declare. A renamed service would otherwise sit inside the boundary "
+            f"while the declaration says it is outside — so this is refused rather "
+            f"than ignored. Declared there: {sorted(declared) or 'nothing'}."
+        )
 
 
 def override_redefines_egress(override: Path | None) -> bool:
