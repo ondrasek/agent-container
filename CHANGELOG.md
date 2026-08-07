@@ -2,6 +2,121 @@
 
 <!-- version list -->
 
+## v0.21.0 (2026-08-07)
+
+### Bug Fixes
+
+- **egress**: Bind the boundary resolver to loopback and own its pidfile dir
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`b75df0c`](https://github.com/ondrasek/agent-container/commit/b75df0c3b7f2aaf4c58fb5fb1c75e0a073d3022f))
+
+- **egress**: Close an unrestricted egress channel and make declared ports work
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`5ed4bfa`](https://github.com/ondrasek/agent-container/commit/5ed4bfaea6b94eed7e11dfacf89a1135737932c5))
+
+- **egress**: Constrain the proxy's PORT and close two holes in the fail-open fix
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`5125646`](https://github.com/ondrasek/agent-container/commit/512564675001d18f0d05ba1b953eb3e3e8c5cd1b))
+
+- **egress**: Let ssl_bump decide the intercept path, not http_access
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`7fe0583`](https://github.com/ondrasek/agent-container/commit/7fe0583d35ec739b9cf3a610fd1160df23a5404c))
+
+- **egress**: Refuse rather than deploy unrestricted when a declaration is unreadable
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`766086a`](https://github.com/ondrasek/agent-container/commit/766086a154ffc4ab262cd5ff6d848973b30de0c9))
+
+- **egress**: Run the port-owner migration in both directions
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`f1ed831`](https://github.com/ondrasek/agent-container/commit/f1ed831936945161c42bda60e52b09e385416619))
+
+- **egress**: Stop the healthcheck polluting the refusal record, and make boundary membership drift
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`7d8defd`](https://github.com/ondrasek/agent-container/commit/7d8defd0318ffd77995e3226f3eab48389ab2182))
+
+- **egress**: Wait for the boundary to serve before starting the agent
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`f68e830`](https://github.com/ondrasek/agent-container/commit/f68e830b716bac47ce37ec941fd1d2af446688ba))
+
+- **image**: Meet FR-020a by dropping port 53, not redirecting it
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`cb94139`](https://github.com/ondrasek/agent-container/commit/cb94139b7660eb4e3403609f58cda28eca91486a))
+
+### Documentation
+
+- Record that the last two tier failures were a cold image build
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`e25066f`](https://github.com/ondrasek/agent-container/commit/e25066f8f58aac28890b2d0308e86c0a812d3bdb))
+
+- Record the remaining adversarial-review findings as tasks
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`d261806`](https://github.com/ondrasek/agent-container/commit/d261806435b345b5a79bd75809ebbc115573cfb0))
+
+- **specs**: Prove the Phase B mechanism before building on it
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`817e57f`](https://github.com/ondrasek/agent-container/commit/817e57fa656f48605c6117cdd924df9d241f9387))
+
+### Features
+
+- Join the agent to the egress namespace, with no capability
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`47b0e82`](https://github.com/ondrasek/agent-container/commit/47b0e82a13831163e6323c57f47c78e4a686b30e))
+
+- Make the DNS allowlist real rather than advisory
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`2a52a53`](https://github.com/ondrasek/agent-container/commit/2a52a53afaca1525e68fb24d26e69cc3f7242564))
+
+- One typed egress.allow list driving three surfaces
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`7a16ef8`](https://github.com/ondrasek/agent-container/commit/7a16ef88fb6e34111233a150bf5192a5d428397b))
+
+- Put operator sidecars inside the egress boundary
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`3511294`](https://github.com/ondrasek/agent-container/commit/35112945f3179c2adb1fa83dcaffa3a07e283dd7))
+
+- Refuse a sidecar that could dismantle the boundary it sits in
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`8a6811b`](https://github.com/ondrasek/agent-container/commit/8a6811be2454ea0aba1e36145b867353a7681c07))
+
+- Report WHICH enforcement an environment got, not whether
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`fa4a021`](https://github.com/ondrasek/agent-container/commit/fa4a0210d19fd06202b001096426d269f91b8d53))
+
+- **012**: Finish Phase B remaining tasks and reconcile the docs
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`edf8a67`](https://github.com/ondrasek/agent-container/commit/edf8a671abe16f7c7cb2de6a052b5734b2a3f873))
+
+- **012**: Land T145-T151 with measured limits
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`7d7803c`](https://github.com/ondrasek/agent-container/commit/7d7803cb35d80f152a1480f31759a4878c45732c))
+
+- **egress**: State at deploy time that a ported rule pins its addresses
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`7345411`](https://github.com/ondrasek/agent-container/commit/73454114acc63359d891a507b05ee9f5eef110ed))
+
+- **egress**: Tell the operator which mechanism they actually got
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`16cf2e7`](https://github.com/ondrasek/agent-container/commit/16cf2e7e03cf992892eeb5a2e167746ec6b0f8e8))
+
+- **egress**: Warn when default-deny would break `git push` over SSH
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`397d25f`](https://github.com/ondrasek/agent-container/commit/397d25f7d7c82448b017ac1525461567188cb644))
+
+- **image**: Build the Phase B egress boundary
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`f004537`](https://github.com/ondrasek/agent-container/commit/f004537bc2803df31fff0b3943530697bf03b095))
+
+### Testing
+
+- Assert the port is CLOSED, not that the connection was dropped
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`c021f66`](https://github.com/ondrasek/agent-container/commit/c021f66746e041a556fd69478d0a7cec354438dd))
+
+- Pin the three egress renderings and their disagreements
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`ac923d6`](https://github.com/ondrasek/agent-container/commit/ac923d6c7bbcbcc5abd41053f9c4c2cceb83e74f))
+
+
 ## v0.20.0 (2026-08-04)
 
 ### Bug Fixes
