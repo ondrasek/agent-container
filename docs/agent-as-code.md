@@ -29,9 +29,11 @@ environments:
     credentials:               # references, never values (US2 — see Roadmap)
       - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
     egress:                    # where this environment may go (Feature 012)
-      providers: [anthropic]   #   model vendors, by name
-      allow: [github.com]      #   everything else it needs — INCLUDING the git remote,
-                               #   because the proxy governs ALL egress, not just providers
+      allow:                   #   ONE list; the entry shape says what it is
+        - { provider: anthropic }        # model vendor, by name — tool supplies the hosts
+        - { host: github.com }           # the git remote over HTTPS — the declaration
+                                         #   governs ALL egress, not just providers
+        - { host: github.com, port: 22 } # a port selects netfilter, not the proxy
       enforcement: advisory    #   advisory (default) | strict
 ```
 

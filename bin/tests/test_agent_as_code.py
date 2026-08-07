@@ -1243,29 +1243,29 @@ def test_egress_absent_empty_and_populated_are_three_distinct_states(wiz, tmp_pa
     absent = _project(tmp_path / "a", MINIMAL)
     (env,) = wiz.load_project_spec(absent)
     assert "egress" not in env
-    assert wiz.resolve_provider_hosts(env.get("egress")) == []
+    assert wiz.resolve_destinations(env.get("egress")) == []
 
-    empty = _egress(tmp_path, "      providers: []\n", "b")
+    empty = _egress(tmp_path, "      allow: []\n", "b")
     (env,) = wiz.load_project_spec(empty)
-    assert env["egress"]["providers"] == []  # declared, and declared EMPTY
-    assert wiz.resolve_provider_hosts(env["egress"]) == []
+    assert env["egress"]["allow"] == []  # declared, and declared EMPTY
+    assert wiz.resolve_destinations(env["egress"]) == []
 
-    populated = _egress(tmp_path, "      providers: [anthropic]\n", "c")
+    populated = _egress(tmp_path, "      allow: [{provider: anthropic}]\n", "c")
     (env,) = wiz.load_project_spec(populated)
-    assert wiz.resolve_provider_hosts(env["egress"]) == [
-        ("anthropic", ("api.anthropic.com",), "tool")
+    assert wiz.resolve_destinations(env["egress"]) == [
+        ("anthropic", "api.anthropic.com", None, "tool")
     ]
 
 
-def test_egress_providers_bare_string_dies_naming_the_field(wiz, tmp_path):
+def test_egress_allow_bare_string_dies_naming_the_field(wiz, tmp_path):
     """Must not iterate the characters — "anthropic" is one provider, not nine."""
-    root = _egress(tmp_path, "      providers: anthropic\n")
-    with pytest.raises(wiz.Fatal, match="'providers' must be a list"):
+    root = _egress(tmp_path, "      allow: anthropic\n")
+    with pytest.raises(wiz.Fatal, match="'allow' must be a list"):
         wiz.load_project_spec(root)
 
 
 def test_egress_unknown_name_short_form_dies_listing_known(wiz, tmp_path):
-    root = _egress(tmp_path, "      providers: [nosuchvendor]\n")
+    root = _egress(tmp_path, "      allow: [{provider: nosuchvendor}]\n")
     with pytest.raises(wiz.Fatal) as e:
         wiz.load_project_spec(root)
     msg = str(e.value)
@@ -1278,11 +1278,11 @@ def test_egress_unknown_name_long_form_is_accepted(wiz, tmp_path):
     name the tool has never heard of; the hosts are authoritative."""
     root = _egress(
         tmp_path,
-        "      providers:\n        - name: corp-llm\n          hosts: [gw.corp.internal]\n",
+        "      allow:\n        - provider: corp-llm\n          hosts: [gw.corp.internal]\n",
     )
     (env,) = wiz.load_project_spec(root)
-    assert wiz.resolve_provider_hosts(env["egress"]) == [
-        ("corp-llm", ("gw.corp.internal",), "declaration")
+    assert wiz.resolve_destinations(env["egress"]) == [
+        ("corp-llm", "gw.corp.internal", None, "declaration")
     ]
 
 
@@ -1294,19 +1294,27 @@ def test_egress_hosts_replace_never_extend(wiz, tmp_path):
     declaration reads as constrained.
     """
     root = _egress(
-        tmp_path, "      providers:\n        - name: anthropic\n          hosts: [gw.corp]\n"
+        tmp_path, "      allow:\n        - provider: anthropic\n          hosts: [gw.corp]\n"
     )
     (env,) = wiz.load_project_spec(root)
-    ((name, hosts, source),) = wiz.resolve_provider_hosts(env["egress"])
+    ((name, host, port, source),) = wiz.resolve_destinations(env["egress"])
     assert name == "anthropic" and source == "declaration"
-    assert hosts == ("gw.corp",)
-    assert "api.anthropic.com" not in hosts, "hosts: must REPLACE the mapping, not extend it"
+    assert host == "gw.corp" and port is None
+    assert host != "api.anthropic.com", "hosts: must REPLACE the mapping, not extend it"
 
 
-def test_egress_long_form_without_hosts_dies(wiz, tmp_path):
-    root = _egress(tmp_path, "      providers:\n        - name: anthropic\n")
-    with pytest.raises(wiz.Fatal, match="requires 'hosts'"):
-        wiz.load_project_spec(root)
+def test_egress_entry_needs_exactly_one_of_provider_or_host(wiz, tmp_path):
+    """Phase A refused a `{name}` mapping carrying no `hosts`. Under the unified
+    schema that IS the short form and is valid, so this pins what is genuinely
+    ambiguous now: an entry naming both keys, or neither."""
+    both = _egress(
+        tmp_path, "      allow:\n        - provider: anthropic\n          host: x.com\n", "b"
+    )
+    with pytest.raises(wiz.Fatal, match="exactly one of"):
+        wiz.load_project_spec(both)
+    neither = _egress(tmp_path, "      allow:\n        - port: 22\n", "n")
+    with pytest.raises(wiz.Fatal, match="exactly one of"):
+        wiz.load_project_spec(neither)
 
 
 @pytest.mark.parametrize(
@@ -1316,7 +1324,7 @@ def test_egress_non_hostname_dies_naming_the_field(wiz, tmp_path, bad):
     """A URL accepted here would never match a CONNECT target — permitting
     nothing, silently. Refuse it at parse time instead."""
     root = _egress(
-        tmp_path, f"      providers:\n        - name: x\n          hosts: ['{bad}']\n", sub=bad[:4]
+        tmp_path, f"      allow:\n        - provider: x\n          hosts: ['{bad}']\n", sub=bad[:4]
     )
     with pytest.raises(wiz.Fatal, match="is not a hostname"):
         wiz.load_project_spec(root)
@@ -1325,27 +1333,29 @@ def test_egress_non_hostname_dies_naming_the_field(wiz, tmp_path, bad):
 def test_egress_unknown_keys_die(wiz, tmp_path):
     with pytest.raises(wiz.Fatal, match="unknown key 'bogus'"):
         wiz.load_project_spec(_egress(tmp_path, "      bogus: 1\n", "k1"))
-    with pytest.raises(wiz.Fatal, match="unknown provider key 'bogus'"):
+    with pytest.raises(wiz.Fatal, match=r"unknown key\(s\) \['bogus'\]"):
         wiz.load_project_spec(
             _egress(
                 tmp_path,
-                "      providers:\n        - name: x\n          hosts: [a.b]\n          bogus: 1\n",
+                "      allow:\n        - provider: x\n          hosts: [a.b]\n          bogus: 1\n",
                 "k2",
             )
         )
 
 
 def test_egress_enforcement_enum(wiz, tmp_path):
-    ok = _egress(tmp_path, "      providers: [anthropic]\n      enforcement: strict\n", "ok")
+    ok = _egress(
+        tmp_path, "      allow: [{provider: anthropic}]\n      enforcement: strict\n", "ok"
+    )
     (env,) = wiz.load_project_spec(ok)
     assert env["egress"]["enforcement"] == "strict"
-    bad = _egress(tmp_path, "      providers: []\n      enforcement: paranoid\n", "bad")
+    bad = _egress(tmp_path, "      allow: []\n      enforcement: paranoid\n", "bad")
     with pytest.raises(wiz.Fatal, match="enforcement='paranoid'"):
         wiz.load_project_spec(bad)
 
 
-def test_egress_without_providers_is_refused_as_the_fourth_state(wiz, tmp_path):
-    """`egress:` present with no `providers` is neither declared nor undeclared.
+def test_egress_without_allow_is_refused_as_the_fourth_state(wiz, tmp_path):
+    """`egress:` present with no `allow` is neither declared nor undeclared.
 
     Reading it as unrestricted would let `enforcement: strict` sit in a file
     enforcing nothing; reading it as empty would air-gap on a key added for an
@@ -1356,51 +1366,53 @@ def test_egress_without_providers_is_refused_as_the_fourth_state(wiz, tmp_path):
     with pytest.raises(wiz.Fatal) as e:
         wiz.load_project_spec(root)
     msg = str(e.value)
-    assert "missing 'providers'" in msg
-    assert "providers: []" in msg and "remove the egress block" in msg
+    assert "missing 'allow'" in msg
+    assert "allow: []" in msg and "remove the egress block" in msg
 
 
 def test_is_egress_declared_separates_absent_from_empty(wiz):
     """The presence gate T011f exists for: both states resolve to an empty
     allowlist, so presence can never be read off the resolved hosts."""
     assert wiz.is_egress_declared(None) is False
-    assert wiz.is_egress_declared({"providers": []}) is True
-    assert wiz.resolve_provider_hosts(None) == wiz.resolve_provider_hosts({"providers": []}) == []
+    assert wiz.is_egress_declared({"allow": []}) is True
+    assert wiz.resolve_destinations(None) == wiz.resolve_destinations({"allow": []}) == []
 
 
-def test_egress_filter_is_anchored_against_suffix_attack(wiz):
-    """THE security boundary. tinyproxy matches filter lines UNANCHORED, so a bare
-    hostname is a substring allowlist."""
-    import re as _re
+def test_squid_acl_exact_token_does_not_match_a_suffix_attack(wiz):
+    """THE security boundary, restated for squid.
 
-    pat = wiz.egress_filter_line("api.anthropic.com")
-    rx = _re.compile(pat)
-    assert rx.fullmatch("api.anthropic.com")
+    Phase A generated anchored REGEXES for tinyproxy, and the risk was an
+    unanchored pattern. squid matches tokens, not regexes, so the equivalent risk
+    is different: a BARE token is exact, and only a LEADING DOT widens it. This
+    pins that an exact entry cannot be widened by an attacker-controlled suffix.
+    """
+    assert wiz.squid_acl_line("api.anthropic.com") == "api.anthropic.com"
+    e = [("anthropic", "api.anthropic.com", None, "tool")]
+    assert wiz.egress_permits_host(e, "api.anthropic.com")
     for attack in (
         "api.anthropic.com.attacker.net",
         "evil-api.anthropic.com",
-        "apiXanthropicYcom",
         "notapi.anthropic.com",
     ):
-        assert not rx.match(attack), f"{pat!r} permits {attack!r}"
+        assert not wiz.egress_permits_host(e, attack), f"exact entry permits {attack!r}"
 
 
-def test_egress_wildcard_matches_subdomains_but_not_suffix_attack(wiz):
-    import re as _re
-
-    rx = _re.compile(wiz.egress_filter_line("*.githubusercontent.com"))
-    assert rx.fullmatch("objects.githubusercontent.com")
-    assert rx.fullmatch("raw.githubusercontent.com")
-    assert rx.fullmatch("githubusercontent.com"), "the bare domain must match too"
+def test_squid_acl_wildcard_becomes_a_leading_dot(wiz):
+    """`*.x` is NOT squid syntax and would match nothing, silently. It is
+    translated to `.x`, which matches the domain and its subdomains (R12a)."""
+    assert wiz.squid_acl_line("*.githubusercontent.com") == ".githubusercontent.com"
+    e = [("gh", "*.githubusercontent.com", None, "declaration")]
+    assert wiz.egress_permits_host(e, "raw.githubusercontent.com")
+    assert wiz.egress_permits_host(e, "githubusercontent.com"), "the bare domain must match"
     for attack in ("githubusercontent.com.attacker.net", "evilgithubusercontent.com"):
-        assert not rx.match(attack), f"wildcard permits {attack!r}"
+        assert not wiz.egress_permits_host(e, attack), f"wildcard permits {attack!r}"
 
 
 def test_egress_empty_filter_body_denies_everything(wiz):
-    """`providers: []` must produce an EMPTY allowlist body. With
+    """`allow: []` must produce an EMPTY allowlist body. With
     `FilterDefaultDeny Yes` that denies everything; an empty file that somehow
     meant allow-all would invert the air-gapped state, silently and totally."""
-    assert wiz.build_egress_filter([]) == ""
+    assert wiz.build_squid_acl([]) == ""
 
 
 def test_egress_host_length_is_capped(wiz, tmp_path):
@@ -1410,26 +1422,38 @@ def test_egress_host_length_is_capped(wiz, tmp_path):
     assert wiz.HOSTNAME_RE.fullmatch(long_host), "fixture must pass the shape check"
     root = _egress(
         tmp_path,
-        f"      providers:\n        - name: x\n          hosts: ['{long_host}']\n",
+        f"      allow:\n        - provider: x\n          hosts: ['{long_host}']\n",
         "long",
     )
     with pytest.raises(wiz.Fatal, match="over the 253-character DNS limit"):
         wiz.load_project_spec(root)
 
 
-def test_egress_allow_carries_non_provider_hosts(wiz, tmp_path):
-    """FR-001c. The proxy governs ALL egress, so git remotes and registries must be
-    declarable — there is no hidden baseline (FR-001e)."""
+def test_allow_carries_providers_hosts_and_ports_in_one_list(wiz, tmp_path):
+    """FR-018a. One list, and THE PORT SELECTS THE SURFACE — no port goes to the
+    proxy allowlist, a port becomes a netfilter rule."""
     root = _egress(
         tmp_path,
-        "      providers: [anthropic]\n      allow: [github.com, '*.githubusercontent.com']\n",
-        "allow",
+        "      allow:\n"
+        "        - provider: anthropic\n"
+        "        - host: '*.githubusercontent.com'\n"
+        "        - host: github.com\n          port: 22\n",
+        "mix",
     )
     (env,) = wiz.load_project_spec(root)
-    entries = wiz.resolve_provider_hosts(env["egress"])
-    assert ("allow", ("github.com", "*.githubusercontent.com"), "declaration") in entries
-    body = wiz.build_egress_filter(entries)
-    assert "^github\\.com$" in body
+    entries = wiz.resolve_destinations(env["egress"])
+    assert ("anthropic", "api.anthropic.com", None, "tool") in entries
+    assert ("github.com", "github.com", 22, "declaration") in entries
+    # proxy allowlist gets the portless entries only
+    acl = wiz.build_squid_acl(entries)
+    # github.com carries a port, so it belongs to netfilter and must NOT appear in
+    # the proxy allowlist — otherwise a {host, port: 22} entry would also open 443
+    # to that host, which SC-010 forbids. (This assertion caught its own first
+    # draft, which expected it in both.)
+    assert acl == "api.anthropic.com\n.githubusercontent.com\n"
+    # netfilter gets the ported entry only
+    rules = wiz.build_netfilter_rules(entries)
+    assert "--dport 22" in rules and "anthropic" not in rules
 
 
 def test_egress_not_a_mapping_dies(wiz, tmp_path):
@@ -1442,7 +1466,7 @@ def test_egress_not_a_mapping_dies(wiz, tmp_path):
 
 
 def _enf(wiz, agent="claude", mode=None, override=None):
-    e = {"providers": ["anthropic"]}
+    e = {"allow": [{"provider": "anthropic"}]}
     if mode:
         e["enforcement"] = mode
     return wiz.enforce_egress_declaration(e, agent, override)
@@ -1456,19 +1480,41 @@ def test_mode_table_enforceable_strict_deploys_with_proxy(wiz):
     assert _enf(wiz, mode="strict") is True
 
 
-def test_mode_table_unenforceable_advisory_deploys_without_proxy(wiz):
-    """Deploys, and says so. The defect this feature fixes is silence, not
-    permissiveness — so advisory must NOT refuse, but must never be quiet."""
-    assert _enf(wiz, agent="some-future-agent") is False
+def test_mode_table_unenforceable_advisory_deploys_without_proxy(wiz, tmp_path):
+    """Deploys, and says so. The defect this feature fixes is SILENCE, not
+    permissiveness — advisory must not refuse, but must never be quiet.
+
+    The obstacle here is an operator override redefining the egress service.
+    Phase A used "an agent not known to honour the proxy", which is no longer an
+    obstacle at all: transparent enforcement needs nothing from the agent, so an
+    unprobed agent still gets the boundary. That change is the feature.
+    """
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    assert _enf(wiz, override=o) is False
 
 
-def test_mode_table_unenforceable_strict_refuses(wiz):
+def test_mode_table_unenforceable_strict_refuses(wiz, tmp_path):
     """SC-004a: zero deployments proceeding with an unenforceable declaration."""
+    o = tmp_path / "dev.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
     with pytest.raises(wiz.Fatal) as e:
-        _enf(wiz, agent="some-future-agent", mode="strict")
+        _enf(wiz, mode="strict", override=o)
     msg = str(e.value)
-    assert "not known to honour" in msg
+    assert "redefines" in msg
     assert "advisory" in msg, "must name the way out, not just refuse"
+
+
+def test_an_unprobed_agent_still_gets_the_boundary(wiz):
+    """The Phase A -> Phase B difference, stated as a test.
+
+    Under Phase A an agent absent from AGENT_HONOURS_PROXY could not be enforced,
+    because enforcement asked the agent to cooperate. Transparent enforcement asks
+    it for nothing, so the same agent now gets the full boundary — and `strict`
+    has no reason to refuse it.
+    """
+    assert wiz.egress_enforcement_mode({"allow": []}, "some-future-agent")[0] == "transparent"
+    assert _enf(wiz, agent="some-future-agent", mode="strict") is True
 
 
 def test_undeclared_never_deploys_a_proxy(wiz):
@@ -1485,7 +1531,7 @@ def test_override_redefining_egress_makes_it_unenforceable(wiz, tmp_path):
     o = tmp_path / "dev.services.yaml"
     o.write_text("services:\n  egress:\n    image: someone/else\n")
     assert wiz.override_redefines_egress(o) is True
-    ok, reason = wiz.egress_enforceable({"providers": ["anthropic"]}, "claude", o)
+    ok, reason = wiz.egress_enforceable({"allow": [{"provider": "anthropic"}]}, "claude", o)
     assert ok is False
     assert "redefines" in reason and str(o) in reason
 
@@ -1507,7 +1553,7 @@ def test_override_of_an_unrelated_service_is_fine(wiz, tmp_path):
 def test_json_reports_the_override_as_not_enforced(wiz, tmp_path):
     o = tmp_path / "dev.services.yaml"
     o.write_text("services:\n  egress:\n    image: someone/else\n")
-    p = wiz.egress_payload({"providers": ["anthropic"]}, "claude", o)
+    p = wiz.egress_payload({"allow": [{"provider": "anthropic"}]}, "claude", o)
     assert p["declared"] is True and p["enforced"] is False
     assert "redefines" in p["not_enforced_reason"]
 
@@ -1520,8 +1566,10 @@ def test_editing_the_declaration_registers_as_drift(wiz):
     `egress.providers` reported "matching" and never redeployed. The declaration
     changed and the running proxy did not, silently and indefinitely."""
     spec = wiz.ExecSpec()
-    before = wiz.env_desired_config(spec, {"providers": ["anthropic"]})
-    after = wiz.env_desired_config(spec, {"providers": ["anthropic", "openai"]})
+    before = wiz.env_desired_config(spec, {"allow": [{"provider": "anthropic"}]})
+    after = wiz.env_desired_config(
+        spec, {"allow": [{"provider": "anthropic"}, {"provider": "openai"}]}
+    )
     assert before["egress"] != after["egress"]
     assert wiz.config_drift(after, before) == [("egress", after["egress"], before["egress"])]
 
@@ -1531,15 +1579,17 @@ def test_tightening_enforcement_mode_registers_as_drift(wiz):
     is enforceable, so without the mode in the token, tightening to strict would
     report matching and never take effect."""
     spec = wiz.ExecSpec()
-    adv = wiz.env_desired_config(spec, {"providers": ["anthropic"]})
-    strict = wiz.env_desired_config(spec, {"providers": ["anthropic"], "enforcement": "strict"})
+    adv = wiz.env_desired_config(spec, {"allow": [{"provider": "anthropic"}]})
+    strict = wiz.env_desired_config(
+        spec, {"allow": [{"provider": "anthropic"}], "enforcement": "strict"}
+    )
     assert adv["egress"] != strict["egress"]
 
 
 def test_adding_or_removing_a_declaration_registers_as_drift(wiz):
     spec = wiz.ExecSpec()
     none_ = wiz.env_desired_config(spec, None)
-    airgap = wiz.env_desired_config(spec, {"providers": []})
+    airgap = wiz.env_desired_config(spec, {"allow": []})
     assert none_["egress"] is None
     assert airgap["egress"] is not None, "air-gapped is DECLARED; it must not read as absent"
     assert wiz.config_drift(airgap, none_)
@@ -1549,7 +1599,7 @@ def test_fingerprint_moves_when_the_generator_changes(wiz, monkeypatch):
     """The token hashes the GENERATED BODY, so it also moves when the PROVIDERS
     table drifts under a tool upgrade or the anchoring changes — both of which
     change what the proxy enforces while the declaration text stays identical."""
-    decl = {"providers": ["anthropic"]}
+    decl = {"allow": [{"provider": "anthropic"}]}
     before = wiz.egress_fingerprint(decl)
     monkeypatch.setitem(wiz.PROVIDERS, "anthropic", ("api.anthropic.com", "extra.example"))
     assert wiz.egress_fingerprint(decl) != before
@@ -1558,5 +1608,277 @@ def test_fingerprint_moves_when_the_generator_changes(wiz, monkeypatch):
 def test_unchanged_declaration_does_not_drift(wiz):
     """The other half: a no-op apply must stay a no-op, or every run recreates."""
     spec = wiz.ExecSpec()
-    d = {"providers": ["anthropic"], "allow": ["github.com"]}
+    d = {"allow": [{"provider": "anthropic"}, {"host": "github.com"}]}
     assert wiz.config_drift(wiz.env_desired_config(spec, d), wiz.env_desired_config(spec, d)) == []
+
+
+# --- Phase 8: the four entry shapes, and the three renderings ---------------
+
+
+@pytest.mark.parametrize(
+    "block,expect",
+    [
+        ("        - provider: anthropic\n", ("anthropic", "api.anthropic.com", None, "tool")),
+        (
+            "        - provider: corp\n          hosts: [gw.corp]\n",
+            ("corp", "gw.corp", None, "declaration"),
+        ),
+        ("        - host: example.com\n", ("example.com", "example.com", None, "declaration")),
+        (
+            "        - host: example.com\n          port: 5432\n",
+            ("example.com", "example.com", 5432, "declaration"),
+        ),
+    ],
+)
+def test_all_four_entry_shapes_resolve(wiz, tmp_path, block, expect):
+    """T106/FR-018a. The fourth shape is the one that matters most: `port` is what
+    routes an entry to netfilter instead of the proxy."""
+    root = _egress(tmp_path, f"      allow:\n{block}", sub=str(abs(hash(block)))[:6])
+    (env,) = wiz.load_project_spec(root)
+    assert wiz.resolve_destinations(env["egress"]) == [expect]
+
+
+@pytest.mark.parametrize("bad", ["0", "65536", "-1", "'22'", "22.5", "true"])
+def test_bad_port_dies_naming_the_field(wiz, tmp_path, bad):
+    """A port outside 1-65535, or one that is not an integer. `true` is included
+    because YAML parses it as a bool and `isinstance(True, int)` is True in
+    Python — so a naive range check would accept `port: true` as port 1."""
+    root = _egress(
+        tmp_path, f"      allow:\n        - host: x.com\n          port: {bad}\n", sub=f"p{bad[:3]}"
+    )
+    with pytest.raises(wiz.Fatal, match="must be an integer 1-65535"):
+        wiz.load_project_spec(root)
+
+
+def test_a_wildcard_host_with_a_port_is_refused_naming_the_mechanism(wiz, tmp_path):
+    """T148. The combination validated, rendered a rule that CANNOT EXIST, and the
+    tool reported the destination as permitted.
+
+    `port` selects netfilter, and netfilter has no wildcard destination: `-d
+    '*.example.com'` is an operand iptables resolves at insert time and cannot.
+    The refusal must name the mechanism, because "invalid" would leave the
+    operator with no way to know that the same host is perfectly legal WITHOUT a
+    port — the proxy can match a subtree, the packet filter cannot.
+    """
+    root = _egress(
+        tmp_path, '      allow:\n        - host: "*.example.com"\n          port: 22\n', "wcp"
+    )
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "*.example.com" in msg, "must name the offending entry"
+    assert "wildcard" in msg and "PACKET FILTER" in msg, "must name the mechanism, not just refuse"
+    assert "drop the `port:`" in msg, "and the escape that works"
+    # The same host WITHOUT a port stays legal — the refusal must be about the
+    # combination, not about wildcards, or FR-001d would be quietly withdrawn.
+    ok = _egress(tmp_path, '      allow:\n        - host: "*.example.com"\n', "wcok")
+    (env,) = wiz.load_project_spec(ok)
+    assert wiz.resolve_destinations(env["egress"]) == [
+        ("*.example.com", "*.example.com", None, "declaration")
+    ]
+
+
+def test_the_wildcard_port_refusal_is_what_keeps_the_two_surfaces_agreeing(wiz):
+    """T148, the half that makes the refusal load-bearing rather than tidy.
+
+    Nothing downstream of the validator can catch this: `resolve_destinations` is
+    a pure mapping, `build_netfilter_rules` renders whatever host it is given, and
+    `egress_permits_endpoint` matches wildcards — so the push check would report
+    such a destination as PERMITTED while the rule meant to carry it cannot be
+    installed at all. Both facts are asserted here, on hand-built entries that
+    bypass validation, so the reason the validator refuses is recorded next to it.
+    """
+    entries = [("*.example.com", "*.example.com", 22, "declaration")]
+    assert wiz.egress_permits_endpoint(entries, "git.example.com", 22), (
+        "the check calls it permitted — which is why validation must refuse it first"
+    )
+    assert "-d '*.example.com'" in wiz.build_netfilter_rules(entries), (
+        "and the renderer emits a destination iptables cannot resolve"
+    )
+    with pytest.raises(wiz.Fatal, match="wildcard"):
+        wiz.validate_destination({"host": "*.example.com", "port": 22}, "allow[0]")
+
+
+def test_squid_rendering_is_unquoted_and_dot_prefixed(wiz):
+    """T108/R12a — the two forms that produce a SILENTLY EMPTY allowlist.
+
+    A quoted token is a FILE PATH to squid, and `*.x` is not squid syntax at all.
+    Neither is an error; both just match nothing.
+    """
+    entries = [
+        ("a", "api.anthropic.com", None, "tool"),
+        ("b", "*.githubusercontent.com", None, "declaration"),
+    ]
+    acl = wiz.build_squid_acl(entries)
+    assert '"' not in acl and "'" not in acl, "a quoted entry is read as a FILE PATH"
+    assert "*." not in acl, "`*.` is not squid syntax and would match nothing"
+    assert acl == "api.anthropic.com\n.githubusercontent.com\n"
+
+
+def test_netfilter_rendering_denies_by_default(wiz):
+    """T110/FR-017. An undeclared port produces NO rule — the policy denies it.
+
+    The first design sketch redirected 80/443 under a default-ACCEPT policy,
+    which let an agent reach anything it liked on 8080 while the declaration
+    still read as constraining. Worse than no control.
+    """
+    entries = [("g", "github.com", 22, "declaration"), ("a", "api.anthropic.com", None, "tool")]
+    rules = wiz.build_netfilter_rules(entries)
+    assert rules.count("iptables -A OUTPUT") == 1, "only the PORTED entry gets a rule"
+    assert "--dport 22" in rules
+    assert "8080" not in rules and "api.anthropic.com" not in rules
+    assert "-j ACCEPT" in rules and "-P OUTPUT" not in rules, "the policy is the entrypoint's"
+
+
+def test_unbound_rendering_escapes_the_catch_all_refuse(wiz):
+    """Every declared name needs `transparent` as well as its forward-zone, or the
+    baked `local-zone: "." refuse` matches first and the allowlist permits
+    NOTHING while passing every refusal test (R17)."""
+    conf = wiz.build_unbound_conf([("a", "api.anthropic.com", None, "tool")])
+    assert 'local-zone: "api.anthropic.com" transparent' in conf
+    assert 'name: "api.anthropic.com"' in conf
+    assert conf.count("forward-addr:") == 1
+
+
+def test_unbound_rendering_sends_the_refusal_record_somewhere_reachable(wiz):
+    """T130/FR-020d. The baked config sets `log-replies: yes`, but unbound's
+    `use-syslog` DEFAULTS TO YES and the egress image runs no syslogd — so every
+    reply line, refusals included, went to syslog(3) and was discarded. Measured:
+    the resolver answered REFUSED for an undeclared name while the container log
+    was completely empty. A config that names the record while the record goes
+    nowhere is the shape this suite exists to catch.
+
+    Asserted on the GENERATED fragment because that is the half the tool owns; it
+    is `include:`d last, so it decides the destination whatever the baked file says.
+    """
+    conf = wiz.build_unbound_conf([("a", "api.anthropic.com", None, "tool")])
+    assert "use-syslog: no" in conf, "syslog is the default and drops the record"
+    assert 'logfile: ""' in conf, "and an empty logfile is what makes it stderr"
+    # Both must sit in the `server:` clause — unbound rejects a server option that
+    # trails a `forward-zone:`, which would take the whole boundary down at start.
+    assert conf.index("use-syslog") < conf.index("forward-zone:")
+
+
+def test_the_air_gapped_allowlist_still_records_its_refusals(wiz):
+    """T130. `allow: []` refuses EVERY lookup, so it is the declaration whose
+    record matters most — and the one an early return for "no names" would have
+    silently switched the logging off for. An empty body is still a config."""
+    conf = wiz.build_unbound_conf([])
+    assert "use-syslog: no" in conf and 'logfile: ""' in conf
+    assert "local-zone:" not in conf and "forward-zone:" not in conf, (
+        "air-gapped permits nothing; only the baked catch-all applies"
+    )
+
+
+def test_the_generated_resolver_config_never_widens_the_catch_all(wiz, tmp_path):
+    """T131/FR-020e. The refusal answer comes from the baked `local-zone: "."
+    refuse`, and this fragment is included INTO that same `server:` clause — so a
+    generated `local-zone: "."` of any type would override it and the resolver
+    would answer for everything while every other test here still passed.
+
+    The guard is the validator: `*.` alone is the only input that renders an empty
+    zone name, and it is refused before it can reach the generator.
+    """
+    conf = wiz.build_unbound_conf(
+        [("a", "*.githubusercontent.com", None, "tool"), ("g", "github.com", 22, "declaration")]
+    )
+    assert 'local-zone: "." ' not in conf and 'local-zone: ""' not in conf
+    assert 'local-zone: "githubusercontent.com" transparent' in conf, "the `*.` prefix is stripped"
+    with pytest.raises(wiz.Fatal, match="not a hostname"):
+        wiz.validate_egress_host("*.", "where", allow_wildcard=True)
+
+
+def test_phase_a_two_key_syntax_is_refused_with_the_replacement(wiz, tmp_path):
+    """T113/FR-018b — removed, NOT deprecated, and never silently ignored.
+
+    Ignoring a `providers:` block would deploy an environment permitting far less
+    than its author wrote down, which is the silent-under-permission mirror of the
+    silent-over-permission this feature exists to prevent.
+    """
+    root = _egress(tmp_path, "      providers: [anthropic]\n", "old")
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "`providers:` was replaced" in msg
+    assert "{provider: anthropic}" in msg, "must show the replacement, not just refuse"
+    assert "port" in msg, "and mention that a port selects netfilter"
+
+
+def test_the_three_renderings_agree_on_one_declaration(wiz, tmp_path):
+    """T114. One declaration, three surfaces — drift between them is the failure
+    the unified schema exists to prevent, and it would be silent.
+
+    A portless host must appear in the proxy allowlist AND the resolver but NOT
+    netfilter; a ported host in netfilter AND the resolver but NOT the proxy.
+    """
+    root = _egress(
+        tmp_path,
+        "      allow:\n"
+        "        - provider: anthropic\n"
+        "        - host: github.com\n          port: 22\n",
+        "agree",
+    )
+    (env,) = wiz.load_project_spec(root)
+    e = wiz.resolve_destinations(env["egress"])
+    acl, rules, dns = (
+        wiz.build_squid_acl(e),
+        wiz.build_netfilter_rules(e),
+        wiz.build_unbound_conf(e),
+    )
+
+    assert "api.anthropic.com" in acl and "api.anthropic.com" not in rules
+    assert "github.com" in rules and "github.com" not in acl
+    # BOTH need resolution: a ported destination is unreachable without DNS, and
+    # omitting it would make SSH fail in a way that looks like a firewall bug.
+    assert "api.anthropic.com" in dns and "github.com" in dns
+
+
+def test_a_web_port_on_a_host_entry_is_refused_naming_the_mechanism(wiz):
+    """`{host, port: 443}` validated, was reported PERMITTED, and rendered a netfilter
+    rule that can never match: 80 and 443 are REDIRECTed into squid in the nat table,
+    which runs before the filter ACCEPT the entry generates.
+
+    Refused rather than rewritten to the portless form — the two forms permit
+    different things (portless goes through the proxy, where the SNI is checked and
+    the request is logged), and silently turning one declaration into another is how
+    a security control comes to mean something its author did not write.
+    """
+    for port in (80, 443):
+        with pytest.raises(wiz.Fatal, match="served by the proxy, not by netfilter"):
+            wiz.validate_egress({"allow": [{"host": "github.com", "port": port}]}, "envs[0]")
+
+
+def test_a_non_web_port_on_a_host_entry_is_still_accepted(wiz):
+    """The refusal must not widen: netfilter's whole purpose is the other ports."""
+    wiz.validate_egress({"allow": [{"host": "github.com", "port": 22}]}, "envs[0]")
+    wiz.validate_egress({"allow": [{"host": "db.example.com", "port": 5432}]}, "envs[0]")
+    wiz.validate_egress({"allow": [{"host": "git.example.com", "port": 8443}]}, "envs[0]")
+
+
+def test_moving_a_sidecar_out_of_the_boundary_is_drift(wiz):
+    """T156. `sidecars_outside` changes WHICH container's egress is filtered and
+    leaves the allowlist and both enforcement modes untouched, so it was invisible to
+    drift detection: `apply` reported "matching" after an operator moved a redis
+    outside the boundary — a change of exactly the kind this feature exists to make
+    visible, reported as no change at all."""
+    inside = {"allow": [{"provider": "anthropic"}]}
+    outside = {"allow": [{"provider": "anthropic"}], "sidecars_outside": ["redis"]}
+    assert wiz.egress_config_token(inside) != wiz.egress_config_token(outside)
+
+
+def test_reordering_sidecars_outside_is_not_drift(wiz):
+    """A reordered list is the same deployment. A token that moved would redeploy
+    every environment whose YAML was merely tidied, which trains operators to ignore
+    the redeploy that matters."""
+    a = {"allow": [], "sidecars_outside": ["redis", "postgres"]}
+    b = {"allow": [], "sidecars_outside": ["postgres", "redis"]}
+    assert wiz.egress_config_token(a) == wiz.egress_config_token(b)
+
+
+def test_the_allowlist_and_the_boundary_membership_cannot_alias(wiz):
+    """Both ride the same token, so a change to either must move it. Pins that the
+    two fields are separated in the token rather than concatenated into something a
+    crafted host name could forge."""
+    a = {"allow": [{"host": "redis"}], "sidecars_outside": []}
+    b = {"allow": [], "sidecars_outside": ["redis"]}
+    assert wiz.egress_config_token(a) != wiz.egress_config_token(b)

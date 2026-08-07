@@ -203,19 +203,24 @@ def test_replacement_guard_fails_if_hosts_are_made_additive(wiz, monkeypatch):
     still deploys, still enforces something, and still looks constrained. Prove
     the test that pins it can actually fail.
     """
-    real = wiz.resolve_provider_hosts
+    real = wiz.resolve_destinations
 
     def additive(egress):
         out = []
-        for name, hosts, source in real(egress):
-            extra = wiz.PROVIDERS.get(name, ())
-            out.append((name, tuple(dict.fromkeys((*hosts, *extra))), source))
+        for name, host, port, source in real(egress):
+            out.append((name, host, port, source))
+            for extra in wiz.PROVIDERS.get(name, ()):
+                if extra != host:
+                    out.append((name, extra, port, source))
         return out
 
-    monkeypatch.setattr(wiz, "resolve_provider_hosts", additive)
-    ((_n, hosts, _s),) = wiz.resolve_provider_hosts(
-        {"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]}
-    )
+    monkeypatch.setattr(wiz, "resolve_destinations", additive)
+    hosts = [
+        h
+        for _n, h, _p, _s in wiz.resolve_destinations(
+            {"allow": [{"provider": "anthropic", "hosts": ["gw.corp"]}]}
+        )
+    ]
     assert "api.anthropic.com" in hosts, "the additive stand-in must reproduce the bug"
     assert "gw.corp" in hosts
 
@@ -253,3 +258,62 @@ def test_threat_model_guard_reads_the_fake_root_not_the_real_document(wiz, fake_
     (fake_root / "docs" / "threat-model.md").write_text("no table here\n", encoding="utf-8")
     assert tpl._threat_model_path() == fake_root / "docs" / "threat-model.md"
     assert tpl._tm_rows() == [], "the guard is reading the real document, not the fake root"
+
+
+# --- T141: the overclaim guard, which is an ABSENCE check -------------------
+
+
+def test_overclaim_guard_fails_on_a_statement_that_overclaims(wiz, monkeypatch):
+    """An absence assertion is the easiest kind to write and the easiest to have
+    silently stop covering anything — it passes just as happily against a string
+    that says nothing at all as against an honest one.
+
+    So it is fed a statement that DOES overclaim and asserted to reject it. Both
+    mechanisms are proved separately: the packet-level statement can defend more,
+    and that is exactly the one at risk of being written as absolute.
+    """
+    import test_cli as tc
+
+    for transparent, phrase in ((False, "we guarantee it"), (True, "this blocks all egress")):
+        monkeypatch.setattr(
+            wiz,
+            "egress_strength_statement",
+            lambda agent, *, transparent=False, _p=phrase: _p,
+        )
+        check = (
+            tc.test_transparent_statement_contains_no_overclaim
+            if transparent
+            else tc.test_strength_statement_contains_no_overclaim
+        )
+        with pytest.raises(AssertionError, match="overclaim"):
+            check(wiz)
+
+
+def test_mode_divergence_guard_fails_when_both_modes_say_the_same_thing(wiz, monkeypatch):
+    """A mode-aware statement collapsed to one string would pass every presence
+    check while telling the operator nothing about which mechanism they got."""
+    import test_cli as tc
+
+    monkeypatch.setattr(
+        wiz, "egress_strength_statement", lambda agent, *, transparent=False: "identical"
+    )
+    with pytest.raises(AssertionError):
+        tc.test_the_two_statements_are_actually_different(wiz)
+
+
+# --- T148: the wildcard-with-a-port refusal ---------------------------------
+
+
+def test_wildcard_port_guard_fails_when_the_combination_is_admitted(wiz, monkeypatch, tmp_path):
+    """The refusal is a validator, and a validator that stops refusing is silent.
+
+    Its whole value is that NOTHING downstream can catch this: the entry resolves,
+    renders and passes the permission check exactly like a legal one. So the
+    validator is replaced with one that admits the combination, and the test that
+    pins the refusal is asserted to fail.
+    """
+    import test_agent_as_code as tac
+
+    monkeypatch.setattr(wiz, "validate_destination", lambda entry, where: None)
+    with pytest.raises(pytest.fail.Exception):
+        tac.test_a_wildcard_host_with_a_port_is_refused_naming_the_mechanism(wiz, tmp_path)

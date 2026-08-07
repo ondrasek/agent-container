@@ -47,12 +47,18 @@ agent-container down alpha --purge
 | Resource           | Pattern                              | Example                       |
 |--------------------|--------------------------------------|-------------------------------|
 | Container          | `agent-container-<name>`                      | `agent-container-alpha`                |
+| Egress sidecar     | `agent-egress-<name>`                | `agent-egress-alpha`          |
 | Workspace volume   | `agent-container-<name>-workspace`            | `agent-container-alpha-workspace`      |
 | Per-container volumes | `agent-container-<name>-{workspace,claude,codex,pi,shellenv,tmux,ssh}` | `agent-container-alpha-ssh` |
 | Image              | `localhost/agent-container:latest` | (shared across containers) |
 | Quadlet unit       | `agent-container-<name>.container`            | `agent-container-alpha.container`      |
 
 `<name>` must match `[a-z0-9][a-z0-9_-]*`. Short and ASCII; this is what shows up in `ps`, `journalctl`, and your shell prompt.
+
+The egress sidecar (present only under an enforced [egress declaration](egress.md)) is deliberately
+**outside** the `agent-container-*` namespace: six separate sites treat any `agent-container-*`
+container as an environment to list, pick or tear down, and a sidecar named into that space would be
+offered as one.
 
 ## Port allocation
 
@@ -69,6 +75,25 @@ So `alpha` always maps to **2218**, `bravo` to **2238**, etc. Window: **2200-229
 - **Where the resolved port lives.** `${XDG_STATE_HOME:-$HOME/.local/state}/agent-container/<name>.port`. NOT in the repo. `agent-container attach` reads it to construct the `ssh -p` call.
 
 If you need to override (e.g. you already have something on 2218), edit the state file before `attach`, or set `AGENT_CONTAINER_HOST` / use raw `ssh`. The pinning is a convention, not a contract.
+
+### Who publishes the port
+
+Normally the agent service does. Under an enforced [egress declaration](egress.md) it **cannot**:
+the agent joins the egress sidecar's network namespace, a shared namespace has exactly one port
+owner, and that is the container owning the namespace. So the `2200 + hash` binding is published by
+the **egress** service, and the agent service declares no `ports:` at all.
+
+The port **number** is unchanged, so `port_for_name`, the state file and `attach` all still agree —
+nothing about connecting to the container changes. What changes is which service holds the binding,
+and that is part of the deployed shape rather than a detail:
+
+- **adding** a declaration to a running environment moves the binding from `agent` to `egress`;
+- **removing** one moves it back.
+
+Either way compose cannot hand a published port to a different service while the current owner still
+holds it, so the tool detects the stale owner — **in both directions** — and recreates the
+deployment rather than failing with `port is already allocated`. It says so when it does; a
+recreation an operator did not ask for reads as a bug unless it is announced. Volumes are preserved.
 
 ## Volume layout
 
@@ -111,6 +136,14 @@ both down).
 It is validated: **`services:` only**, and it **must not redefine the `agent` service**. On the
 create path an invalid override is fatal; on teardown it is resolved leniently and ignored with a
 warning, because a broken override must never block a teardown.
+
+Under an enforced [egress declaration](egress.md) these services are **inside the enforcement
+boundary by default** — a third `-f` places each one in the egress sidecar's network namespace, and
+they wait for it to be healthy exactly as the agent does. A sidecar with free egress that the agent
+can reach *is* a bypass, so being inside is the default and `egress.sidecars_outside` is the
+explicit, named exception. The override is checked for **egress posture** as well as shape once a
+declaration exists: a service inside the boundary may not hold `privileged`, `NET_ADMIN`/`NET_RAW`/
+`SYS_ADMIN`/`ALL`, or `network_mode: host`.
 
 ## State on the host
 
@@ -155,7 +188,9 @@ AGENT_CONTAINER_NAME=alpha docker compose down
 
 The same env vars drive container name, port, and volume names, so two compose invocations with different `AGENT_CONTAINER_NAME` produce two non-colliding stacks — each with the full set of nine per-container volumes (matching the CLI). Point `AGENT_CONTAINER_ENV_FILE` at a distinct `.env` (default `../.env`) to give parallel stacks different `GH_TOKEN` / git identities.
 
-`agent-container` does not use compose — it calls the runtime directly. Compose is offered for operators who prefer that interface.
+`orchestration/compose.yaml` is a **hand-editable template**, separate from the compose model
+`agent-container` generates per deployment (which is where the egress service, the shared network
+namespace and the port owner above are decided). Use it if you want to drive compose yourself.
 
 ## SSH identity is persisted per container
 
@@ -167,4 +202,4 @@ SSH **host key** and the operator's **`~/.ssh/authorized_keys`** live on the `-s
 - **No VSCode coupling** — no `.devcontainer/`, no editor assumptions. SSH + tmux is the contract.
 - **Parallel-safe** — `agent-container up alpha` and `agent-container up bravo` run side by side with distinct names, ports, and volumes.
 - **No baked secrets** — `.env` is read at run time, not at build time.
-- **Rootless** — no `sudo` or root inside the container; sshd runs as the `dev` user on port 2222. Podman also runs rootless under the operator's user on the host.
+- **Rootless** — no `sudo` or root inside the container; sshd runs as the `dev` user on port 2222. Podman also runs rootless under the operator's user on the host. The one capability any deployment holds — `NET_ADMIN`, for programming the [egress boundary](egress.md) — sits on the sidecar, which runs no untrusted code; the agent container's capability set is empty with a declaration and without one alike.

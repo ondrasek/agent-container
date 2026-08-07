@@ -173,6 +173,8 @@ _agent-container() {
                 logs)
                     _arguments \
                         '--no-follow[Print logs without following]' \
+                        '--egress[Read the egress boundary log, where refusals are recorded]' \
+                        '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names_local'
                     ;;
                 completions)

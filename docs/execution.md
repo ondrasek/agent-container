@@ -30,12 +30,26 @@ code** (`--foreground` is headless-only and is refused elsewhere).
 > and pin the reported code to that forced stop. Keep headless-foreground sidecars
 > long-lived.
 >
-> **The [egress proxy](./egress.md) is such a service.** An enforced declaration adds
+> **The [egress sidecar](./egress.md) is such a service.** An enforced declaration adds
 > a second, long-lived container to the project, so the same rule applies to it: if
-> the proxy exits first, the run aborts. That is **fail-closed and correct** — an
-> agent should not keep working once its egress control is gone — but the reported
-> exit code then reflects the forced stop rather than the agent's own result. Stated
-> here so it reads as a behaviour, not as a mystery.
+> the sidecar exits first, the run aborts. That is **fail-closed and correct** — the
+> agent shares that container's network namespace, so once it is gone the agent has
+> no network at all, let alone a controlled one — but the reported exit code then
+> reflects the forced stop rather than the agent's own result. Stated here so it
+> reads as a behaviour, not as a mystery.
+
+### Starting under an egress declaration
+
+An enforced declaration changes *when* the agent starts and *where its port lives*,
+and both are visible from here:
+
+- the agent waits for the egress sidecar to be **healthy**, not merely started —
+  netfilter is installed before either daemon serves, so an agent started in that
+  window gets bare connection refusals for destinations it is entitled to reach.
+  A headless run therefore begins a second or two after `up`, by design;
+- the agent joins the sidecar's network namespace, so it **cannot publish ports**;
+  the SSH binding moves to the sidecar. The port *number* is unchanged and `attach`
+  is unaffected — see [orchestration](./orchestration.md#who-publishes-the-port).
 
 ### Re-`up` of a finished headless run
 

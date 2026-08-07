@@ -353,7 +353,7 @@ def test_plan_payload_names_fields_explicitly(wiz):
                 "field": "f",
             }
         ],
-        "egress": {"providers": ["anthropic"]},
+        "egress": {"allow": [{"provider": "anthropic"}]},
     }
     (row,) = wiz.plan_payload([(env, "acme", "local", None, "drifted", "agent: 'claude'→'codex'")])
     # The KEY SET is the guard: a new field cannot reach stdout without someone
@@ -405,33 +405,90 @@ def test_json_reports_undeclared_as_unrestricted_not_empty(wiz):
 
 
 def test_json_reports_air_gapped_as_declared_not_unrestricted(wiz):
-    e = _row(wiz, {"providers": []})["egress"]
+    e = _row(wiz, {"allow": []})["egress"]
     assert e["declared"] is True and e["unrestricted"] is False
-    assert e["hosts"] == []
+    assert e["destinations"] == []
 
 
 def test_json_reports_the_effective_allowlist_not_the_default(wiz):
     """FR-001b. Reporting the tool's default while enforcing an operator override
     would state a permission set the proxy does not enforce."""
-    e = _row(wiz, {"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]})["egress"]
-    assert e["hosts"] == [{"label": "anthropic", "host": "gw.corp", "host_source": "declaration"}]
-    assert all(h["host"] != "api.anthropic.com" for h in e["hosts"])
+    e = _row(wiz, {"allow": [{"provider": "anthropic", "hosts": ["gw.corp"]}]})["egress"]
+    assert e["destinations"] == [
+        {"label": "anthropic", "host": "gw.corp", "port": None, "source": "declaration"}
+    ]
+    assert all(h["host"] != "api.anthropic.com" for h in e["destinations"])
 
 
 def test_json_marks_tool_supplied_hosts_as_such(wiz):
-    e = _row(wiz, {"providers": ["anthropic"]})["egress"]
-    assert e["hosts"] == [
-        {"label": "anthropic", "host": "api.anthropic.com", "host_source": "tool"}
+    e = _row(wiz, {"allow": [{"provider": "anthropic"}]})["egress"]
+    assert e["destinations"] == [
+        {"label": "anthropic", "host": "api.anthropic.com", "port": None, "source": "tool"}
     ]
 
 
-def test_json_separates_declared_from_enforced(wiz):
+def test_json_separates_declared_from_enforced(wiz, tmp_path):
     """A declaration can exist and not be in force. SC-004's honesty requirement
-    applies to the machine-readable surface too, not only to prose."""
-    e = _row(wiz, {"providers": ["anthropic"]}, agent="some-future-agent")["egress"]
-    assert e["declared"] is True
-    assert e["enforced"] is False
-    assert "not known to honour" in e["not_enforced_reason"]
+    applies to the machine-readable surface too, not only to prose.
+
+    The obstacle is an operator override of the egress service — an unprobed
+    AGENT is no longer one, because transparent enforcement asks the agent for
+    nothing.
+    """
+    o = tmp_path / "acme.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    p = wiz.egress_payload({"allow": [{"provider": "anthropic"}]}, "claude", o)
+    assert p["declared"] is True
+    assert p["enforced"] is False
+    assert "redefines" in p["not_enforced_reason"]
+
+
+def test_json_names_which_mechanism_was_obtained(wiz, tmp_path):
+    """T151/FR-021. `enforced` is a boolean, and the two mechanisms this feature
+    can deliver are not interchangeable: the packet-level boundary holds against an
+    agent actively evading it, a cooperative proxy holds only against accident.
+
+    The prose statement distinguishes them (it has to — FR-022), so a machine
+    consumer that could not was reading a strictly weaker surface than the human
+    one, for the field the whole feature is about.
+    """
+    enforced = _row(wiz, {"allow": [{"provider": "anthropic"}]})["egress"]
+    assert enforced["mechanism"] == wiz.EGRESS_TRANSPARENT
+    assert enforced["mechanism"] != str(enforced["enforced"]), (
+        "the field must name a mechanism, not restate the boolean"
+    )
+
+    undeclared = _row(wiz, None)["egress"]
+    assert undeclared["mechanism"] == wiz.EGRESS_UNENFORCED, (
+        "'none' rather than null — a null reads as 'unknown' and invites a guess"
+    )
+
+    o = tmp_path / "acme.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    unenforceable = wiz.egress_payload({"allow": [{"provider": "anthropic"}]}, "claude", o)
+    assert unenforceable["declared"] is True
+    assert unenforceable["mechanism"] == wiz.EGRESS_UNENFORCED
+
+
+def test_json_mechanism_and_enforced_cannot_disagree(wiz, tmp_path):
+    """The new field must not become a second, drifting source of truth: a payload
+    reading `enforced: true, mechanism: none` would be worse than either field
+    alone. They come from ONE call, and this pins the relationship rather than the
+    two values, so it still holds if a third mechanism is ever added.
+    """
+    o = tmp_path / "acme.services.yaml"
+    o.write_text("services:\n  egress:\n    image: someone/else\n")
+    for egress, override in (
+        (None, None),
+        ({"allow": []}, None),
+        ({"allow": [{"provider": "anthropic"}]}, None),
+        ({"allow": [{"provider": "anthropic"}]}, o),
+    ):
+        p = wiz.egress_payload(egress, "claude", override)
+        assert p["enforced"] is (p["mechanism"] != wiz.EGRESS_UNENFORCED)
+        # And `enforced` is still THERE. Consumers exist; the field was added
+        # alongside it, never in place of it.
+        assert "enforced" in p and isinstance(p["enforced"], bool)
 
 
 def test_json_exposes_the_builtin_default_provider(wiz):

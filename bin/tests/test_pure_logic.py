@@ -812,3 +812,181 @@ def test_threat_model_reconciled_rows_name_their_threats(wiz):
         f"'none' explicitly if the feature genuinely touched no boundary — silence "
         f"and 'nothing changed' must not look identical."
     )
+
+
+# --- Feature 012: the entrypoint's rule shape (adversarial review) ------------
+
+
+def _entrypoint_accept_rules(wiz):
+    """Every `-A OUTPUT ... -j ACCEPT` line in the egress entrypoint."""
+    text = (wiz.REPO_ROOT / "image" / "egress" / "entrypoint.sh").read_text(encoding="utf-8")
+    return [
+        ln.strip()
+        for ln in text.splitlines()
+        if "-A OUTPUT" in ln and "-j ACCEPT" in ln and not ln.strip().startswith("#")
+    ]
+
+
+def _rule_is_scoped(rule: str) -> bool:
+    """A port-matching ACCEPT must also constrain WHO or WHERE, not just which port.
+
+    THREE CORRECTIONS from adversarial review, each of which let the D1 hole be
+    reopened with the whole suite green:
+
+    * `-o eth0` was accepted as "scoping". It is the opposite — eth0 is the route to
+      everywhere. Only `-o lo` narrows anything, so the interface test is now
+      specific rather than "an -o is present".
+    * `--dports` and `-m multiport` were invisible, so the same hole written in the
+      multiport form passed.
+    * `--destination`/`--out-interface` long forms were invisible too.
+    """
+    if not any(f in rule for f in ("--dport", "--dports")):
+        return True  # not a port rule; the other matches govern it
+    scoped_by_destination = " -d " in rule or " --destination " in rule
+    scoped_by_loopback = " -o lo" in rule or " --out-interface lo" in rule
+    scoped_by_owner = "-m owner" in rule
+    return scoped_by_destination or scoped_by_loopback or scoped_by_owner
+
+
+def test_no_accept_rule_matches_on_destination_port_alone(wiz):
+    """An ACCEPT matching only `--dport` is an unrestricted egress channel.
+
+    Found by adversarial review: `-p tcp --dport 3128:3129 -j ACCEPT` carried no
+    `-d` and no `-o`, so a connection to ANY address on those ports was accepted
+    before `-P OUTPUT DROP` could apply. The nat REDIRECT only matches dport 443/80,
+    so squid never saw it, nothing was logged, and `enforced: true` still held.
+
+    Asserted structurally rather than by naming the two ports, because the next
+    such rule will have a different number.
+    """
+    for rule in _entrypoint_accept_rules(wiz):
+        assert _rule_is_scoped(rule), (
+            f"ACCEPT matches on destination port alone, so it admits ANY address: {rule!r}"
+        )
+
+
+def test_generated_port_rules_are_scoped_to_a_host(wiz):
+    """The same invariant on the GENERATED side — SC-010 is 'that host and that
+    port only', so a generated rule must never widen to a whole port."""
+    dests = [("gh", "github.com", 22, "spec"), ("db", "db.example.com", 5432, "spec")]
+    for line in wiz.build_netfilter_rules(dests).splitlines():
+        if "-j ACCEPT" in line and "--dport" in line:
+            assert _rule_is_scoped(line), f"generated rule is unscoped: {line!r}"
+
+
+def test_the_scoping_guard_can_fail():
+    """Proof the check above is not vacuous — an absence assertion passes just as
+    happily against a rule set that contains no port rules at all.
+
+    The rejected cases now include the three forms adversarial review found the
+    first version blind to: `-o eth0` (which scopes nothing), and the multiport and
+    long-option spellings of the same hole.
+    """
+    # Must be REJECTED — each is an unrestricted egress channel.
+    assert not _rule_is_scoped("iptables -A OUTPUT -p tcp --dport 3128:3129 -j ACCEPT")
+    assert not _rule_is_scoped("iptables -A OUTPUT -o eth0 -p tcp --dport 3128 -j ACCEPT"), (
+        "eth0 is the route to everywhere; it is not scoping"
+    )
+    assert not _rule_is_scoped(
+        "iptables -A OUTPUT -p tcp -m multiport --dports 3128,3129 -j ACCEPT"
+    )
+    # Must be ACCEPTED — each genuinely narrows the destination.
+    assert _rule_is_scoped("iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport 3128 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT -o lo -p tcp --dport 53 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT --destination 10.0.0.1 -p tcp --dport 22 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT -m owner --uid-owner 31 -p tcp --dport 80 -j ACCEPT")
+
+
+def test_the_forward_proxy_constrains_the_PORT_not_only_the_HOST(wiz):
+    """`dstdomain` matches a name and says nothing about the port.
+
+    Measured: before this restriction, `CONNECT <declared-host>:6379` through the
+    tool's own forward proxy was ALLOWED and squid dialled out
+    (`TCP_TUNNEL/503 … HIER_DIRECT/<ip>` — the 503 was the origin not listening,
+    not squid refusing). A PORTLESS entry means "this host over HTTP/HTTPS"
+    everywhere else in the feature, so admitting every port contradicted a printed
+    guarantee. After: `TCP_DENIED/403`.
+    """
+    conf = (wiz.REPO_ROOT / "image" / "egress" / "squid.conf").read_text(encoding="utf-8")
+    code = [ln.strip() for ln in conf.splitlines() if not ln.strip().startswith("#")]
+    joined = "\n".join(code)
+    assert "acl SSL_ports port 443" in joined
+    assert "http_access deny CONNECT !SSL_ports" in joined
+    assert "http_access deny !Safe_ports" in joined
+    # ORDER IS THE PROPERTY: squid takes the first match, so the denies must precede
+    # the allowlist rule or they never run.
+    deny_at = next(i for i, ln in enumerate(code) if "deny CONNECT !SSL_ports" in ln)
+    allow_at = next(i for i, ln in enumerate(code) if "http_access allow allowed_http" in ln)
+    assert deny_at < allow_at, "the port denies must be evaluated before the host allow"
+
+
+def test_declared_port_rules_are_installed_after_the_resolver(wiz):
+    """iptables resolves `-d <hostname>` AT INSERT TIME, so the fragment must be
+    sourced after unbound is up.
+
+    Sourced from inside install_rules it could never work: the DNS rewrite has
+    already pointed 127.0.0.11:53 at 127.0.0.1:53 and unbound did not exist yet, so
+    every declared `{host, port}` ACCEPT was silently skipped — FR-018 non-functional,
+    and `git push` over declared SSH dropped at push time.
+    """
+    lines = (
+        (wiz.REPO_ROOT / "image" / "egress" / "entrypoint.sh")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+
+    def _stmt(needle: str) -> int:
+        """Line number of the EXECUTABLE statement, never a comment mentioning it.
+
+        The first draft of this test used `text.index(...)` and matched the prose in
+        the wrapper's own comment — a check satisfied by a sentence rather than by
+        the code it names, which is precisely the defect class this file exists to
+        catch. Found by the gate, kept as a comment so it is not reintroduced.
+        """
+        for i, ln in enumerate(lines):
+            stripped = ln.strip()
+            if stripped.startswith("#"):
+                continue
+            if needle in stripped:
+                return i
+        raise AssertionError(f"no executable statement matching {needle!r}")
+
+    unbound_at = _stmt("unbound -c /etc/unbound/unbound.conf")
+    ports_at = _stmt("/etc/egress/ports.rules")
+    policy_at = _stmt("iptables -P OUTPUT DROP")
+    assert unbound_at < ports_at, "declared port rules are sourced before the resolver exists"
+    assert ports_at < policy_at, "declared ports must be admitted before the policy flips to DROP"
+
+
+def test_iptables_failures_cannot_be_swallowed(wiz):
+    """`install_rules || die` suppressed `set -e` for the whole function body, and
+    the function's status was that of its last command — which always succeeded."""
+    text = (wiz.REPO_ROOT / "image" / "egress" / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "command iptables" in text, "the checking wrapper is gone"
+    assert "netfilter rule REJECTED" in text, "a failed rule must name itself"
+    # CODE ONLY. The comment above the wrapper quotes the old form to explain why it
+    # was wrong, and a naive substring check matched that prose — an absence
+    # assertion satisfied by the very sentence documenting the fix.
+    code = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    assert not any("install_rules || die" in ln for ln in code), (
+        "the AND-OR form suppresses set -e for the entire function body"
+    )
+
+
+def test_the_boundary_resolver_binds_loopback_only(wiz):
+    """Copilot review, verified with a control: on `interface: 0.0.0.0` the resolver
+    also answered on the egress container's PROJECT-NETWORK address, which a sidecar
+    declared OUTSIDE the boundary can route to.
+
+    Measured before/after from a container on the same network but NOT sharing the
+    namespace: pre-fix the undeclared-to-them name resolved (160.79.104.10); after,
+    `Connection refused`. A sidecar that is outside by design must not inherit the
+    boundary's allowlisted resolution as well as its free egress.
+    """
+    conf = (wiz.REPO_ROOT / "image" / "egress" / "unbound.conf").read_text(encoding="utf-8")
+    code = [ln.strip() for ln in conf.splitlines() if not ln.strip().startswith("#")]
+    assert "interface: 127.0.0.1" in code, "the resolver must not bind a routable address"
+    assert not any(ln.startswith("interface: 0.0.0.0") for ln in code)
+    assert "access-control: 0.0.0.0/0 allow" not in code, (
+        "a blanket allow re-opens what the loopback bind closes if the bind ever widens"
+    )

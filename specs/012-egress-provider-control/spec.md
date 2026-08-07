@@ -524,6 +524,22 @@ that host on that port becomes reachable.
 - **FR-023d**: `validate_sidecar_override` currently checks a sidecar override's **shape**, not its
   egress posture. Under this feature that channel becomes security-relevant, and the guard MUST be
   extended accordingly — a service defined there now lands inside or beside a security boundary.
+- **FR-021a** *(added 2026-08-05, implementation finding)*: FR-021's automatic fallback to the
+  proxy-variable mechanism is **not implemented, deliberately**, and the requirement needs amending
+  rather than satisfying.
+
+  Two reasons, both structural. **Nothing rules out transparent enforcement per agent** — its whole
+  point is needing nothing from the agent, so an agent nobody has probed still gets the boundary,
+  and Phase A's "not known to honour the proxy" stops being an obstacle at all. Every obstacle that
+  remains (no image sources, an operator-redefined egress service) **rules out the proxy just as
+  completely**, so there is nothing left to fall back *to*. And whether the daemon grants
+  `NET_ADMIN` is not knowable before running the container, so any pre-deploy fallback decision
+  would be a guess licensing a deploy.
+
+  Instead the entrypoint **fails closed**: it dies if it cannot install its rules, `compose up`
+  fails, and no unconstrained container is left running. A silent downgrade to the weaker mechanism
+  is precisely the failure this feature exists to prevent — an environment reporting enforcement
+  while an agent can `unset HTTPS_PROXY` and walk out.
 - **FR-022**: FR-008's honesty statement MUST be **revised, not merely extended**, once transparent
   enforcement is in force. The current wording says packet filtering "needs privileges this
   container deliberately does not have" — which is true of the **agent** container and false of the

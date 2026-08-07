@@ -154,6 +154,10 @@ test_tool() {
     assert_has "${tool}:list-flag" "--json" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "logs" "--"
     assert_has "${tool}:logs-flag" "--no-follow" "${COMPREPLY[@]}"
+    # --egress is the ONLY way to reach the boundary's log, where a refused
+    # destination is recorded (T130). Undiscoverable, an operator debugging a
+    # refusal tails the agent container and finds an empty stream instead.
+    assert_has "${tool}:logs-egress" "--egress" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "attach" "--"
     assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "build" "--"

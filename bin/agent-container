@@ -588,13 +588,26 @@ ENFORCEMENT_MODES = ("advisory", "strict")
 # which begins with CONTAINER_PREFIX — and six separate sites treat any
 # `agent-container-*` container as an environment to list, pick or tear down.
 EGRESS_SERVICE_KEY = "egress"
-EGRESS_PORT = 8888
-EGRESS_FILTER_PATH = "/etc/tinyproxy/filter"
+# squid's NON-INTERCEPT forward-proxy port. Phase A used 8888 (tinyproxy); this is
+# a different daemon on a different port, and the constant moved with it rather
+# than being kept for continuity — a stale port here points the diagnostic layer
+# at nothing, and the symptom is an unreachable DECLARED destination, which reads
+# as the allowlist being wrong.
+EGRESS_PORT = 3127
+EGRESS_ACL_PATH = "/etc/squid/allowed_sni.acl"
+EGRESS_UNBOUND_PATH = "/etc/unbound/allowed.conf"
+# A shell fragment the entrypoint SOURCES before flipping the policy to DROP,
+# so a declared {host, port} is permitted by the time anything can use it.
+EGRESS_PORTS_PATH = "/etc/egress/ports.rules"
 # The minimum for in-container traffic. The tool owns this value; an operator one is
 # refused rather than compared (contract C6) — deciding whether one NO_PROXY is
 # "wider" than another means comparing *, .suffix, IP, CIDR and port forms, and a
 # comparison erring permissively reproduces the exact bypass the rule prevents.
 EGRESS_NO_PROXY = "localhost,127.0.0.1,::1"
+# FR-020c: where the sidecar resolver forwards DECLARED names. Defaulting to the
+# host's own resolver would leak the declared destination set to whatever the
+# VPS provider runs, so the tool picks rather than inherits.
+EGRESS_UPSTREAM_DNS = "1.1.1.1"
 
 
 def egress_container_name(name: str) -> str:
@@ -2300,6 +2313,67 @@ def _yaml_service_keys(text: str) -> list[str]:
     return [str(k) for k in svc] if isinstance(svc, dict) else []
 
 
+# Capabilities a sidecar must not hold once it shares the agent's network
+# namespace. NET_ADMIN is the fatal one: a sidecar holding it can FLUSH THE
+# IPTABLES RULES of the namespace it shares, and the agent does not need the
+# capability itself — it only needs to ask something that has it. `privileged`
+# grants it and more. `network_mode: host` leaves the namespace altogether, which
+# is the boundary simply not applying.
+EGRESS_FORBIDDEN_SIDECAR_CAPS = ("NET_ADMIN", "NET_RAW", "SYS_ADMIN", "ALL")
+
+
+def check_sidecar_egress_posture(path: Path, egress: object) -> None:
+    """Refuse a sidecar that could dismantle the boundary it sits inside (FR-023d).
+
+    `validate_sidecar_override` checks SHAPE — services-only, does not redefine
+    the agent. That was cosmetic before this feature and is security-relevant
+    after: a helper service is now inside the enforcement namespace, so what it is
+    permitted to hold is part of the security model.
+
+    Only applies to sidecars INSIDE the boundary. One deliberately placed outside
+    (`sidecars_outside`) is already declared as unconstrained and named as such —
+    refusing its capabilities too would be theatre, since it is not in the
+    namespace to dismantle.
+    """
+    if not is_egress_declared(egress):
+        return
+    try:
+        doc = _yaml_document(path.read_text())
+    except OSError:
+        return
+    services = doc.get("services")
+    if not isinstance(services, dict):
+        return
+    outside = set(sidecars_outside_boundary(egress))
+    for name, spec in services.items():
+        if str(name) in outside or not isinstance(spec, dict):
+            continue
+        if spec.get("privileged"):
+            die(
+                f"sidecar override {path}: service '{name}' is `privileged` and would "
+                f"share the agent's network namespace, so it could flush the egress "
+                f"rules — and the agent only has to ask it. Declare it in "
+                f"`egress.sidecars_outside` if it genuinely needs its own privileges; "
+                f"it will then be named as outside the boundary."
+            )
+        caps = spec.get("cap_add")
+        held = [str(c).upper().removeprefix("CAP_") for c in caps] if isinstance(caps, list) else []
+        bad = sorted(set(held) & set(EGRESS_FORBIDDEN_SIDECAR_CAPS))
+        if bad:
+            die(
+                f"sidecar override {path}: service '{name}' requests {bad}, which would "
+                f"let it reprogram the network namespace it shares with the agent. The "
+                f"agent needs no capability of its own to use it — only to ask. Move the "
+                f"service to `egress.sidecars_outside` if that is intended."
+            )
+        if str(spec.get("network_mode") or "") == "host":
+            die(
+                f"sidecar override {path}: service '{name}' uses `network_mode: host`, "
+                f"which leaves the enforcement namespace entirely — the boundary would "
+                f"simply not apply to it while the declaration read as enforced."
+            )
+
+
 def validate_sidecar_override(path: Path) -> None:
     """Guardrail on an operator sidecar override (FR-004/FR-018): it must be a
     non-empty compose `services:`-only fragment and MUST NOT redefine the agent
@@ -2329,27 +2403,104 @@ def validate_sidecar_override(path: Path) -> None:
 
 
 def driver_compose_argv(
-    host: dict, project: str, file: Path, *args: str, override: Path | None = None
+    host: dict,
+    project: str,
+    file: Path,
+    *args: str,
+    override: Path | None = None,
+    boundary: Path | None = None,
 ) -> list[str]:
-    """`<runtime> --context/-connection X compose -p <project> -f <file> [-f <override>] …`.
+    """`<runtime> compose -p <project> -f <file> [-f <override>] [-f <boundary>] …`.
 
-    When a sidecar `override` is given it rides as a SECOND `-f` right after the
-    generated compose file, so compose's native multi-file merge folds the helper
-    services into the same project (US4). Order matters: the override is layered
-    ON TOP of the generated file.
+    THREE LAYERS, AND THE ORDER IS THE POINT. The generated file first; the
+    operator's sidecar override second, so their helpers fold into the same
+    project (US4); and — when a declaration is enforced — the tool's BOUNDARY
+    OVERLAY last, placing each sidecar in the egress namespace.
+
+    The overlay must come after the override, or an operator's `network_mode`
+    would win and their sidecar would sit outside the boundary while the
+    declaration said otherwise. It is a separate file rather than an edit to
+    theirs because the override is operator-owned: the tool reads it, never
+    rewrites it.
 
     >>> from pathlib import Path
     >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "agent-container-acme", Path("/s/acme.compose.yaml"), "up", "-d")
     ['docker', '--context', 'lima', 'compose', '-p', 'agent-container-acme', '-f', '/s/acme.compose.yaml', 'up', '-d']
     >>> driver_compose_argv({"driver": "docker", "context": "lima"}, "p", Path("/s/a.yaml"), "up", override=Path("/s/side.yaml"))
     ['docker', '--context', 'lima', 'compose', '-p', 'p', '-f', '/s/a.yaml', '-f', '/s/side.yaml', 'up']
+    >>> driver_compose_argv({"driver": "docker", "context": ""}, "p", Path("/a.yaml"), "up", override=Path("/s.yaml"), boundary=Path("/b.yaml"))[-7:]
+    ['-f', '/a.yaml', '-f', '/s.yaml', '-f', '/b.yaml', 'up']
     """
-    files = ["-f", str(file)] + (["-f", str(override)] if override else [])
+    files = ["-f", str(file)]
+    if override:
+        files += ["-f", str(override)]
+    if boundary:
+        files += ["-f", str(boundary)]
     return driver_runtime_argv(host) + ["compose", "-p", project, *files, *args]
 
 
+def sidecars_inside_boundary(override: Path | None, egress: object) -> list[str]:
+    """The operator sidecars that will share the egress network namespace.
+
+    One place, because the overlay that does the PLACING and the checks that
+    DESCRIBE it (T149) must answer identically. A second spelling would eventually
+    disagree, and the disagreement an operator would notice is a service they
+    believe is constrained.
+
+    Empty when nothing is declared or there is no override — not "every service",
+    which is what a caller reading the file directly would get for an undeclared
+    environment where no sidecar is placed anywhere.
+    """
+    if override is None or not is_egress_declared(egress):
+        return []
+    try:
+        services = _yaml_service_keys(override.read_text())
+    except OSError:
+        return []
+    outside = set(sidecars_outside_boundary(egress))
+    return [svc for svc in services if svc not in outside]
+
+
+def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dict | None:
+    """A compose fragment placing each operator sidecar in the egress namespace.
+
+    ANY SIDECAR THE AGENT CAN REACH THAT HAS FREE EGRESS **IS** A BYPASS. The
+    agent need not escape anything — it need only ask something that already has
+    the access: `redis REPLICAOF <host> <port>`, `postgres COPY … FROM PROGRAM`,
+    or any service that fetches a URL on request. Locking the agent down while
+    leaving sidecars outside produces an environment reporting `enforced: true`
+    while two lines of redis walk straight out.
+
+    So the default is INSIDE, and `sidecars_outside` is the deliberate exception
+    (FR-023a) — verified to name real services before we get here.
+
+    Returns None when there is nothing to place, so no third `-f` is emitted and
+    the argv for an environment without sidecars is unchanged.
+    """
+    inside = sidecars_inside_boundary(override, egress)
+    if not inside:
+        return None
+    return {
+        "services": {
+            svc: {
+                "network_mode": f"service:{EGRESS_SERVICE_KEY}",
+                # `service_healthy` for the same reason as the agent: a sidecar
+                # placed inside the boundary and started before it serves gets
+                # bare connection refusals for everything, declared or not.
+                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}},
+            }
+            for svc in inside
+        }
+    }
+
+
 def driver_up_argv(
-    host: dict, project: str, file: Path, override: Path | None = None, foreground: bool = False
+    host: dict,
+    project: str,
+    file: Path,
+    override: Path | None = None,
+    foreground: bool = False,
+    boundary: Path | None = None,
 ) -> list[str]:
     """Bring the deployment up. Detached by default (`-d`). A headless FOREGROUND
     run (Feature 004) instead runs ATTACHED with `--abort-on-container-exit
@@ -2369,18 +2520,33 @@ def driver_up_argv(
             "--exit-code-from",
             "agent",
             override=override,
+            boundary=boundary,
         )
-    return driver_compose_argv(host, project, file, "up", "-d", "--build", override=override)
+    return driver_compose_argv(
+        host, project, file, "up", "-d", "--build", override=override, boundary=boundary
+    )
 
 
 def driver_redeploy_argv(
-    host: dict, project: str, file: Path, override: Path | None = None
+    host: dict,
+    project: str,
+    file: Path,
+    override: Path | None = None,
+    boundary: Path | None = None,
 ) -> list[str]:
     """Deliberately non-idempotent (FR-010): rebuild the image and recreate the
     container even with no change. Named volumes are external-by-name so they are
     re-attached, not recreated (FR-008)."""
     return driver_compose_argv(
-        host, project, file, "up", "-d", "--build", "--force-recreate", override=override
+        host,
+        project,
+        file,
+        "up",
+        "-d",
+        "--build",
+        "--force-recreate",
+        override=override,
+        boundary=boundary,
     )
 
 
@@ -2460,6 +2626,8 @@ def build_compose_model(
     workspace_mount: object = _WORKSPACE_DEFAULT,
     declare_workspace_volume: bool = True,
     egress_filter_body: str | None = None,
+    egress_unbound_body: str | None = None,
+    egress_ports_body: str | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
@@ -2495,13 +2663,29 @@ def build_compose_model(
         "ports": [f"{port}:2222"],
         "volumes": workspace_mounts + other_volume_mounts(name) + list(extra_mounts or []),
     }
+    if egress_filter_body is not None:
+        # Joining the egress namespace means the agent CANNOT publish ports — the
+        # daemon refuses both together — so the binding moves there (above). The
+        # agent gains no capability: `cap_add` is absent here deliberately, and
+        # SC-011 asserts the set stays empty.
+        service.pop("ports", None)
+        service["network_mode"] = f"service:{EGRESS_SERVICE_KEY}"
+        # `service_healthy`, not the list form: the list form waits only for the
+        # container to be STARTED, which is true long before squid and unbound are
+        # serving. This is what closes the window described on the healthcheck.
+        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}}
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
         # `https_proxy`, not `HTTPS_PROXY`. Compose applies `environment:` OVER
         # `env_file:`, so these win over an operator env-file — which is what C6
         # requires of NO_PROXY precedence.
-        target = f"http://{EGRESS_SERVICE_KEY}:{EGRESS_PORT}"
+        # LOOPBACK, NOT THE SERVICE NAME. The agent shares this sidecar's network
+        # namespace, so the proxy IS 127.0.0.1 — naming it `egress:` would make
+        # the diagnostic layer depend on a DNS lookup that the allowlist itself
+        # refuses (measured: curl exit 5, "couldn't resolve proxy"). A security
+        # control whose own address needs permission from that control is a loop.
+        target = f"http://127.0.0.1:{EGRESS_PORT}"
         env |= {
             "HTTPS_PROXY": target,
             "HTTP_PROXY": target,
@@ -2562,11 +2746,79 @@ def build_compose_model(
             "container_name": egress_container_name(name),
             "build": {"context": str(Path(build_context) / "egress")},
             "restart": restart,
-            "configs": [{"source": "egress_filter", "target": EGRESS_FILTER_PATH}],
+            # THE ONLY PRIVILEGE IN THE DEPLOYMENT, and it is not on the agent.
+            # Constitution II is per-container: this one runs no untrusted code.
+            "cap_add": ["NET_ADMIN"],
+            # THE PUBLISHED PORT LIVES HERE NOW. A shared network namespace has
+            # exactly one port owner, and it is the container that owns the
+            # namespace. The port NUMBER is unchanged, so `port_for_name` and every
+            # consumer still agree — but which service publishes it is part of the
+            # deployed shape, and every Phase A environment has it on `agent`.
+            # That makes this a migration (T118), not an edit.
+            "ports": [f"{port}:2222"],
+            "configs": [
+                {"source": "egress_acl", "target": EGRESS_ACL_PATH},
+                {"source": "egress_unbound", "target": EGRESS_UNBOUND_PATH},
+                {"source": "egress_ports", "target": EGRESS_PORTS_PATH},
+            ],
+            # READINESS IS PART OF THE CONTRACT, not a detail. `up` otherwise
+            # returns while the boundary is starting: netfilter is already
+            # installed (the entrypoint does that FIRST, deliberately), so the
+            # agent's traffic is redirected at a port nothing is listening on yet
+            # and every call fails with a bare connection refusal. Measured — a
+            # declared destination gave curl exit 7 immediately after `up` and
+            # exit 0 three seconds later.
+            #
+            # It fails CLOSED during that window, which is the right direction and
+            # is by design. But an agent that starts working immediately sees a
+            # refusal indistinguishable from "this destination is not declared",
+            # so the window is a correctness problem for the DIAGNOSTIC layer even
+            # though it is not a hole.
+            #
+            # BOTH daemons are probed, not just squid: a resolver that is not yet
+            # answering fails every name lookup, and that failure also looks like
+            # a policy refusal from inside the container.
+            "healthcheck": {
+                "test": [
+                    "CMD-SHELL",
+                    # OBSERVES THE LISTENING SOCKETS; DOES NOT CONNECT TO THEM.
+                    # `nc -z` opened a request-less TCP connection to squid every
+                    # few seconds, and squid logged each one as
+                    # `NONE_NONE/000 error:transaction-end-before-headers` —
+                    # measured at 53 of 67 access-log lines on a two-minute-old
+                    # boundary, ~28,800/day in an always-on container. Enforcement
+                    # was never affected; the FR-020d RECORD was, and `grep
+                    # NONE_NONE` — the documented way to find a refused connection
+                    # — returned mostly the probe.
+                    #
+                    # It cannot be filtered at the log: an `access_log` ACL is
+                    # evaluated against a request, and these transactions have none,
+                    # so `url_regex` and `method NONE` were both measured INEFFECTIVE
+                    # (research R25). The probe is the right place to fix it.
+                    #
+                    # Readiness is unchanged in substance: a bound listening socket is
+                    # what "the daemon is up" means here, and `nc -z` only ever proved
+                    # the same thing one layer later.
+                    # No `$` anchor: netstat prints Foreign Address and State AFTER
+                    # the local address, so an end-of-line anchor never matches and
+                    # the healthcheck would never pass — the agent would then never
+                    # start, since it waits on `service_healthy`. Trailing whitespace
+                    # is the correct delimiter and keeps `:53` from matching `:5353`.
+                    "netstat -lnt | grep -qE '[:.]3127[[:space:]]'"
+                    " && netstat -lnu | grep -qE '[:.]53[[:space:]]'",
+                ],
+                "interval": "2s",
+                "timeout": "2s",
+                "retries": 15,
+                "start_period": "2s",
+            },
         }
-        # `content:`, never `file:` — a file: config is a read-only BIND of the local
-        # path and cannot reach a daemon that does not share the filesystem.
-        model_configs["egress_filter"] = {"content": egress_filter_body}
+        # `content:`, never `file:` — a file: config is a read-only BIND of the
+        # local path and cannot reach a daemon that does not share the filesystem
+        # (research R10b, measured). All three surfaces ride the same channel.
+        model_configs["egress_acl"] = {"content": egress_filter_body}
+        model_configs["egress_unbound"] = {"content": egress_unbound_body or "\n"}
+        model_configs["egress_ports"] = {"content": egress_ports_body or "\n"}
     if svc_configs:
         service["configs"] = svc_configs
     if model_configs:
@@ -3085,32 +3337,6 @@ def stage_task_injection(
     return [("task", f, INJECT_TASK_PATH)]
 
 
-def build_egress_config(entries: list[tuple[str, tuple[str, ...], str]]) -> str:
-    """The allowlist body, for INLINE delivery via a compose `config` with `content:`.
-
-    NOT `file:`. A `file:` config is materialised as a READ-ONLY BIND of the local
-    path — measured: `inspect .Mounts` reports
-    `{"Type":"bind","Source":"/Users/…","RW":false}` — so it fails at container
-    create with `bind source path does not exist` whenever the daemon cannot see
-    that path. Against a remote host reached through an ssh-forwarded socket, that
-    is always. It works today only because STATE_DIR sits under $HOME, which Lima
-    happens to share; the project's canonical target is a remote VPS, where it
-    would not.
-
-    `content:` is genuinely API-delivered (`.Mounts == []`, verified), which also
-    closes the live-edit window a bind leaves open — with a bind, an in-container
-    write to the source path would alter the allowlist of the running proxy.
-
-    Earlier revisions of this docstring, and research R10b, asserted the exact
-    opposite. Both were wrong; corrected in the same change that fixes the code.
-
-    An EMPTY body is the air-gapped state, not a broken one: with
-    `FilterDefaultDeny Yes` the body is an ALLOWLIST, so empty denies everything
-    (verified, research R10c). Callers gate on enforce_egress_declaration() first.
-    """
-    return build_egress_filter(entries)
-
-
 def compose_up_exec(
     host_name: str,
     host_rec: dict,
@@ -3179,7 +3405,22 @@ def compose_up_exec(
     egress = resolve_egress_declaration(name)
     # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
     # the operator hears it now, not after the agent has done a session of work.
-    check_egress_permits_push(egress, spec.repo, (egress or {}).get("enforcement") or "advisory")
+    _push_mode = (egress or {}).get("enforcement") or "advisory"
+    # Resolved ONCE and reused: the SSH push check and the strength statement must
+    # not be able to disagree about which mechanism is being deployed.
+    _transparent = (
+        egress_enforcement_mode(egress, spec.agent, resolve_sidecar_override(name))[0]
+        == "transparent"
+    )
+    check_egress_permits_push(
+        egress,
+        spec.repo,
+        _push_mode,
+        # The SSH arm applies only where the boundary is packet-level. Asking here
+        # rather than assuming: an environment that falls back to the proxy must not
+        # be warned about an SSH push that will work perfectly well.
+        transparent=_transparent,
+    )
     _mode = (egress or {}).get("enforcement") or "advisory"
     # US2: the disclosure (undeclared + the agent has a default) and FR-003a (declared
     # but the default is outside the set) are mutually exclusive by construction —
@@ -3187,18 +3428,54 @@ def compose_up_exec(
     disclose_builtin_default(egress, spec.agent)
     check_builtin_default_declared(egress, spec.agent, _mode)
     if is_egress_declared(egress):
-        log(egress_strength_statement(spec.agent))
+        # The statement must describe the mechanism this environment ACTUALLY gets.
+        # Printing the proxy text for a packet-level boundary understates it, and
+        # printing the boundary text for a proxy fallback overstates it — the second
+        # being the failure this whole requirement exists to prevent.
+        log(egress_strength_statement(spec.agent, transparent=_transparent))
     # C6 backstop for the imperative path, where `env_file` IS the operator's file.
     # The apply path checks earlier, before staging, so it can name the operator's
     # file rather than the tool-generated merge (which they have never heard of).
     refuse_operator_proxy_vars(
         egress, spec.agent, env_file, override=resolve_sidecar_override(name)
     )
-    egress_body = (
-        build_egress_config(resolve_provider_hosts(egress))
-        if enforce_egress_declaration(egress, spec.agent, resolve_sidecar_override(name))
-        else None
-    )
+    _override = resolve_sidecar_override(name)
+    # Refuse an opt-out naming a service that does not exist, BEFORE staging:
+    # a renamed sidecar would otherwise sit inside the boundary while the
+    # declaration says it is outside, or vice versa.
+    verify_sidecars_outside_resolve(egress, _override)
+    if _override is not None:
+        check_sidecar_egress_posture(_override, egress)
+    _enforced = enforce_egress_declaration(egress, spec.agent, _override)
+    # AFTER `_enforced`, and gated on the SAME variable the boundary overlay below
+    # uses — the refusal's entire premise is that the sidecars share the agent's
+    # namespace, which is true only when a boundary is deployed. Still before
+    # staging and before `down_container`'s port migration, so nothing has been
+    # written or torn down when it fires.
+    refuse_sidecar_name_in_allow(egress, _override, enforced=_enforced)
+    # NOT gated on `not redeploy`: `redeploy` is precisely how a declaration is
+    # added or removed, so skipping the migration there meant the one command that
+    # triggers the port move was the one command that could not survive it.
+    if phase_a_port_owner_stale(host_rec, host_name, name, _enforced):
+        # T118 (adopting) and T129d (dropping). Compose cannot hand the published
+        # port to a different service while the current owner still holds it, and
+        # on the drop side that owner is an ORPHAN of the regenerated model — not
+        # something a plain recreate will stand down in time.
+        #
+        # Announced, not silent: an operator whose container is recreated deserves
+        # to know it was a migration and not a bug.
+        _moving = "to the egress service" if _enforced else "back to the container"
+        warn(
+            f"{name}: the published port moves {_moving}, so the deployment is being "
+            f"recreated. Volumes are preserved; the port number is unchanged."
+        )
+        down_container(host_name, host_rec, name, purge=False)
+    _dests = resolve_destinations(egress) if _enforced else []
+    # R24/T155: the LAST silent property of the boundary, said out loud at deploy.
+    warn_pinned_port_destinations(_dests, transparent=_transparent)
+    egress_body = build_squid_acl(_dests) if _enforced else None
+    egress_unbound_body = build_unbound_conf(_dests) if _enforced else None
+    egress_ports_body = build_netfilter_rules(_dests) if _enforced else None
     # Published so `apply` can read it back and notice an edited declaration. NOT in
     # ExecSpec.compose_environment(): that is a pure function of the 004 execution
     # options with no access to the declaration, and an exact-equality test pins it.
@@ -3217,6 +3494,8 @@ def compose_up_exec(
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
         egress_filter_body=egress_body,
+        egress_unbound_body=egress_unbound_body,
+        egress_ports_body=egress_ports_body,
     )
     compose_file = write_compose_file(host_name, name, model)
     log(f"host={host_name} name={name} port={port} env-file={env_file}")
@@ -3227,16 +3506,49 @@ def compose_up_exec(
             "committed-and-pushed is LOST on teardown (FR-015)."
         )
     project = compose_project(name)
-    override = resolve_sidecar_override(name)  # validated; merged as a 2nd -f (US4)
+    override = _override  # validated; merged as a 2nd -f (US4)
     if override is not None:
         log(f"sidecar override={override}")
+    boundary_file = None
+    if _enforced:
+        overlay = build_sidecar_boundary_overlay(override, egress)
+        if overlay is not None:
+            boundary_file = host_state_dir(host_name) / f"{name}.boundary.yaml"
+            boundary_file.write_text(json.dumps(overlay, indent=2) + "\n")
+            log(f"sidecars inside the egress boundary: {', '.join(overlay['services'])}")
+            # And what that does to how they are ADDRESSED, which the line above
+            # does not say and no operator infers from "inside the boundary".
+            warn_sidecar_hostnames_moved_to_loopback(list(overlay["services"]))
+        outside = sidecars_outside_boundary(egress)
+        if outside:
+            # FR-023b/SC-015. NAMED, always — an unnamed exception is
+            # indistinguishable from a bug, and `enforced: true` would otherwise
+            # quietly mean "except for these".
+            warn(
+                f"egress: {', '.join(outside)} "
+                + ("is" if len(outside) == 1 else "are")
+                + " OUTSIDE the enforcement boundary by declaration. The agent can reach "
+                + ("it" if len(outside) == 1 else "them")
+                + ", and anything "
+                + ("it" if len(outside) == 1 else "they")
+                + " can reach is reachable through "
+                + ("it" if len(outside) == 1 else "them")
+                + "."
+            )
     # Headless --foreground streams the run attached and propagates the agent's
     # exit code (FR-002/SC-004); everything else brings the deployment up detached.
     foreground = spec.foreground and spec.mode == "headless" and not redeploy
     if redeploy:
-        argv = driver_redeploy_argv(host_rec, project, compose_file, override)
+        argv = driver_redeploy_argv(host_rec, project, compose_file, override, boundary_file)
     else:
-        argv = driver_up_argv(host_rec, project, compose_file, override, foreground=foreground)
+        argv = driver_up_argv(
+            host_rec,
+            project,
+            compose_file,
+            override,
+            foreground=foreground,
+            boundary=boundary_file,
+        )
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
         # The container's exit code IS the agent result — surface it as our own.
@@ -4149,10 +4461,32 @@ def wizard_handover(
         )
 
 
-def do_logs(name: str, follow: bool) -> int:
+def do_logs(name: str, follow: bool, egress: bool = False) -> int:
+    """Stream the agent container's log, or — with `egress` — the boundary's.
+
+    THE BOUNDARY'S LOG IS THE ONLY PLACE A REFUSAL IS RECORDED (FR-020d), and
+    since T150 it carries BOTH halves. unbound writes one line per reply, so an
+    undeclared name leaves `… api.openai.com. A IN REFUSED …`; squid writes one
+    line per request, so an undeclared SNI leaves `NONE_NONE/000 0 CONNECT
+    140.82.121.10:443 … sni=codeload.github.com`. Neither appears anywhere else —
+    the agent container's own log shows a failed lookup or a dropped connection
+    with no cause. Without this flag the record existed and was unreachable, which
+    for an operator is the same as not existing.
+    """
     validate_name(name)
     rt = detect_runtime()
-    argv = [rt, "logs"] + (["-f"] if follow else []) + [container_name(name)]
+    target = egress_container_name(name) if egress else container_name(name)
+    if egress and not container_exists(rt, target):
+        # The runtime's own "no such container" reads as a tool fault, when the
+        # truth is a policy fact: this environment has no boundary to log. That is
+        # the FR-020e confusion — a declaration outcome presented as infrastructure
+        # breakage — one level up from DNS, so it gets named rather than passed on.
+        die(
+            f"'{name}' has no egress boundary to read: no container {target}. An "
+            f"environment is only given one when its spec declares `egress:` AND the "
+            f"declaration is enforceable — check `agent-container status`."
+        )
+    argv = [rt, "logs"] + (["-f"] if follow else []) + [target]
     try:
         return run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     except KeyboardInterrupt:
@@ -5117,80 +5451,173 @@ HOSTNAME_MAX = 253
 
 
 def validate_egress(egress: object, where: str) -> None:
-    """Validate the optional `egress:` block (Feature 012, contracts C1).
+    """Validate the optional `egress:` block (Feature 012 Phase B, contracts C9).
 
-    Three states are DISTINCT and must never be conflated: absent (unrestricted —
-    this function is not called at all), `providers: []` (air-gapped, refuse
-    everything), and a non-empty list. Coercing absent to empty would turn every
-    existing environment air-gapped on upgrade.
+    ONE list, `allow`, whose entries take one of four shapes:
 
-    A provider entry is EITHER a bare name the tool knows, OR a `{name, hosts}`
-    mapping for an indirect endpoint (FR-001a) whose name need NOT be known —
-    there, the hosts are authoritative and the name is a label.
+        - provider: anthropic                  # tool supplies the hosts
+        - provider: openai
+          hosts: [llm.corp.internal]           # REPLACES the mapping (FR-001b)
+        - host: "*.githubusercontent.com"      # HTTPS, via the proxy
+        - host: github.com
+          port: 22                             # non-HTTP -> a netfilter rule
+
+    THE PORT SELECTS THE ENFORCEMENT SURFACE, and that is what makes one list
+    coherent rather than merely shorter: no port means HTTP/HTTPS through the
+    proxy allowlist; a port means an explicit netfilter rule. The operator
+    declares DESTINATIONS; the tool decides which surface each needs. A separate
+    `ports:` key would make the operator classify their own traffic by mechanism,
+    which is the tool's job and leaks implementation into the declaration.
+
+    Three states stay DISTINCT: absent (unrestricted — this function is not called
+    at all), `allow: []` (default-deny), and a non-empty list. Coercing absent to
+    empty would deny everything for every existing environment on upgrade.
     """
     where = f"{where} egress"
     if not isinstance(egress, dict):
         die(f"{where}: must be a mapping")
+    if "providers" in egress:
+        # FR-018b: removed, NOT deprecated — one way to say a thing. Refused with
+        # the replacement named, because silently ignoring a `providers:` block
+        # would deploy an environment permitting far less than its author wrote.
+        die(
+            f"{where}: `providers:` was replaced by a single `allow:` list. Rewrite "
+            f"`providers: [anthropic]` as `allow: [{{provider: anthropic}}]`, and plain "
+            f"hosts as `{{host: example.com}}`. A port on an entry "
+            f"(`{{host: github.com, port: 22}}`) selects netfilter instead of the proxy."
+        )
     for k in egress:
-        if k not in {"providers", "allow", "enforcement"}:
+        if k not in {"allow", "enforcement", "sidecars_outside"}:
             die(f"{where}: unknown key {k!r}")
     _enum_field(egress, "enforcement", ENFORCEMENT_MODES, where)
-    if "providers" not in egress:
-        # The FOURTH state: `egress:` present without `providers`. Neither declared
-        # nor undeclared. Reading it as unrestricted would let `enforcement: strict`
-        # sit in a file enforcing nothing; reading it as empty would air-gap on a key
-        # added for an unrelated reason. Both silent, so refuse and say which.
+    if "allow" not in egress:
+        # Present without `allow` is neither declared nor undeclared. Unrestricted
+        # would let `enforcement: strict` sit in a file enforcing nothing; empty
+        # would deny everything on a key added for an unrelated reason. Both are
+        # silent, so refuse and offer both real states.
         die(
-            f"{where}: missing 'providers'. An egress block must say what is permitted — "
-            f"write `providers: []` for an environment that may reach nothing, or remove "
+            f"{where}: missing 'allow'. An egress block must say what is permitted — "
+            f"write `allow: []` for an environment that may reach nothing, or remove "
             f"the egress block entirely for unrestricted (the default)"
         )
-    allow = egress.get("allow")
-    if allow is not None:
-        if not isinstance(allow, list):
-            die(f"{where}: 'allow' must be a list of hostnames")
-        for i, h in enumerate(allow):
-            validate_egress_host(h, f"{where} allow[{i}]", allow_wildcard=True)
-    providers = egress.get("providers")
-    # A bare string is the common mistake; iterating its characters would treat
-    # "anthropic" as nine providers, so die naming the field instead.
-    if not isinstance(providers, list):
-        got = type(providers).__name__
-        die(f"{where}: 'providers' must be a list, got {got} (a single provider is a 1-item list)")
-    for i, entry in enumerate(providers):
-        validate_provider_entry(entry, f"{where} providers[{i}]")
-
-
-def validate_provider_entry(entry: object, where: str) -> None:
-    """One provider declaration: a known name, or a `{name, hosts}` override."""
-    if isinstance(entry, str):
-        if entry not in PROVIDERS:
+    outside = egress.get("sidecars_outside")
+    if outside is not None:
+        if not isinstance(outside, list) or not all(isinstance(x, str) and x for x in outside):
+            die(f"{where}: 'sidecars_outside' must be a list of sidecar service names")
+        if AGENT_SERVICE_KEY in outside or EGRESS_SERVICE_KEY in outside:
+            # Neither is an operator sidecar. The agent outside the boundary is the
+            # feature switched off while still reporting a declaration; the egress
+            # service outside its own namespace is incoherent.
             die(
-                f"{where}: unknown provider {entry!r}. Known: "
-                f"{', '.join(sorted(PROVIDERS))}. For an endpoint the tool does not "
-                f"know (a gateway, a self-hosted or vendor-compatible deployment), "
-                f"give it explicit hosts: {{ name: {entry}, hosts: [<host>] }}"
+                f"{where}: 'sidecars_outside' may only name operator sidecars, not "
+                f"'{AGENT_SERVICE_KEY}' or '{EGRESS_SERVICE_KEY}'"
             )
-        return
+    entries = egress.get("allow")
+    if not isinstance(entries, list):
+        got = type(entries).__name__
+        die(f"{where}: 'allow' must be a list, got {got} (a single destination is a 1-item list)")
+    for i, entry in enumerate(entries):
+        validate_destination(entry, f"{where} allow[{i}]")
+
+
+def validate_destination(entry: object, where: str) -> None:
+    """One destination: `{provider}`, `{provider, hosts}`, `{host}` or `{host, port}`."""
     if not isinstance(entry, dict):
-        die(f"{where}: must be a provider name (string) or a {{name, hosts}} mapping")
-    for k in entry:
-        if k not in {"name", "hosts"}:
-            die(f"{where}: unknown provider key {k!r}")
-    name = entry.get("name")
-    if not name or not isinstance(name, str):
-        die(f"{where}: missing required string 'name'")
-    hosts = entry.get("hosts")
-    if hosts is None:
-        # The mapping form exists ONLY to carry hosts. Without them it is the short
-        # form written the long way, so say that rather than silently accepting it.
         die(
-            f"{where}: the mapping form requires 'hosts' — for the tool's own hosts, write {name!r}"
+            f"{where}: must be a mapping — {{provider: <name>}} or {{host: <host>}}, "
+            f"optionally with `hosts:` or `port:`"
         )
-    if not isinstance(hosts, list) or not hosts:
-        die(f"{where}: 'hosts' must be a non-empty list of hostnames")
-    for h in hosts:
-        validate_egress_host(h, where)
+    keys = {str(k) for k in entry}
+    unknown = keys - {"provider", "host", "hosts", "port"}
+    if unknown:
+        die(f"{where}: unknown key(s) {sorted(unknown)}")
+    if ("provider" in keys) == ("host" in keys):
+        die(
+            f"{where}: give exactly one of `provider:` or `host:` (got {sorted(keys) or 'nothing'})"
+        )
+    if "provider" in keys:
+        name = entry.get("provider")
+        if not name or not isinstance(name, str):
+            die(f"{where}: `provider` must be a non-empty string")
+        if "port" in keys:
+            die(
+                f"{where}: `port` is not valid on a provider entry — a provider is HTTPS "
+                f"via the proxy. For a non-HTTP destination use {{host: <host>, port: <n>}}"
+            )
+        hosts = entry.get("hosts")
+        if hosts is None:
+            if name not in PROVIDERS:
+                die(
+                    f"{where}: unknown provider {name!r}. Known: "
+                    f"{', '.join(sorted(PROVIDERS))}. For an endpoint the tool does not "
+                    f"know, give it explicit hosts: {{provider: {name}, hosts: [<host>]}}"
+                )
+            return
+        if not isinstance(hosts, list) or not hosts:
+            die(f"{where}: `hosts` must be a non-empty list of hostnames")
+        for h in hosts:
+            validate_egress_host(h, where, allow_wildcard=True)
+        return
+    if "hosts" in keys:
+        die(f"{where}: `hosts` belongs on a provider entry; a host entry already names one")
+    validate_egress_host(entry.get("host"), where, allow_wildcard=True)
+    if "port" in keys:
+        port = entry.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            die(f"{where}: `port` must be an integer 1-65535, got {port!r}")
+        if port in (80, 443):
+            # 80 AND 443 ARE THE PROXY'S SURFACE, AND A RULE FOR THEM CANNOT MATCH.
+            # Both ports are REDIRECTed into squid in the nat table, which runs before
+            # the filter ACCEPT this entry would render — so the rule is installed,
+            # reported as permitting the destination, and never consulted. FR-018a is
+            # that the PORT SELECTS THE MECHANISM; naming a port squid already owns
+            # asks netfilter for something it will never be given.
+            #
+            # Refused rather than silently rewritten to the portless form: the two
+            # forms differ in what they permit (portless admits the host over
+            # HTTP/HTTPS *through the proxy*, where the SNI is checked and the
+            # request is logged), and quietly changing an operator's declaration into
+            # a different one is how a security control comes to mean something its
+            # author did not write.
+            die(
+                f"{where}: port {port} is served by the proxy, not by netfilter, so a "
+                f"`{{host, port: {port}}}` rule can never match — 80 and 443 are "
+                f"redirected into the proxy before it is reached. Declare the host "
+                f"without a `port:` to permit it over HTTP/HTTPS: "
+                f"{{host: {entry.get('host')}}}"
+            )
+        host = str(entry.get("host"))
+        if host.startswith("*."):
+            # T148. A WILDCARD WITH A PORT IS A RULE THAT CANNOT EXIST, and it used
+            # to validate. `port` selects netfilter (FR-018a), netfilter has no
+            # wildcard destination, and `build_netfilter_rules` renders `-d '*.x'`
+            # — an operand iptables resolves AT INSERT TIME, so the boundary dies
+            # installing it and blames netfilter rather than the declaration.
+            #
+            # Refused rather than made real because there is nothing to make: a
+            # subtree cannot be enumerated into addresses, and the only surface
+            # that can match a name subtree is the proxy, which sees the name in
+            # the handshake. Meanwhile `egress_permits_endpoint` matches wildcards,
+            # so the push check reported such a destination as PERMITTED — a
+            # declaration that validates, reads as permitted, and then does not
+            # exist is the exact defect class this feature exists to remove.
+            die(
+                f"{where}: a wildcard host cannot carry a `port:`. A port selects the "
+                f"PACKET FILTER, and netfilter has no wildcard destination — the rule "
+                f"renders as `-d {host}`, which cannot resolve when the boundary "
+                f"installs it, so this entry would be reported as permitted and then "
+                f"not exist. Name the exact host for that port, or drop the `port:` "
+                f"— a name subtree can only be matched by the proxy, from the name in "
+                f"the TLS handshake, and only on ports 80 and 443."
+            )
+
+
+# `validate_provider_entry` lived here: the validator for a `providers:` entry.
+# T112 made `providers:` a hard refusal in `validate_egress`, so no input could
+# ever reach it again — a validator for a syntax that dies two frames earlier
+# reads as a supported shape to anyone grepping for it. vulture at
+# --min-confidence 80 does not report unused FUNCTIONS (they score 60), so the
+# gate stayed green over it.
 
 
 def validate_egress_host(h: object, where: str, *, allow_wildcard: bool = False) -> None:
@@ -5215,49 +5642,177 @@ def validate_egress_host(h: object, where: str, *, allow_wildcard: bool = False)
         )
 
 
-def egress_filter_line(host: str) -> str:
-    """One tinyproxy filter pattern for `host`, ANCHORED and ESCAPED.
+def squid_acl_line(host: str) -> str:
+    """One squid `ssl::server_name` / `dstdomain` token.
 
-    THIS IS THE SECURITY BOUNDARY OF THE FEATURE. tinyproxy matches filter entries
-    with `regexec` and they are UNANCHORED by default, so writing a hostname
-    verbatim produces a SUBSTRING allowlist: `api.anthropic.com` would also permit
-    `api.anthropic.com.attacker.net` and `evil-api.anthropic.com`. The dots must be
-    escaped too, or `.` matches any character.
+    TWO SYNTAX TRAPS, both measured (R12a), each yielding a SILENTLY EMPTY
+    allowlist rather than an error:
 
-    A leading `*.` (FR-001d) means the domain AND its subdomains — and matches the
-    bare domain as well, since an operator writing `*.githubusercontent.com`
-    reasonably expects the parent to work.
+    1. **Never quote the entry.** A quoted token in squid is a FILE PATH, so
+       `"*.example.com"` makes squid try to open a file of that name and the acl
+       ends up empty. Quoting is the natural instinct when generating from YAML,
+       which is why this returns a bare token and the caller writes one per line.
+    2. **Subdomains use a LEADING DOT**, not `*.`. `.example.com` matches the
+       domain and every subdomain; `*.example.com` matches nothing, silently.
 
-    >>> egress_filter_line("api.anthropic.com")
-    '^api\\\\.anthropic\\\\.com$'
-    >>> egress_filter_line("*.githubusercontent.com")
-    '^([A-Za-z0-9_-]+\\\\.)*githubusercontent\\\\.com$'
+    >>> squid_acl_line("api.anthropic.com"), squid_acl_line("*.githubusercontent.com")
+    ('api.anthropic.com', '.githubusercontent.com')
     """
-    if host.startswith("*."):
-        return rf"^([A-Za-z0-9_-]+\.)*{re.escape(host[2:])}$"
-    return rf"^{re.escape(host)}$"
+    return f".{host[2:]}" if host.startswith("*.") else host
 
 
-def build_egress_filter(entries: list[tuple[str, tuple[str, ...], str]]) -> str:
-    """The generated tinyproxy filter file — with `FilterDefaultDeny Yes` this is an
-    ALLOWLIST, so an EMPTY body denies everything (the air-gapped state, FR-011).
+def build_squid_acl(entries: list[tuple[str, str, int | None, str]]) -> str:
+    """The generated squid allowlist — HTTP/HTTPS destinations only.
 
-    Callers must have established that egress IS declared (is_egress_declared);
-    this function cannot tell an air-gapped environment from an unrestricted one,
-    because both arrive as an empty list.
+    PORTED ENTRIES ARE EXCLUDED: they are netfilter's business, and listing them
+    here would let a `{host, port: 22}` entry also open 443 to that host, which
+    the operator did not ask for. SC-010 requires "that host and that port only".
 
-    >>> print(build_egress_filter([("anthropic", ("api.anthropic.com",), "tool")]))
-    # anthropic (tool)
-    ^api\\.anthropic\\.com$
+    An EMPTY body is default-deny, not breakage: squid matches nothing and the
+    netfilter policy denies the rest.
+
+    >>> print(build_squid_acl([("anthropic", "api.anthropic.com", None, "tool")]))
+    api.anthropic.com
     <BLANKLINE>
-    >>> build_egress_filter([])
+    >>> build_squid_acl([("github.com", "github.com", 22, "declaration")])
     ''
     """
-    out: list[str] = []
-    for label, hosts, source in entries:
-        out.append(f"# {label} ({source})")
-        out.extend(egress_filter_line(h) for h in hosts)
-    return "".join(f"{line}\n" for line in out)
+    return "".join(f"{squid_acl_line(h)}\n" for _l, h, port, _s in entries if port is None)
+
+
+def build_netfilter_rules(entries: list[tuple[str, str, int | None, str]]) -> str:
+    """Per-destination ACCEPT rules, sourced by the entrypoint before the policy
+    flips to DROP. Only PORTED entries appear — everything else is HTTP/HTTPS and
+    is handled by the REDIRECT to squid.
+
+    A shell fragment rather than a data file because the image would otherwise
+    need a parser to apply it.
+
+    NO WILDCARD CAN REACH HERE, and the absence of handling for one is deliberate:
+    `-d '*.example.com'` is not a destination iptables can resolve, so
+    `validate_destination` refuses `{host: "*.x", port: n}` outright (T148) rather
+    than letting this render a rule the boundary then dies installing.
+
+    >>> print(build_netfilter_rules([("github.com", "github.com", 22, "declaration")]))
+    iptables -A OUTPUT -p tcp -d 'github.com' --dport 22 -j ACCEPT
+    <BLANKLINE>
+    >>> build_netfilter_rules([("anthropic", "api.anthropic.com", None, "tool")])
+    ''
+    """
+    return "".join(
+        f"iptables -A OUTPUT -p tcp -d '{h}' --dport {port} -j ACCEPT\n"
+        for _l, h, port, _s in entries
+        if port is not None
+    )
+
+
+def build_unbound_conf(entries: list[tuple[str, str, int | None, str]]) -> str:
+    """The generated unbound allowlist.
+
+    EVERY declared name needs `local-zone: … transparent` AS WELL AS its
+    `forward-zone`. Without it the baked catch-all `local-zone: "." refuse`
+    matches first and DECLARED NAMES ARE REFUSED TOO — an allowlist permitting
+    nothing while passing every refusal test. Observed, not theorised (R17), and
+    exactly the failure T136a exists to catch.
+
+    Ported entries are INCLUDED: a `{host, port: 22}` destination is unreachable
+    without resolution, and omitting it would make SSH fail like a firewall bug.
+
+    THE LOG DESTINATION IS PART OF THE ALLOWLIST'S JOB (T130/FR-020d), which is
+    why it is emitted here rather than left to the baked config. `log-replies:
+    yes` is set there, but unbound's `use-syslog` DEFAULTS TO YES and the egress
+    image runs no syslogd — so every reply line, including every REFUSED, was
+    handed to syslog(3) and discarded. Measured: the boundary answered REFUSED
+    for an undeclared name and the container log was completely EMPTY. A config
+    that names the record while the record goes nowhere is the failure shape this
+    repo keeps hitting, so the pair below is set unconditionally.
+
+    `logfile: ""` alongside it because the two together decide the destination:
+    with syslog off and no logfile, unbound writes to stderr, which is the
+    container's log and therefore reachable as `agent-container logs <n> --egress`.
+    This fragment is `include:`d LAST by the baked unbound.conf, so it also wins
+    if that file ever starts setting either option itself.
+
+    EMITTED EVEN FOR AN EMPTY ALLOWLIST — hence no early return. `allow: []` is
+    air-gapped, i.e. the environment where EVERY lookup is refused and the record
+    is the operator's only account of what the agent reached for; returning "" for
+    that case would switch the logging off exactly where it matters most.
+
+    >>> print(build_unbound_conf([("anthropic", "api.anthropic.com", None, "tool")]))
+    server:
+      use-syslog: no
+      logfile: ""
+      local-zone: "api.anthropic.com" transparent
+    forward-zone:
+      name: "api.anthropic.com"
+      forward-addr: 1.1.1.1
+    <BLANKLINE>
+    >>> print(build_unbound_conf([]))
+    server:
+      use-syslog: no
+      logfile: ""
+    <BLANKLINE>
+    """
+    names = list(dict.fromkeys(h.removeprefix("*.") for _l, h, _p, _s in entries))
+    out = ["server:", "  use-syslog: no", '  logfile: ""']
+    out += [f'  local-zone: "{n}" transparent' for n in names]
+    for n in names:
+        out += ["forward-zone:", f'  name: "{n}"', f"  forward-addr: {EGRESS_UPSTREAM_DNS}"]
+    return "".join(f"{ln}\n" for ln in out)
+
+
+def _environment_declares_egress_leniently(root: Path, name: str) -> bool:
+    """Whether <name> carries an `egress:` key, judged WITHOUT validation.
+
+    Used only on the error path, to tell "this environment declared egress and the
+    spec is broken" (must refuse — deploying would be unrestricted while the
+    declaration reads as enforced) from "some unrelated file is broken" (may
+    proceed). Deliberately lenient: it must answer even for a spec the validator
+    rejected, so it asks only whether the KEY IS PRESENT and never what it means.
+
+    `yaml.safe_load` per file, never a regex over the text — flow style, quoted
+    keys and multi-document files all defeat a pattern scan, and the miss would be
+    silent and in the permissive direction.
+
+    An UNREADABLE file (permissions, encoding) answers False: that is not evidence
+    this environment declared anything, and the owning path still reports it. An
+    UNPARSEABLE spec file is the opposite case and refuses — see below.
+    """
+    import yaml
+
+    # `_spec_yaml_files` — THE LOADER'S OWN DISCOVERY, not a second glob. The first
+    # version walked `PROJECT_MARKER/*` non-recursively while the loader uses
+    # `rglob`, so a spec in a SUBDIRECTORY was invisible here and the fail-open this
+    # function exists to close stayed open for exactly those projects. Two
+    # discoveries that had to agree, with nothing checking that they did.
+    for path in _spec_yaml_files(root):
+        try:
+            docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        except OSError, UnicodeDecodeError:
+            continue
+        except yaml.YAMLError:
+            # A SPEC FILE THAT WILL NOT PARSE IS THE UNCERTAIN CASE, and uncertainty
+            # must not resolve to "no declaration". Returning False deploys
+            # UNRESTRICTED on the single most likely mistake in this feature's own
+            # syntax: a mis-indented `egress:` block is a PARSE error, so it never
+            # reaches the validator that would have named it. Refusing is the only
+            # answer that cannot be silently wrong in the permissive direction.
+            die(
+                f"{path}: this spec file could not be parsed, so the tool cannot tell "
+                f"whether {name!r} declares an `egress:` block. Refusing to deploy — "
+                f"continuing would risk running UNRESTRICTED while a declaration exists. "
+                f"Fix the YAML; `agent-container plan {name}` names the location."
+            )
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            envs = doc.get("environments")
+            if not isinstance(envs, list):
+                continue
+            for env in envs:
+                if isinstance(env, dict) and env.get("name") == name and "egress" in env:
+                    return True
+    return False
 
 
 def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | None:
@@ -5283,6 +5838,20 @@ def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | Non
         # A broken spec is reported by the paths that own it (`plan`/`apply`).
         # Refusing an imperative `up` here would make an unrelated syntax error
         # elsewhere in the project block a deployment that never used the spec.
+        #
+        # BUT NOT IF THE BROKEN PART IS THIS ENVIRONMENT'S OWN DECLARATION.
+        # Returning None then means "undeclared", which deploys UNRESTRICTED while
+        # the operator has written a declaration they cannot see is being ignored —
+        # the precise failure this feature exists to remove, and it fails OPEN.
+        # Silence, not permissiveness, is the defect (FR-007b).
+        if _environment_declares_egress_leniently(root, name):
+            die(
+                f"{name}: an `egress:` declaration exists but the project spec could not "
+                f"be validated, so the tool cannot tell what it permits. Refusing to deploy: "
+                f"continuing would run this environment UNRESTRICTED while the declaration "
+                f"reads as enforced. Fix the spec (`agent-container plan {name}` names the "
+                f"offending file and field)."
+            )
         return None
     for env in environments:
         if env.get("name") == name:
@@ -5290,15 +5859,38 @@ def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | Non
     return None
 
 
-def egress_strength_statement(agent: str | None) -> str:
+def egress_strength_statement(agent: str | None, *, transparent: bool = False) -> str:
     """FR-008/FR-008a, contract C5 — the honest limits of what a proxy delivers.
 
     Every clause here is load-bearing and the test asserts their PRESENCE plus the
     ABSENCE of stronger phrasing, because this is the requirement most easily
     satisfied in appearance and violated in substance.
+
+    TWO MECHANISMS, TWO DIFFERENT HONEST ANSWERS (FR-022). Under transparent
+    enforcement the old text is no longer merely cautious, it is FALSE: it says
+    this feature does not do packet filtering, and Phase B does exactly that. But
+    the correction runs in both directions — describing the boundary as absolute
+    would be the same defect with the sign flipped, so the residual limits are
+    named as specifically as the guarantees.
     """
     honours = ", ".join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))
     known = AGENT_HONOURS_PROXY.get(agent or "", False)
+    if transparent:
+        return (
+            "egress enforcement is packet-level. Routing is programmed into the network "
+            "stack, so it does not depend on the agent's cooperation: a process that "
+            "ignores proxy settings and opens a direct connection is denied by a "
+            "default-deny policy, and the container holds no capability with which to "
+            "change that. It is NOT content inspection and NOT an absolute boundary. "
+            "TLS is never terminated, so what travels to a DECLARED destination is "
+            "neither seen nor limited — anything reachable through a permitted host "
+            "remains reachable. Filtering of TLS uses the name the client asks for, and "
+            "the connection is spliced to the address the CLIENT chose, so a process "
+            "that opens a connection to an arbitrary address while presenting a "
+            "declared name is not stopped by the name check. Sidecars listed in "
+            "egress.sidecars_outside are outside the boundary entirely, and anything "
+            "they can reach is reachable through them."
+        )
     return (
         f"egress enforcement is proxy-level, not packet-level. The proxy refuses "
         f"requests from clients that honour proxy settings; it does not stop a process "
@@ -5332,7 +5924,12 @@ def disclose_builtin_default(egress: object, agent: str | None) -> None:
         f"agent {agent!r} has a BUILT-IN DEFAULT PROVIDER ({provider}): it can reach "
         f"a model provider over the network without any credential you supplied, and "
         f"this environment declares no egress restriction. To constrain it, declare "
-        f"`egress.providers` in the environment spec."
+        # NOT `egress.providers`, which this message said until the sibling message
+        # in check_builtin_default_declared was fixed for exactly this: that key is
+        # the one shape `validate_egress` refuses OUTRIGHT (FR-018b), so following
+        # the advice answered a warning with a hard failure. The sibling had a test;
+        # this one did not, so the defect survived one function over.
+        f"egress in the environment spec:  egress.allow: [{{provider: {provider}}}]"
     )
 
 
@@ -5350,18 +5947,266 @@ def check_builtin_default_declared(egress: object, agent: str | None, mode: str)
     if provider is None:
         return
     assert isinstance(egress, dict)  # narrowed by is_egress_declared
-    entries = resolve_provider_hosts(egress)
+    entries = resolve_destinations(egress)
     if any(egress_permits_host(entries, h) for h in PROVIDERS.get(provider, ())):
         return
     msg = (
         f"agent {agent!r} has a built-in default provider ({provider}) that this "
         f"declaration does NOT permit. The agent may try it and be refused at run "
-        f"time. Either declare it (`egress.providers: [{provider}]`) or configure the "
-        f"agent to use a declared provider."
+        # `providers:` is the one shape `validate_egress` refuses outright (FR-018b),
+        # so naming it here would answer a warning with a hard failure.
+        f"time. Either declare it (`egress.allow: [{{provider: {provider}}}]`) or "
+        f"configure the agent to use a declared provider."
     )
     if mode == "strict":
         die(msg)
     warn(msg)
+
+
+def sidecars_outside_boundary(egress: object) -> list[str]:
+    """Operator sidecars deliberately placed OUTSIDE the enforcement boundary.
+
+    Declared in the SPEC, beside the allowlist — not in the override file. The
+    override is operator-owned and shape-validated by design (Feature 002), and
+    giving it security meaning would erode the line between "the operator's helper
+    services" and "the tool's security model". Every other security decision lives
+    host-side in the spec Feature 006 establishes an agent cannot rewrite; this is
+    one, so it lives there too.
+
+    >>> sidecars_outside_boundary({"allow": [], "sidecars_outside": ["feed"]})
+    ['feed']
+    >>> sidecars_outside_boundary({"allow": []}), sidecars_outside_boundary(None)
+    ([], [])
+    """
+    if not isinstance(egress, dict):
+        return []
+    named = egress.get("sidecars_outside")
+    return [str(x) for x in named] if isinstance(named, list) else []
+
+
+def verify_sidecars_outside_resolve(egress: object, override: Path | None) -> None:
+    """Refuse an opt-out naming a sidecar that does not exist.
+
+    THE FAILURE THIS PREVENTS IS A RENAME. A typo that matches nothing leaves the
+    sidecar INSIDE the boundary, which is safe; but a service renamed in the
+    override while the spec still names the old one would leave the NEW service
+    silently inside and the operator believing it is outside — or, read the other
+    way round, leave an exception in the spec that no longer describes anything
+    while the operator believes it still does.
+
+    Either way the declaration stops matching reality, and the direction that
+    matters is unknowable from here — so both are refused rather than guessed.
+    """
+    named = sidecars_outside_boundary(egress)
+    if not named:
+        return
+    if override is None:
+        die(
+            f"egress: 'sidecars_outside' names {named} but this environment declares "
+            f"no sidecars (no <name>.services.yaml). Remove the entries, or add the "
+            f"services they refer to."
+        )
+    try:
+        declared = set(_yaml_service_keys(override.read_text()))
+    except OSError as e:
+        die(f"egress: cannot read the sidecar override {override} ({e})")
+    missing = sorted(set(named) - declared)
+    if missing:
+        die(
+            f"egress: 'sidecars_outside' names {missing}, which {override} does not "
+            f"declare. A renamed service would otherwise sit inside the boundary "
+            f"while the declaration says it is outside — so this is refused rather "
+            f"than ignored. Declared there: {sorted(declared) or 'nothing'}."
+        )
+
+
+def refuse_sidecar_name_in_allow(egress: object, override: Path | None, *, enforced: bool) -> None:
+    """Refuse a declared destination that names a sidecar inside the boundary (T149).
+
+    `enforced` HAS NO DEFAULT, and that is the point. Nothing shares a namespace
+    until a boundary is actually deployed, and a declaration can exist without one:
+    an `advisory` declaration on a host with no reachable egress image sources (a
+    non-editable PyPI install) or under an override that redefines the `egress`
+    service deploys UNENFORCED, sidecars stay on the project network, and
+    service-name DNS between them keeps working. Refusing there would reject a
+    configuration that works, with a message asserting a namespace share that is
+    not happening — the whole justification stated as fact about a deployment where
+    it is false. `sidecars_inside_boundary` cannot see this: it answers the
+    CONDITIONAL question (which sidecars would be inside, if one is deployed), so
+    the enforceability half has to be supplied by whoever knows it.
+
+    ADOPTING A DECLARATION CHANGES HOW SIDECARS ARE ADDRESSED, and an entry like
+    `{host: redis}` is the shape of the mistake that follows. Under Phase A the
+    agent sat on the project network and reached `redis:6379` by service name
+    through the proxy, so declaring it was meaningful. Inside the boundary every
+    service shares ONE network namespace, so the sidecar is on LOOPBACK and needs
+    no declaration at all — while the entry itself cannot work either way:
+
+      * with a port, `build_netfilter_rules` renders `-d redis`, which iptables
+        resolves AT INSERT TIME through the sidecar resolver, which forwards
+        declared names to a PUBLIC upstream where no such name exists. The rule is
+        rejected and the boundary dies rather than starting unenforced.
+      * without one, squid gets a `dstdomain` it can never resolve for the same
+        reason, so the entry permits nothing.
+
+    So the operator is told at deploy time what actually changed and what to write
+    instead, rather than meeting an NXDOMAIN at run time and reading it as a DNS
+    fault. Refused rather than warned BECAUSE THE ENTRY CANNOT BE MADE TO WORK:
+    advisory/strict is the axis for a declaration that cannot be ENFORCED, not for
+    one that names a destination which does not exist.
+
+    Only sidecars INSIDE the boundary are matched. One deliberately placed outside
+    is on the project network and unreachable from inside by any name, which is the
+    disclosed cost of `sidecars_outside` rather than a mistake in the allowlist.
+    """
+    if not enforced:
+        return
+    inside = set(sidecars_inside_boundary(override, egress))
+    if not inside:
+        return
+    assert isinstance(egress, dict)  # sidecars_inside_boundary is empty otherwise
+    named = sorted({h for _l, h, _p, _s in resolve_destinations(egress) if h in inside})
+    if not named:
+        return
+    die(
+        f"egress: allow names {named}, which {'is' if len(named) == 1 else 'are'} "
+        f"sidecar service name(s), not reachable destination(s). Under an enforced "
+        f"declaration the sidecars share ONE network namespace with the agent, so "
+        f"service-name DNS between them no longer resolves and the name resolves "
+        f"NOWHERE — the entry cannot be installed as a rule or matched by the proxy. "
+        f"Remove {'it' if len(named) == 1 else 'them'}: loopback traffic inside the "
+        f"boundary needs no declaration. Reach the service at 127.0.0.1:<its port>."
+    )
+
+
+def resolve_host_addresses(host: str, port: int, timeout: float = 3.0) -> list[str] | None:
+    """Every address `host` currently resolves to, or None if it could not be asked.
+
+    BOUNDED, because this runs on the deploy path. `getaddrinfo` honours no timeout
+    argument and a slow or unreachable resolver would otherwise stall a deploy, so
+    the lookup runs on a thread that is simply abandoned if it overruns. A daemon
+    thread is correct here: the answer is advisory, and the process must not wait on
+    it at exit.
+
+    Returns None — not `[]` — when the lookup failed or timed out. The two must not
+    collapse: "no addresses" would read as a resolvable host with no records and
+    invite a confident warning about something never measured.
+    """
+    import socket
+    import threading
+
+    out: list[str] = []
+    err: list[BaseException] = []
+
+    def _lookup() -> None:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            seen: dict[str, None] = {}
+            for info in infos:
+                seen.setdefault(str(info[4][0]), None)
+            out.extend(seen)
+        except BaseException as exc:  # noqa: BLE001 - advisory probe; never fatal
+            err.append(exc)
+
+    t = threading.Thread(target=_lookup, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive() or err or not out:
+        return None
+    return out
+
+
+def warn_pinned_port_destinations(
+    dests: list[tuple[str, str, int | None, str]], *, transparent: bool
+) -> None:
+    """FR-018, research R24 — say that a ported destination's addresses are PINNED.
+
+    `iptables -d <hostname>` expands the operand at INSERT TIME and stores addresses,
+    not the name. R24 measured it: with `{host: github.com, port: 22}` declared, only
+    `140.82.121.4` was admitted while `.3` and `.5` timed out, and nothing in the
+    boundary re-resolves. So the destination works until the resolver hands the agent
+    a different address, then stops. It fails CLOSED, which is the right direction,
+    but the operator learns it after a push has already failed. This does not fix the
+    pinning; it converts a silent property into a stated one.
+
+    WARNS FOR EVERY NAMED PORTED DESTINATION, and the first version of this did not —
+    it warned only when a host resolved to MORE THAN ONE address simultaneously, which
+    does not detect the canonical case at all. Measured: `github.com` returns a SINGLE
+    address per query here (140.82.121.3) while R24 separately proved .3, .4 and .5 all
+    exist. It rotates ACROSS queries over time, not within one answer, so a count-based
+    check was silent for exactly the host the warning was written for — a check passing
+    while the thing it names is broken.
+
+    So the condition is the one that is actually knowable: a rule built from a NAME is
+    pinned, full stop. An IP literal is exempt because there is nothing to re-resolve
+    and no rotation to suffer. Currently-resolved addresses are included when the probe
+    answers, as information rather than as the trigger.
+
+    ONLY under transparent enforcement: without netfilter there is no pinned rule, and
+    a warning on an environment that has none is the noise that teaches operators to
+    skip the one that matters.
+    """
+    if not transparent:
+        return
+    for label, host, port, _src in dests:
+        # Portless entries are the proxy's surface — squid re-resolves per request, so
+        # nothing is pinned. A wildcard cannot carry a port (validation refuses it).
+        if port is None or host.startswith("*"):
+            continue
+        if _is_ip_literal(host):
+            continue
+        addrs = resolve_host_addresses(host, port)
+        seen = f" (now: {', '.join(sorted(addrs)[:4])})" if addrs else ""
+        warn(
+            f"egress: {host!r} (declared as {label}, port {port}) is admitted by a packet "
+            f"rule built from the addresses resolved WHEN THE BOUNDARY STARTS{seen}, and "
+            f"nothing re-resolves them. If this host's addresses change — round-robin and "
+            f"CDN-fronted hosts such as github.com do, without returning more than one at "
+            f"a time — the destination stops being reachable while the declaration still "
+            f"reads as permitting it. It fails closed and the refusal is logged; "
+            f"`redeploy` re-pins."
+        )
+
+
+def _is_ip_literal(host: str) -> bool:
+    """True for a literal address, which no rule can pin the wrong way.
+
+    >>> [_is_ip_literal(h) for h in ("10.0.0.1", "::1", "github.com", "1.2.3")]
+    [True, True, False, False]
+    """
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def warn_sidecar_hostnames_moved_to_loopback(inside: list[str]) -> None:
+    """Say what adopting a declaration did to sidecar addressing (T149).
+
+    Measured, and it is not obvious from anything else the tool prints: joining one
+    network namespace means service-name DNS BETWEEN the services stops resolving,
+    so every connection string naming a sidecar breaks the moment a declaration is
+    adopted. The operator gets a name-resolution failure inside the container and
+    no reason to connect it to a change they made in the spec.
+
+    The remediation is the part that must be here rather than left to inference,
+    because the obvious guess — declare the sidecar's name in `egress.allow` —
+    CANNOT work (see refuse_sidecar_name_in_allow). Loopback is the answer, and the
+    shared namespace also means the ports are shared, which is the second surprise.
+    """
+    if not inside:
+        return
+    warn(
+        f"egress: {', '.join(inside)} now share ONE network namespace with the agent, "
+        f"so SERVICE-NAME DNS BETWEEN THEM NO LONGER RESOLVES. Reach them on loopback "
+        f"and their port (127.0.0.1:5432, not db:5432) — and note that the namespace "
+        f"has one port space, so two sidecars cannot both listen on the same port. "
+        f"Declaring a service name in `egress.allow` does NOT restore it: loopback "
+        f"needs no permission, and the resolver has no such name to answer with."
+    )
 
 
 def override_redefines_egress(override: Path | None) -> bool:
@@ -5380,53 +6225,114 @@ def override_redefines_egress(override: Path | None) -> bool:
         return False
 
 
-def egress_enforceable(
+# The two mechanisms this feature can deliver, strongest first. They are NOT
+# interchangeable and must never be reported as one thing: `transparent` holds
+# even against an agent actively evading it; `cooperative` holds only against
+# accident and misconfiguration. Reporting `enforced: true` for both would make
+# the field mean whichever the operator happened to get (FR-021).
+EGRESS_TRANSPARENT = "transparent"
+EGRESS_UNENFORCED = "none"
+# There is deliberately NO `cooperative` mode returned by this predicate, and the
+# absence is a decision rather than an omission.
+#
+# FR-021 asks for a fallback to Phase A's proxy-variable mechanism under
+# `advisory` when transparent enforcement "cannot be delivered". Two things make
+# that unbuildable as written:
+#
+#   1. Nothing rules out transparent enforcement PER AGENT. Its whole point is
+#      that it needs nothing from the agent, so an agent nobody has probed still
+#      gets the boundary. Every obstacle that remains (no image, an overridden
+#      egress service) rules out the proxy too — there is nothing left to fall
+#      back TO.
+#   2. Whether the daemon grants NET_ADMIN and the kernel accepts the rules is
+#      not knowable before running the container. The entrypoint therefore FAILS
+#      CLOSED: it dies if it cannot install its rules, `compose up` fails, and no
+#      unconstrained container is left running.
+#
+# A silent downgrade to the weaker mechanism would be the exact failure this
+# feature exists to prevent — an environment reporting enforcement while an agent
+# can `unset HTTPS_PROXY` and walk out. FR-021 needs amending; see spec.
+
+
+def egress_enforcement_mode(
     egress: object, agent: str | None, override: Path | None = None
-) -> tuple[bool, str]:
-    """Whether a declaration can actually be ENFORCED here — `(ok, reason)`.
+) -> tuple[str, str]:
+    """Which mechanism this environment will actually get — `(mode, reason)`.
 
-    The reason is shown to the operator, so it must name the specific obstacle
-    rather than saying "unsupported". `advisory` deploys and states the limitation;
-    `strict` refuses (FR-007b).
+    `reason` is shown to the operator and must name the specific obstacle, never
+    "unsupported": the point of FR-021 is that an operator can tell WHICH
+    enforcement they obtained, and a vague message defeats that as thoroughly as
+    reporting nothing.
 
-    An agent absent from AGENT_HONOURS_PROXY reads as NOT known to honour, so a
-    newly added agent is refused under strict until someone probes it — the safe
-    direction (data-model §4).
+    Every obstacle here rules out enforcement ENTIRELY: there is no partial mode
+    to report, because the things that prevent the netfilter boundary (no image,
+    an operator-redefined egress service) prevent the proxy just as completely.
 
-    >>> egress_enforceable({"providers": []}, "claude")
-    (True, '')
-    >>> egress_enforceable({"providers": []}, "some-future-agent")[0]
-    False
+    What cannot be settled here: whether the daemon will actually grant
+    NET_ADMIN, and whether the kernel will accept the rules. Neither is knowable
+    without running the container. That case is handled by FAILING CLOSED rather
+    than by guessing — the entrypoint dies if it cannot install its rules, so
+    `compose up` fails and no unconstrained container is left running. A
+    pre-deploy guess would be worse than the absence of one: it would license a
+    deploy on a prediction.
+
+    >>> egress_enforcement_mode({"allow": []}, "claude")[0]
+    'transparent'
+    >>> egress_enforcement_mode(None, "claude")[0]
+    'none'
+    >>> egress_enforcement_mode({"allow": []}, "some-future-agent")[0]
+    'transparent'
     """
     if not is_egress_declared(egress):
-        return True, ""  # nothing declared, nothing to enforce
+        return EGRESS_UNENFORCED, ""
+
     try:
         ctx = resolve_build_context()
     except Fatal:
         ctx = None  # no checkout reachable (e.g. a bare PyPI install)
     if ctx is None or not (Path(ctx) / "egress" / "Dockerfile").is_file():
-        return False, (
-            "the egress proxy image sources are not reachable "
+        # Rules out BOTH: without the image there is no proxy either.
+        return EGRESS_UNENFORCED, (
+            "the egress image sources are not reachable "
             "(expected image/egress/Dockerfile in a checkout)"
         )
     if override_redefines_egress(override):
-        return False, (
-            f"the sidecar override {override} redefines the '{EGRESS_SERVICE_KEY}' "
-            f"service, so the running proxy is not the one this tool configured and "
-            f"its allowlist cannot be vouched for"
+        return EGRESS_UNENFORCED, (
+            f"the sidecar override {override} redefines the "
+            f"'{EGRESS_SERVICE_KEY}' service, so the running boundary is not the one "
+            f"this tool configured and its allowlist cannot be vouched for"
         )
-    if not AGENT_HONOURS_PROXY.get(agent or "", False):
-        return False, (
-            f"agent {agent!r} is not known to honour proxy environment variables, "
-            f"so the declaration cannot be enforced for it. Known to honour: "
-            f"{', '.join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))}"
-        )
-    return True, ""
+
+    # Transparent enforcement needs nothing FROM THE AGENT — that is its whole
+    # point — so there is no per-agent obstacle to check here. Proxy adherence
+    # only matters for the cooperative fallback, and is therefore checked in that
+    # branch rather than as a precondition of enforcement generally.
+    return EGRESS_TRANSPARENT, ""
+
+
+def egress_enforceable(
+    egress: object, agent: str | None, override: Path | None = None
+) -> tuple[bool, str]:
+    """Back-compat shim: enforced at all, by either mechanism.
+
+    Kept because `--json`'s `enforced` field and the strict/advisory decision both
+    want the coarse answer. Callers that must distinguish the two mechanisms —
+    anything reporting strength to an operator — MUST use
+    egress_enforcement_mode() instead, or they will describe a cooperative
+    deployment in the language of a boundary.
+    """
+    mode, reason = egress_enforcement_mode(egress, agent, override)
+    return mode != EGRESS_UNENFORCED, reason
 
 
 # The variables that decide where a request goes. NO_PROXY is the bypass C6 exists
 # for; the *_PROXY pair is included because redirecting the agent at a different
 # proxy defeats the allowlist just as completely as skipping one.
+#
+# Under Phase B these are no longer the enforcement — netfilter is — but the
+# refusal is KEPT: an operator value would still break the diagnostic layer that
+# turns a dropped connection into a nameable refusal, and a declaration whose
+# error messages silently stop working is its own kind of failure.
 PROXY_ENV_KEYS = (
     "NO_PROXY",
     "no_proxy",
@@ -5520,7 +6426,10 @@ def refuse_operator_proxy_vars(
     Only fires when the declaration would actually be enforced — an unenforced
     declaration has no guarantee for the variable to contradict.
     """
-    if not is_egress_declared(egress) or not egress_enforceable(egress, agent)[0]:
+    # The override MUST reach this check: an environment whose egress service is
+    # operator-redefined is not enforced, so there is no guarantee for NO_PROXY
+    # to contradict and refusing would be noise.
+    if not is_egress_declared(egress) or not egress_enforceable(egress, agent, override)[0]:
         return
     found = find_operator_proxy_var(env_files, cred_names, override)
     if found is None:
@@ -5538,9 +6447,15 @@ def https_remote_host(url: str | None) -> str | None:
     """The host of an HTTPS git remote, or None for anything else.
 
     SSH remotes return None deliberately: `ssh` does not honour `https_proxy`, so
-    an SSH push is unaffected by the allowlist and warning about it would be noise.
+    an SSH push is unaffected by the PROXY and warning about it here would be noise.
     That asymmetry is exactly why this defect is invisible to anyone testing with a
     push key and fatal to anyone using the documented GH_TOKEN path.
+
+    It does NOT follow that SSH is safe under Phase B. Transparent enforcement is
+    default-deny at the packet level, which kills port 22 unless it is declared —
+    the same Hard Constraint #1 collision arriving from the opposite direction, with
+    SSH as the casualty rather than the survivor. `ssh_remote_endpoint` covers that
+    case; this function stays about the proxy.
 
     >>> https_remote_host("https://github.com/you/acme")
     'github.com'
@@ -5558,24 +6473,126 @@ def https_remote_host(url: str | None) -> str | None:
     return host or None
 
 
-def egress_permits_host(entries: list[tuple[str, tuple[str, ...], str]], host: str) -> bool:
-    """Whether the effective allowlist admits `host` — evaluated with the SAME
-    patterns the proxy will use, so this check cannot disagree with enforcement.
+def https_remote_endpoint(url: str | None) -> tuple[str, int] | None:
+    """`(host, port)` for an HTTPS remote on a NON-STANDARD port, else None.
 
-    >>> e = [("allow", ("*.githubusercontent.com", "github.com"), "declaration")]
+    Returns None for the ordinary 443 case, because that one is the proxy's surface
+    and `https_remote_host` + `egress_permits_host` already govern it. This exists
+    only for the ports the redirect does not touch:
+
+    >>> https_remote_endpoint("https://git.example.com:8443/you/acme")
+    ('git.example.com', 8443)
+    >>> [https_remote_endpoint(u) for u in ("https://github.com/x", "https://h:443/x", None)]
+    [None, None, None]
+    """
+    if not url or not url.startswith("https://"):
+        return None
+    authority = url[len("https://") :].split("/", 1)[0]
+    hostport = authority.rsplit("@", 1)[-1]
+    if ":" not in hostport:
+        return None
+    host, _, raw = hostport.partition(":")
+    if not host or not raw.isdigit() or not 0 < int(raw) < 65536:
+        return None
+    port = int(raw)
+    return None if port == 443 else (host, port)
+
+
+def ssh_remote_endpoint(url: str | None) -> tuple[str, int] | None:
+    """The `(host, port)` an SSH git remote will actually connect to, or None.
+
+    Both spellings git uses, because only one of them carries a port and an
+    operator who wrote the other still cannot push:
+
+    >>> ssh_remote_endpoint("git@github.com:you/acme.git")
+    ('github.com', 22)
+    >>> ssh_remote_endpoint("ssh://git@github.com:2222/you/acme")
+    ('github.com', 2222)
+    >>> [ssh_remote_endpoint(u) for u in ("https://github.com/you/acme", "", None)]
+    [None, None, None]
+
+    A non-numeric or out-of-range port is treated as NOT an SSH remote rather than
+    coerced to 22: guessing would produce a check against an endpoint the push will
+    never use, and a check that passes for the wrong endpoint is worse than none.
+    """
+    if not url:
+        return None
+    if url.startswith("ssh://"):
+        authority = url[len("ssh://") :].split("/", 1)[0]
+        hostport = authority.rsplit("@", 1)[-1]
+        if ":" in hostport:
+            host, _, raw = hostport.partition(":")
+            if not raw.isdigit() or not 0 < int(raw) < 65536:
+                return None
+            return (host, int(raw)) if host else None
+        return (hostport, 22) if hostport else None
+    # scp-like: user@host:path. Rejected when the part after ':' looks like a port,
+    # because `host:2222` is not scp-like syntax at all — git reads it as a path.
+    if "://" in url or ":" not in url:
+        return None
+    authority, _, _path = url.partition(":")
+    host = authority.rsplit("@", 1)[-1]
+    return (host, 22) if host else None
+
+
+def egress_permits_endpoint(
+    entries: list[tuple[str, str, int | None, str]], host: str, port: int
+) -> bool:
+    """Whether the allowlist admits `host` on `port` as a NON-HTTP destination.
+
+    The complement of `egress_permits_host`: that one considers only portless
+    entries (the proxy's surface), this one only entries carrying a port (the
+    netfilter surface). Keeping them separate is the point of FR-018a — the port
+    selects the mechanism, so a declaration that permits a host over HTTPS says
+    nothing about reaching it on 22.
+    """
+    for _label, pattern, entry_port, _src in entries:
+        if entry_port != port:
+            continue
+        token = squid_acl_line(pattern)
+        if token.startswith("."):
+            if host == token[1:] or host.endswith(token):
+                return True
+        elif host == token:
+            return True
+    return False
+
+
+def egress_permits_host(entries: list[tuple[str, str, int | None, str]], host: str) -> bool:
+    """Whether the effective allowlist admits `host` over HTTP/HTTPS.
+
+    Matches the way SQUID will: a bare token matches that host exactly; a
+    leading-dot token matches the domain and any subdomain. Evaluating it any
+    other way lets this check and the running proxy disagree — and the
+    disagreement that matters is the PERMISSIVE one, where the tool calls a host
+    reachable that squid then refuses.
+
+    Ported entries are skipped: those are netfilter rules, not proxy allowlist
+    entries, so `{host, port: 22}` is NOT reachable over 443 (SC-010).
+
+    >>> e = [("a", "*.githubusercontent.com", None, "d"), ("b", "github.com", None, "d")]
     >>> [egress_permits_host(e, h) for h in ("github.com", "raw.githubusercontent.com")]
     [True, True]
-    >>> egress_permits_host(e, "gitlab.com")
+    >>> egress_permits_host(e, "githubusercontent.com.attacker.net")
+    False
+    >>> egress_permits_host([("g", "github.com", 22, "d")], "github.com")
     False
     """
-    return any(
-        re.fullmatch(egress_filter_line(pattern)[1:-1], host)
-        for _label, hosts, _src in entries
-        for pattern in hosts
-    )
+    for _label, pattern, port, _src in entries:
+        if port is not None:
+            continue
+        token = squid_acl_line(pattern)
+        if token.startswith("."):
+            if host == token[1:] or host.endswith(token):
+                return True
+        elif host == token:
+            return True
+    return False
 
 
-def check_egress_permits_push(egress: object, repo_url: str | None, mode: str) -> None:
+def check_egress_permits_push(
+    egress: object, repo_url: str | None, mode: str, *, transparent: bool = False
+) -> None:
     """FR-003c — the check that protects the project's first hard constraint.
 
     The proxy governs ALL HTTPS egress, so an enforced declaration that omits the
@@ -5591,18 +6608,79 @@ def check_egress_permits_push(egress: object, repo_url: str | None, mode: str) -
     tool never sees, and a warning on every deployment would be noise that trains
     operators to ignore the one that matters.
     """
-    host = https_remote_host(repo_url)
-    if host is None or not is_egress_declared(egress):
+    if not is_egress_declared(egress):
         return
     assert isinstance(egress, dict)  # narrowed by is_egress_declared
-    if egress_permits_host(resolve_provider_hosts(egress), host):
+    dests = resolve_destinations(egress)
+
+    # THE SSH ARM (FR-003c, T132). Only under transparent enforcement: the proxy
+    # cannot see an SSH connection, so under Phase A this would be a warning about
+    # a push that works — and a check that cries wolf on a healthy environment is
+    # how operators learn to ignore the one that matters.
+    #
+    # Under Phase B it is the reverse of the HTTPS case. Default-deny is at the
+    # packet level, so port 22 is closed unless declared, and the SAME hard
+    # constraint breaks with SSH as the casualty instead of the survivor.
+    # AN HTTPS REMOTE ON A NON-STANDARD PORT IS NETFILTER'S SURFACE, NOT THE PROXY'S.
+    # The nat REDIRECT matches dport 443/80 only, so `https://git.example.com:8443/…`
+    # is never handed to squid and is denied by default-deny unless declared as a
+    # `{host, port}` entry. `https_remote_host` discards the port, so the portless
+    # check below would report such a remote as permitted while the push is dropped.
+    https_ep = https_remote_endpoint(repo_url) if transparent else None
+    if https_ep is not None and egress_permits_endpoint(dests, *https_ep):
+        # TERMINAL, not a fall-through. The portless check below is the PROXY's
+        # surface and deliberately ignores ported entries (FR-018a), so continuing
+        # would demand a second, portless declaration for a destination already
+        # correctly declared — refusing a push that will work.
+        return
+    if https_ep is not None:
+        h, prt = https_ep
+        _push_refusal(
+            f"egress: the declaration does not permit {h!r} on port {prt}, but this "
+            f"environment pushes over HTTPS to it on a NON-STANDARD port. Only 80 and 443 "
+            f"are routed through the proxy; anything else is denied at the packet level "
+            f"unless declared. Add it:  egress.allow: [{{host: {h}, port: {prt}}}]",
+            mode,
+        )
+        return
+
+    ssh = ssh_remote_endpoint(repo_url) if transparent else None
+    if ssh is not None and not egress_permits_endpoint(dests, *ssh):
+        ssh_host, ssh_port = ssh
+        _push_refusal(
+            f"egress: the declaration does not permit {ssh_host!r} on port {ssh_port}, "
+            f"but this environment pushes over SSH to it. Transparent enforcement is "
+            f"DEFAULT-DENY at the packet level, so `git push` will be refused — and it "
+            f"will be refused at push time, after the work exists. Add it:  "
+            f"egress.allow: [{{host: {ssh_host}, port: {ssh_port}}}]",
+            mode,
+        )
+        return
+
+    host = https_remote_host(repo_url)
+    if host is None:
+        return
+    if egress_permits_host(dests, host):
         return
     msg = (
         f"egress: the declaration does not permit {host!r}, but this environment "
         f"pushes over HTTPS to it. The proxy governs ALL egress, so `git push` will "
         f"be refused — and it will be refused at push time, after the work exists. "
-        f"Add it:  egress.allow: [{host}]"
+        # The remediation must be VALID as written: `allow` entries are mappings,
+        # so a bare `[github.com]` here would send the operator from one refusal
+        # into another ("must be a mapping") with the tool having supplied it.
+        f"Add it:  egress.allow: [{{host: {host}}}]"
     )
+    _push_refusal(msg, mode)
+
+
+def _push_refusal(msg: str, mode: str) -> None:
+    """`strict` refuses, `advisory` warns — the same escalation for both arms.
+
+    Shared so the two cannot drift into treating the same class of breakage
+    differently, which would make the severity depend on the remote's URL scheme
+    rather than on what the operator asked for.
+    """
     if mode == "strict":
         die(msg)
     warn(msg)
@@ -5625,6 +6703,24 @@ def enforce_egress_declaration(
     ok, reason = egress_enforceable(egress, agent, override)
     if ok:
         log(f"egress: enforcement={mode} (enforced)")
+        # FR-020d/FR-020e. Said at the moment the operator opts into default-deny,
+        # because that is when a refusal starts being possible and the record is
+        # otherwise undiscoverable — it lives in a container the tool deliberately
+        # keeps out of the `agent-container-*` namespace every listing scans.
+        #
+        # COVERS BOTH HALVES since T150: unbound's replies AND squid's access log
+        # now go to the boundary container's stdio, so refused CONNECTIONS are in
+        # this same stream. Before T150 squid logged to a file inside the boundary
+        # and this message said "DNS lookups" for that reason; leaving it scoped
+        # that way would send the operator whose HTTPS host is undeclared — the
+        # common case — looking for a record it says does not cover them.
+        log(
+            "egress: refused lookups AND refused connections are recorded in the "
+            "boundary's log (`agent-container logs <name> --egress`); REFUSED means "
+            "the name is not declared, NXDOMAIN means it does not exist, and a "
+            "connection the proxy would not open logs NONE_NONE/000 with the "
+            "`sni=` it was reaching for"
+        )
         return True
     if mode == "strict":
         die(
@@ -5637,6 +6733,79 @@ def enforce_egress_declaration(
         f"The environment can reach anything the network allows."
     )
     return False
+
+
+def _previous_model_had_egress(host_name: str, name: str) -> bool:
+    """Whether the last model written for this environment declared the egress
+    service — i.e. whether a port-owner migration back to the agent is even
+    possible.
+
+    Takes the host NAME, not the host record: the record does not carry its own
+    key, and reading one off it silently yields "" — which resolves to a path that
+    never exists, so every environment would look like it had no egress and the
+    drop-side migration would never fire. That failure is invisible, because "no
+    migration needed" is also the answer for the common case.
+
+    Reads the generated compose file rather than asking the runtime: this is
+    consulted on EVERY deploy, and an environment that has never had a declaration
+    must not pay a runtime probe to learn that nothing moved.
+    """
+    try:
+        model = json.loads(compose_file_path(host_name, name).read_text())
+    except OSError, json.JSONDecodeError, ValueError, AttributeError:
+        return False
+    services = model.get("services") if isinstance(model, dict) else None
+    return isinstance(services, dict) and EGRESS_SERVICE_KEY in services
+
+
+def phase_a_port_owner_stale(host_rec: dict, host_name: str, name: str, enforced: bool) -> bool:
+    """Whether a RUNNING container still publishes the port the egress service now
+    owns — i.e. it was deployed before the shared-namespace migration.
+
+    THE IDENTITY LOCK CANNOT SEE THIS. Container name, port number and all nine
+    volume names are unchanged; only which service publishes the port moved. So a
+    baseline diff passes while the deployed shape is stale, and the environment
+    keeps running with Phase A's cooperative enforcement while its declaration
+    reads as a boundary.
+
+    SYMMETRIC, because the migration runs BOTH WAYS. Adopting a declaration moves
+    the binding from the agent to the egress service; DROPPING one moves it back.
+    Only the first direction was handled, so removing an `egress:` block failed the
+    redeploy with `port is already allocated` — compose cannot bind a port the
+    still-running egress container holds, and that container is an orphan of the
+    regenerated model rather than something the new model mentions.
+
+    Returns False when the container cannot be inspected — never a false "stale"
+    from a failed probe, which would recreate a healthy environment on every apply.
+    """
+    # Which container must NOT be publishing, given the shape being deployed.
+    holder = egress_container_name(name) if not enforced else container_name(name)
+    if not enforced and not _previous_model_had_egress(host_name, name):
+        # No egress service was ever deployed here, so the binding cannot be
+        # anywhere but the agent and there is nothing to migrate. Checked against
+        # the PREVIOUSLY GENERATED MODEL — a file read — rather than by probing the
+        # runtime, so an ordinary deployment gains no extra runtime call at all.
+        return False
+    argv = driver_runtime_argv(host_rec) + [
+        "inspect",
+        holder,
+        "--format",
+        "{{json .HostConfig.PortBindings}}",
+    ]
+    r = query(argv)
+    # A probe that did not produce parseable output is NOT evidence of staleness.
+    # `stdout` can be absent entirely (no such container, or a driver that reports
+    # nothing), and treating that as "stale" would recreate a healthy environment
+    # on every deploy — the failure mode this guard exists to avoid.
+    if r.returncode != 0 or not isinstance(r.stdout, str) or not r.stdout.strip():
+        return False
+    try:
+        bindings = json.loads(r.stdout)
+    except json.JSONDecodeError, ValueError:
+        return False
+    # Adopting: a Phase A agent container binds 2222; a Phase B one publishes
+    # nothing. Dropping: the egress container is the one still holding it.
+    return bool(bindings)
 
 
 def egress_fingerprint(egress: object) -> str | None:
@@ -5654,15 +6823,19 @@ def egress_fingerprint(egress: object) -> str | None:
 
     >>> egress_fingerprint(None) is None
     True
-    >>> egress_fingerprint({"providers": []}) == egress_fingerprint({"providers": [], "allow": []})
+    >>> egress_fingerprint({"allow": []}) == egress_fingerprint({"allow": [], "enforcement": "advisory"})
     True
-    >>> egress_fingerprint({"providers": ["anthropic"]}) != egress_fingerprint({"providers": []})
+    >>> egress_fingerprint({"allow": [{"provider": "anthropic"}]}) != egress_fingerprint({"allow": []})
     True
     """
     if not is_egress_declared(egress):
         return None
     assert isinstance(egress, dict)
-    body = build_egress_filter(resolve_provider_hosts(egress))
+    # Hash ALL THREE renderings, not just the proxy's: a change to the netfilter
+    # rules or the resolver config changes what is enforced just as much, and
+    # digesting only the squid acl would report 'matching' for an edited port.
+    entries = resolve_destinations(egress)
+    body = build_squid_acl(entries) + build_netfilter_rules(entries) + build_unbound_conf(entries)
     return hashlib.sha256(body.encode()).hexdigest()[:16]
 
 
@@ -5673,16 +6846,39 @@ def egress_config_token(egress: object) -> str | None:
     model when the declaration is enforceable — so without it, tightening
     `enforcement: advisory` to `strict` would report "matching" and never redeploy.
 
-    >>> egress_config_token({"providers": [], "enforcement": "strict"})[:6]
+    `sidecars_outside` rides along for the same reason and it is NOT cosmetic: moving
+    a service in or out of the boundary changes which container's egress is filtered,
+    and it leaves the allowlist and both enforcement modes untouched. Without it
+    `apply` reported "matching" after an operator moved a redis from inside the
+    boundary to outside — a change of exactly the kind this feature exists to make
+    visible, reported as no change at all.
+
+    Order-insensitive (`sorted`), because a reordered list is the same deployment and
+    a token that moved would redeploy every environment whose YAML was tidied.
+
+    >>> egress_config_token({"allow": [], "enforcement": "strict"})[:6]
     'strict'
     >>> egress_config_token(None) is None
+    True
+    >>> a = egress_config_token({"allow": [], "sidecars_outside": ["redis"]})
+    >>> b = egress_config_token({"allow": []})
+    >>> a == b
+    False
+    >>> x = egress_config_token({"allow": [], "sidecars_outside": ["a", "b"]})
+    >>> y = egress_config_token({"allow": [], "sidecars_outside": ["b", "a"]})
+    >>> x == y
     True
     """
     fp = egress_fingerprint(egress)
     if fp is None:
         return None
     assert isinstance(egress, dict)
-    return f"{egress.get('enforcement') or 'advisory'}:{fp}"
+    outside = egress.get("sidecars_outside")
+    # `str(x)` deliberately: this runs on a DECLARATION, which may not have been
+    # validated yet on every path that computes a token, so a non-string entry must
+    # still produce a stable token rather than raise inside drift detection.
+    outside_part = ",".join(sorted(str(x) for x in outside)) if isinstance(outside, list) else ""
+    return f"{egress.get('enforcement') or 'advisory'}:{outside_part}:{fp}"
 
 
 def is_egress_declared(egress: object) -> bool:
@@ -5694,49 +6890,46 @@ def is_egress_declared(egress: object) -> bool:
     the upgrade catastrophe data-model §2 exists to prevent. Presence lives here,
     in one place, not in each caller's discipline.
 
-    >>> is_egress_declared(None), is_egress_declared({"providers": []})
+    >>> is_egress_declared(None), is_egress_declared({"allow": []})
     (False, True)
     """
-    return isinstance(egress, dict) and "providers" in egress
+    return isinstance(egress, dict) and "allow" in egress
 
 
-def resolve_provider_hosts(egress: dict | None) -> list[tuple[str, tuple[str, ...], str]]:
-    """The EFFECTIVE allowlist: (label, hosts, source) per declared entry.
+def resolve_destinations(egress: dict | None) -> list[tuple[str, str, int | None, str]]:
+    """The effective destination list: `(label, host, port, source)` per host.
 
-    An explicit `hosts:` REPLACES the tool's mapping for that entry — it is never
-    added to it (FR-001b). An operator who routes through a gateway is usually
-    doing so to CLOSE the direct vendor path; extending would leave it open while
-    the declaration reads as constrained.
+    `port is None` means HTTP/HTTPS through the proxy allowlist; an integer means
+    an explicit netfilter rule. That one field routes an entry to a surface.
 
-    `allow:` entries (FR-001c) ride the same list under the label `allow`, because
-    the proxy governs ALL egress and there is exactly one allowlist. The split is
-    for readability, not privilege.
+    An explicit `hosts:` REPLACES the provider's mapping, never extends it
+    (FR-001b): an operator routing through a gateway is usually doing so to CLOSE
+    the direct vendor path, and extending would leave it open while the
+    declaration reads as constrained.
 
     CALLERS MUST GATE ON is_egress_declared() FIRST — `[]` here means both
-    "unrestricted" and "air-gapped", which are opposites.
+    "unrestricted" and "deny everything", which are opposites.
 
-    >>> resolve_provider_hosts({"providers": ["anthropic"]})
-    [('anthropic', ('api.anthropic.com',), 'tool')]
-    >>> resolve_provider_hosts({"providers": [{"name": "anthropic", "hosts": ["gw.corp"]}]})
-    [('anthropic', ('gw.corp',), 'declaration')]
-    >>> resolve_provider_hosts({"providers": [], "allow": ["github.com"]})
-    [('allow', ('github.com',), 'declaration')]
-    >>> resolve_provider_hosts({"providers": []})
-    []
-    >>> resolve_provider_hosts(None)
-    []
+    >>> resolve_destinations({"allow": [{"provider": "anthropic"}]})
+    [('anthropic', 'api.anthropic.com', None, 'tool')]
+    >>> resolve_destinations({"allow": [{"provider": "anthropic", "hosts": ["gw.corp"]}]})
+    [('anthropic', 'gw.corp', None, 'declaration')]
+    >>> resolve_destinations({"allow": [{"host": "github.com", "port": 22}]})
+    [('github.com', 'github.com', 22, 'declaration')]
+    >>> resolve_destinations({"allow": []}), resolve_destinations(None)
+    ([], [])
     """
     if not egress:
         return []
-    out: list[tuple[str, tuple[str, ...], str]] = []
-    for entry in egress.get("providers") or []:
-        if isinstance(entry, str):
-            out.append((entry, PROVIDERS[entry], "tool"))
+    out: list[tuple[str, str, int | None, str]] = []
+    for entry in egress.get("allow") or []:
+        if "provider" in entry:
+            name, hosts = entry["provider"], entry.get("hosts")
+            src = "declaration" if hosts else "tool"
+            for h in hosts or PROVIDERS.get(name, ()):
+                out.append((name, h, None, src))
         else:
-            out.append((entry["name"], tuple(entry["hosts"]), "declaration"))
-    extra = egress.get("allow") or []
-    if extra:
-        out.append(("allow", tuple(extra), "declaration"))
+            out.append((entry["host"], entry["host"], entry.get("port"), "declaration"))
     return out
 
 
@@ -6152,44 +7345,72 @@ def plan_payload(plans: list) -> list[dict]:
 def egress_payload(egress: object, agent: str, override: Path | None = None) -> dict:
     """The egress facts, machine-readable (FR-005/FR-013, contract C7).
 
-    `hosts` is the EFFECTIVE allowlist, so an operator `hosts:` override is
+    `destinations` is the EFFECTIVE allowlist, so an operator `hosts:` override is
     reported rather than the tool's default — reporting the default while
-    enforcing an override would state a permission set the proxy does not enforce.
-    `host_source` says which side supplied each entry.
+    enforcing an override would state a permission set the boundary does not
+    enforce. Each entry carries `source` (which side supplied it) and `port`
+    (which surface enforces it).
+
+    It replaced a flat `hosts` list, which is emitted by NEITHER branch now. It
+    used to survive in the undeclared branch alone, where an empty list read as
+    "nothing is permitted" in the one case where EVERYTHING is — a consumer that
+    kept reading `.hosts` saw the allowlist invert rather than disappear.
 
     `enforced` is the honest field: a declaration can exist and not be in force
     (advisory mode with an unenforceable declaration), and a caller must be able to
     tell those apart without parsing prose.
 
+    `mechanism` IS NOT A RESTATEMENT OF `enforced` (T151/FR-021). A boolean cannot
+    say WHICH enforcement was obtained, and the two this feature can deliver are
+    not interchangeable: the packet-level boundary holds against an agent actively
+    evading it, a cooperative proxy holds only against accident. FR-021's promise is
+    that an operator can tell them apart, and the prose statement said so while the
+    machine-readable surface reported one bit for both. Added ALONGSIDE `enforced`
+    rather than replacing it — consumers exist, and `enforced` keeps its meaning.
+
     >>> p = egress_payload(None, "claude")
-    >>> p["declared"], p["enforced"], p["providers"]
-    (False, False, [])
+    >>> p["declared"], p["enforced"], p["mechanism"], p["destinations"]
+    (False, False, 'none', [])
     """
     if not is_egress_declared(egress):
         return {
             "declared": False,
             "enforced": False,
+            # 'none' rather than null: an undeclared environment HAS a mechanism,
+            # and it is nothing. A null would read as "unknown" and invite a
+            # consumer to guess, which is the silence this feature exists to end.
+            "mechanism": EGRESS_UNENFORCED,
             "enforcement": None,
             "providers": [],
-            "hosts": [],
+            "destinations": [],
             "unrestricted": True,
         }
     assert isinstance(egress, dict)
-    entries = resolve_provider_hosts(egress)
-    ok, reason = egress_enforceable(egress, agent, override)
+    entries = resolve_destinations(egress)
+    mechanism, reason = egress_enforcement_mode(egress, agent, override)
+    ok = mechanism != EGRESS_UNENFORCED
     return {
         "declared": True,
         "enforced": ok,
+        # The two fields are computed from ONE call deliberately. Deriving `enforced`
+        # from the mechanism is what keeps them from disagreeing — a payload saying
+        # `enforced: true, mechanism: none` would be worse than either field alone.
+        "mechanism": mechanism,
         "not_enforced_reason": None if ok else reason,
         "enforcement": egress.get("enforcement") or "advisory",
-        "providers": [label for label, _h, _s in entries if label != "allow"],
-        "hosts": [
-            {"label": label, "host": h, "host_source": source}
-            for label, hosts, source in entries
-            for h in hosts
+        "providers": sorted(
+            {label for label, _h, port, src in entries if src == "tool" or port is None}
+        ),
+        "destinations": [
+            # `port` is the field that says WHICH SURFACE enforces this entry:
+            # null -> the proxy allowlist, an integer -> an explicit netfilter
+            # rule. A caller reading only `host` cannot tell those apart, and they
+            # have very different reach (SC-010: that host and that port only).
+            {"label": label, "host": h, "port": port, "source": source}
+            for label, h, port, source in entries
         ],
-        # `providers: []` is air-gapped, NOT unrestricted — the opposite. Stated
-        # explicitly so a caller never has to infer it from an empty host list.
+        # `allow: []` is DENY-EVERYTHING, not unrestricted — the opposite. Stated
+        # explicitly so a caller never has to infer it from an empty list.
         "unrestricted": False,
     }
 
@@ -7180,14 +8401,31 @@ def attach(
 def logs(
     name: str = typer.Argument(..., help="Container short name."),
     no_follow: bool = typer.Option(False, "--no-follow", help="Print logs without following."),
+    egress: bool = typer.Option(
+        False,
+        "--egress",
+        help=(
+            "Read the egress boundary's log instead of the agent's — where refused "
+            "destinations are recorded. REFUSED means the name is not declared; "
+            "NXDOMAIN means the name genuinely does not exist."
+        ),
+    ),
     as_json: bool = JSON_OPT,
 ) -> None:
     """Tail container logs."""
     set_json_mode(as_json)
-    rc = do_logs(name, follow=not no_follow)
+    rc = do_logs(name, follow=not no_follow, egress=egress)
     # The log STREAM itself is the container's own output and is not wrapped; the
     # envelope reports the outcome so an agent can tell success from failure.
-    emit_action("logs", name=name, exit_code=rc)
+    # `source` because the two streams answer different questions and a caller
+    # that cannot tell them apart would read an agent log as a policy record.
+    emit_action(
+        "logs",
+        name=name,
+        source="egress" if egress else "agent",
+        container=egress_container_name(name) if egress else container_name(name),
+        exit_code=rc,
+    )
     raise typer.Exit(rc)
 
 

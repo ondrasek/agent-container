@@ -311,7 +311,7 @@ or `GH_TOKEN` (HTTPS alternative).
 
 ## Providers are not credentials (Feature 012)
 
-Declaring `egress.providers` says **where an environment may go**. It does not say what authorises
+Declaring `egress.allow` says **where an environment may go**. It does not say what authorises
 it, and it never implies storing a key.
 
 The two are neighbours in the same file, not a hierarchy — and the tool deliberately does **not**

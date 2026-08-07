@@ -196,7 +196,7 @@ _agent_container() {
             ;;
         logs)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-follow" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--no-follow --egress --json" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
