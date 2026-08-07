@@ -886,3 +886,77 @@ def test_an_ordinary_https_remote_is_still_the_proxys_surface(wiz):
         "strict",
         transparent=True,
     )
+
+
+# --- T155 / research R24: the pinned-address warning --------------------------
+
+
+def test_every_named_ported_destination_is_warned_about(wiz, monkeypatch, capsys):
+    """The trigger is a NAME, not an address count.
+
+    The first version warned only on more than one simultaneous address, and that is
+    silent for the canonical case: `github.com` returns ONE address per query while
+    R24 proved .3, .4 and .5 all exist — it rotates across queries, not within an
+    answer. A count-based check passed while the very host it was written for went
+    unwarned.
+    """
+    monkeypatch.setattr(wiz, "resolve_host_addresses", lambda h, p, timeout=3.0: ["140.82.121.3"])
+    wiz.warn_pinned_port_destinations([("github.com", "github.com", 22, "spec")], transparent=True)
+    err = capsys.readouterr().err
+    assert "WHEN THE BOUNDARY STARTS" in err
+    assert "still reads as permitting it" in err, "name the failure, not just the mechanism"
+    assert "140.82.121.3" in err, "the resolved address is useful information"
+
+
+def test_an_ip_literal_is_never_warned_about(wiz, monkeypatch, capsys):
+    """Nothing to re-resolve, so nothing can go stale. Warning here would be noise."""
+    monkeypatch.setattr(wiz, "resolve_host_addresses", lambda h, p, timeout=3.0: ["10.0.0.1"])
+    wiz.warn_pinned_port_destinations([("db", "10.0.0.1", 5432, "spec")], transparent=True)
+    assert capsys.readouterr().err == ""
+    wiz.warn_pinned_port_destinations([("v6", "::1", 5432, "spec")], transparent=True)
+    assert capsys.readouterr().err == ""
+
+
+def test_the_warning_still_fires_when_the_lookup_fails(wiz, monkeypatch, capsys):
+    """The PINNING is what is being reported, and it is true whether or not this
+    machine can resolve the name. Staying silent on a failed probe would make the
+    warning depend on the deploying machine's resolver rather than on the mechanism."""
+    monkeypatch.setattr(wiz, "resolve_host_addresses", lambda h, p, timeout=3.0: None)
+    wiz.warn_pinned_port_destinations([("gh", "github.com", 22, "spec")], transparent=True)
+    err = capsys.readouterr().err
+    assert "WHEN THE BOUNDARY STARTS" in err
+    assert "now:" not in err, "must not claim addresses it never measured"
+
+
+def test_portless_entries_are_never_warned_about(wiz, monkeypatch, capsys):
+    """The proxy re-resolves per request, so nothing is pinned on that surface. If
+    this ever warns, the port/mechanism split (FR-018a) has been misread."""
+    monkeypatch.setattr(
+        wiz, "resolve_host_addresses", lambda h, p, timeout=3.0: ["1.1.1.1", "1.0.0.1"]
+    )
+    wiz.warn_pinned_port_destinations(
+        [("anthropic", "api.anthropic.com", None, "tool")], transparent=True
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_nothing_is_warned_about_without_transparent_enforcement(wiz, monkeypatch, capsys):
+    """Without netfilter there is no pinned rule to warn about."""
+    monkeypatch.setattr(
+        wiz, "resolve_host_addresses", lambda h, p, timeout=3.0: ["1.2.3.4", "5.6.7.8"]
+    )
+    wiz.warn_pinned_port_destinations([("gh", "github.com", 22, "spec")], transparent=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_the_resolver_probe_is_bounded_and_never_raises(wiz):
+    """It runs on the deploy path, and `getaddrinfo` honours no timeout argument.
+
+    Exercised against a name that cannot resolve: the contract is None, promptly,
+    rather than an exception escaping into a deploy.
+    """
+    import time
+
+    started = time.monotonic()
+    assert wiz.resolve_host_addresses("no-such-host.invalid", 22, timeout=2.0) is None
+    assert time.monotonic() - started < 10, "the probe must not stall a deploy"

@@ -3447,6 +3447,8 @@ def compose_up_exec(
         )
         down_container(host_name, host_rec, name, purge=False)
     _dests = resolve_destinations(egress) if _enforced else []
+    # R24/T155: the LAST silent property of the boundary, said out loud at deploy.
+    warn_pinned_port_destinations(_dests, transparent=_transparent)
     egress_body = build_squid_acl(_dests) if _enforced else None
     egress_unbound_body = build_unbound_conf(_dests) if _enforced else None
     egress_ports_body = build_netfilter_rules(_dests) if _enforced else None
@@ -6051,6 +6053,110 @@ def refuse_sidecar_name_in_allow(egress: object, override: Path | None, *, enfor
         f"Remove {'it' if len(named) == 1 else 'them'}: loopback traffic inside the "
         f"boundary needs no declaration. Reach the service at 127.0.0.1:<its port>."
     )
+
+
+def resolve_host_addresses(host: str, port: int, timeout: float = 3.0) -> list[str] | None:
+    """Every address `host` currently resolves to, or None if it could not be asked.
+
+    BOUNDED, because this runs on the deploy path. `getaddrinfo` honours no timeout
+    argument and a slow or unreachable resolver would otherwise stall a deploy, so
+    the lookup runs on a thread that is simply abandoned if it overruns. A daemon
+    thread is correct here: the answer is advisory, and the process must not wait on
+    it at exit.
+
+    Returns None — not `[]` — when the lookup failed or timed out. The two must not
+    collapse: "no addresses" would read as a resolvable host with no records and
+    invite a confident warning about something never measured.
+    """
+    import socket
+    import threading
+
+    out: list[str] = []
+    err: list[BaseException] = []
+
+    def _lookup() -> None:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            seen: dict[str, None] = {}
+            for info in infos:
+                seen.setdefault(str(info[4][0]), None)
+            out.extend(seen)
+        except BaseException as exc:  # noqa: BLE001 - advisory probe; never fatal
+            err.append(exc)
+
+    t = threading.Thread(target=_lookup, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive() or err or not out:
+        return None
+    return out
+
+
+def warn_pinned_port_destinations(
+    dests: list[tuple[str, str, int | None, str]], *, transparent: bool
+) -> None:
+    """FR-018, research R24 — say that a ported destination's addresses are PINNED.
+
+    `iptables -d <hostname>` expands the operand at INSERT TIME and stores addresses,
+    not the name. R24 measured it: with `{host: github.com, port: 22}` declared, only
+    `140.82.121.4` was admitted while `.3` and `.5` timed out, and nothing in the
+    boundary re-resolves. So the destination works until the resolver hands the agent
+    a different address, then stops. It fails CLOSED, which is the right direction,
+    but the operator learns it after a push has already failed. This does not fix the
+    pinning; it converts a silent property into a stated one.
+
+    WARNS FOR EVERY NAMED PORTED DESTINATION, and the first version of this did not —
+    it warned only when a host resolved to MORE THAN ONE address simultaneously, which
+    does not detect the canonical case at all. Measured: `github.com` returns a SINGLE
+    address per query here (140.82.121.3) while R24 separately proved .3, .4 and .5 all
+    exist. It rotates ACROSS queries over time, not within one answer, so a count-based
+    check was silent for exactly the host the warning was written for — a check passing
+    while the thing it names is broken.
+
+    So the condition is the one that is actually knowable: a rule built from a NAME is
+    pinned, full stop. An IP literal is exempt because there is nothing to re-resolve
+    and no rotation to suffer. Currently-resolved addresses are included when the probe
+    answers, as information rather than as the trigger.
+
+    ONLY under transparent enforcement: without netfilter there is no pinned rule, and
+    a warning on an environment that has none is the noise that teaches operators to
+    skip the one that matters.
+    """
+    if not transparent:
+        return
+    for label, host, port, _src in dests:
+        # Portless entries are the proxy's surface — squid re-resolves per request, so
+        # nothing is pinned. A wildcard cannot carry a port (validation refuses it).
+        if port is None or host.startswith("*"):
+            continue
+        if _is_ip_literal(host):
+            continue
+        addrs = resolve_host_addresses(host, port)
+        seen = f" (now: {', '.join(sorted(addrs)[:4])})" if addrs else ""
+        warn(
+            f"egress: {host!r} (declared as {label}, port {port}) is admitted by a packet "
+            f"rule built from the addresses resolved WHEN THE BOUNDARY STARTS{seen}, and "
+            f"nothing re-resolves them. If this host's addresses change — round-robin and "
+            f"CDN-fronted hosts such as github.com do, without returning more than one at "
+            f"a time — the destination stops being reachable while the declaration still "
+            f"reads as permitting it. It fails closed and the refusal is logged; "
+            f"`redeploy` re-pins."
+        )
+
+
+def _is_ip_literal(host: str) -> bool:
+    """True for a literal address, which no rule can pin the wrong way.
+
+    >>> [_is_ip_literal(h) for h in ("10.0.0.1", "::1", "github.com", "1.2.3")]
+    [True, True, False, False]
+    """
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 def warn_sidecar_hostnames_moved_to_loopback(inside: list[str]) -> None:

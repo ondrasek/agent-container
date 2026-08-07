@@ -1326,3 +1326,37 @@ being a request-less connection to an `http_port`. That is a change to a readine
 gate the boundary's fail-closed behaviour depends on (T129c, R20), so it needs its
 own measurement of the start-up window rather than a patch during a verification
 pass. Recorded as **T152**.
+
+
+### R26 — a count-based rotation check cannot see rotation (measured, T155)
+
+R24 established that `{host, port}` pins the addresses resolved at rule-install time.
+The obvious warning is "this host resolves to several addresses, and the rule pins
+them". **Measured, that check is silent for the canonical case.**
+
+| Query | Result |
+|---|---|
+| `getaddrinfo("github.com", 22)` from the deploying machine | **one** address: `140.82.121.3` |
+| R24's in-container probe, separately | `.4` admitted; `.3` and `.5` timed out |
+
+github.com rotates **across queries over time**, not within a single answer. So a
+threshold of "more than one simultaneous address" never fires for the host the
+warning exists to cover — a check that passes while the property it names is
+violated, which is this repo's recurring shape and was reintroduced by the fix for
+the previous instance of it.
+
+The condition that is knowable at deploy time is much simpler: **a rule built from a
+NAME is pinned.** That is true regardless of how many addresses the name currently
+has, so the warning triggers on every named ported destination and reports the
+resolved addresses as information rather than as the trigger. An IP literal is exempt
+because there is nothing to re-resolve.
+
+Two smaller consequences, both deliberate:
+
+- The warning **still fires when the probe fails**. Staying silent would make it
+  depend on the deploying machine's resolver rather than on the mechanism, and the
+  pinning is true either way. It simply omits the "now: …" clause rather than
+  claiming addresses it never measured.
+- The probe runs on an **abandoned daemon thread** with a join timeout, because
+  `getaddrinfo` honours no timeout argument and this sits on the deploy path. A slow
+  resolver must not stall a deploy for an advisory message.

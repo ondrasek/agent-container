@@ -620,7 +620,7 @@ Fixed in this pass:
 - [ ] T154 **quickstart S15 is not runnable as written** — the agent image has neither `dig` nor `nc`.
       The property verified via a raw-socket probe: `@8.8.8.8` → `Operation not permitted`, declared
       → RCODE 0, undeclared and the tunnelling label → RCODE 5 (REFUSED, not NXDOMAIN).
-- [ ] T155 **A deploy-time warning when a ported host resolves to more than one address**, saying the
+- [X] T155 **DONE — and the first implementation did not detect the case it was written for.** It warned only when a host resolved to MORE THAN ONE address simultaneously; the real resolver then showed `github.com` returning a SINGLE address (140.82.121.3) while R24 had separately proved .3, .4 and .5 all exist. It rotates ACROSS queries over time, not within one answer, so a count-based check was silent for exactly the canonical host — a check passing while the thing it names is broken. Rewritten to warn on the condition that is actually knowable: a packet rule built from a NAME is pinned, full stop. IP literals are exempt (nothing to re-resolve); resolved addresses are reported as information, not as the trigger; and the warning still fires when the probe fails, so it depends on the mechanism rather than on the deploying machine's resolver. The probe is bounded on an abandoned daemon thread because `getaddrinfo` honours no timeout and this runs on the deploy path.
       rule pins them (research R24). This is the verification agent's recommendation before
       `{host, port}` is relied on for git remotes, and it converts the last silent part into a
       stated one.
