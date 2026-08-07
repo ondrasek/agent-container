@@ -445,3 +445,33 @@ failure modes are disjoint.
 | 11 — polish | 8 |
 | **Phase B total** | **51** |
 | **Feature total** | **115** (64 Phase A + 51 Phase B) |
+
+
+## Adversarial review findings — remaining (ultracode, 30 agents, 12 confirmed / 8 refuted)
+
+- [ ] T147 **`{host, port}` pins DNS at rule-install time.** `iptables -d <host>` expands to the
+      addresses resolved at insert time and pins them. A declared endpoint whose addresses rotate
+      (github.com, any CDN-fronted git host) stops being reachable while the declaration still reads
+      as permitting it — and after the T129c readiness gate the failure appears as a working
+      deployment whose pushes fail later. Nothing in research.md measures it. Probe before T146.
+- [ ] T148 **A wildcard host with `port:` validates but renders an iptables rule that cannot exist**,
+      and the tool reports it as permitted (`bin/agent-container` validate_destination). Netfilter has
+      no wildcard destination. Either refuse the combination at validation with a message naming the
+      mechanism, or resolve it — but it must not validate and then silently not exist.
+- [ ] T149 **Adopting a declaration breaks every sidecar hostname.** Under `network_mode: service:`
+      the sidecars share one namespace, so service-name DNS no longer resolves between them; the
+      current error steers the operator toward a fix that cannot work. Confirmed by measurement.
+- [ ] T150 **squid's `access_log` writes to a file nothing can read** (`image/egress/squid.conf`:
+      `stdio:/var/log/squid/access.log`). T130 fixed the DNS half of "a refusal is a record"; the
+      CONNECTION half is still false. Should be `stdio:/dev/stdout`.
+- [ ] T151 **`--json` cannot report WHICH mechanism was obtained** — `enforced` is a boolean with no
+      mechanism field. FR-021's promise is that an operator can tell which enforcement they got, and
+      a machine consumer currently cannot.
+
+### Refuted by the verification pass (recorded so they are not re-raised)
+
+IPv6 has no separate filtering but is not reachable (no v6 route in the namespace); SC-009's port
+test does exercise what it names; the subdomain-under-a-declared-name exfiltration path is real but
+downgraded to low — it requires the operator to have declared the parent domain, which is the
+documented meaning of a domain entry; the proxy strength statement is not printed when nothing is
+enforced; a sidecar publishing ports fails loudly at the daemon rather than silently.
