@@ -33,3 +33,8 @@ dist/
 build/
 # NOTE: uv.lock IS committed. agent-container is an application/CLI (not a library), so
 # the lockfile is checked in for reproducible dev envs (`uv sync`). Do not ignore it.
+
+# speckit: which feature this WORKING COPY is on. Per-developer session state —
+# every spec branch set it differently, so it conflicted on each of the five spec
+# merges while encoding nothing durable. The specs themselves are the shared record.
+.specify/feature.json
