@@ -299,3 +299,21 @@ def test_mode_divergence_guard_fails_when_both_modes_say_the_same_thing(wiz, mon
     )
     with pytest.raises(AssertionError):
         tc.test_the_two_statements_are_actually_different(wiz)
+
+
+# --- T148: the wildcard-with-a-port refusal ---------------------------------
+
+
+def test_wildcard_port_guard_fails_when_the_combination_is_admitted(wiz, monkeypatch, tmp_path):
+    """The refusal is a validator, and a validator that stops refusing is silent.
+
+    Its whole value is that NOTHING downstream can catch this: the entry resolves,
+    renders and passes the permission check exactly like a legal one. So the
+    validator is replaced with one that admits the combination, and the test that
+    pins the refusal is asserted to fail.
+    """
+    import test_agent_as_code as tac
+
+    monkeypatch.setattr(wiz, "validate_destination", lambda entry, where: None)
+    with pytest.raises(pytest.fail.Exception):
+        tac.test_a_wildcard_host_with_a_port_is_refused_naming_the_mechanism(wiz, tmp_path)

@@ -155,8 +155,8 @@ selected agent has a built-in default and what that implies (quickstart S4).
 - [X] T027b [P] [US2] Add a test in `bin/tests/test_cli.py` for T027a — fires when the default is outside the declared set, silent when it is inside or when nothing is declared (FR-003a)
 - [X] T028 [US2] Implement the enforcement-strength statement in `bin/agent-container`: a proxy refuses clients that honour it, does **not** stop a process that dials directly, and **which** agents are known to honour it — currently all four (contract C5, FR-008)
 - [X] T029 [US2] Add a test in `bin/tests/test_cli.py` asserting the strength statement names the adherence set and contains **no** phrasing implying packet-level or absolute enforcement. SC-004's failure mode is satisfying the requirement in appearance
-- [X] T030 [P] [US2] Extend the `--json` envelope in `bin/agent-container` with `egress.providers`, `egress.hosts`, `egress.enforcement`, `egress.enforced`, `agent.builtin_default_provider`, `agent.honours_proxy` (contract C7, FR-005/FR-013)
-- [X] T031 [P] [US2] Add tests in `bin/tests/test_agent_interface.py` proving the `--json` fields report the **effective** allowlist — including `host_source` — so an operator sees the mapping before a refusal rather than after, and an operator `hosts:` override is reflected rather than the tool's default (research R6/R6a, FR-001b). Reporting the default while enforcing an override would state a permission set the proxy does not enforce
+- [X] T030 [P] [US2] Extend the `--json` envelope in `bin/agent-container` with `egress.providers`, `egress.hosts`, `egress.enforcement`, `egress.enforced`, `agent.builtin_default_provider`, `agent.honours_proxy` (contract C7, FR-005/FR-013). **NOTE (superseded in part by T112):** the flat `egress.hosts` list named here no longer exists — it was replaced by `egress.destinations`, whose entries carry `label`/`host`/`port`/`source`. It is emitted by NEITHER branch now: it used to survive in the undeclared branch alone, where an empty list read as "nothing is permitted" in the one case where everything is. A consumer still reading `.egress.hosts` gets `null`
+- [X] T031 [P] [US2] Add tests in `bin/tests/test_agent_interface.py` proving the `--json` fields report the **effective** allowlist — including `host_source` — so an operator sees the mapping before a refusal rather than after, and an operator `hosts:` override is reflected rather than the tool's default (research R6/R6a, FR-001b). Reporting the default while enforcing an override would state a permission set the proxy does not enforce. **NOTE:** delivered, but `host_source` as a separate field is gone with the flat `hosts` list — each `destinations` entry carries its own `source` instead. The test asserts that shape (`test_agent_interface.py:416`)
 
 **Checkpoint**: US2 is independently deliverable. Run quickstart S4, S7, S8.
 
@@ -303,11 +303,11 @@ it must fail (quickstart S12).
 - [X] T116 [US4] **Move the published port binding to the egress service** — a shared namespace has one port owner. The port *number* is unchanged, so the identity lock still passes; this is an announced **migration**, not an edit (Constitution IV, plan)
 - [X] T117 [US4] Add a test in `bin/tests/test_compose.py` pinning the new port ownership **and** asserting `port_for_name` is unchanged, so the migration is visible in exactly one place
 - [X] T118 [US4] Handle the migration for **already-running Phase A environments** in `bin/agent-container`: detect the old shape and recreate rather than leave a container whose port the tool no longer owns
-- [X] T119 [US4] Implement FR-021 — when transparent enforcement cannot be delivered on a host, fall back to Phase A's mechanism under `advisory` and refuse under `strict`, **naming which mode was obtained**. **Define the detection explicitly** (can the daemon grant `NET_ADMIN`? does `network_mode: service:` work on this runtime?) and prefer a positive probe over an assumption — an undetected failure silently downgrades to Phase A's strength while reporting the stronger one
-- [ ] T120 [US4] Place operator sidecars **inside** the boundary by default (FR-023), with an explicit opt-out (FR-023a)
-- [ ] T121 [US4] Name every out-of-boundary sidecar in the enforcement statement (FR-023b, **SC-015**) — otherwise `enforced: true` quietly means "except for these three containers", which is the overclaim SC-004 forbids wearing a different hat
+- [X] T119 [US4] Implement FR-021 — when transparent enforcement cannot be delivered on a host, fall back to Phase A's mechanism under `advisory` and refuse under `strict`, **naming which mode was obtained**. **Define the detection explicitly** (can the daemon grant `NET_ADMIN`? does `network_mode: service:` work on this runtime?) and prefer a positive probe over an assumption — an undetected failure silently downgrades to Phase A's strength while reporting the stronger one — **DONE, BUT NOT AS WRITTEN. The automatic fallback is deliberately NOT implemented; the requirement was amended instead (spec FR-021a).** What shipped is `egress_enforcement_mode()`, which returns `(mode, reason)` over exactly two modes — `transparent` and `none` — so the "name which mechanism you got" half is delivered and the "fall back to the proxy" half is refused. Two structural reasons, both recorded at the function: nothing rules out transparent enforcement **per agent** (it needs nothing from the agent, so there is no per-agent obstacle to fall back from), and every obstacle that remains — no image sources, an operator-redefined `egress` service — rules out the proxy **just as completely**, so there is nothing left to fall back *to*. Whether the daemon grants `NET_ADMIN` is not knowable pre-deploy, so the entrypoint **fails closed** rather than the tool guessing. A silent downgrade is the exact failure this feature exists to prevent, so the absence is the safe direction
+- [X] T120 [US4] Place operator sidecars **inside** the boundary by default (FR-023), with an explicit opt-out (FR-023a) — **DONE.** `build_sidecar_boundary_overlay` emits `network_mode: service:egress` + `depends_on: service_healthy` for every service in the operator's override that is not named in `egress.sidecars_outside`, delivered as a **third `-f`** *after* the override so an operator's own `network_mode` cannot win. Returns `None` when there is nothing to place, so the argv for an environment without sidecars is unchanged. `sidecars_outside` lives in the **spec**, not the override — the override is operator-owned and an agent must not be able to move a service out of the boundary. Tests: `test_compose.py` (overlay contents, opt-out, ordering, `verify_sidecars_outside_resolve` refusing a name no override defines)
+- [ ] T121 [US4] Name every out-of-boundary sidecar in the enforcement statement (FR-023b, **SC-015**) — otherwise `enforced: true` quietly means "except for these three containers", which is the overclaim SC-004 forbids wearing a different hat. **STATE: the naming is IMPLEMENTED and ASSERTED NOWHERE.** `do_up` warns `egress: <names> … outside the boundary` at deploy, beside the strength statement. But the only test claiming to cover SC-015 — `test_cli.py:505`, `assert "sidecars_outside" in s` — asserts that the literal *key name* occurs in the generic statement, which passes while no sidecar is ever named and the list is never consulted. It is also absent from `--json` (`egress_payload` has no `sidecars_outside` field), which T127a's acceptance arm would catch. Needs a unit assertion that the NAMES appear, keyed off a declaration that actually names one
 - [X] T122 [US4] Extend `validate_sidecar_override` to check **egress posture**, not only shape (FR-023d) — it was cosmetic before this feature and is security-relevant after
-- [ ] T123 [US4] Ensure no automatic project-network allowance is granted (FR-023c) — that would be the hidden baseline FR-001e forbids, reintroduced by the back door
+- [X] T123 [US4] Ensure no automatic project-network allowance is granted (FR-023c) — that would be the hidden baseline FR-001e forbids, reintroduced by the back door — **DONE by construction, and that is the whole of it.** No generator emits a subnet or project-network ACCEPT: `build_netfilter_rules` renders only `-d '<host>' --dport <port>` per declared entry, and the entrypoint's own unconditional ACCEPTs are `-o lo`, `ESTABLISHED,RELATED`, the two `--uid-owner` daemon exemptions, and the loopback-scoped squid ports. **Unguarded, though:** `_rule_is_scoped` in `test_pure_logic.py` returns True for any rule without `--dport`, so a future `-d 172.18.0.0/16 -j ACCEPT` would pass every existing check. Worth a companion assertion that no ACCEPT carries a CIDR destination
 
 ### Evasion acceptance (US4) — the only tests that can establish the claim
 
@@ -368,20 +368,39 @@ fail, then declare SSH to one host and confirm only that host on that port opens
       T128/T129a/T129b/T129c. plan.md anticipated this shape for ADOPTING a declaration but not for
       dropping one. Likely needs the old container stopped before the rebind rather than a plain
       recreate.
-- [ ] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not
-- [ ] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded
-- [ ] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding
+- [X] T129 [US5] Implement allowlist-only resolution (FR-020b) — declared names resolve, everything else does not — **DONE, and it is the same code as T111 rather than a second mechanism.** The baked `unbound.conf` carries `local-zone: "." refuse`; the generated `allowed.conf` adds `local-zone: "<name>" transparent` **plus** a `forward-zone` per declared name. Both halves are required: without the per-name `transparent` the catch-all matches first and **declared names are refused too** — an allowlist that permits nothing while passing every refusal test (observed, R17). Ported `{host, port}` entries are included, or a declared SSH remote fails to resolve and looks like a firewall bug. Pinned by doctest plus `test_agent_as_code.py:1688-1740`
+- [X] T130 [P] [US5] Record refused resolutions (FR-020d), for the same reason a refused connection is recorded — **DONE, and the fix was the DESTINATION, not the flag.** `log-replies: yes` was already set, but unbound's `use-syslog` **defaults to yes** and the egress image runs no syslogd, so every REFUSED line was handed to `syslog(3)` and discarded — measured: the boundary answered REFUSED and the container log was completely empty. `build_unbound_conf` now emits `use-syslog: no` + `logfile: ""` unconditionally, including for `allow: []`, where the record is the operator's only account of what the agent reached for. Reachable as `agent-container logs <name> --egress`
+- [X] T131 [US5] Make a refusal distinguishable from a genuine "no such host" (FR-020e), per T103's finding — **DONE by the T103 resolver choice itself.** unbound's `local-zone: "." refuse` answers **REFUSED** ("policy forbids asking") where dnsmasq's `local=/#/` can only answer NXDOMAIN. That is not cosmetic: NXDOMAIN is a **cacheable negative**, so a client that caches it keeps failing after the operator fixes the declaration and a policy error presents as a DNS bug outliving its cause. The distinction is surfaced to the operator on `logs --egress` ("REFUSED means the name is not declared; NXDOMAIN means the name genuinely does not exist") and is the tell the entrypoint documents for a mis-ordered DNAT
 - [X] T132 [US5] Add the **SSH arm to FR-003c's deploy-time check** — default-deny kills `git push` over SSH unless port 22 is declared. Hard Constraint #1 breaking from the opposite direction to Phase A's HTTPS case — **DONE.** The SSH arm fires only under TRANSPARENT enforcement — under the proxy, `ssh` does not honour `https_proxy` and the push genuinely works, so warning there would train operators to ignore the check. `ssh_remote_endpoint` parses both spellings git accepts and returns None for a non-numeric or out-of-range port rather than coercing to 22: a check that passes for the WRONG endpoint is worse than no check. Escalation is shared with the HTTPS arm, so severity cannot come to depend on the remote's URL scheme.
 - [X] T133 [P] [US5] Add a test for T132: fires for an SSH remote with no `{host, port: 22}` entry, silent when declared — **DONE.** Fires for all three SSH spellings; silent when `{host, port: 22}` is declared. Also pins FR-018a's port-selects-the-mechanism rule from the direction that matters: declaring the host PORTLESS (the proxy's surface) or on a DIFFERENT port must NOT report an SSH push as safe. `test_push_check_is_silent_for_ssh_remotes` renamed and narrowed — its old name claimed SSH is always unaffected, which Phase B falsified.
 
 ### Default-deny acceptance (US5)
+
+**STATE OF THIS BLOCK (reconciled at T145).** Every test below **exists and is named**; none is
+ticked, because the last full tier (R23: `50 passed, 2 skipped, 2 failed`, both failures a cold
+image build) ran at `e25066f`, and `5ed4bfa` has since changed the entrypoint's ACCEPT scoping and
+the point at which the declared-port fragment is sourced — which is exactly the machinery T135 and
+T138 assert. **These are written but unverified against the current boundary**, so they close with
+T146's tier run, not before. The tests:
+
+| Task | Test in `bin/tests/test_acceptance.py` |
+|---|---|
+| T134 | `test_agent_cannot_reach_a_non_standard_port` |
+| T135 | `test_a_declared_port_opens_that_host_and_that_port_only` |
+| T136 | `test_an_undeclared_name_does_not_resolve_including_a_tunnelling_label` |
+| T137 | `test_a_public_resolver_cannot_be_queried_directly` |
+| T138 | `test_git_push_over_declared_ssh_reaches_the_remote` |
+| T139 | `test_an_undeclared_environment_keeps_its_own_network` |
+
+Still genuinely unwritten: **T125**, **T127**, **T127a** (and T137a, which cannot be written as
+specified — see its note).
 
 - [ ] T134 [US5] Acceptance: an undeclared **non-standard HTTP port** (8080) and an arbitrary port (1337) both fail (SC-009, quickstart S13). **The first design sketch got this wrong** — redirecting only 80/443 under default-accept lets 8080 through, which is worse than no control
 - [ ] T135 [US5] Acceptance: a declared `{host, port: 22}` is reachable at **that host and that port only** — not the protocol generally, not another host (SC-010, quickstart S14)
 - [ ] T136 [US5] Acceptance: an undeclared name does not resolve, **including a tunnelling-shaped label** like `ZXhmaWx0cmF0ZWQ.attacker.example.com` (SC-012, quickstart S15)
 - [X] T136a [US5] Acceptance: a **declared** name still resolves and the environment works end to end (US5 scenario 3). **An allowlist-only resolver that resolves NOTHING passes every other DNS test here** — the positive case is what separates "working" from "broken closed", and broken-closed is the failure this mechanism makes easy
 - [ ] T137 [US5] Acceptance: `dig @8.8.8.8` is forced to the sidecar resolver (SC-013, quickstart S15)
-- [ ] T137a [US5] Acceptance: on a host where transparent enforcement **cannot** be delivered, `advisory` deploys and names the fallback mechanism while `strict` refuses (US5 scenario 4, FR-007b). SC-004a asserted this for Phase A only; without it `enforced: true` is ambiguous between two mechanisms of very different strength
+- [ ] T137a [US5] Acceptance: on a host where transparent enforcement **cannot** be delivered, `advisory` deploys and names the fallback mechanism while `strict` refuses (US5 scenario 4, FR-007b). SC-004a asserted this for Phase A only; without it `enforced: true` is ambiguous between two mechanisms of very different strength. **CANNOT BE WRITTEN AS SPECIFIED — see T119 and spec FR-021a.** There is no fallback mechanism to name: `egress_enforcement_mode` returns only `transparent` or `none`, so on a host that cannot deliver the boundary `advisory` deploys **unenforced** (stating the specific obstacle) and `strict` refuses. Rewrite the task around that pair of outcomes, or drop it in favour of a unit test over `egress_enforcement_mode`'s two obstacle branches — do not leave it phrased around a mechanism the tool deliberately does not have
 - [ ] T138 [US5] Acceptance: `git push` over declared SSH **succeeds** (quickstart S18). If this fails the feature is unshippable, whatever else passes
 - [ ] T139 [US5] Acceptance: an environment with **no** declaration is untouched — no rules, no forced DNS, unrestricted (FR-004, quickstart S19). Default-deny applies to opt-in environments, **never retroactively**
 
@@ -396,7 +415,9 @@ fail, then declare SSH to one host and confirm only that host on that port opens
 - [ ] T142 [P] Rewrite `docs/egress.md` — enforcement is a boundary now, not a convention. Correct the "proxy-level, not packet-level" framing throughout
 - [ ] T143 [P] Update `docs/execution.md` and `docs/orchestration.md` for the shared namespace and the port-owner move
 - [X] T144 Re-measure `CLAUDE.md` against its 2000-token budget with a real tokenizer, and update the egress invariant — it currently says "proxy-level", which Phase B falsifies — **DONE.** Measured with `tiktoken`, not estimated: 1962 before, 2036 after the rewrite alone, **1978 (`cl100k_base`) / 1973 (`o200k_base`) after pruning**. The invariant now reads packet-level and names the three things a reader must not get wrong: `NET_ADMIN` is on the **sidecar** and the agent holds none, squid **splices and never bumps** (a locally-issued CN means the boundary inverted), and a declared **port** selects netfilter over the proxy allowlist. The rewrite alone put the file 36 tokens **over**, so seven bullets were pruned before this task was called done — the number is measured after every edit, not estimated once
-- [ ] T145 Re-run the identity check against the T001 baseline. **It will pass** — the port number is unchanged — so verify the *port owner* separately; the lock cannot see that, which is why T116/T117 exist
+- [X] T145 Re-run the identity check against the T001 baseline. **It will pass** — the port number is unchanged — so verify the *port owner* separately; the lock cannot see that, which is why T116/T117 exist — **DONE, and it passed as predicted.** `test_pure_logic.py` + `test_compose.py`: 178 passed. All six baseline rows match (`agent-container-acme`/2206 through `agent-container-zzz-999`/2282), all nine volume names in canonical order, and the only permitted deviation is still the one shellenv mount PATH.
+      **The port owner IS covered**, in one place, by `test_compose.py::test_the_published_port_moves_to_the_egress_service`: the agent publishes `<port>:2222` with no declaration, publishes **nothing** with one (`"ports" not in agent`), and the egress service publishes the same number. The gating is a single condition (`egress_filter_body is not None`) shared with `network_mode`, so the two cannot come apart, and there is no `cooperative` mode that would move the port without the namespace (T119). The runtime half is covered too, in **both** directions, by `test_lifecycle.py:444-505`.
+      **One vacuous assertion found, and it is the one T117's text names.** `test_compose.py:208` reads `assert wiz.port_for_name("acme") == wiz.port_for_name("acme")` — a tautology that holds for any return value, so the "asserting `port_for_name` is unchanged" half of T117 is not asserted there. The number itself is genuinely pinned, one file over, by `test_pure_logic.py::test_identity_is_unchanged_by_feature_011`. Fix is one of: `== 2206` (the T001 baseline literal), or delete the line and point the docstring at the test that does pin it. **Left for the owner of that file** — flagged, not edited
 - [X] T145a **Reconcile `docs/threat-model.md`** — Constitution 2.2.0 makes this MUST for any feature altering a trust boundary, and Phase B alters it more than anything else in the project. Flip the `012 Phase B` row to ✅ and record what actually changed: **T4 → mitigated**, **T5 → mitigated**, and §5's four "not mitigated" bullets under T4 rewritten. Also record what Phase B **newly introduces** — a container holding `NET_ADMIN`, and a resolver the whole environment depends on. **By the constitution's own words, Phase B has not landed until this row is updated** — **DONE.** T4 → **mitigated**, with all four Phase A bullets re-measured rather than asserted away; T5 → **mitigated** (sidecars inside by default, `sidecars_outside` the declared exception); T7 restated because `NET_ADMIN` now genuinely exists in the deployment; §2/§3/§4 updated for the sidecar as an actor, the boundary as an asset, and a boundary that is now a *set* of containers whose interior is unfiltered loopback by construction. **Two new threats the phase introduced rather than inherited**: **T13** — squid splices to `ORIGINAL_DST`, so a declared *name* does not constrain the *address* (measured this session; already stated in the tool's own output, which is why the doc could not go on omitting it); **T14** — the sidecar is new surface and a hard dependency, with the readiness window recorded as failing **closed**. §5 T12 gained six further instances of the check-that-passes-while-broken shape found in this phase. The structural guards (`test_threat_model_names_every_feature`, `test_threat_model_reconciled_rows_name_their_threats`, and their can-fail proofs) were re-run: green
 - [ ] T146 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier, and verify quickstart S12–S19 by hand
 
@@ -449,6 +470,28 @@ failure modes are disjoint.
 
 ## Adversarial review findings — remaining (ultracode, 30 agents, 12 confirmed / 8 refuted)
 
+**ALL FIVE ARE BEING WORKED THIS ROUND, IN PARALLEL, AND THE WORK IS UNCOMMITTED.** At the time of
+the T145 reconciliation the tree carries in-flight edits to `bin/agent-container` and
+`image/egress/squid.conf` addressing T148, T149, T150 and T151, plus a probe in progress for T147.
+None is ticked here, because none is committed or verified — **do not treat the code you can read
+as the record**. Whoever lands them ticks their own row with the usual measured note.
+
+Two cross-cutting notes for those agents:
+
+1. **The T151 `mechanism` field and T121 are the same surface.** `egress_payload` also has no
+   `sidecars_outside`, so a machine consumer cannot see either which mechanism it got or which
+   containers sit outside it. Adding one field and not the other leaves `enforced: true` ambiguous
+   in the second way instead of the first.
+2. **The in-flight T-fix to `disclose_builtin_default` breaks a committed test.** It replaces the
+   `egress.providers` remediation (correctly — that key is the one shape `validate_egress` refuses
+   outright, so the advice answered a warning with a hard failure) but `bin/tests/test_cli.py:395`
+   still asserts `"egress.providers" in err` under the message *"must say how to constrain it"*.
+   Reproduced: `test_builtin_default_is_disclosed_when_nothing_is_declared` **FAILS** in the working
+   tree. The test must move to the new remediation and, better, put it back through
+   `validate_egress` the way `test_compose.py:378` already does for the sibling message — that
+   sibling had such a test and this one did not, which is precisely why the defect survived one
+   function over.
+
 - [ ] T147 **`{host, port}` pins DNS at rule-install time.** `iptables -d <host>` expands to the
       addresses resolved at insert time and pins them. A declared endpoint whose addresses rotate
       (github.com, any CDN-fronted git host) stops being reachable while the declaration still reads
@@ -475,3 +518,68 @@ test does exercise what it names; the subdomain-under-a-declared-name exfiltrati
 downgraded to low — it requires the operator to have declared the parent domain, which is the
 documented meaning of a domain entry; the proxy strength statement is not printed when nothing is
 enforced; a sidecar publishing ports fails loudly at the daemon rather than silently.
+
+## Verification findings — T146 (the authoritative run)
+
+Found by running the tier and the quickstart on live containers, not by reading.
+The gate and the tier are both green; these are what the run found in addition.
+
+- [X] T146a **`refuse_sidecar_name_in_allow` refused a deployment that works, with a
+      message asserting something false about it** — FIXED. The T149 refusal ran before
+      `enforce_egress_declaration` and fired on any declaration with an override, but its
+      entire premise is the shared namespace, which exists only when a boundary is
+      actually deployed. An `advisory` declaration that cannot be enforced (no reachable
+      `image/egress/Dockerfile` — the documented non-editable PyPI install — or an
+      override redefining the `egress` service) deploys UNENFORCED: sidecars stay on the
+      project network and service-name DNS between them keeps working. `enforced` is now a
+      keyword with **no default** and the call site is gated on the same `_enforced` the
+      boundary overlay uses. **Why nothing caught it:** every test called the function
+      directly with a declaration, and `test_inside_and_outside_are_computed_in_one_place`
+      compares `sidecars_inside_boundary` to the overlay — both of which answer the
+      *conditional* question — so the equality held while the condition that actually
+      decides placement was a third thing neither side saw. New test
+      `test_the_refusal_is_silent_when_no_boundary_is_actually_DEPLOYED` pins both branches
+- [X] T146b **The deploy-time record statement and `do_logs` still described the pre-T150
+      world** — FIXED. Both said the record was "scoped to resolutions only" *because*
+      squid logged to a file. After T150 refused connections are in the same stream, so
+      the scoping would send the operator whose HTTPS host is undeclared — the common case
+      — looking for a record the tool told them it did not cover. Verified live: the new
+      line prints, and both halves are in `logs --egress`
+- [X] T146c **A tautology where T117's text claims its assertion is** — FIXED.
+      `test_compose.py` asserted `port_for_name("acme") == port_for_name("acme")` and
+      derived the expected `ports:` value from the same function, so a drifted port moved
+      both sides of every assertion together. Now the literal `2206:2222` baseline
+- [X] T146d **C7's field table listed `egress.enforced` twice and never listed
+      `mechanism`** — FIXED: deduped, and the T151 field documented
+- [ ] T152 **The healthcheck is ~79% of the refusal record** (research **R25**, measured).
+      `nc -z 127.0.0.1 3127` opens a request-less connection to squid every ~3 s and each
+      one is logged, so the FR-020d record T150 delivered is diluted ~28,800 lines/day in
+      an always-on container. Enforcement is unaffected; legibility is not. **Two
+      `access_log` ACL filters were tried and measured INEFFECTIVE** (`url_regex` on the
+      pseudo-URL, and `method NONE`) — an ACL that cannot be evaluated does not match, so
+      the negation stays true; both were reverted rather than shipped with a comment
+      claiming verification. Two more were rejected on reasoning (`http_status 000` and
+      the client address both discard real refusals). The fix belongs in the **healthcheck**,
+      which is a readiness gate the fail-closed behaviour depends on (T129c/R20) and so
+      needs its own start-up-window measurement
+- [ ] T153 **quickstart S14's stated expectation for the undeclared port is wrong about the
+      mechanism** — the same defect shape S13 already had. It says `ssh -p 443 git@github.com`
+      "**times out**". Measured: the connection is DNAT'd into squid, which terminates it, so
+      ssh reports `kex_exchange_identification: Connection closed by remote host` /
+      `Connection closed by 140.82.121.4 port 443` — a *closed* connection, not a timeout.
+      A verifier following the step reads correct behaviour as a failure. The acceptance
+      test `test_a_declared_port_opens_that_host_and_that_port_only` already documents the
+      real mechanism ("443 is redirected into squid … `ssl_bump terminate` ends it, curl
+      exit 35") and asserts only `returncode != 0`, so the code and the test are right and
+      only the quickstart prose is stale. **SC-010 itself is confirmed solid**: with
+      `{host: github.com, port: 22}` declared, `https://github.com/` gives curl exit 35
+      direct and `CONNECT tunnel failed, response 403` proxied, while the declared provider
+      on 443 still returns 0
+- [ ] T154 **S15 cannot be executed as written: the agent image has neither `dig` nor `nc`.**
+      The step says to run `dig +time=5 +tries=1 @8.8.8.8 attacker.example.com`; both tools
+      are absent, and agents must never `apt install` at runtime. The property was verified
+      instead with the acceptance module's own `_DNS_PROBE` (raw-socket UDP/53), which is
+      what that test already uses — `@8.8.8.8` and `@1.1.1.1` both return
+      `NORESPONSE … [Errno 1] Operation not permitted`, the declared name returns `RCODE 0`
+      and undeclared/tunnelling names `RCODE 5`. Either rewrite the step around a tool the
+      image has, or state that it needs the probe

@@ -1650,6 +1650,55 @@ def test_bad_port_dies_naming_the_field(wiz, tmp_path, bad):
         wiz.load_project_spec(root)
 
 
+def test_a_wildcard_host_with_a_port_is_refused_naming_the_mechanism(wiz, tmp_path):
+    """T148. The combination validated, rendered a rule that CANNOT EXIST, and the
+    tool reported the destination as permitted.
+
+    `port` selects netfilter, and netfilter has no wildcard destination: `-d
+    '*.example.com'` is an operand iptables resolves at insert time and cannot.
+    The refusal must name the mechanism, because "invalid" would leave the
+    operator with no way to know that the same host is perfectly legal WITHOUT a
+    port — the proxy can match a subtree, the packet filter cannot.
+    """
+    root = _egress(
+        tmp_path, '      allow:\n        - host: "*.example.com"\n          port: 22\n', "wcp"
+    )
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.load_project_spec(root)
+    msg = str(e.value)
+    assert "*.example.com" in msg, "must name the offending entry"
+    assert "wildcard" in msg and "PACKET FILTER" in msg, "must name the mechanism, not just refuse"
+    assert "drop the `port:`" in msg, "and the escape that works"
+    # The same host WITHOUT a port stays legal — the refusal must be about the
+    # combination, not about wildcards, or FR-001d would be quietly withdrawn.
+    ok = _egress(tmp_path, '      allow:\n        - host: "*.example.com"\n', "wcok")
+    (env,) = wiz.load_project_spec(ok)
+    assert wiz.resolve_destinations(env["egress"]) == [
+        ("*.example.com", "*.example.com", None, "declaration")
+    ]
+
+
+def test_the_wildcard_port_refusal_is_what_keeps_the_two_surfaces_agreeing(wiz):
+    """T148, the half that makes the refusal load-bearing rather than tidy.
+
+    Nothing downstream of the validator can catch this: `resolve_destinations` is
+    a pure mapping, `build_netfilter_rules` renders whatever host it is given, and
+    `egress_permits_endpoint` matches wildcards — so the push check would report
+    such a destination as PERMITTED while the rule meant to carry it cannot be
+    installed at all. Both facts are asserted here, on hand-built entries that
+    bypass validation, so the reason the validator refuses is recorded next to it.
+    """
+    entries = [("*.example.com", "*.example.com", 22, "declaration")]
+    assert wiz.egress_permits_endpoint(entries, "git.example.com", 22), (
+        "the check calls it permitted — which is why validation must refuse it first"
+    )
+    assert "-d '*.example.com'" in wiz.build_netfilter_rules(entries), (
+        "and the renderer emits a destination iptables cannot resolve"
+    )
+    with pytest.raises(wiz.Fatal, match="wildcard"):
+        wiz.validate_destination({"host": "*.example.com", "port": 22}, "allow[0]")
+
+
 def test_squid_rendering_is_unquoted_and_dot_prefixed(wiz):
     """T108/R12a — the two forms that produce a SILENTLY EMPTY allowlist.
 

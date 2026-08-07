@@ -2271,6 +2271,21 @@ def test_git_push_over_declared_ssh_reaches_the_remote(acc):
     can be produced ONLY by a server that received the authentication request,
     whereas everything default-deny does (drop, timeout, unreachable) fails
     before any server is spoken to.
+
+    WHAT THIS TEST STRUCTURALLY CANNOT SEE, stated because the task it closes is
+    the one declared "unshippable if it fails" (T147, research R24/R25). It probes
+    SECONDS after `up`, and `{host, port}` is enforced by `iptables -d <name>`,
+    which resolves the operand ONCE at rule-install time and pins the addresses in
+    that single answer — nothing in the boundary re-resolves (measured at T146: the
+    egress container runs exactly `squid` and `unbound`, no refresher). So a green
+    result here means "reachable at deploy", not "reachable for the life of the
+    container". Measured at T146 on a live boundary: `github.com` pinned to
+    140.82.121.4, and 140.82.121.3 / .5 — the SAME host's other rotation addresses
+    — both time out. The moment the resolver hands the agent one of those, this
+    transport is dead until the container restarts, and R24 caught exactly that at
+    301 s with no recovery. A time-boxed probe cannot distinguish the two, which is
+    why the limitation is written here rather than left to be rediscovered as a
+    passing test over a broken push.
     """
     endpoint = ("github.com", 22)
     if _PUSH_URL:

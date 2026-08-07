@@ -39,6 +39,13 @@ the hostname; a port means an explicit packet-filter rule for that host on that 
 directly: `{host: github.com, port: 22}` does **not** make `github.com` reachable over HTTPS, and
 `{host: github.com}` does **not** open port 22.
 
+One combination is **refused** for the same reason: `{host: "*.example.com", port: 22}`. A port
+selects the packet filter, and netfilter has no wildcard destination — the rule would render as
+`-d '*.example.com'`, which cannot resolve. A subtree can only be matched from the name in the TLS
+handshake, which is the proxy's surface and therefore ports 80 and 443 only. So name the exact host
+for that port, or drop the `port:`. It is refused at validation rather than at deploy because it
+otherwise validated, was **reported as permitted**, and then did not exist.
+
 ## The three states are different, and one of them is not what you'd guess
 
 | Declaration | Meaning |
@@ -187,6 +194,29 @@ Two guards around it:
   quietly mean "except for these containers"; an undisclosed exemption is the same overclaim as an
   undisclosed baseline.
 
+### Adopting a declaration changes how you address them
+
+**Service-name DNS between the services stops working**, and this is the one migration cost that
+bites immediately. Inside the boundary the agent and every sidecar share **one** network namespace,
+so there is no per-service name to resolve any more — `postgres://db:5432` fails, and it fails as a
+name-resolution error with nothing pointing back at the declaration you added.
+
+They are all on **loopback** instead:
+
+| Before a declaration | Inside the boundary |
+|---|---|
+| `redis://redis:6379` | `redis://127.0.0.1:6379` |
+| `postgres://db:5432` | `postgres://127.0.0.1:5432` |
+
+Two consequences follow. One namespace means **one port space**, so two sidecars can no longer both
+listen on the same port. And **declaring the service name in `egress.allow` does not fix it** — that
+is the natural guess and it is refused, naming the fix: loopback traffic inside the boundary needs no
+permission, and the resolver has no such name to answer with (with a port it would render an
+`-d redis` rule the boundary cannot install; without one, a proxy entry it can never resolve).
+
+The tool says all of this at deploy time, on the same line that lists which sidecars joined the
+boundary.
+
 The override is also checked for **egress posture**, not merely shape. A sidecar *inside* the
 boundary that asks for `privileged`, for `NET_ADMIN`/`NET_RAW`/`SYS_ADMIN`/`ALL`, or for
 `network_mode: host` is refused: the first two could flush the rules of the namespace they share,
@@ -214,6 +244,34 @@ an integer for an explicit packet-filter rule. A caller reading only `host` cann
 and they have very different reach.
 
 `unrestricted` disambiguates an empty list, since undeclared and air-gapped both have one.
+
+`mechanism` names **which** enforcement you got — `transparent` for the packet-level boundary,
+`none` when nothing is enforced. It is not a restatement of `enforced`: the two mechanisms this
+feature can deliver are not interchangeable (one holds against an agent actively evading it, the
+other only against accident), and a boolean cannot say which. The prose statement distinguishes
+them, so a machine consumer must be able to as well. `enforced` keeps its meaning and is still
+emitted; the two are computed from one call so they cannot come to disagree.
+
+### Seeing what was refused
+
+```console
+$ agent-container logs acme --egress
+```
+
+The boundary's log is **the only place a refusal is recorded**, and it carries both halves:
+
+| line | means |
+|---|---|
+| `api.openai.com. A IN REFUSED` | the name is **not declared**. `NXDOMAIN` instead would mean it genuinely does not exist |
+| `NONE_NONE/000 0 CONNECT 140.82.121.4:443 … sni=github.com` | a TLS connection **terminated** because the name it asked for is not on the allowlist. Read the `sni=`, not the URL — the URL is the address the client chose, and on a CDN it fronts thousands of sites |
+| `TCP_DENIED/403 CONNECT api.openai.com:443` | refused through the diagnostic proxy, **with a status** the client can report rather than a silent drop |
+| `TCP_TUNNEL/200 CONNECT api.anthropic.com:443 ORIGINAL_DST/…` | permitted, and spliced — the tunnel was opened, not inspected |
+
+The agent's own log shows only the resulting failure with no cause, which is why this flag exists.
+Two things to know before reading it: the container healthcheck contributes a
+`NONE_NONE/000 … error:transaction-end-before-headers` line every few seconds, so filter those out;
+and asking for an environment with no boundary reports that as a **policy** fact ("no egress
+boundary to read"), not as a missing container.
 
 ## Modes
 

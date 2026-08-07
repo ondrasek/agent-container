@@ -150,8 +150,35 @@ log "unbound up (pid ${UNBOUND_PID})"
 # needs squid, which starts below — after the policy flips.
 if [ -s /etc/egress/ports.rules ]; then
     log "applying declared port rules"
+    # Counted BEFORE, so what the fragment actually installed can be printed
+    # afterwards without guessing which rules were its own.
+    rules_before=$(command iptables -S OUTPUT | wc -l)
     # shellcheck disable=SC1091  # generated, injected via compose configs
     . /etc/egress/ports.rules
+
+    # THE PIN IS PART OF THE RECORD, because it is NOT what the declaration says
+    # (T147, measured in research R24). `iptables -d <name>` resolves the operand
+    # here, once, and stores one rule PER ADDRESS in that one answer — the kernel
+    # never sees the name. A declared endpoint whose addresses rotate therefore
+    # stops being reachable while the declaration still reads as permitting it,
+    # and because the readiness gate passes, it presents as a healthy deployment
+    # whose connections fail later. Measured, not theorised: `github.com` was
+    # pinned to 140.82.121.4 and the SAME resolver handed the agent 140.82.121.3
+    # ~2 minutes later, so `ssh -T git@github.com` timed out — Hard Constraint #1
+    # (commit AND push) failing at push time, after the work exists.
+    #
+    # This cannot be fixed by logging, so what is fixed is the SILENCE: the
+    # addresses go to the operator's channel with the consequence spelled out, so
+    # a later timeout is diagnosable from `agent-container logs <name> --egress`
+    # instead of looking like a broken network.
+    command iptables -S OUTPUT | tail -n "+$((rules_before + 1))" |
+        while read -r rule; do log "pinned NOW, by address: ${rule}"; done
+    log "declared {host, port} entries are pinned to the addresses above, resolved"
+    log "  once, just now. If a destination's addresses rotate — every CDN-fronted"
+    log "  host does, github.com included — it becomes UNREACHABLE while the"
+    log "  declaration still permits it, and the failure surfaces at connect time"
+    log "  (git push, a database connection) rather than at deploy. A destination"
+    log "  declared WITHOUT a port is matched by NAME at the proxy and does not pin."
 fi
 
 # FR-017. Everything not permitted above is denied — including protocols and
@@ -164,6 +191,35 @@ log "netfilter complete; OUTPUT policy=DROP"
 # This container's own resolution rides the SAME rewrite: squid's /etc/resolv.conf
 # still says 127.0.0.11 and lands on unbound, so squid can resolve declared names
 # and only declared names. No second mechanism, and nothing to keep in sync.
+
+# --- the record --------------------------------------------------------------
+# A REFUSED CONNECTION IS ONLY A RECORD IF THE OPERATOR CAN READ IT (FR-020d,
+# T150). squid's access log is written to `stdio:/dev/stdout` so it lands in the
+# container's log and `agent-container logs <name> --egress` shows it — the same
+# channel T130 had to fix for unbound, whose refusals were being handed to a
+# syslog this image does not run.
+#
+# BUT squid CANNOT OPEN THAT PATH BY ITSELF. /dev/stdout is /proc/self/fd/1, the
+# runtime's log pipe, created root-owned and mode 0600; squid REOPENS its logs by
+# path after dropping to the `squid` user, and that open fails with EACCES.
+# Measured: `FATAL: Cannot open '/dev/stdout' for writing`, written to cache.log —
+# inside the container, where nothing reads it — leaving a container that exited 1
+# with a COMPLETELY EMPTY log. The fix for an unreadable record failing invisibly
+# is the exact defect it was fixing.
+#
+# chown rather than `chmod 0666`, and the difference is real: writing to an
+# ALREADY-OPEN descriptor needs no permission, only reopening the path does. So
+# unbound keeps its inherited stderr and needs nothing, and squid is the only user
+# that gains anything. Measured both ways (unbound still cannot reopen it).
+chown squid /dev/stdout /dev/stderr || die "cannot hand squid the container's log stream"
+
+# AND IT IS CHECKED, because the failure mode is silence. Without this the
+# boundary comes up, squid dies on its first log open, compose reports only
+# `unhealthy`, and the reason is in a file inside a container that is already
+# gone. Runs as `squid` because root's answer would be yes regardless — the guard
+# has to ask the user that will actually do the open.
+su -s /bin/sh squid -c '[ -w /dev/stdout ] && [ -w /dev/stderr ]' ||
+    die "squid cannot write the container's log stream — a refused connection would go unrecorded (FR-020d)"
 
 # --- proxy -------------------------------------------------------------------
 # exec: squid becomes PID 1 so compose owns the lifecycle and a crash takes the

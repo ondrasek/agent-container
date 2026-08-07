@@ -2439,6 +2439,28 @@ def driver_compose_argv(
     return driver_runtime_argv(host) + ["compose", "-p", project, *files, *args]
 
 
+def sidecars_inside_boundary(override: Path | None, egress: object) -> list[str]:
+    """The operator sidecars that will share the egress network namespace.
+
+    One place, because the overlay that does the PLACING and the checks that
+    DESCRIBE it (T149) must answer identically. A second spelling would eventually
+    disagree, and the disagreement an operator would notice is a service they
+    believe is constrained.
+
+    Empty when nothing is declared or there is no override — not "every service",
+    which is what a caller reading the file directly would get for an undeclared
+    environment where no sidecar is placed anywhere.
+    """
+    if override is None or not is_egress_declared(egress):
+        return []
+    try:
+        services = _yaml_service_keys(override.read_text())
+    except OSError:
+        return []
+    outside = set(sidecars_outside_boundary(egress))
+    return [svc for svc in services if svc not in outside]
+
+
 def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dict | None:
     """A compose fragment placing each operator sidecar in the egress namespace.
 
@@ -2455,14 +2477,7 @@ def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dic
     Returns None when there is nothing to place, so no third `-f` is emitted and
     the argv for an environment without sidecars is unchanged.
     """
-    if override is None:
-        return None
-    try:
-        services = _yaml_service_keys(override.read_text())
-    except OSError:
-        return None
-    outside = set(sidecars_outside_boundary(egress))
-    inside = [svc for svc in services if svc not in outside]
+    inside = sidecars_inside_boundary(override, egress)
     if not inside:
         return None
     return {
@@ -3408,6 +3423,12 @@ def compose_up_exec(
     if _override is not None:
         check_sidecar_egress_posture(_override, egress)
     _enforced = enforce_egress_declaration(egress, spec.agent, _override)
+    # AFTER `_enforced`, and gated on the SAME variable the boundary overlay below
+    # uses — the refusal's entire premise is that the sidecars share the agent's
+    # namespace, which is true only when a boundary is deployed. Still before
+    # staging and before `down_container`'s port migration, so nothing has been
+    # written or torn down when it fires.
+    refuse_sidecar_name_in_allow(egress, _override, enforced=_enforced)
     # NOT gated on `not redeploy`: `redeploy` is precisely how a declaration is
     # added or removed, so skipping the migration there meant the one command that
     # triggers the port move was the one command that could not survive it.
@@ -3469,6 +3490,9 @@ def compose_up_exec(
             boundary_file = host_state_dir(host_name) / f"{name}.boundary.yaml"
             boundary_file.write_text(json.dumps(overlay, indent=2) + "\n")
             log(f"sidecars inside the egress boundary: {', '.join(overlay['services'])}")
+            # And what that does to how they are ADDRESSED, which the line above
+            # does not say and no operator infers from "inside the boundary".
+            warn_sidecar_hostnames_moved_to_loopback(list(overlay["services"]))
         outside = sidecars_outside_boundary(egress)
         if outside:
             # FR-023b/SC-015. NAMED, always — an unnamed exception is
@@ -4414,12 +4438,14 @@ def wizard_handover(
 def do_logs(name: str, follow: bool, egress: bool = False) -> int:
     """Stream the agent container's log, or — with `egress` — the boundary's.
 
-    THE BOUNDARY'S LOG IS THE ONLY PLACE A REFUSAL IS RECORDED (FR-020d). unbound
-    writes one line per reply, so an undeclared name reached for by the agent
-    leaves `… api.openai.com. A IN REFUSED …` there and nowhere else; the agent
-    container's own log shows a failed lookup with no cause. Without this flag the
-    record existed and was unreachable, which for an operator is the same as not
-    existing.
+    THE BOUNDARY'S LOG IS THE ONLY PLACE A REFUSAL IS RECORDED (FR-020d), and
+    since T150 it carries BOTH halves. unbound writes one line per reply, so an
+    undeclared name leaves `… api.openai.com. A IN REFUSED …`; squid writes one
+    line per request, so an undeclared SNI leaves `NONE_NONE/000 0 CONNECT
+    140.82.121.10:443 … sni=codeload.github.com`. Neither appears anywhere else —
+    the agent container's own log shows a failed lookup or a dropped connection
+    with no cause. Without this flag the record existed and was unreachable, which
+    for an operator is the same as not existing.
     """
     validate_name(name)
     rt = detect_runtime()
@@ -5513,6 +5539,30 @@ def validate_destination(entry: object, where: str) -> None:
         port = entry.get("port")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             die(f"{where}: `port` must be an integer 1-65535, got {port!r}")
+        host = str(entry.get("host"))
+        if host.startswith("*."):
+            # T148. A WILDCARD WITH A PORT IS A RULE THAT CANNOT EXIST, and it used
+            # to validate. `port` selects netfilter (FR-018a), netfilter has no
+            # wildcard destination, and `build_netfilter_rules` renders `-d '*.x'`
+            # — an operand iptables resolves AT INSERT TIME, so the boundary dies
+            # installing it and blames netfilter rather than the declaration.
+            #
+            # Refused rather than made real because there is nothing to make: a
+            # subtree cannot be enumerated into addresses, and the only surface
+            # that can match a name subtree is the proxy, which sees the name in
+            # the handshake. Meanwhile `egress_permits_endpoint` matches wildcards,
+            # so the push check reported such a destination as PERMITTED — a
+            # declaration that validates, reads as permitted, and then does not
+            # exist is the exact defect class this feature exists to remove.
+            die(
+                f"{where}: a wildcard host cannot carry a `port:`. A port selects the "
+                f"PACKET FILTER, and netfilter has no wildcard destination — the rule "
+                f"renders as `-d {host}`, which cannot resolve when the boundary "
+                f"installs it, so this entry would be reported as permitted and then "
+                f"not exist. Name the exact host for that port, or drop the `port:` "
+                f"— a name subtree can only be matched by the proxy, from the name in "
+                f"the TLS handshake, and only on ports 80 and 443."
+            )
 
 
 # `validate_provider_entry` lived here: the validator for a `providers:` entry.
@@ -5590,6 +5640,11 @@ def build_netfilter_rules(entries: list[tuple[str, str, int | None, str]]) -> st
 
     A shell fragment rather than a data file because the image would otherwise
     need a parser to apply it.
+
+    NO WILDCARD CAN REACH HERE, and the absence of handling for one is deliberate:
+    `-d '*.example.com'` is not a destination iptables can resolve, so
+    `validate_destination` refuses `{host: "*.x", port: n}` outright (T148) rather
+    than letting this render a rule the boundary then dies installing.
 
     >>> print(build_netfilter_rules([("github.com", "github.com", 22, "declaration")]))
     iptables -A OUTPUT -p tcp -d 'github.com' --dport 22 -j ACCEPT
@@ -5806,7 +5861,12 @@ def disclose_builtin_default(egress: object, agent: str | None) -> None:
         f"agent {agent!r} has a BUILT-IN DEFAULT PROVIDER ({provider}): it can reach "
         f"a model provider over the network without any credential you supplied, and "
         f"this environment declares no egress restriction. To constrain it, declare "
-        f"`egress.providers` in the environment spec."
+        # NOT `egress.providers`, which this message said until the sibling message
+        # in check_builtin_default_declared was fixed for exactly this: that key is
+        # the one shape `validate_egress` refuses OUTRIGHT (FR-018b), so following
+        # the advice answered a warning with a hard failure. The sibling had a test;
+        # this one did not, so the defect survived one function over.
+        f"egress in the environment spec:  egress.allow: [{{provider: {provider}}}]"
     )
 
 
@@ -5895,6 +5955,91 @@ def verify_sidecars_outside_resolve(egress: object, override: Path | None) -> No
             f"while the declaration says it is outside — so this is refused rather "
             f"than ignored. Declared there: {sorted(declared) or 'nothing'}."
         )
+
+
+def refuse_sidecar_name_in_allow(egress: object, override: Path | None, *, enforced: bool) -> None:
+    """Refuse a declared destination that names a sidecar inside the boundary (T149).
+
+    `enforced` HAS NO DEFAULT, and that is the point. Nothing shares a namespace
+    until a boundary is actually deployed, and a declaration can exist without one:
+    an `advisory` declaration on a host with no reachable egress image sources (a
+    non-editable PyPI install) or under an override that redefines the `egress`
+    service deploys UNENFORCED, sidecars stay on the project network, and
+    service-name DNS between them keeps working. Refusing there would reject a
+    configuration that works, with a message asserting a namespace share that is
+    not happening — the whole justification stated as fact about a deployment where
+    it is false. `sidecars_inside_boundary` cannot see this: it answers the
+    CONDITIONAL question (which sidecars would be inside, if one is deployed), so
+    the enforceability half has to be supplied by whoever knows it.
+
+    ADOPTING A DECLARATION CHANGES HOW SIDECARS ARE ADDRESSED, and an entry like
+    `{host: redis}` is the shape of the mistake that follows. Under Phase A the
+    agent sat on the project network and reached `redis:6379` by service name
+    through the proxy, so declaring it was meaningful. Inside the boundary every
+    service shares ONE network namespace, so the sidecar is on LOOPBACK and needs
+    no declaration at all — while the entry itself cannot work either way:
+
+      * with a port, `build_netfilter_rules` renders `-d redis`, which iptables
+        resolves AT INSERT TIME through the sidecar resolver, which forwards
+        declared names to a PUBLIC upstream where no such name exists. The rule is
+        rejected and the boundary dies rather than starting unenforced.
+      * without one, squid gets a `dstdomain` it can never resolve for the same
+        reason, so the entry permits nothing.
+
+    So the operator is told at deploy time what actually changed and what to write
+    instead, rather than meeting an NXDOMAIN at run time and reading it as a DNS
+    fault. Refused rather than warned BECAUSE THE ENTRY CANNOT BE MADE TO WORK:
+    advisory/strict is the axis for a declaration that cannot be ENFORCED, not for
+    one that names a destination which does not exist.
+
+    Only sidecars INSIDE the boundary are matched. One deliberately placed outside
+    is on the project network and unreachable from inside by any name, which is the
+    disclosed cost of `sidecars_outside` rather than a mistake in the allowlist.
+    """
+    if not enforced:
+        return
+    inside = set(sidecars_inside_boundary(override, egress))
+    if not inside:
+        return
+    assert isinstance(egress, dict)  # sidecars_inside_boundary is empty otherwise
+    named = sorted({h for _l, h, _p, _s in resolve_destinations(egress) if h in inside})
+    if not named:
+        return
+    die(
+        f"egress: allow names {named}, which {'is' if len(named) == 1 else 'are'} "
+        f"sidecar service name(s), not reachable destination(s). Under an enforced "
+        f"declaration the sidecars share ONE network namespace with the agent, so "
+        f"service-name DNS between them no longer resolves and the name resolves "
+        f"NOWHERE — the entry cannot be installed as a rule or matched by the proxy. "
+        f"Remove {'it' if len(named) == 1 else 'them'}: loopback traffic inside the "
+        f"boundary needs no declaration. Reach the service at 127.0.0.1:<its port>."
+    )
+
+
+def warn_sidecar_hostnames_moved_to_loopback(inside: list[str]) -> None:
+    """Say what adopting a declaration did to sidecar addressing (T149).
+
+    Measured, and it is not obvious from anything else the tool prints: joining one
+    network namespace means service-name DNS BETWEEN the services stops resolving,
+    so every connection string naming a sidecar breaks the moment a declaration is
+    adopted. The operator gets a name-resolution failure inside the container and
+    no reason to connect it to a change they made in the spec.
+
+    The remediation is the part that must be here rather than left to inference,
+    because the obvious guess — declare the sidecar's name in `egress.allow` —
+    CANNOT work (see refuse_sidecar_name_in_allow). Loopback is the answer, and the
+    shared namespace also means the ports are shared, which is the second surprise.
+    """
+    if not inside:
+        return
+    warn(
+        f"egress: {', '.join(inside)} now share ONE network namespace with the agent, "
+        f"so SERVICE-NAME DNS BETWEEN THEM NO LONGER RESOLVES. Reach them on loopback "
+        f"and their port (127.0.0.1:5432, not db:5432) — and note that the namespace "
+        f"has one port space, so two sidecars cannot both listen on the same port. "
+        f"Declaring a service name in `egress.allow` does NOT restore it: loopback "
+        f"needs no permission, and the resolver has no such name to answer with."
+    )
 
 
 def override_redefines_egress(override: Path | None) -> bool:
@@ -6396,14 +6541,18 @@ def enforce_egress_declaration(
         # otherwise undiscoverable — it lives in a container the tool deliberately
         # keeps out of the `agent-container-*` namespace every listing scans.
         #
-        # SCOPED TO RESOLUTIONS ONLY, deliberately. squid's access log is written
-        # to a FILE inside the boundary (`access_log stdio:/var/log/squid/…`), not
-        # to its stdout, so refused CONNECTIONS are not in this stream — claiming
-        # them here would be the overclaim FR-022 forbids, wearing a smaller hat.
+        # COVERS BOTH HALVES since T150: unbound's replies AND squid's access log
+        # now go to the boundary container's stdio, so refused CONNECTIONS are in
+        # this same stream. Before T150 squid logged to a file inside the boundary
+        # and this message said "DNS lookups" for that reason; leaving it scoped
+        # that way would send the operator whose HTTPS host is undeclared — the
+        # common case — looking for a record it says does not cover them.
         log(
-            "egress: refused DNS lookups are recorded in the boundary's log "
-            "(`agent-container logs <name> --egress`); REFUSED means undeclared, "
-            "NXDOMAIN means the name does not exist"
+            "egress: refused lookups AND refused connections are recorded in the "
+            "boundary's log (`agent-container logs <name> --egress`); REFUSED means "
+            "the name is not declared, NXDOMAIN means it does not exist, and a "
+            "connection the proxy would not open logs NONE_NONE/000 with the "
+            "`sni=` it was reaching for"
         )
         return True
     if mode == "strict":
@@ -7021,14 +7170,26 @@ def egress_payload(egress: object, agent: str, override: Path | None = None) -> 
     (advisory mode with an unenforceable declaration), and a caller must be able to
     tell those apart without parsing prose.
 
+    `mechanism` IS NOT A RESTATEMENT OF `enforced` (T151/FR-021). A boolean cannot
+    say WHICH enforcement was obtained, and the two this feature can deliver are
+    not interchangeable: the packet-level boundary holds against an agent actively
+    evading it, a cooperative proxy holds only against accident. FR-021's promise is
+    that an operator can tell them apart, and the prose statement said so while the
+    machine-readable surface reported one bit for both. Added ALONGSIDE `enforced`
+    rather than replacing it — consumers exist, and `enforced` keeps its meaning.
+
     >>> p = egress_payload(None, "claude")
-    >>> p["declared"], p["enforced"], p["destinations"]
-    (False, False, [])
+    >>> p["declared"], p["enforced"], p["mechanism"], p["destinations"]
+    (False, False, 'none', [])
     """
     if not is_egress_declared(egress):
         return {
             "declared": False,
             "enforced": False,
+            # 'none' rather than null: an undeclared environment HAS a mechanism,
+            # and it is nothing. A null would read as "unknown" and invite a
+            # consumer to guess, which is the silence this feature exists to end.
+            "mechanism": EGRESS_UNENFORCED,
             "enforcement": None,
             "providers": [],
             "destinations": [],
@@ -7036,10 +7197,15 @@ def egress_payload(egress: object, agent: str, override: Path | None = None) -> 
         }
     assert isinstance(egress, dict)
     entries = resolve_destinations(egress)
-    ok, reason = egress_enforceable(egress, agent, override)
+    mechanism, reason = egress_enforcement_mode(egress, agent, override)
+    ok = mechanism != EGRESS_UNENFORCED
     return {
         "declared": True,
         "enforced": ok,
+        # The two fields are computed from ONE call deliberately. Deriving `enforced`
+        # from the mechanism is what keeps them from disagreeing — a payload saying
+        # `enforced: true, mechanism: none` would be worse than either field alone.
+        "mechanism": mechanism,
         "not_enforced_reason": None if ok else reason,
         "enforcement": egress.get("enforcement") or "advisory",
         "providers": sorted(

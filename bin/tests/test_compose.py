@@ -200,12 +200,19 @@ def test_the_published_port_moves_to_the_egress_service(wiz, tmp_path):
     """
     plain = _model(wiz, tmp_path)
     withp = _model(wiz, tmp_path, egress_filter_body="")
-    port = f"{wiz.port_for_name('acme')}:2222"
+    # The LITERAL T001 baseline, not `port_for_name("acme")`. Deriving the expected
+    # value from the function under discussion made both sides of every assertion
+    # move together, so a drifted port read as "unchanged owner, unchanged number"
+    # — and the tautology that used to sit at the end of this test
+    # (`port_for_name("acme") == port_for_name("acme")`) held for any return value
+    # at all. The number is also pinned in test_pure_logic.py::
+    # test_identity_is_unchanged_by_feature_011; it is repeated here because THIS
+    # test is the one that claims the number survives the owner moving.
+    port = "2206:2222"
 
     assert plain["services"]["agent"]["ports"] == [port], "unchanged without a declaration"
     assert "ports" not in withp["services"]["agent"], "the agent cannot publish in a shared netns"
     assert withp["services"]["egress"]["ports"] == [port], "same NUMBER, different owner"
-    assert wiz.port_for_name("acme") == wiz.port_for_name("acme")
 
 
 def test_agent_joins_the_namespace_and_gains_no_capability(wiz, tmp_path):
@@ -390,6 +397,26 @@ def test_the_builtin_default_refusal_offers_config_the_validator_accepts(wiz):
         wiz.validate_destination(entry, "remediation")
     # And the whole block it implies must validate, not just the entry.
     wiz.validate_egress({"allow": _remediation_entries(msg)}, "remediation")
+
+
+def test_the_builtin_default_disclosure_also_offers_config_that_validates(wiz, capsys):
+    """The same defect one function over — and the sibling test above is exactly
+    what made it easy to miss.
+
+    `check_builtin_default_declared` was fixed to stop naming `egress.providers`;
+    `disclose_builtin_default` — the message an UNDECLARED environment gets, so the
+    more common of the two — went on naming it. It is the one key `validate_egress`
+    refuses OUTRIGHT (FR-018b), so an operator following the advice answered a
+    disclosure with a hard failure, with the tool having authored both.
+    """
+    wiz.disclose_builtin_default(None, "opencode")
+    msg = capsys.readouterr().err
+    assert "big-pickle" in msg, "the disclosure must fire for an agent with a default"
+    assert "egress.providers" not in msg, "the remediation names the one refused key"
+    entries = _remediation_entries(msg)
+    for entry in entries:
+        wiz.validate_destination(entry, "remediation")
+    wiz.validate_egress({"allow": entries}, "remediation")
 
 
 def test_ssh_endpoint_parsing_rejects_a_non_numeric_port(wiz):
@@ -649,6 +676,117 @@ def test_posture_check_is_inert_without_a_declaration(wiz, tmp_path):
     """No declaration, no boundary, no business refusing an operator's sidecar."""
     o = _override(tmp_path, "services:\n  h:\n    image: x\n    privileged: true\n")
     wiz.check_sidecar_egress_posture(o, None)
+
+
+# --- T149: adopting a declaration changes how sidecars are ADDRESSED ---------
+
+
+def test_declaring_a_sidecar_service_name_is_refused_with_the_real_fix(wiz, tmp_path):
+    """T149. `{host: redis}` was meaningful under the cooperative proxy — the agent
+    was on the project network and reached the service by name. Inside the boundary
+    every service shares ONE namespace, so the sidecar is on loopback and the name
+    resolves nowhere: with a port the rule renders `-d redis` and the boundary dies
+    installing it, without one squid gets a domain it can never resolve.
+
+    Refused rather than warned because the entry cannot be made to work at all, and
+    the message must carry the fix — an operator who reaches for the allowlist has
+    already guessed wrong, so repeating "declare it" would send them in a circle.
+    """
+    o = _override(tmp_path, "services:\n  redis:\n    image: redis:7\n")
+    for entry in ({"host": "redis"}, {"host": "redis", "port": 6379}):
+        with pytest.raises(wiz.Fatal) as e:
+            wiz.refuse_sidecar_name_in_allow({"allow": [entry]}, o, enforced=True)
+        msg = str(e.value)
+        assert "redis" in msg, "must name the entry it is refusing"
+        assert "127.0.0.1" in msg, "and where the service actually is now"
+        assert "one network namespace" in msg.lower(), "and why it changed"
+
+
+def test_a_real_destination_that_merely_resembles_nothing_is_left_alone(wiz, tmp_path):
+    """The refusal matches sidecar service names EXACTLY. A declaration is mostly
+    real hosts, and a check that fired on any of them would make the boundary
+    undeployable for the environments most likely to want it."""
+    o = _override(tmp_path, "services:\n  redis:\n    image: redis:7\n")
+    wiz.refuse_sidecar_name_in_allow(
+        {"allow": [{"provider": "anthropic"}, {"host": "redis.corp.internal"}]}, o, enforced=True
+    )
+    # Undeclared, and no override: nothing to say in either case.
+    wiz.refuse_sidecar_name_in_allow(None, o, enforced=True)
+    wiz.refuse_sidecar_name_in_allow({"allow": [{"host": "redis"}]}, None, enforced=True)
+
+
+def test_the_refusal_is_silent_when_no_boundary_is_actually_DEPLOYED(wiz, tmp_path):
+    """The refusal's premise is a shared namespace, which exists only when the
+    declaration is ENFORCED — and a declaration can exist without one.
+
+    `advisory` on a host with no reachable egress image sources, or under an
+    override redefining the `egress` service, deploys UNENFORCED: no boundary, the
+    sidecars stay on the project network, and service-name DNS between them keeps
+    working. Refusing there rejects a configuration that works, and does it with a
+    message stating as fact a namespace share that is not happening.
+
+    Neither `sidecars_inside_boundary` nor the overlay can catch this — both answer
+    the conditional question — so the gate lives on this parameter, and it has no
+    default so a future caller cannot omit it back into the defect.
+    """
+    o = _override(tmp_path, "services:\n  redis:\n    image: redis:7\n")
+    egress = {"allow": [{"provider": "anthropic"}, {"host": "redis", "port": 6379}]}
+    wiz.refuse_sidecar_name_in_allow(egress, o, enforced=False)
+    # And the same input DOES refuse once a boundary is deployed, so the test above
+    # is not passing because the entry stopped being detected.
+    with pytest.raises(wiz.Fatal, match="redis"):
+        wiz.refuse_sidecar_name_in_allow(egress, o, enforced=True)
+
+
+def test_a_sidecar_declared_outside_the_boundary_is_not_matched(wiz, tmp_path):
+    """One placed outside is on the project network and is disclosed as
+    unconstrained. Whether its name resolves is the cost of that choice, not a
+    mistake in the allowlist — so the refusal stays scoped to services INSIDE."""
+    o = _override(tmp_path, "services:\n  feed:\n    image: f\n")
+    wiz.refuse_sidecar_name_in_allow(
+        {"allow": [{"host": "feed", "port": 8080}], "sidecars_outside": ["feed"]}, o, enforced=True
+    )
+
+
+def test_the_loopback_diagnostic_says_what_changed_and_what_to_do(wiz, capsys):
+    """The old failure was a correct placement with a wrong story: the operator was
+    told the sidecars were "inside the boundary" and then met an unresolvable
+    hostname, with nothing connecting the two. Both halves are asserted — what
+    broke, and the fix — plus that it does NOT point at the allowlist, which is the
+    fix that cannot work.
+    """
+    wiz.warn_sidecar_hostnames_moved_to_loopback(["db", "redis"])
+    err = capsys.readouterr().err
+    assert "db" in err and "redis" in err
+    assert "NO LONGER RESOLVES" in err, "say what changed, not just what to do"
+    assert "127.0.0.1:5432" in err, "a concrete replacement, not 'use loopback'"
+    assert "does NOT restore it" in err, "the obvious guess must be closed off"
+    # Silent when there is nothing inside — an environment with no sidecars must
+    # not be told about a change that did not happen to it.
+    wiz.warn_sidecar_hostnames_moved_to_loopback([])
+    assert capsys.readouterr().err == ""
+
+
+def test_inside_and_outside_are_computed_in_one_place(wiz, tmp_path):
+    """The overlay does the placing and three diagnostics describe it. A second
+    spelling of "which sidecars are inside" would eventually disagree with the one
+    that actually places them — and the disagreement would be a service the
+    operator believes is constrained.
+
+    WHAT THIS EQUALITY DOES NOT COVER, stated so it is not read as more than it is:
+    both sides answer the CONDITIONAL question — which sidecars would be inside a
+    boundary that is deployed. Whether one is deployed at all is `_enforced`, which
+    neither function receives, so agreeing here proves nothing about whether a
+    caller remembered to ask. That gate is a required keyword on
+    `refuse_sidecar_name_in_allow` for exactly that reason.
+    """
+    o = _override(tmp_path, "services:\n  redis:\n    image: r\n  feed:\n    image: f\n")
+    egress = {**DECL_A, "sidecars_outside": ["feed"]}
+    assert wiz.sidecars_inside_boundary(o, egress) == ["redis"]
+    overlay = wiz.build_sidecar_boundary_overlay(o, egress)
+    assert list(overlay["services"]) == wiz.sidecars_inside_boundary(o, egress)
+    # Undeclared: nothing is placed anywhere, so nothing is inside.
+    assert wiz.sidecars_inside_boundary(o, None) == []
 
 
 # --- adversarial review: fail-open paths -------------------------------------

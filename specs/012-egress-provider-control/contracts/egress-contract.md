@@ -182,8 +182,8 @@ The existing `--json` envelope (Feature 009) gains, per environment:
 | `egress.providers` | the provider labels resolved out of `allow` |
 | `egress.destinations` | the **effective** allowlist: `{label, host, port, source}` per entry. `source` (`tool`/`declaration`) must reflect an operator `hosts:` override rather than the tool's default (FR-001b), or the JSON would state a permission set the boundary does not enforce. `port` says WHICH SURFACE enforces the entry — `null` is the proxy allowlist, an integer is a netfilter rule (FR-018a), and the two have very different reach. Replaced a flat `egress.hosts`, which is no longer emitted by either branch |
 | `egress.enforced` | whether the declaration is actually in force. **Distinct from `declared`** — an advisory declaration that cannot be enforced is `declared: true, enforced: false`, with `not_enforced_reason` |
-| `egress.enforcement` | the effective mode |
-| `egress.enforced` | whether the declaration is actually being enforced for this agent |
+| `egress.mechanism` | **WHICH enforcement was obtained** (T151/FR-021): `transparent` (packet-level default-deny) or `none`. A boolean cannot say this, and the two are not interchangeable — the packet-level boundary holds against an agent actively evading it. Emitted `none`, never `null`, for an undeclared environment: a null reads as "unknown" and invites the consumer to guess. Derived from the same one call as `enforced`, so the pair cannot drift into `enforced: true, mechanism: none` |
+| `egress.enforcement` | the effective mode (`advisory`/`strict`) |
 | `agent.builtin_default_provider` | the disclosure, machine-readable |
 | `agent.honours_proxy` | the adherence fact |
 

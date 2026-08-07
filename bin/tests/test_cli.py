@@ -392,7 +392,12 @@ def test_builtin_default_is_disclosed_when_nothing_is_declared(wiz, capsys):
     err = capsys.readouterr().err
     assert "BUILT-IN DEFAULT PROVIDER" in err
     assert "big-pickle" in err, "must name WHICH provider, not merely that one exists"
-    assert "egress.providers" in err, "must say how to constrain it"
+    # It must say how to constrain it, and this assertion USED TO PIN THE WRONG
+    # ANSWER: `egress.providers` is the one key `validate_egress` refuses outright
+    # (FR-018b), so the disclosure sent the operator into a hard failure the tool
+    # had authored — with a passing test reading as coverage for the opposite.
+    assert "egress.providers" not in err
+    assert "egress.allow:" in err, "must say how to constrain it, in syntax that validates"
 
 
 def test_no_disclosure_for_an_agent_without_a_builtin_default(wiz, capsys):

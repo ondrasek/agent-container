@@ -1045,3 +1045,284 @@ duration told them apart.
 while an acceptance tier is running. The harness invokes `bin/agent-container`
 fresh per call, so a mid-run edit makes the whole verdict untrustworthy even when
 it is not the cause.
+
+
+### R24 (MEASURED) — a `{host, port}` rule pins ADDRESSES, and a rotating endpoint
+
+### breaks while the declaration still permits it (T147)
+
+`iptables -d <name>` resolves the operand **at insert time** and stores addresses;
+the kernel never sees the name. T147 asked whether that is a real operational
+defect or an acceptable documented limitation. **It is a real defect**, and the
+numbers below are why — measured on a live boundary built from `image/egress/`
+(docker 29.1.5 under Lima, `iptables v1.8.11 (nf_tables)`, alpine 3.21,
+unbound 1.22, upstream `1.1.1.1`) with the tool's own generators producing
+`allowed_sni.acl`, `allowed.conf` and `ports.rules`.
+
+**What one rule with a name in it becomes.** `ports.rules` carried three lines;
+`iptables -S OUTPUT` held ten:
+
+| declared entry | rules installed | addresses stored |
+|---|---|---|
+| `-d 'github.com' --dport 22` | **1** | `140.82.121.4/32` |
+| `-d 'api.anthropic.com' --dport 443` | **1** | `160.79.104.10/32` |
+| `-d 's3.amazonaws.com' --dport 443` | **8** | eight `/32`s, one per A record |
+
+So it pins **every address in that one answer, and only those** — one rule each.
+Nothing is re-resolved, and there is no name anywhere in the ruleset.
+
+**How fast the pin goes stale.** 21 answers per name from the boundary's own
+resolver over a 202-second window, compared against what was pinned at start:
+
+| name (declared port) | pinned | distinct addresses seen | answers containing an address that is NOT pinned | answers containing NO pinned address |
+|---|---|---|---|---|
+| `github.com` (22) | 1 | **2** (`140.82.121.3`, `.4`) | **5 / 21** | **5 / 21** |
+| `api.anthropic.com` (443) | 1 | 1 | 0 / 21 | 0 / 21 |
+| `s3.amazonaws.com` (443) | 8 | **162** | **21 / 21** | **21 / 21** |
+
+TTLs, from the same resolver: `github.com` **45 s** remaining of 60,
+`api.anthropic.com` 117 s, `s3.amazonaws.com` **5 s**.
+
+**The consequence, driven end to end** rather than inferred — from the agent
+container (`CapEff: 0000000000000000`, sharing the boundary's netns), roughly two
+minutes after the boundary came up:
+
+| probe | result |
+|---|---|
+| `dig github.com A` | `140.82.121.3` — **not** the pinned address |
+| `nc -w6 github.com 22` | `Operation timed out` |
+| `nc -w6 140.82.121.4 22` (the pin) | `open` |
+| `ssh -T git@github.com` | `connect to host github.com port 22: Operation timed out` |
+
+Both addresses answer SSH; only the pinned one is permitted. And restarting the
+boundary a few minutes later pinned `140.82.121.3` instead — the rotation is
+visible between two container starts, not only in a long-lived deployment.
+
+**Why this is the worst-shaped failure available.** The declaration reads as
+permitting `github.com:22`; the readiness gate (T129c) passes, because squid and
+unbound are healthy and neither knows about the pin; every DNS lookup succeeds, so
+FR-020e's "policy, not a DNS fault" signal says nothing. The environment is
+therefore *reported healthy and behaves healthily* until a connection is made —
+and for the documented SSH git remote that moment is **push time**, after the work
+exists. That is Hard Constraint #1 (commit **and** push) breaking in the exact
+ordering the constraint exists to prevent, and it is intermittent
+(**5/21 ≈ 24 %** for `github.com`), which is the hardest form to diagnose.
+
+**The obvious consolation was written down, then measured, and is FALSE.** The
+draft of this entry claimed that a destination declared **without** a port is
+immune, since squid matches the SNI by name per connection. Declaring
+`s3.amazonaws.com` as a bare `host:` and driving 12 HTTPS requests through it:
+
+| declaration | requests | succeeded | failed |
+|---|---|---|---|
+| `- host: s3.amazonaws.com` (no port) | 12 | **2** | **10** (curl exit 35) |
+
+with **10** matching `SECURITY ALERT: Host header forgery detected on … (local IP
+does not match any domain IP)` / `on URL: s3.amazonaws.com:443` in squid, and
+`NONE_NONE/409` in the access log. **The same root cause, one layer up**: on an
+intercepted connection squid checks that the client's original destination address
+is among the addresses **squid** resolves for the name, and squid's ipcache and the
+agent's answer had diverged. Squid's own documentation closes off a config fix:
+*"For now suspicious intercepted CONNECT requests are always responded to with an
+HTTP 409 (Conflict) error page"* — regardless of `host_verify_strict`.
+
+So rotation is not a netfilter problem that the proxy path escapes. It is a
+**divergent-resolution** problem, and both surfaces have it.
+
+`api.anthropic.com` never failed in any run, and the reason is visible in the
+numbers above: **1** address, stable for the whole window. Every declared
+destination measured here worked or failed exactly according to whether its
+address set held still.
+
+**Failure direction when resolution fails outright, also measured:** a ported host
+that does not resolve makes `iptables` exit **2** (`host/network 'x' not found`)
+with no rule installed, which the entrypoint's checking wrapper turns into a
+`die`. Fail-closed, and loud.
+
+#### What was shipped for it, and what was not
+
+**Shipped #1 (`image/egress/unbound.conf`): `cache-min-ttl: 300`, which makes the
+three resolutions agree.** The agent, squid's ipcache and the entrypoint's rule
+installation each resolve independently, and the boundary only works when they hold
+the same addresses. Pinning the cache is what makes them:
+
+| declaration | resolver | requests / probes | failed |
+|---|---|---|---|
+| `- host: s3.amazonaws.com` | as shipped before | 12 HTTPS | **10** (+10 forgery alerts) |
+| `- host: s3.amazonaws.com` | `cache-min-ttl: 300` | 12 HTTPS | **0** (0 alerts) |
+| `- {host: github.com, port: 22}` | `cache-min-ttl: 300` | 14 × `nc -z github.com 22` over 196 s | **0** |
+| `- {host: s3.amazonaws.com, port: 443}` | `cache-min-ttl: 300` | 14 answers over 196 s | every address ⊆ the pinned 8 |
+
+**It fixes the bare-host CDN case outright and the ported case only for as long as
+that first cache entry lives** — the rules are still installed once. Said plainly
+because the numbers above, read alone, would suggest the pin was solved.
+
+**Shipped #2 (`image/egress/entrypoint.sh`): the pin is now RECORDED.** Every
+installed address is logged, once, at install time, with the consequence spelled
+out, so a later timeout is diagnosable from `agent-container logs <name> --egress`
+instead of presenting as a broken network. This does not fix the defect; it ends
+the **silence**, which is the part that made it dangerous.
+
+**Not shipped: periodic re-resolution — and the reason is a schedule, not an
+impossibility.** Against the raw TTLs it genuinely could not work: `s3.amazonaws.com`
+rotates its whole 8-address answer inside 5 seconds (**162 distinct addresses in 21
+answers**), so any rule set built from a *separate* lookup loses the race with the
+client's lookup. **`cache-min-ttl` removes that race**, which is the load-bearing
+consequence of shipping it: every consumer now reads one stable RRset per name, so
+a refresher re-resolving through unbound sees exactly what the agent sees, and the
+exposure shrinks to the gap between a cache flip and the next refresh cycle.
+
+Measured, on the run that ends this entry — boundary with `cache-min-ttl: 300`,
+sampled every 20 s:
+
+| elapsed since container start | `github.com` answer | `nc -z github.com 22` |
+|---|---|---|
+| up to **281 s** | `140.82.121.3` — the pinned address | **succeeds**, every sample |
+| from **301 s** | `140.82.121.4`, and all 8 `s3` addresses rotated with it | **fails**, 9 / 9 consecutive samples to 501 s |
+
+The break lands on the 300-second `cache-min-ttl` boundary to within one sampling
+interval, and it does not recover: the pin is stale until the container restarts.
+A refresher running well inside 300 s would carry it across. It is left to a task rather than patched in
+here because it is a **background mutator of the filter table in the one container
+that holds `NET_ADMIN`**, and it needs a shape this entry has not measured: a
+dedicated chain rebuilt per cycle (the generated fragment appends to `OUTPUT`, so
+the rules cannot be replaced without either a chain to own them or a
+delete-by-pattern that could take the loopback ACCEPT with it), a decision about
+removing addresses that stopped answering versus retaining them, and a stated
+failure direction when a cycle's resolution fails. Wrong, it either widens the
+boundary silently or drops declared traffic — both worse than the recorded pin.
+
+**The strongest fix still derives the rules from the resolver's own answers**,
+since unbound is the only way an address can enter the namespace at all: an address
+the client was handed is by construction one the boundary saw. Two routes, both
+real work rather than a patch, and both belong in a task:
+
+1. **unbound's `ipset` module** feeding `-m set --match-set <set> dst` per declared
+   port, with entry timeouts so a rotated-away address expires by itself. Keeps
+   host×port granularity (one set per declared port). Costs: a new `ipset`
+   dependency (Constitution VI), `xt_set` in the host kernel — a portability
+   dependency that must fail loudly, not silently — and confirmation that Alpine's
+   unbound is built with the module and can write the set after dropping
+   privileges. **Not verified here.**
+2. **Send declared TLS ports through squid** — the mechanism that already matches
+   by name — instead of netfilter. This is the FR-018a rule ("the presence of a
+   port selects the enforcement surface") being *wrong for TLS ports*: it selects
+   the weaker surface for the case the stronger one handles natively. Needs a
+   per-port `https_port` and a per-port ACL so `{a, 8443}` does not also open
+   `{a, 443}`, or SC-010 is lost.
+
+Until one of them lands, `{host, port}` on a CDN-fronted name is a **known
+operational defect with a recorded pin**, not a documented limitation — the
+distinction being that a limitation is something the operator can plan around, and
+this one currently reads as working.
+
+#### R24a (MEASURED) — the connection half of "a refusal is a record" (T150)
+
+`access_log stdio:/var/log/squid/access.log` wrote refusals to a path inside a
+container nothing reads. The stated fix — `stdio:/dev/stdout` — **killed squid**:
+
+| change | result |
+|---|---|
+| `access_log stdio:/dev/stdout` alone | `FATAL: Cannot open '/dev/stdout' for writing`, container exits **1**, `docker logs` **completely empty** |
+| `chown squid /dev/stdout /dev/stderr` first | squid starts; access lines appear in `docker logs` |
+| `chmod 0666 /dev/stdout` instead | also works, but grants every uid in the container the same write |
+
+The cause is measured, not guessed: the log pipe is `prw------- root root`, and
+squid **reopens its logs by path after dropping to the `squid` user**, so the open
+fails with EACCES. Writing to an already-open descriptor needs no permission —
+which is why unbound, which keeps its inherited stderr, never hit this. `chown` is
+therefore the narrow fix (`unbound` still cannot reopen it: measured).
+
+**And the fix's own failure was invisible**, which is the finding worth keeping:
+the FATAL went to `cache.log`, a file, so the boundary died with an empty operator
+log and compose would have reported only `unhealthy`. `cache_log
+stdio:/dev/stderr` is now set for that reason, and the entrypoint checks
+writability **as the `squid` user** before starting squid — a guard proven to fail
+when it should (`rc=1` before the chown, `rc=0` after).
+
+**The refusal record was also naming the wrong thing.** Default format, measured:
+
+| event | logged as |
+|---|---|
+| undeclared SNI, TLS terminated | `NONE_NONE/000 0 CONNECT 140.82.121.10:443` — an **address**, on a CDN that fronts thousands of sites |
+| declared SNI, spliced | `TCP_TUNNEL/200 ... CONNECT api.anthropic.com:443` — the **name** |
+| undeclared host, plain HTTP | `TCP_DENIED/403 GET http://codeload.github.com/` |
+
+So the record was least legible exactly where the operator has to act. The log
+format now appends `%ssl::>sni`, the field `ssl_bump` matched the ACL against:
+`NONE_NONE/000 0 CONNECT 140.82.121.10:443 HIER_NONE/- sni=codeload.github.com`.
+`%err_code` was tried and **rejected on measurement** — it stays `-` on precisely
+the terminated TLS transaction and populates only for the plain-HTTP
+`ERR_ACCESS_DENIED`, so including it would imply a distinction the field does not
+carry. What separates the two is that a spliced connection is followed by a
+second `TCP_TUNNEL/200` line and a terminated one is not.
+
+**Consequence for the deploy-time statement.** `egress_enforceable`'s message
+scopes the record to "refused DNS lookups" and says so *because* squid logged to a
+file; that scoping comment is now stale, and left alone it understates what the
+operator gets — FR-022's smaller sin, but still an inaccurate statement of the
+mechanism.
+
+### R25 (MEASURED, T146) — moving squid's access log to stdout made the HEALTHCHECK
+### 79% of the refusal record, and two obvious filters do not work
+
+Found while verifying T150 on a live boundary, which is the only place it is
+visible: T150 is correct and the `sni=` field earns its place (confirmed below),
+but the same change put the container **healthcheck** into the operator's only
+record of a refused connection.
+
+The healthcheck is `nc -z 127.0.0.1 3127 && nc -z -u -w1 127.0.0.1 53` on a
+2-second interval. `nc -z` opens a TCP connection to squid's mandatory
+non-intercept port and closes it **without sending a request**, and squid logs each
+one:
+
+```
+1786091653.920 0 127.0.0.1 NONE_NONE/000 0 - error:transaction-end-before-headers HIER_NONE/- sni=-
+```
+
+Measured on a boundary two minutes old: **53 of 67 access-log lines — 79% — were
+the probe**, arriving one per ~3 s. In a container this project describes as
+always-on that is **~28,800 lines a day**, indefinitely, with no retention
+configured. Before T150 they went to a file nobody read, so moving the log to the
+operator's channel is precisely what turned them into a problem. Enforcement is
+unaffected; what degrades is the FR-020d **record**, and `grep NONE_NONE` — the
+documented way to find a refused connection — returns overwhelmingly probe lines.
+
+**T150's own value is confirmed by the same run, and is not in question.** The
+refusal genuinely needs the appended field:
+
+```
+1786091594.160 0 172.23.0.2 NONE_NONE/000 0 CONNECT 140.82.121.4:443 HIER_NONE/- sni=github.com
+1786091594.241 0 127.0.0.1  TCP_DENIED/403 3814 CONNECT github.com:443 HIER_NONE/- sni=-
+1786091540.305 20 172.23.0.2 TCP_TUNNEL/200 2784 CONNECT api.anthropic.com:443 ORIGINAL_DST/160.79.104.10 sni=api.anthropic.com
+```
+
+The first line names the destination **only** in `sni=`; without T150's format the
+operator would have had `140.82.121.4:443` alone.
+
+#### Two filters were tried and BOTH MEASURED INEFFECTIVE — do not re-attempt them
+
+An `access_log` ACL cannot suppress these, because there is no request to match:
+
+| attempt | result |
+|---|---|
+| `acl x url_regex ^error:transaction-end-before-headers$` + `access_log … !x` | **no effect** — 10 probe lines per 30 s before and after. That token is what `%ru` *prints*; with no request there is no request-URI for the ACL to see |
+| `acl x method NONE` + `access_log … !x` | **no effect** — 12 probe lines per 36 s, exactly the unfiltered rate. squid accepted the config (healthy, no `FATAL`, the ACL present in the running container) and logged anyway: an ACL that cannot be evaluated does not match, so the negation stays true |
+
+Both were reverted rather than left in place. A filter that looks right and does
+nothing, carrying a comment claiming it was verified, is the exact defect class
+this feature exists to remove — so the failed shapes are recorded here instead.
+
+**Two shapes rejected without trying, on reasoning that is worth keeping:**
+`http_status 000` matches the probe *and* every terminated-TLS refusal
+(`NONE_NONE/000 CONNECT <addr>:443 sni=<name>`), so it would discard exactly the
+record being protected; and filtering the client address `127.0.0.1` would too — an
+agent using the diagnostic proxy variables connects to `127.0.0.1:3128`, so its
+`TCP_DENIED/403 CONNECT api.openai.com:443` comes from that same address
+(measured).
+
+**Where the fix has to live: the healthcheck, not squid.conf.** The probe must stop
+being a request-less connection to an `http_port`. That is a change to a readiness
+gate the boundary's fail-closed behaviour depends on (T129c, R20), so it needs its
+own measurement of the start-up window rather than a patch during a verification
+pass. Recorded as **T152**.
