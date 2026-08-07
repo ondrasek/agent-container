@@ -1831,3 +1831,25 @@ def test_the_three_renderings_agree_on_one_declaration(wiz, tmp_path):
     # BOTH need resolution: a ported destination is unreachable without DNS, and
     # omitting it would make SSH fail in a way that looks like a firewall bug.
     assert "api.anthropic.com" in dns and "github.com" in dns
+
+
+def test_a_web_port_on_a_host_entry_is_refused_naming_the_mechanism(wiz):
+    """`{host, port: 443}` validated, was reported PERMITTED, and rendered a netfilter
+    rule that can never match: 80 and 443 are REDIRECTed into squid in the nat table,
+    which runs before the filter ACCEPT the entry generates.
+
+    Refused rather than rewritten to the portless form — the two forms permit
+    different things (portless goes through the proxy, where the SNI is checked and
+    the request is logged), and silently turning one declaration into another is how
+    a security control comes to mean something its author did not write.
+    """
+    for port in (80, 443):
+        with pytest.raises(wiz.Fatal, match="served by the proxy, not by netfilter"):
+            wiz.validate_egress({"allow": [{"host": "github.com", "port": port}]}, "envs[0]")
+
+
+def test_a_non_web_port_on_a_host_entry_is_still_accepted(wiz):
+    """The refusal must not widen: netfilter's whole purpose is the other ports."""
+    wiz.validate_egress({"allow": [{"host": "github.com", "port": 22}]}, "envs[0]")
+    wiz.validate_egress({"allow": [{"host": "db.example.com", "port": 5432}]}, "envs[0]")
+    wiz.validate_egress({"allow": [{"host": "git.example.com", "port": 8443}]}, "envs[0]")

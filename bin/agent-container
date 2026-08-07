@@ -5539,6 +5539,27 @@ def validate_destination(entry: object, where: str) -> None:
         port = entry.get("port")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             die(f"{where}: `port` must be an integer 1-65535, got {port!r}")
+        if port in (80, 443):
+            # 80 AND 443 ARE THE PROXY'S SURFACE, AND A RULE FOR THEM CANNOT MATCH.
+            # Both ports are REDIRECTed into squid in the nat table, which runs before
+            # the filter ACCEPT this entry would render — so the rule is installed,
+            # reported as permitting the destination, and never consulted. FR-018a is
+            # that the PORT SELECTS THE MECHANISM; naming a port squid already owns
+            # asks netfilter for something it will never be given.
+            #
+            # Refused rather than silently rewritten to the portless form: the two
+            # forms differ in what they permit (portless admits the host over
+            # HTTP/HTTPS *through the proxy*, where the SNI is checked and the
+            # request is logged), and quietly changing an operator's declaration into
+            # a different one is how a security control comes to mean something its
+            # author did not write.
+            die(
+                f"{where}: port {port} is served by the proxy, not by netfilter, so a "
+                f"`{{host, port: {port}}}` rule can never match — 80 and 443 are "
+                f"redirected into the proxy before it is reached. Declare the host "
+                f"without a `port:` to permit it over HTTP/HTTPS: "
+                f"{{host: {entry.get('host')}}}"
+            )
         host = str(entry.get("host"))
         if host.startswith("*."):
             # T148. A WILDCARD WITH A PORT IS A RULE THAT CANNOT EXIST, and it used
@@ -5727,19 +5748,35 @@ def _environment_declares_egress_leniently(root: Path, name: str) -> bool:
     keys and multi-document files all defeat a pattern scan, and the miss would be
     silent and in the permissive direction.
 
-    Answers False on an unparseable file rather than raising: a file that cannot be
-    read at all is not evidence that THIS environment declared anything, and the
-    owning path still reports it.
+    An UNREADABLE file (permissions, encoding) answers False: that is not evidence
+    this environment declared anything, and the owning path still reports it. An
+    UNPARSEABLE spec file is the opposite case and refuses — see below.
     """
     import yaml
 
-    for path in sorted(root.glob(f"{PROJECT_MARKER}/*")):
-        if not path.is_file() or not _is_spec_file(path.name):
-            continue
+    # `_spec_yaml_files` — THE LOADER'S OWN DISCOVERY, not a second glob. The first
+    # version walked `PROJECT_MARKER/*` non-recursively while the loader uses
+    # `rglob`, so a spec in a SUBDIRECTORY was invisible here and the fail-open this
+    # function exists to close stayed open for exactly those projects. Two
+    # discoveries that had to agree, with nothing checking that they did.
+    for path in _spec_yaml_files(root):
         try:
             docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
-        except OSError, UnicodeDecodeError, yaml.YAMLError:
+        except OSError, UnicodeDecodeError:
             continue
+        except yaml.YAMLError:
+            # A SPEC FILE THAT WILL NOT PARSE IS THE UNCERTAIN CASE, and uncertainty
+            # must not resolve to "no declaration". Returning False deploys
+            # UNRESTRICTED on the single most likely mistake in this feature's own
+            # syntax: a mis-indented `egress:` block is a PARSE error, so it never
+            # reaches the validator that would have named it. Refusing is the only
+            # answer that cannot be silently wrong in the permissive direction.
+            die(
+                f"{path}: this spec file could not be parsed, so the tool cannot tell "
+                f"whether {name!r} declares an `egress:` block. Refusing to deploy — "
+                f"continuing would risk running UNRESTRICTED while a declaration exists. "
+                f"Fix the YAML; `agent-container plan {name}` names the location."
+            )
         for doc in docs:
             if not isinstance(doc, dict):
                 continue

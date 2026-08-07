@@ -828,10 +828,24 @@ def _entrypoint_accept_rules(wiz):
 
 
 def _rule_is_scoped(rule: str) -> bool:
-    """A port-matching ACCEPT must also constrain WHO or WHERE, not just which port."""
-    if "--dport" not in rule:
+    """A port-matching ACCEPT must also constrain WHO or WHERE, not just which port.
+
+    THREE CORRECTIONS from adversarial review, each of which let the D1 hole be
+    reopened with the whole suite green:
+
+    * `-o eth0` was accepted as "scoping". It is the opposite — eth0 is the route to
+      everywhere. Only `-o lo` narrows anything, so the interface test is now
+      specific rather than "an -o is present".
+    * `--dports` and `-m multiport` were invisible, so the same hole written in the
+      multiport form passed.
+    * `--destination`/`--out-interface` long forms were invisible too.
+    """
+    if not any(f in rule for f in ("--dport", "--dports")):
         return True  # not a port rule; the other matches govern it
-    return " -d " in rule or " -o " in rule or "-m owner" in rule
+    scoped_by_destination = " -d " in rule or " --destination " in rule
+    scoped_by_loopback = " -o lo" in rule or " --out-interface lo" in rule
+    scoped_by_owner = "-m owner" in rule
+    return scoped_by_destination or scoped_by_loopback or scoped_by_owner
 
 
 def test_no_accept_rule_matches_on_destination_port_alone(wiz):
@@ -862,10 +876,48 @@ def test_generated_port_rules_are_scoped_to_a_host(wiz):
 
 def test_the_scoping_guard_can_fail():
     """Proof the check above is not vacuous — an absence assertion passes just as
-    happily against a rule set that contains no port rules at all."""
+    happily against a rule set that contains no port rules at all.
+
+    The rejected cases now include the three forms adversarial review found the
+    first version blind to: `-o eth0` (which scopes nothing), and the multiport and
+    long-option spellings of the same hole.
+    """
+    # Must be REJECTED — each is an unrestricted egress channel.
     assert not _rule_is_scoped("iptables -A OUTPUT -p tcp --dport 3128:3129 -j ACCEPT")
+    assert not _rule_is_scoped("iptables -A OUTPUT -o eth0 -p tcp --dport 3128 -j ACCEPT"), (
+        "eth0 is the route to everywhere; it is not scoping"
+    )
+    assert not _rule_is_scoped(
+        "iptables -A OUTPUT -p tcp -m multiport --dports 3128,3129 -j ACCEPT"
+    )
+    # Must be ACCEPTED — each genuinely narrows the destination.
     assert _rule_is_scoped("iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport 3128 -j ACCEPT")
     assert _rule_is_scoped("iptables -A OUTPUT -o lo -p tcp --dport 53 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT --destination 10.0.0.1 -p tcp --dport 22 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT -m owner --uid-owner 31 -p tcp --dport 80 -j ACCEPT")
+
+
+def test_the_forward_proxy_constrains_the_PORT_not_only_the_HOST(wiz):
+    """`dstdomain` matches a name and says nothing about the port.
+
+    Measured: before this restriction, `CONNECT <declared-host>:6379` through the
+    tool's own forward proxy was ALLOWED and squid dialled out
+    (`TCP_TUNNEL/503 … HIER_DIRECT/<ip>` — the 503 was the origin not listening,
+    not squid refusing). A PORTLESS entry means "this host over HTTP/HTTPS"
+    everywhere else in the feature, so admitting every port contradicted a printed
+    guarantee. After: `TCP_DENIED/403`.
+    """
+    conf = (wiz.REPO_ROOT / "image" / "egress" / "squid.conf").read_text(encoding="utf-8")
+    code = [ln.strip() for ln in conf.splitlines() if not ln.strip().startswith("#")]
+    joined = "\n".join(code)
+    assert "acl SSL_ports port 443" in joined
+    assert "http_access deny CONNECT !SSL_ports" in joined
+    assert "http_access deny !Safe_ports" in joined
+    # ORDER IS THE PROPERTY: squid takes the first match, so the denies must precede
+    # the allowlist rule or they never run.
+    deny_at = next(i for i, ln in enumerate(code) if "deny CONNECT !SSL_ports" in ln)
+    allow_at = next(i for i, ln in enumerate(code) if "http_access allow allowed_http" in ln)
+    assert deny_at < allow_at, "the port denies must be evaluated before the host allow"
 
 
 def test_declared_port_rules_are_installed_after_the_resolver(wiz):

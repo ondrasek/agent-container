@@ -583,3 +583,52 @@ The gate and the tier are both green; these are what the run found in addition.
       `NORESPONSE … [Errno 1] Operation not permitted`, the declared name returns `RCODE 0`
       and undeclared/tunnelling names `RCODE 5`. Either rewrite the step around a tool the
       image has, or state that it needs the probe
+
+
+## Second adversarial + holistic review (ultracode, 24 agents; 10 confirmed of 7 lenses)
+
+Fixed in this pass:
+- **The forward proxy constrained the HOST but not the PORT.** `dstdomain` says nothing about the
+  port, so `CONNECT <declared-host>:6379` through the tool's own proxy was ALLOWED and squid dialled
+  out — measured `TCP_TUNNEL/503 … HIER_DIRECT/<ip>`, where the 503 was the origin not listening
+  rather than squid refusing. A portless entry means "this host over HTTP/HTTPS" everywhere else in
+  the feature, so this contradicted a printed guarantee. Now `TCP_DENIED/403`. Found independently
+  by four of the seven lenses.
+- **Two holes in the D4 fail-open fix, both in code written the same day.** The lenient probe globbed
+  `PROJECT_MARKER/*` non-recursively while the loader uses `rglob`, so a spec in a subdirectory was
+  invisible and the fail-open persisted for exactly those projects; and a YAML *parse* error in a
+  spec carrying an `egress:` block returned False — i.e. "undeclared", i.e. UNRESTRICTED — on the
+  single most likely mistake in this feature's own syntax, since a mis-indented `egress:` block never
+  reaches the validator that would have named it. It now refuses, naming the file.
+- **My own unscoped-ACCEPT guard had three blind spots**, each enough to reopen the D1 hole with the
+  full suite green: it accepted `-o eth0` as "scoping" (eth0 is the route to everywhere), and could
+  not see the `-m multiport --dports` or long-option spellings.
+- **`{host, port: 80}` / `{host, port: 443}` validated, were reported permitted, and rendered a rule
+  that can never match** — both ports are REDIRECTed into squid in the nat table, which runs before
+  the filter ACCEPT. Refused now, naming the mechanism, rather than silently rewritten to the
+  portless form: the two forms permit different things.
+
+- [ ] T152 **squid's access log is ~79% healthcheck noise** (research R25). `nc -z 127.0.0.1 3127`
+      opens a request-less connection every ~3s, logged as `NONE_NONE/000 error:transaction-end-
+      before-headers` — measured 53 of 67 lines, ~28,800/day. Enforcement is unaffected; the FR-020d
+      RECORD degrades. Two `access_log` ACL filters were tried and **measured ineffective** (an ACL
+      cannot be evaluated on a transaction with no request) and reverted rather than shipped with a
+      comment claiming verification. The fix belongs in the healthcheck.
+- [ ] T153 **quickstart S14's expected result is wrong.** A declared host on an undeclared port is
+      not a timeout — it is `kex_exchange_identification: Connection closed by remote host`, because
+      the connection is DNAT'd into squid and terminated. SC-010 itself verified sound.
+- [ ] T154 **quickstart S15 is not runnable as written** — the agent image has neither `dig` nor `nc`.
+      The property verified via a raw-socket probe: `@8.8.8.8` → `Operation not permitted`, declared
+      → RCODE 0, undeclared and the tunnelling label → RCODE 5 (REFUSED, not NXDOMAIN).
+- [ ] T155 **A deploy-time warning when a ported host resolves to more than one address**, saying the
+      rule pins them (research R24). This is the verification agent's recommendation before
+      `{host, port}` is relied on for git remotes, and it converts the last silent part into a
+      stated one.
+- [ ] T156 **`sidecars_outside` is invisible to drift detection**, so `apply` reports "matching" after
+      a change that moves a sidecar in or out of the boundary.
+- [ ] T157 **`test_completions.sh` flakes under load** — a pty-driven zsh completion assertion went
+      empty twice immediately after the container tier, green on five other runs, with zero changes
+      to `completions/`. A hard CI gate that can go red while nothing it names is broken.
+- [ ] T158 **The proxy strength statement is printed only when nothing is enforced**, so the text
+      asserting proxy-level enforcement describes an environment that has none. Defensible under
+      FR-021a but worth resolving.
