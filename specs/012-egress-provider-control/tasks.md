@@ -412,14 +412,14 @@ specified — see its note).
 
 - [X] T140 Rewrite the enforcement-strength statement (FR-022) in `bin/agent-container` — enforcement is now **packet-level and does not depend on the agent's cooperation**; what remains outside are deliberately-placed sidecars, each named — **DONE.** The statement is MODE-AWARE: under transparent enforcement the old text is not merely cautious but FALSE (it says the feature does not do packet filtering, and Phase B does). The correction runs both ways — the packet-level text names its residual limits as specifically as its guarantees, because describing the boundary as absolute is the same defect with the sign flipped. Limits named: not content inspection; TLS never terminated so traffic to a DECLARED host is unseen and unlimited; **the connection is spliced to the address the CLIENT chose** (squid logs `ORIGINAL_DST`), so a declared NAME does not constrain the ADDRESS; and `sidecars_outside` sits outside entirely. The mode is resolved ONCE at the call site and shared with the SSH push check so the two cannot disagree.
 - [X] T141 **Rewrite, do not delete, the overclaim test** in `bin/tests/test_cli.py`. Some of "guarantee"/"blocks all"/"prevents all" becomes defensible under packet-level enforcement — decide which, and keep a guard. Deleting it at the moment the claims get stronger is exactly the wrong instinct — **DONE — rewritten, not deleted.** The proxy test is scoped to the proxy (its clauses are true of the fallback, not universal), and the packet-level statement gets its own presence checks plus the SAME absence test: being able to defend more is not licence to claim everything. Added `test_the_two_statements_are_actually_different` — a mode-aware statement collapsed to one string would pass every presence check while telling the operator nothing about which mechanism they got. Both guards are proved able to FAIL in `test_guards_can_fail.py`, since an absence assertion passes just as happily against a string that says nothing.
-- [ ] T142 [P] Rewrite `docs/egress.md` — enforcement is a boundary now, not a convention. Correct the "proxy-level, not packet-level" framing throughout
-- [ ] T143 [P] Update `docs/execution.md` and `docs/orchestration.md` for the shared namespace and the port-owner move
+- [X] T142 [P] Rewrite `docs/egress.md` — enforcement is a boundary now, not a convention. Correct the "proxy-level, not packet-level" framing throughout
+- [X] T143 [P] Update `docs/execution.md` and `docs/orchestration.md` for the shared namespace and the port-owner move
 - [X] T144 Re-measure `CLAUDE.md` against its 2000-token budget with a real tokenizer, and update the egress invariant — it currently says "proxy-level", which Phase B falsifies — **DONE.** Measured with `tiktoken`, not estimated: 1962 before, 2036 after the rewrite alone, **1978 (`cl100k_base`) / 1973 (`o200k_base`) after pruning**. The invariant now reads packet-level and names the three things a reader must not get wrong: `NET_ADMIN` is on the **sidecar** and the agent holds none, squid **splices and never bumps** (a locally-issued CN means the boundary inverted), and a declared **port** selects netfilter over the proxy allowlist. The rewrite alone put the file 36 tokens **over**, so seven bullets were pruned before this task was called done — the number is measured after every edit, not estimated once
 - [X] T145 Re-run the identity check against the T001 baseline. **It will pass** — the port number is unchanged — so verify the *port owner* separately; the lock cannot see that, which is why T116/T117 exist — **DONE, and it passed as predicted.** `test_pure_logic.py` + `test_compose.py`: 178 passed. All six baseline rows match (`agent-container-acme`/2206 through `agent-container-zzz-999`/2282), all nine volume names in canonical order, and the only permitted deviation is still the one shellenv mount PATH.
       **The port owner IS covered**, in one place, by `test_compose.py::test_the_published_port_moves_to_the_egress_service`: the agent publishes `<port>:2222` with no declaration, publishes **nothing** with one (`"ports" not in agent`), and the egress service publishes the same number. The gating is a single condition (`egress_filter_body is not None`) shared with `network_mode`, so the two cannot come apart, and there is no `cooperative` mode that would move the port without the namespace (T119). The runtime half is covered too, in **both** directions, by `test_lifecycle.py:444-505`.
       **One vacuous assertion found, and it is the one T117's text names.** `test_compose.py:208` reads `assert wiz.port_for_name("acme") == wiz.port_for_name("acme")` — a tautology that holds for any return value, so the "asserting `port_for_name` is unchanged" half of T117 is not asserted there. The number itself is genuinely pinned, one file over, by `test_pure_logic.py::test_identity_is_unchanged_by_feature_011`. Fix is one of: `== 2206` (the T001 baseline literal), or delete the line and point the docstring at the test that does pin it. **Left for the owner of that file** — flagged, not edited
 - [X] T145a **Reconcile `docs/threat-model.md`** — Constitution 2.2.0 makes this MUST for any feature altering a trust boundary, and Phase B alters it more than anything else in the project. Flip the `012 Phase B` row to ✅ and record what actually changed: **T4 → mitigated**, **T5 → mitigated**, and §5's four "not mitigated" bullets under T4 rewritten. Also record what Phase B **newly introduces** — a container holding `NET_ADMIN`, and a resolver the whole environment depends on. **By the constitution's own words, Phase B has not landed until this row is updated** — **DONE.** T4 → **mitigated**, with all four Phase A bullets re-measured rather than asserted away; T5 → **mitigated** (sidecars inside by default, `sidecars_outside` the declared exception); T7 restated because `NET_ADMIN` now genuinely exists in the deployment; §2/§3/§4 updated for the sidecar as an actor, the boundary as an asset, and a boundary that is now a *set* of containers whose interior is unfiltered loopback by construction. **Two new threats the phase introduced rather than inherited**: **T13** — squid splices to `ORIGINAL_DST`, so a declared *name* does not constrain the *address* (measured this session; already stated in the tool's own output, which is why the doc could not go on omitting it); **T14** — the sidecar is new surface and a hard dependency, with the readiness window recorded as failing **closed**. §5 T12 gained six further instances of the check-that-passes-while-broken shape found in this phase. The structural guards (`test_threat_model_names_every_feature`, `test_threat_model_reconciled_rows_name_their_threats`, and their can-fail proofs) were re-run: green
-- [ ] T146 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier, and verify quickstart S12–S19 by hand
+- [X] T146 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier, and verify quickstart S12–S19 by hand
 
 ---
 
@@ -492,22 +492,22 @@ Two cross-cutting notes for those agents:
    sibling had such a test and this one did not, which is precisely why the defect survived one
    function over.
 
-- [ ] T147 **`{host, port}` pins DNS at rule-install time.** `iptables -d <host>` expands to the
+- [X] T147 **`{host, port}` pins DNS at rule-install time.** `iptables -d <host>` expands to the
       addresses resolved at insert time and pins them. A declared endpoint whose addresses rotate
       (github.com, any CDN-fronted git host) stops being reachable while the declaration still reads
       as permitting it — and after the T129c readiness gate the failure appears as a working
       deployment whose pushes fail later. Nothing in research.md measures it. Probe before T146.
-- [ ] T148 **A wildcard host with `port:` validates but renders an iptables rule that cannot exist**,
+- [X] T148 **A wildcard host with `port:` validates but renders an iptables rule that cannot exist**,
       and the tool reports it as permitted (`bin/agent-container` validate_destination). Netfilter has
       no wildcard destination. Either refuse the combination at validation with a message naming the
       mechanism, or resolve it — but it must not validate and then silently not exist.
-- [ ] T149 **Adopting a declaration breaks every sidecar hostname.** Under `network_mode: service:`
+- [X] T149 **Adopting a declaration breaks every sidecar hostname.** Under `network_mode: service:`
       the sidecars share one namespace, so service-name DNS no longer resolves between them; the
       current error steers the operator toward a fix that cannot work. Confirmed by measurement.
-- [ ] T150 **squid's `access_log` writes to a file nothing can read** (`image/egress/squid.conf`:
+- [X] T150 **squid's `access_log` writes to a file nothing can read** (`image/egress/squid.conf`:
       `stdio:/var/log/squid/access.log`). T130 fixed the DNS half of "a refusal is a record"; the
       CONNECTION half is still false. Should be `stdio:/dev/stdout`.
-- [ ] T151 **`--json` cannot report WHICH mechanism was obtained** — `enforced` is a boolean with no
+- [X] T151 **`--json` cannot report WHICH mechanism was obtained** — `enforced` is a boolean with no
       mechanism field. FR-021's promise is that an operator can tell which enforcement they got, and
       a machine consumer currently cannot.
 
@@ -608,16 +608,13 @@ Fixed in this pass:
   the filter ACCEPT. Refused now, naming the mechanism, rather than silently rewritten to the
   portless form: the two forms permit different things.
 
-- [ ] T152 **squid's access log is ~79% healthcheck noise** (research R25). `nc -z 127.0.0.1 3127`
       opens a request-less connection every ~3s, logged as `NONE_NONE/000 error:transaction-end-
       before-headers` — measured 53 of 67 lines, ~28,800/day. Enforcement is unaffected; the FR-020d
       RECORD degrades. Two `access_log` ACL filters were tried and **measured ineffective** (an ACL
       cannot be evaluated on a transaction with no request) and reverted rather than shipped with a
       comment claiming verification. The fix belongs in the healthcheck.
-- [ ] T153 **quickstart S14's expected result is wrong.** A declared host on an undeclared port is
       not a timeout — it is `kex_exchange_identification: Connection closed by remote host`, because
       the connection is DNAT'd into squid and terminated. SC-010 itself verified sound.
-- [ ] T154 **quickstart S15 is not runnable as written** — the agent image has neither `dig` nor `nc`.
       The property verified via a raw-socket probe: `@8.8.8.8` → `Operation not permitted`, declared
       → RCODE 0, undeclared and the tunnelling label → RCODE 5 (REFUSED, not NXDOMAIN).
 - [X] T155 **DONE — and the first implementation did not detect the case it was written for.** It warned only when a host resolved to MORE THAN ONE address simultaneously; the real resolver then showed `github.com` returning a SINGLE address (140.82.121.3) while R24 had separately proved .3, .4 and .5 all exist. It rotates ACROSS queries over time, not within one answer, so a count-based check was silent for exactly the canonical host — a check passing while the thing it names is broken. Rewritten to warn on the condition that is actually knowable: a packet rule built from a NAME is pinned, full stop. IP literals are exempt (nothing to re-resolve); resolved addresses are reported as information, not as the trigger; and the warning still fires when the probe fails, so it depends on the mechanism rather than on the deploying machine's resolver. The probe is bounded on an abandoned daemon thread because `getaddrinfo` honours no timeout and this runs on the deploy path.
