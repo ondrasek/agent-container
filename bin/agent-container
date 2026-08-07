@@ -2781,7 +2781,31 @@ def build_compose_model(
             "healthcheck": {
                 "test": [
                     "CMD-SHELL",
-                    "nc -z 127.0.0.1 3127 && nc -z -u -w1 127.0.0.1 53",
+                    # OBSERVES THE LISTENING SOCKETS; DOES NOT CONNECT TO THEM.
+                    # `nc -z` opened a request-less TCP connection to squid every
+                    # few seconds, and squid logged each one as
+                    # `NONE_NONE/000 error:transaction-end-before-headers` —
+                    # measured at 53 of 67 access-log lines on a two-minute-old
+                    # boundary, ~28,800/day in an always-on container. Enforcement
+                    # was never affected; the FR-020d RECORD was, and `grep
+                    # NONE_NONE` — the documented way to find a refused connection
+                    # — returned mostly the probe.
+                    #
+                    # It cannot be filtered at the log: an `access_log` ACL is
+                    # evaluated against a request, and these transactions have none,
+                    # so `url_regex` and `method NONE` were both measured INEFFECTIVE
+                    # (research R25). The probe is the right place to fix it.
+                    #
+                    # Readiness is unchanged in substance: a bound listening socket is
+                    # what "the daemon is up" means here, and `nc -z` only ever proved
+                    # the same thing one layer later.
+                    # No `$` anchor: netstat prints Foreign Address and State AFTER
+                    # the local address, so an end-of-line anchor never matches and
+                    # the healthcheck would never pass — the agent would then never
+                    # start, since it waits on `service_healthy`. Trailing whitespace
+                    # is the correct delimiter and keeps `:53` from matching `:5353`.
+                    "netstat -lnt | grep -qE '[:.]3127[[:space:]]'"
+                    " && netstat -lnu | grep -qE '[:.]53[[:space:]]'",
                 ],
                 "interval": "2s",
                 "timeout": "2s",
@@ -6822,16 +6846,39 @@ def egress_config_token(egress: object) -> str | None:
     model when the declaration is enforceable — so without it, tightening
     `enforcement: advisory` to `strict` would report "matching" and never redeploy.
 
+    `sidecars_outside` rides along for the same reason and it is NOT cosmetic: moving
+    a service in or out of the boundary changes which container's egress is filtered,
+    and it leaves the allowlist and both enforcement modes untouched. Without it
+    `apply` reported "matching" after an operator moved a redis from inside the
+    boundary to outside — a change of exactly the kind this feature exists to make
+    visible, reported as no change at all.
+
+    Order-insensitive (`sorted`), because a reordered list is the same deployment and
+    a token that moved would redeploy every environment whose YAML was tidied.
+
     >>> egress_config_token({"allow": [], "enforcement": "strict"})[:6]
     'strict'
     >>> egress_config_token(None) is None
+    True
+    >>> a = egress_config_token({"allow": [], "sidecars_outside": ["redis"]})
+    >>> b = egress_config_token({"allow": []})
+    >>> a == b
+    False
+    >>> x = egress_config_token({"allow": [], "sidecars_outside": ["a", "b"]})
+    >>> y = egress_config_token({"allow": [], "sidecars_outside": ["b", "a"]})
+    >>> x == y
     True
     """
     fp = egress_fingerprint(egress)
     if fp is None:
         return None
     assert isinstance(egress, dict)
-    return f"{egress.get('enforcement') or 'advisory'}:{fp}"
+    outside = egress.get("sidecars_outside")
+    # `str(x)` deliberately: this runs on a DECLARATION, which may not have been
+    # validated yet on every path that computes a token, so a non-string entry must
+    # still produce a stable token rather than raise inside drift detection.
+    outside_part = ",".join(sorted(str(x) for x in outside)) if isinstance(outside, list) else ""
+    return f"{egress.get('enforcement') or 'advisory'}:{outside_part}:{fp}"
 
 
 def is_egress_declared(egress: object) -> bool:

@@ -1360,3 +1360,44 @@ Two smaller consequences, both deliberate:
 - The probe runs on an **abandoned daemon thread** with a join timeout, because
   `getaddrinfo` honours no timeout argument and this sits on the deploy path. A slow
   resolver must not stall a deploy for an advisory message.
+
+
+### R27 — the healthcheck was 100% of the log noise, and it is fixable at the probe (measured, T152)
+
+R25 measured squid's access log as ~79% healthcheck noise and recorded two `access_log`
+ACL filters as INEFFECTIVE: an ACL is evaluated against a request, and `nc -z` produces
+a transaction that has none, so the negation stays true. R25 concluded the fix belonged
+in the healthcheck. It does.
+
+`nc -z 127.0.0.1 3127` opens a request-less TCP connection, which squid logs as
+`NONE_NONE/000 error:transaction-end-before-headers`. Replacing it with an observation
+of the listening sockets removes the connection, and therefore the log line:
+
+| Probe, run 10× | New `NONE_NONE` lines |
+|---|---|
+| `nc -z 127.0.0.1 3127` (old) | **10** — exactly one per probe |
+| `netstat -lnt \| grep -qE '[:.]3127[[:space:]]'` (new) | **0** |
+
+Confirmed on a real deployment: `agent-egress-hcd` reports **0** `NONE_NONE` lines after
+a full `up`, and compose logged `Waiting → Healthy → agent Started`, so readiness still
+gates as T129c requires.
+
+**Readiness is unchanged in substance.** A bound listening socket is what "the daemon is
+up" means here; `nc -z` only ever proved the same thing one layer later.
+
+**One trap, caught before shipping:** the first pattern anchored with `$`. netstat prints
+Foreign Address and State AFTER the local address, so an end-of-line anchor never matches
+— the healthcheck would never pass, and because the agent waits on `service_healthy` it
+would never start. Fails closed, but as a hang rather than a message. Trailing whitespace
+is the correct delimiter and also keeps `:53` from matching `:5353`.
+
+### R28 — github.com rotated mid-session, which is R24 observed rather than argued
+
+While verifying T152 the declared rule installed `-d 140.82.121.3/32 --dport 22`. Minutes
+later, on the same machine, the T155 deploy warning reported `now: 140.82.121.4`.
+
+That is the R24 failure occurring unprompted inside one session: the pinned address and
+the address the resolver now hands out had already diverged. The environment keeps working
+only because the agent had no reason to reach github.com in between. It is the clearest
+available argument that T155's warning is not theoretical and that the refresher (the real
+fix) is worth landing.

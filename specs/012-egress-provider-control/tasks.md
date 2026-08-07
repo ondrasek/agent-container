@@ -551,7 +551,7 @@ The gate and the tier are both green; these are what the run found in addition.
       both sides of every assertion together. Now the literal `2206:2222` baseline
 - [X] T146d **C7's field table listed `egress.enforced` twice and never listed
       `mechanism`** — FIXED: deduped, and the T151 field documented
-- [ ] T152 **The healthcheck is ~79% of the refusal record** (research **R25**, measured).
+- [X] T152 **The healthcheck is ~79% of the refusal record** (research **R25**, measured). — **DONE (research R27).** Fixed at the PROBE, which is where R25 concluded it belonged after measuring two `access_log` ACL filters ineffective — an ACL cannot be evaluated on a transaction with no request. The healthcheck now OBSERVES the listening sockets instead of connecting to them. Measured A/B: 10 old probes → +10 `NONE_NONE` lines (one each); 10 new probes → **+0**. A real deployment reports 0, and compose still logs `Waiting → Healthy → agent Started`, so T129c's gate is intact. Readiness is unchanged in substance: a bound listening socket is what "the daemon is up" means, and `nc -z` proved the same thing one layer later. Trap caught pre-ship: the first pattern used a `$` anchor, but netstat prints Foreign Address and State after the local address, so it would never match — and since the agent waits on `service_healthy`, it would never start.
       `nc -z 127.0.0.1 3127` opens a request-less connection to squid every ~3 s and each
       one is logged, so the FR-020d record T150 delivered is diluted ~28,800 lines/day in
       an always-on container. Enforcement is unaffected; legibility is not. **Two
@@ -624,7 +624,7 @@ Fixed in this pass:
       rule pins them (research R24). This is the verification agent's recommendation before
       `{host, port}` is relied on for git remotes, and it converts the last silent part into a
       stated one.
-- [ ] T156 **`sidecars_outside` is invisible to drift detection**, so `apply` reports "matching" after
+- [X] T156 **`sidecars_outside` is invisible to drift detection**, so `apply` reports "matching" after — **DONE.** `sidecars_outside` now rides the drift token. It changes WHICH container's egress is filtered while leaving the allowlist and both enforcement modes untouched, so moving a redis out of the boundary was reported as no change at all. Order-insensitive, because a reordered list is the same deployment and a token that moved would redeploy every environment whose YAML was merely tidied. The two fields are separated in the token so a crafted host name cannot forge the same value as a membership change.
       a change that moves a sidecar in or out of the boundary.
 - [ ] T157 **`test_completions.sh` flakes under load** — a pty-driven zsh completion assertion went
       empty twice immediately after the container tier, green on five other runs, with zero changes

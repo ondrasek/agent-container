@@ -1853,3 +1853,32 @@ def test_a_non_web_port_on_a_host_entry_is_still_accepted(wiz):
     wiz.validate_egress({"allow": [{"host": "github.com", "port": 22}]}, "envs[0]")
     wiz.validate_egress({"allow": [{"host": "db.example.com", "port": 5432}]}, "envs[0]")
     wiz.validate_egress({"allow": [{"host": "git.example.com", "port": 8443}]}, "envs[0]")
+
+
+def test_moving_a_sidecar_out_of_the_boundary_is_drift(wiz):
+    """T156. `sidecars_outside` changes WHICH container's egress is filtered and
+    leaves the allowlist and both enforcement modes untouched, so it was invisible to
+    drift detection: `apply` reported "matching" after an operator moved a redis
+    outside the boundary — a change of exactly the kind this feature exists to make
+    visible, reported as no change at all."""
+    inside = {"allow": [{"provider": "anthropic"}]}
+    outside = {"allow": [{"provider": "anthropic"}], "sidecars_outside": ["redis"]}
+    assert wiz.egress_config_token(inside) != wiz.egress_config_token(outside)
+
+
+def test_reordering_sidecars_outside_is_not_drift(wiz):
+    """A reordered list is the same deployment. A token that moved would redeploy
+    every environment whose YAML was merely tidied, which trains operators to ignore
+    the redeploy that matters."""
+    a = {"allow": [], "sidecars_outside": ["redis", "postgres"]}
+    b = {"allow": [], "sidecars_outside": ["postgres", "redis"]}
+    assert wiz.egress_config_token(a) == wiz.egress_config_token(b)
+
+
+def test_the_allowlist_and_the_boundary_membership_cannot_alias(wiz):
+    """Both ride the same token, so a change to either must move it. Pins that the
+    two fields are separated in the token rather than concatenated into something a
+    crafted host name could forge."""
+    a = {"allow": [{"host": "redis"}], "sidecars_outside": []}
+    b = {"allow": [], "sidecars_outside": ["redis"]}
+    assert wiz.egress_config_token(a) != wiz.egress_config_token(b)
