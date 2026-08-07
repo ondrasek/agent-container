@@ -5659,6 +5659,44 @@ def build_unbound_conf(entries: list[tuple[str, str, int | None, str]]) -> str:
     return "".join(f"{ln}\n" for ln in out)
 
 
+def _environment_declares_egress_leniently(root: Path, name: str) -> bool:
+    """Whether <name> carries an `egress:` key, judged WITHOUT validation.
+
+    Used only on the error path, to tell "this environment declared egress and the
+    spec is broken" (must refuse — deploying would be unrestricted while the
+    declaration reads as enforced) from "some unrelated file is broken" (may
+    proceed). Deliberately lenient: it must answer even for a spec the validator
+    rejected, so it asks only whether the KEY IS PRESENT and never what it means.
+
+    `yaml.safe_load` per file, never a regex over the text — flow style, quoted
+    keys and multi-document files all defeat a pattern scan, and the miss would be
+    silent and in the permissive direction.
+
+    Answers False on an unparseable file rather than raising: a file that cannot be
+    read at all is not evidence that THIS environment declared anything, and the
+    owning path still reports it.
+    """
+    import yaml
+
+    for path in sorted(root.glob(f"{PROJECT_MARKER}/*")):
+        if not path.is_file() or not _is_spec_file(path.name):
+            continue
+        try:
+            docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        except OSError, UnicodeDecodeError, yaml.YAMLError:
+            continue
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            envs = doc.get("environments")
+            if not isinstance(envs, list):
+                continue
+            for env in envs:
+                if isinstance(env, dict) and env.get("name") == name and "egress" in env:
+                    return True
+    return False
+
+
 def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | None:
     """The `egress:` block declared for environment <name>, or None if undeclared.
 
@@ -5682,6 +5720,20 @@ def resolve_egress_declaration(name: str, cwd: Path | None = None) -> dict | Non
         # A broken spec is reported by the paths that own it (`plan`/`apply`).
         # Refusing an imperative `up` here would make an unrelated syntax error
         # elsewhere in the project block a deployment that never used the spec.
+        #
+        # BUT NOT IF THE BROKEN PART IS THIS ENVIRONMENT'S OWN DECLARATION.
+        # Returning None then means "undeclared", which deploys UNRESTRICTED while
+        # the operator has written a declaration they cannot see is being ignored —
+        # the precise failure this feature exists to remove, and it fails OPEN.
+        # Silence, not permissiveness, is the defect (FR-007b).
+        if _environment_declares_egress_leniently(root, name):
+            die(
+                f"{name}: an `egress:` declaration exists but the project spec could not "
+                f"be validated, so the tool cannot tell what it permits. Refusing to deploy: "
+                f"continuing would run this environment UNRESTRICTED while the declaration "
+                f"reads as enforced. Fix the spec (`agent-container plan {name}` names the "
+                f"offending file and field)."
+            )
         return None
     for env in environments:
         if env.get("name") == name:
@@ -6109,6 +6161,31 @@ def https_remote_host(url: str | None) -> str | None:
     return host or None
 
 
+def https_remote_endpoint(url: str | None) -> tuple[str, int] | None:
+    """`(host, port)` for an HTTPS remote on a NON-STANDARD port, else None.
+
+    Returns None for the ordinary 443 case, because that one is the proxy's surface
+    and `https_remote_host` + `egress_permits_host` already govern it. This exists
+    only for the ports the redirect does not touch:
+
+    >>> https_remote_endpoint("https://git.example.com:8443/you/acme")
+    ('git.example.com', 8443)
+    >>> [https_remote_endpoint(u) for u in ("https://github.com/x", "https://h:443/x", None)]
+    [None, None, None]
+    """
+    if not url or not url.startswith("https://"):
+        return None
+    authority = url[len("https://") :].split("/", 1)[0]
+    hostport = authority.rsplit("@", 1)[-1]
+    if ":" not in hostport:
+        return None
+    host, _, raw = hostport.partition(":")
+    if not host or not raw.isdigit() or not 0 < int(raw) < 65536:
+        return None
+    port = int(raw)
+    return None if port == 443 else (host, port)
+
+
 def ssh_remote_endpoint(url: str | None) -> tuple[str, int] | None:
     """The `(host, port)` an SSH git remote will actually connect to, or None.
 
@@ -6232,6 +6309,29 @@ def check_egress_permits_push(
     # Under Phase B it is the reverse of the HTTPS case. Default-deny is at the
     # packet level, so port 22 is closed unless declared, and the SAME hard
     # constraint breaks with SSH as the casualty instead of the survivor.
+    # AN HTTPS REMOTE ON A NON-STANDARD PORT IS NETFILTER'S SURFACE, NOT THE PROXY'S.
+    # The nat REDIRECT matches dport 443/80 only, so `https://git.example.com:8443/…`
+    # is never handed to squid and is denied by default-deny unless declared as a
+    # `{host, port}` entry. `https_remote_host` discards the port, so the portless
+    # check below would report such a remote as permitted while the push is dropped.
+    https_ep = https_remote_endpoint(repo_url) if transparent else None
+    if https_ep is not None and egress_permits_endpoint(dests, *https_ep):
+        # TERMINAL, not a fall-through. The portless check below is the PROXY's
+        # surface and deliberately ignores ported entries (FR-018a), so continuing
+        # would demand a second, portless declaration for a destination already
+        # correctly declared — refusing a push that will work.
+        return
+    if https_ep is not None:
+        h, prt = https_ep
+        _push_refusal(
+            f"egress: the declaration does not permit {h!r} on port {prt}, but this "
+            f"environment pushes over HTTPS to it on a NON-STANDARD port. Only 80 and 443 "
+            f"are routed through the proxy; anything else is denied at the packet level "
+            f"unless declared. Add it:  egress.allow: [{{host: {h}, port: {prt}}}]",
+            mode,
+        )
+        return
+
     ssh = ssh_remote_endpoint(repo_url) if transparent else None
     if ssh is not None and not egress_permits_endpoint(dests, *ssh):
         ssh_host, ssh_port = ssh

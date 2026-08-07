@@ -649,3 +649,102 @@ def test_posture_check_is_inert_without_a_declaration(wiz, tmp_path):
     """No declaration, no boundary, no business refusing an operator's sidecar."""
     o = _override(tmp_path, "services:\n  h:\n    image: x\n    privileged: true\n")
     wiz.check_sidecar_egress_posture(o, None)
+
+
+# --- adversarial review: fail-open paths -------------------------------------
+
+
+def test_a_broken_spec_refuses_rather_than_deploying_unrestricted(wiz, tmp_path, monkeypatch):
+    """D4. `resolve_egress_declaration` swallowed the validator's Fatal and returned
+    None, which means UNDECLARED — i.e. unrestricted — for an environment whose own
+    `egress:` block is what failed to validate.
+
+    That fails OPEN, and silence is the defect this feature exists to remove: the
+    operator wrote a declaration and would have got an environment that ignores it
+    while reporting nothing.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n"
+        "  - name: acme\n"
+        "    host: local\n"
+        "    container:\n"
+        "      agent: claude\n"
+        "    egress:\n"
+        "      allow: [{provider: anthropic}]\n"
+        "      enforcement: nonsense-not-a-mode\n"
+    )
+    with pytest.raises(wiz.Fatal, match="cannot tell what it permits"):
+        wiz.resolve_egress_declaration("acme", cwd=proj)
+
+
+def test_a_broken_spec_elsewhere_still_deploys_an_undeclared_environment(wiz, tmp_path):
+    """The complement, and the reason the swallow existed. An unrelated environment
+    being invalid must NOT block an imperative `up` of one that declares nothing —
+    otherwise the refusal above becomes a denial of service on the whole project."""
+    proj = tmp_path / "proj"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n"
+        "  - name: other\n"
+        "    host: local\n"
+        "    container:\n"
+        "      agent: claude\n"
+        "    egress:\n"
+        "      enforcement: nonsense-not-a-mode\n"
+        "  - name: acme\n"
+        "    host: local\n"
+        "    container:\n"
+        "      agent: claude\n"
+    )
+    assert wiz.resolve_egress_declaration("acme", cwd=proj) is None
+
+
+def test_lenient_egress_detection_reads_flow_style_and_quoted_keys(wiz, tmp_path):
+    """The detector must not be a pattern scan. Flow style and quoted keys are
+    exactly what a regex misses, and the miss would be silent and PERMISSIVE."""
+    proj = tmp_path / "proj"
+    (proj / ".agent-container").mkdir(parents=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        'environments: [{name: acme, host: local, "egress": {allow: []}}]\n'
+    )
+    assert wiz._environment_declares_egress_leniently(proj, "acme") is True
+    assert wiz._environment_declares_egress_leniently(proj, "absent") is False
+
+
+# --- adversarial review: an HTTPS remote on a non-standard port ---------------
+
+
+def test_push_check_fires_for_an_https_remote_on_a_non_standard_port(wiz):
+    """D6. The nat REDIRECT matches dport 443/80 only, so `https://h:8443/…` never
+    reaches squid and is denied at the packet level unless declared with a port.
+    `https_remote_host` discards the port, so the portless check reported it as
+    permitted while the push was dropped."""
+    with pytest.raises(wiz.Fatal, match="on port 8443"):
+        wiz.check_egress_permits_push(
+            {"allow": [{"host": "git.example.com"}]},
+            "https://git.example.com:8443/you/acme",
+            "strict",
+            transparent=True,
+        )
+
+
+def test_a_declared_non_standard_https_port_is_accepted(wiz):
+    wiz.check_egress_permits_push(
+        {"allow": [{"host": "git.example.com", "port": 8443}]},
+        "https://git.example.com:8443/you/acme",
+        "strict",
+        transparent=True,
+    )
+
+
+def test_an_ordinary_https_remote_is_still_the_proxys_surface(wiz):
+    """443 must NOT start demanding a {host, port} entry — that would break every
+    existing declaration, and the proxy genuinely governs that path."""
+    wiz.check_egress_permits_push(
+        {"allow": [{"host": "github.com"}]},
+        "https://github.com:443/you/acme",
+        "strict",
+        transparent=True,
+    )
