@@ -971,3 +971,22 @@ def test_iptables_failures_cannot_be_swallowed(wiz):
     assert not any("install_rules || die" in ln for ln in code), (
         "the AND-OR form suppresses set -e for the entire function body"
     )
+
+
+def test_the_boundary_resolver_binds_loopback_only(wiz):
+    """Copilot review, verified with a control: on `interface: 0.0.0.0` the resolver
+    also answered on the egress container's PROJECT-NETWORK address, which a sidecar
+    declared OUTSIDE the boundary can route to.
+
+    Measured before/after from a container on the same network but NOT sharing the
+    namespace: pre-fix the undeclared-to-them name resolved (160.79.104.10); after,
+    `Connection refused`. A sidecar that is outside by design must not inherit the
+    boundary's allowlisted resolution as well as its free egress.
+    """
+    conf = (wiz.REPO_ROOT / "image" / "egress" / "unbound.conf").read_text(encoding="utf-8")
+    code = [ln.strip() for ln in conf.splitlines() if not ln.strip().startswith("#")]
+    assert "interface: 127.0.0.1" in code, "the resolver must not bind a routable address"
+    assert not any(ln.startswith("interface: 0.0.0.0") for ln in code)
+    assert "access-control: 0.0.0.0/0 allow" not in code, (
+        "a blanket allow re-opens what the loopback bind closes if the bind ever widens"
+    )

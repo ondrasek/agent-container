@@ -57,6 +57,7 @@ RUN openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
  && chown squid:squid /etc/squid/intercept.pem \
  && chmod 0400 /etc/squid/intercept.pem \
  && mkdir -p /var/log/squid /run/unbound \
+ && chown unbound:unbound /run/unbound \
  && chown -R squid:squid /var/log/squid
 
 # The per-environment allowlist arrives as compose `configs` with `content:` —
@@ -66,7 +67,9 @@ RUN openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
 RUN touch /etc/squid/allowed_sni.acl /etc/unbound/allowed.conf \
  && chown squid:squid /etc/squid/allowed_sni.acl
 
-EXPOSE 3128 3129 53
+# 53 is deliberately absent: the resolver binds loopback only, so advertising it
+# would document reachability the configuration refuses.
+EXPOSE 3128 3129
 
 # NOT rootless, and that is this container's whole purpose. The entrypoint needs
 # CAP_NET_ADMIN to program netfilter; squid then drops to `squid` and unbound to
