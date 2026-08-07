@@ -1691,6 +1691,54 @@ def test_unbound_rendering_escapes_the_catch_all_refuse(wiz):
     assert conf.count("forward-addr:") == 1
 
 
+def test_unbound_rendering_sends_the_refusal_record_somewhere_reachable(wiz):
+    """T130/FR-020d. The baked config sets `log-replies: yes`, but unbound's
+    `use-syslog` DEFAULTS TO YES and the egress image runs no syslogd — so every
+    reply line, refusals included, went to syslog(3) and was discarded. Measured:
+    the resolver answered REFUSED for an undeclared name while the container log
+    was completely empty. A config that names the record while the record goes
+    nowhere is the shape this suite exists to catch.
+
+    Asserted on the GENERATED fragment because that is the half the tool owns; it
+    is `include:`d last, so it decides the destination whatever the baked file says.
+    """
+    conf = wiz.build_unbound_conf([("a", "api.anthropic.com", None, "tool")])
+    assert "use-syslog: no" in conf, "syslog is the default and drops the record"
+    assert 'logfile: ""' in conf, "and an empty logfile is what makes it stderr"
+    # Both must sit in the `server:` clause — unbound rejects a server option that
+    # trails a `forward-zone:`, which would take the whole boundary down at start.
+    assert conf.index("use-syslog") < conf.index("forward-zone:")
+
+
+def test_the_air_gapped_allowlist_still_records_its_refusals(wiz):
+    """T130. `allow: []` refuses EVERY lookup, so it is the declaration whose
+    record matters most — and the one an early return for "no names" would have
+    silently switched the logging off for. An empty body is still a config."""
+    conf = wiz.build_unbound_conf([])
+    assert "use-syslog: no" in conf and 'logfile: ""' in conf
+    assert "local-zone:" not in conf and "forward-zone:" not in conf, (
+        "air-gapped permits nothing; only the baked catch-all applies"
+    )
+
+
+def test_the_generated_resolver_config_never_widens_the_catch_all(wiz, tmp_path):
+    """T131/FR-020e. The refusal answer comes from the baked `local-zone: "."
+    refuse`, and this fragment is included INTO that same `server:` clause — so a
+    generated `local-zone: "."` of any type would override it and the resolver
+    would answer for everything while every other test here still passed.
+
+    The guard is the validator: `*.` alone is the only input that renders an empty
+    zone name, and it is refused before it can reach the generator.
+    """
+    conf = wiz.build_unbound_conf(
+        [("a", "*.githubusercontent.com", None, "tool"), ("g", "github.com", 22, "declaration")]
+    )
+    assert 'local-zone: "." ' not in conf and 'local-zone: ""' not in conf
+    assert 'local-zone: "githubusercontent.com" transparent' in conf, "the `*.` prefix is stripped"
+    with pytest.raises(wiz.Fatal, match="not a hostname"):
+        wiz.validate_egress_host("*.", "where", allow_wildcard=True)
+
+
 def test_phase_a_two_key_syntax_is_refused_with_the_replacement(wiz, tmp_path):
     """T113/FR-018b — removed, NOT deprecated, and never silently ignored.
 

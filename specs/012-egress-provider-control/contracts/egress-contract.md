@@ -178,9 +178,9 @@ The existing `--json` envelope (Feature 009) gains, per environment:
 | Field | Meaning |
 |---|---|
 | `egress.declared` | whether an `egress:` block exists at all |
-| `egress.unrestricted` | **the field that disambiguates an empty `hosts` list.** Undeclared and `providers: []` both have no hosts and are *opposites*; a caller must never infer which from emptiness |
-| `egress.providers` | the declared provider names (excludes `allow` entries) |
-| `egress.hosts` | the **effective** allowlist, each entry tagged `host_source`: `tool` or `declaration`. Must reflect an operator `hosts:` override rather than the tool's default (FR-001b), or the JSON would state a permission set the proxy does not enforce |
+| `egress.unrestricted` | **the field that disambiguates an empty `destinations` list.** Undeclared and `allow: []` both have no destinations and are *opposites*; a caller must never infer which from emptiness |
+| `egress.providers` | the provider labels resolved out of `allow` |
+| `egress.destinations` | the **effective** allowlist: `{label, host, port, source}` per entry. `source` (`tool`/`declaration`) must reflect an operator `hosts:` override rather than the tool's default (FR-001b), or the JSON would state a permission set the boundary does not enforce. `port` says WHICH SURFACE enforces the entry — `null` is the proxy allowlist, an integer is a netfilter rule (FR-018a), and the two have very different reach. Replaced a flat `egress.hosts`, which is no longer emitted by either branch |
 | `egress.enforced` | whether the declaration is actually in force. **Distinct from `declared`** — an advisory declaration that cannot be enforced is `declared: true, enforced: false`, with `not_enforced_reason` |
 | `egress.enforcement` | the effective mode |
 | `egress.enforced` | whether the declaration is actually being enforced for this agent |

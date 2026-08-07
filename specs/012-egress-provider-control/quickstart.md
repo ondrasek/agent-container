@@ -87,18 +87,19 @@ failure C3 forbids.
 
 ```yaml
 egress:
-  providers:
-    - name: anthropic
-      hosts: [llm.corp.internal]
+  allow:
+    - { provider: anthropic, hosts: [llm.corp.internal] }
 ```
 
 ```bash
 agent-container up dev
-agent-container status dev --json | jq '.egress.hosts, .egress.host_source'
+agent-container status dev --json | jq '.egress.destinations'
 ```
 
-**Expected**: the allowlist contains `llm.corp.internal` and **not** `api.anthropic.com`;
-`host_source` reads `declaration`. Then, inside the container:
+**Expected**: the allowlist contains `llm.corp.internal` and **not** `api.anthropic.com`; that
+entry's `source` reads `declaration`. (T112 replaced the flat `egress.hosts`/`host_source` pair
+this step used to read — `jq '.egress.hosts'` now prints `null`, which is a verification step
+passing while verifying nothing.) Then, inside the container:
 
 ```bash
 curl -s -o /dev/null --max-time 20 https://api.anthropic.com/v1/messages; echo "exit=$?"
@@ -170,18 +171,19 @@ agent-container status --json | jq '.data.environments[] | select(.name=="dev")'
 filters. That is more useful than one row, and it kept the CLI from growing an argument merely to
 match this document.
 
-**Expected**: `egress.enforcement`, `egress.enforced`, `egress.hosts` (the **effective** allowlist,
-each entry tagged `tool` or `declaration`), `honours_proxy`, and `builtin_default_provider`.
+**Expected**: `egress.enforcement`, `egress.enforced`, `egress.destinations` (the **effective**
+allowlist, each entry tagged `source: tool | declaration` and `port`), `honours_proxy`, and
+`builtin_default_provider`.
 
 Check the two pairs that must not be conflated:
 
-| Field | Undeclared | `providers: []` |
+| Field | Undeclared | `allow: []` |
 |---|---|---|
 | `declared` | `false` | `true` |
 | `unrestricted` | **`true`** | **`false`** |
 
-Both have an empty `hosts` list and they are **opposites** — a caller must never have to infer
-which from emptiness.
+Both have an empty `destinations` list and they are **opposites** — a caller must never have to
+infer which from emptiness.
 
 `declared` and `enforced` are likewise distinct: an advisory declaration that cannot be enforced
 reads `declared: true, enforced: false` with a `not_enforced_reason`. Then read the prose output

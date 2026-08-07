@@ -8,8 +8,10 @@ material is ever written inline; only `file:` references appear.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
+import yaml
 
 
 def test_project_name(wiz):
@@ -339,6 +341,55 @@ def test_declaring_a_different_port_does_not_open_22(wiz):
             "strict",
             transparent=True,
         )
+
+
+# --- the remediation a refusal prints must survive the tool's own validator ----
+
+
+def _remediation_entries(message: str) -> list:
+    """Pull the `egress.allow: [...]` snippet a refusal offers, as parsed YAML."""
+    m = re.search(r"egress\.allow:\s*(\[.*?\])", message, re.S)
+    assert m, f"the refusal offers no `egress.allow:` remediation:\n{message}"
+    return yaml.safe_load(m.group(1))
+
+
+@pytest.mark.parametrize(
+    "egress,url,transparent",
+    [
+        ({"allow": [{"provider": "anthropic"}]}, "https://github.com/you/acme", False),
+        ({"allow": [{"provider": "anthropic"}]}, "git@github.com:you/acme.git", True),
+        ({"allow": [{"provider": "anthropic"}]}, "ssh://git@git.example.com:2222/x", True),
+    ],
+)
+def test_the_push_refusal_offers_config_the_validator_accepts(wiz, egress, url, transparent):
+    """The HTTPS arm printed `egress.allow: [github.com]` — a bare string, which
+    `validate_destination` refuses ("must be a mapping"). The operator was sent
+    from one refusal into a second one the TOOL had authored, with the first
+    message still reading as correct help. Parse what the refusal offers and put
+    it back through the validator, so the two cannot drift apart again.
+    """
+    with pytest.raises(wiz.Fatal) as exc:
+        wiz.check_egress_permits_push(egress, url, "strict", transparent=transparent)
+    entries = _remediation_entries(str(exc.value))
+    assert entries, "the remediation parsed to an empty list"
+    for entry in entries:
+        wiz.validate_destination(entry, "remediation")
+
+
+def test_the_builtin_default_refusal_offers_config_the_validator_accepts(wiz):
+    """The same defect, one message over: it named `egress.providers:`, which
+    `validate_egress` refuses OUTRIGHT (FR-018b) — answering a warning with a
+    hard failure."""
+    with pytest.raises(wiz.Fatal) as exc:
+        wiz.check_builtin_default_declared(
+            {"allow": [{"provider": "anthropic"}]}, "opencode", "strict"
+        )
+    msg = str(exc.value)
+    assert "egress.providers" not in msg, "the remediation names the one refused key"
+    for entry in _remediation_entries(msg):
+        wiz.validate_destination(entry, "remediation")
+    # And the whole block it implies must validate, not just the entry.
+    wiz.validate_egress({"allow": _remediation_entries(msg)}, "remediation")
 
 
 def test_ssh_endpoint_parsing_rejects_a_non_numeric_port(wiz):

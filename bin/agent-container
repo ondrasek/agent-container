@@ -4411,10 +4411,30 @@ def wizard_handover(
         )
 
 
-def do_logs(name: str, follow: bool) -> int:
+def do_logs(name: str, follow: bool, egress: bool = False) -> int:
+    """Stream the agent container's log, or — with `egress` — the boundary's.
+
+    THE BOUNDARY'S LOG IS THE ONLY PLACE A REFUSAL IS RECORDED (FR-020d). unbound
+    writes one line per reply, so an undeclared name reached for by the agent
+    leaves `… api.openai.com. A IN REFUSED …` there and nowhere else; the agent
+    container's own log shows a failed lookup with no cause. Without this flag the
+    record existed and was unreachable, which for an operator is the same as not
+    existing.
+    """
     validate_name(name)
     rt = detect_runtime()
-    argv = [rt, "logs"] + (["-f"] if follow else []) + [container_name(name)]
+    target = egress_container_name(name) if egress else container_name(name)
+    if egress and not container_exists(rt, target):
+        # The runtime's own "no such container" reads as a tool fault, when the
+        # truth is a policy fact: this environment has no boundary to log. That is
+        # the FR-020e confusion — a declaration outcome presented as infrastructure
+        # breakage — one level up from DNS, so it gets named rather than passed on.
+        die(
+            f"'{name}' has no egress boundary to read: no container {target}. An "
+            f"environment is only given one when its spec declares `egress:` AND the "
+            f"declaration is enforceable — check `agent-container status`."
+        )
+    argv = [rt, "logs"] + (["-f"] if follow else []) + [target]
     try:
         return run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     except KeyboardInterrupt:
@@ -5495,36 +5515,12 @@ def validate_destination(entry: object, where: str) -> None:
             die(f"{where}: `port` must be an integer 1-65535, got {port!r}")
 
 
-def validate_provider_entry(entry: object, where: str) -> None:
-    """One provider declaration: a known name, or a `{name, hosts}` override."""
-    if isinstance(entry, str):
-        if entry not in PROVIDERS:
-            die(
-                f"{where}: unknown provider {entry!r}. Known: "
-                f"{', '.join(sorted(PROVIDERS))}. For an endpoint the tool does not "
-                f"know (a gateway, a self-hosted or vendor-compatible deployment), "
-                f"give it explicit hosts: {{ name: {entry}, hosts: [<host>] }}"
-            )
-        return
-    if not isinstance(entry, dict):
-        die(f"{where}: must be a provider name (string) or a {{name, hosts}} mapping")
-    for k in entry:
-        if k not in {"name", "hosts"}:
-            die(f"{where}: unknown provider key {k!r}")
-    name = entry.get("name")
-    if not name or not isinstance(name, str):
-        die(f"{where}: missing required string 'name'")
-    hosts = entry.get("hosts")
-    if hosts is None:
-        # The mapping form exists ONLY to carry hosts. Without them it is the short
-        # form written the long way, so say that rather than silently accepting it.
-        die(
-            f"{where}: the mapping form requires 'hosts' — for the tool's own hosts, write {name!r}"
-        )
-    if not isinstance(hosts, list) or not hosts:
-        die(f"{where}: 'hosts' must be a non-empty list of hostnames")
-    for h in hosts:
-        validate_egress_host(h, where)
+# `validate_provider_entry` lived here: the validator for a `providers:` entry.
+# T112 made `providers:` a hard refusal in `validate_egress`, so no input could
+# ever reach it again — a validator for a syntax that dies two frames earlier
+# reads as a supported shape to anyone grepping for it. vulture at
+# --min-confidence 80 does not report unused FUNCTIONS (they score 60), so the
+# gate stayed green over it.
 
 
 def validate_egress_host(h: object, where: str, *, allow_wildcard: bool = False) -> None:
@@ -5620,20 +5616,44 @@ def build_unbound_conf(entries: list[tuple[str, str, int | None, str]]) -> str:
     Ported entries are INCLUDED: a `{host, port: 22}` destination is unreachable
     without resolution, and omitting it would make SSH fail like a firewall bug.
 
+    THE LOG DESTINATION IS PART OF THE ALLOWLIST'S JOB (T130/FR-020d), which is
+    why it is emitted here rather than left to the baked config. `log-replies:
+    yes` is set there, but unbound's `use-syslog` DEFAULTS TO YES and the egress
+    image runs no syslogd — so every reply line, including every REFUSED, was
+    handed to syslog(3) and discarded. Measured: the boundary answered REFUSED
+    for an undeclared name and the container log was completely EMPTY. A config
+    that names the record while the record goes nowhere is the failure shape this
+    repo keeps hitting, so the pair below is set unconditionally.
+
+    `logfile: ""` alongside it because the two together decide the destination:
+    with syslog off and no logfile, unbound writes to stderr, which is the
+    container's log and therefore reachable as `agent-container logs <n> --egress`.
+    This fragment is `include:`d LAST by the baked unbound.conf, so it also wins
+    if that file ever starts setting either option itself.
+
+    EMITTED EVEN FOR AN EMPTY ALLOWLIST — hence no early return. `allow: []` is
+    air-gapped, i.e. the environment where EVERY lookup is refused and the record
+    is the operator's only account of what the agent reached for; returning "" for
+    that case would switch the logging off exactly where it matters most.
+
     >>> print(build_unbound_conf([("anthropic", "api.anthropic.com", None, "tool")]))
     server:
+      use-syslog: no
+      logfile: ""
       local-zone: "api.anthropic.com" transparent
     forward-zone:
       name: "api.anthropic.com"
       forward-addr: 1.1.1.1
     <BLANKLINE>
-    >>> build_unbound_conf([])
-    ''
+    >>> print(build_unbound_conf([]))
+    server:
+      use-syslog: no
+      logfile: ""
+    <BLANKLINE>
     """
     names = list(dict.fromkeys(h.removeprefix("*.") for _l, h, _p, _s in entries))
-    if not names:
-        return ""
-    out = ["server:"] + [f'  local-zone: "{n}" transparent' for n in names]
+    out = ["server:", "  use-syslog: no", '  logfile: ""']
+    out += [f'  local-zone: "{n}" transparent' for n in names]
     for n in names:
         out += ["forward-zone:", f'  name: "{n}"', f"  forward-addr: {EGRESS_UPSTREAM_DNS}"]
     return "".join(f"{ln}\n" for ln in out)
@@ -5758,8 +5778,10 @@ def check_builtin_default_declared(egress: object, agent: str | None, mode: str)
     msg = (
         f"agent {agent!r} has a built-in default provider ({provider}) that this "
         f"declaration does NOT permit. The agent may try it and be refused at run "
-        f"time. Either declare it (`egress.providers: [{provider}]`) or configure the "
-        f"agent to use a declared provider."
+        # `providers:` is the one shape `validate_egress` refuses outright (FR-018b),
+        # so naming it here would answer a warning with a hard failure.
+        f"time. Either declare it (`egress.allow: [{{provider: {provider}}}]`) or "
+        f"configure the agent to use a declared provider."
     )
     if mode == "strict":
         die(msg)
@@ -6232,7 +6254,10 @@ def check_egress_permits_push(
         f"egress: the declaration does not permit {host!r}, but this environment "
         f"pushes over HTTPS to it. The proxy governs ALL egress, so `git push` will "
         f"be refused — and it will be refused at push time, after the work exists. "
-        f"Add it:  egress.allow: [{host}]"
+        # The remediation must be VALID as written: `allow` entries are mappings,
+        # so a bare `[github.com]` here would send the operator from one refusal
+        # into another ("must be a mapping") with the tool having supplied it.
+        f"Add it:  egress.allow: [{{host: {host}}}]"
     )
     _push_refusal(msg, mode)
 
@@ -6266,6 +6291,20 @@ def enforce_egress_declaration(
     ok, reason = egress_enforceable(egress, agent, override)
     if ok:
         log(f"egress: enforcement={mode} (enforced)")
+        # FR-020d/FR-020e. Said at the moment the operator opts into default-deny,
+        # because that is when a refusal starts being possible and the record is
+        # otherwise undiscoverable — it lives in a container the tool deliberately
+        # keeps out of the `agent-container-*` namespace every listing scans.
+        #
+        # SCOPED TO RESOLUTIONS ONLY, deliberately. squid's access log is written
+        # to a FILE inside the boundary (`access_log stdio:/var/log/squid/…`), not
+        # to its stdout, so refused CONNECTIONS are not in this stream — claiming
+        # them here would be the overclaim FR-022 forbids, wearing a smaller hat.
+        log(
+            "egress: refused DNS lookups are recorded in the boundary's log "
+            "(`agent-container logs <name> --egress`); REFUSED means undeclared, "
+            "NXDOMAIN means the name does not exist"
+        )
         return True
     if mode == "strict":
         die(
@@ -6867,10 +6906,16 @@ def plan_payload(plans: list) -> list[dict]:
 def egress_payload(egress: object, agent: str, override: Path | None = None) -> dict:
     """The egress facts, machine-readable (FR-005/FR-013, contract C7).
 
-    `hosts` is the EFFECTIVE allowlist, so an operator `hosts:` override is
+    `destinations` is the EFFECTIVE allowlist, so an operator `hosts:` override is
     reported rather than the tool's default — reporting the default while
-    enforcing an override would state a permission set the proxy does not enforce.
-    `host_source` says which side supplied each entry.
+    enforcing an override would state a permission set the boundary does not
+    enforce. Each entry carries `source` (which side supplied it) and `port`
+    (which surface enforces it).
+
+    It replaced a flat `hosts` list, which is emitted by NEITHER branch now. It
+    used to survive in the undeclared branch alone, where an empty list read as
+    "nothing is permitted" in the one case where EVERYTHING is — a consumer that
+    kept reading `.hosts` saw the allowlist invert rather than disappear.
 
     `enforced` is the honest field: a declaration can exist and not be in force
     (advisory mode with an unenforceable declaration), and a caller must be able to
@@ -6887,7 +6932,6 @@ def egress_payload(egress: object, agent: str, override: Path | None = None) -> 
             "enforcement": None,
             "providers": [],
             "destinations": [],
-            "hosts": [],
             "unrestricted": True,
         }
     assert isinstance(egress, dict)
@@ -7901,14 +7945,31 @@ def attach(
 def logs(
     name: str = typer.Argument(..., help="Container short name."),
     no_follow: bool = typer.Option(False, "--no-follow", help="Print logs without following."),
+    egress: bool = typer.Option(
+        False,
+        "--egress",
+        help=(
+            "Read the egress boundary's log instead of the agent's — where refused "
+            "destinations are recorded. REFUSED means the name is not declared; "
+            "NXDOMAIN means the name genuinely does not exist."
+        ),
+    ),
     as_json: bool = JSON_OPT,
 ) -> None:
     """Tail container logs."""
     set_json_mode(as_json)
-    rc = do_logs(name, follow=not no_follow)
+    rc = do_logs(name, follow=not no_follow, egress=egress)
     # The log STREAM itself is the container's own output and is not wrapped; the
     # envelope reports the outcome so an agent can tell success from failure.
-    emit_action("logs", name=name, exit_code=rc)
+    # `source` because the two streams answer different questions and a caller
+    # that cannot tell them apart would read an agent log as a policy record.
+    emit_action(
+        "logs",
+        name=name,
+        source="egress" if egress else "agent",
+        container=egress_container_name(name) if egress else container_name(name),
+        exit_code=rc,
+    )
     raise typer.Exit(rc)
 
 

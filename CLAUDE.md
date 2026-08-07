@@ -1,10 +1,8 @@
 # CLAUDE.md
 
-Guidance for Claude Code (claude.ai/code) when working in this repository.
-
 ## Project intent
 
-Build a **containerized development environment** designed to run remotely (e.g., Hetzner VPS) as an always-on container that the user attaches to and detaches from over SSH. Inside, AI coding agents (Claude Code, Codex, pi-coding-agent, opencode) and editors (nvim) run under tmux. Multiple such containers may run in parallel, each holding working copies of one or more git repositories.
+Build a **containerized development environment** that runs remotely (e.g., Hetzner VPS) as an always-on container the user attaches to and detaches from over SSH. Inside, AI coding agents (Claude Code, Codex, pi-coding-agent, opencode) and nvim run under tmux. Multiple such containers may run in parallel, each holding working copies of one or more git repositories.
 
 ## Hard constraints
 
@@ -32,7 +30,7 @@ those before changing behaviour in that area; do not re-summarise them here.
 - **Layout (specs/011) — [`docs/layout.md`](docs/layout.md) is the one map.** **project root** ·
   **project config** `.agent-container/` (travels with the repo) · **user configuration**
   `~/.config/agent-container/` · **derived host state** · **image sources** `image/`. Never
-  "project directory". Config is two levels, project winning, same filename both. **Plaintext
+  "project directory". Config is two levels, project winning, same filename both; **plaintext
   credentials are user-level only** (repo holds a locator, never a value). `-e` is repeatable and
   replaces discovery; bare `./.env` unread. Context **is** `image/`. Shell env at `~/.agent-env`. **Pre-011 layouts are refused, not ignored.**
 - **Run mechanism is compose** (Compose v2), generated and run **on the target host** — context
@@ -45,15 +43,18 @@ those before changing behaviour in that area; do not re-summarise them here.
   **operator-interactive-login only**. Rotate = edit locally + `redeploy`.
 - **The supported-agent list is single-sourced.** `AGENTS` in `bin/agent-container` is canonical;
   tests fail on drift across entrypoint, Dockerfile, completions, help and docs, and name what to
-  update. A sibling test pins the completions' command list to the CLI's.
+  update; a sibling test pins the completions' command list to the CLI's.
 - **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates
   it `root:root` and rootless cannot write it, even under a dev-owned parent. `opencode` is the
   only agent with two volumes (XDG splits config from credentials).
 - **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently so a
   non-editable install works standalone — only `build` needs a checkout. **PyYAML is the one
   third-party dep**; `yaml.safe_load` **only** — never a regex over structured formats. MIT.
-- **Egress enforcement is proxy-level and says so.** A declaration governs **all** egress (it
-  breaks HTTPS `git push` unless declared — checked at deploy); absent ≠ `providers: []`; the
+- **Egress enforcement is packet-level and says so.** Default-deny in a netns shared with the
+  **egress sidecar**, which alone holds `NET_ADMIN` (the agent holds none); squid **splices, never
+  bumps** — a locally-issued CN means the boundary inverted. A declared port selects netfilter over
+  the proxy allowlist; sidecars are inside unless declared out. A declaration governs **all** egress
+  (it breaks HTTPS `git push` unless declared — checked at deploy); absent ≠ `allow: []`; the
   strength statement is tested for **absence** of overclaim.
 - **Every substantive merge to `main` is a release.** Once `ci` passes, python-semantic-release
   bumps from Conventional Commits (`feat`→minor, `fix`→patch, breaking→minor pre-1.0;
@@ -83,23 +84,21 @@ Don't bake host-specific orchestration into the image.
 
 - **Rootless by decision**: no `sudo`/root at runtime, sshd as `dev` on 2222. **Bake every system
   dep at build time — agents never `apt install` at runtime.** Add packages to the `Dockerfile`.
-- Treat **commit-and-push** as a property of the agent config, not something enforced by git
-  hooks alone (they can be bypassed).
-- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` is the single source of
-  truth for the fast checks (ruff · ty · bandit · vulture · xenon · refurb · `--self-test` ·
-  pytest · shell suites). The local Stop hook runs it; CI runs the *same* script as a hard gate.
+- **Commit-and-push** is a property of the agent config, not of git hooks (bypassable).
+- **Quality gate — one script, two uses.** `scripts/quality-gate.sh` owns the fast checks
+  (ruff · ty · bandit · vulture · xenon · refurb · `--self-test` · pytest · shell suites).
+  The local Stop hook runs it; CI runs the *same* script as a hard gate.
   It **excludes** the CI-authoritative acceptance tier (`pytest -m acceptance bin/tests`; on
-  macOS+Lima the work dir must be Lima-shared). A gate failure blocks the release. **Read its exit
-  code unpiped** — `| tail` reports tail's status, not the gate's.
-- **Run the full suite, not just your new tests** — changing a shared contract is exactly when a
+  macOS+Lima the work dir must be Lima-shared). **Read its exit code unpiped** — `| tail` reports
+  tail's status, not the gate's.
+- **Run the full suite, not just your new tests** — a changed contract is exactly when a
   pre-existing test still pins the old shape.
 - **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: the
   local `commit-msg` hook (`git config core.hooksPath .githooks`, once per clone), the `commits`
   CI job, and a ruleset on `main`. `--no-verify` bypasses only the first.
-- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, plus one proving that
+- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, and one proves that
   check can fail.
-- Justify any new tool or dependency against the constraints above — especially "not
-  VSCode-locked" and Constitution VI.
+- Justify any new tool or dependency against the constraints above and Constitution VI.
 - **Keep this file under 2000 tokens.** It is loaded every session. New feature detail belongs in
   `docs/` and `specs/`, with at most a one-line invariant here.
 
