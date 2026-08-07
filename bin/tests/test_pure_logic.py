@@ -812,3 +812,110 @@ def test_threat_model_reconciled_rows_name_their_threats(wiz):
         f"'none' explicitly if the feature genuinely touched no boundary — silence "
         f"and 'nothing changed' must not look identical."
     )
+
+
+# --- Feature 012: the entrypoint's rule shape (adversarial review) ------------
+
+
+def _entrypoint_accept_rules(wiz):
+    """Every `-A OUTPUT ... -j ACCEPT` line in the egress entrypoint."""
+    text = (wiz.REPO_ROOT / "image" / "egress" / "entrypoint.sh").read_text(encoding="utf-8")
+    return [
+        ln.strip()
+        for ln in text.splitlines()
+        if "-A OUTPUT" in ln and "-j ACCEPT" in ln and not ln.strip().startswith("#")
+    ]
+
+
+def _rule_is_scoped(rule: str) -> bool:
+    """A port-matching ACCEPT must also constrain WHO or WHERE, not just which port."""
+    if "--dport" not in rule:
+        return True  # not a port rule; the other matches govern it
+    return " -d " in rule or " -o " in rule or "-m owner" in rule
+
+
+def test_no_accept_rule_matches_on_destination_port_alone(wiz):
+    """An ACCEPT matching only `--dport` is an unrestricted egress channel.
+
+    Found by adversarial review: `-p tcp --dport 3128:3129 -j ACCEPT` carried no
+    `-d` and no `-o`, so a connection to ANY address on those ports was accepted
+    before `-P OUTPUT DROP` could apply. The nat REDIRECT only matches dport 443/80,
+    so squid never saw it, nothing was logged, and `enforced: true` still held.
+
+    Asserted structurally rather than by naming the two ports, because the next
+    such rule will have a different number.
+    """
+    for rule in _entrypoint_accept_rules(wiz):
+        assert _rule_is_scoped(rule), (
+            f"ACCEPT matches on destination port alone, so it admits ANY address: {rule!r}"
+        )
+
+
+def test_generated_port_rules_are_scoped_to_a_host(wiz):
+    """The same invariant on the GENERATED side — SC-010 is 'that host and that
+    port only', so a generated rule must never widen to a whole port."""
+    dests = [("gh", "github.com", 22, "spec"), ("db", "db.example.com", 5432, "spec")]
+    for line in wiz.build_netfilter_rules(dests).splitlines():
+        if "-j ACCEPT" in line and "--dport" in line:
+            assert _rule_is_scoped(line), f"generated rule is unscoped: {line!r}"
+
+
+def test_the_scoping_guard_can_fail():
+    """Proof the check above is not vacuous — an absence assertion passes just as
+    happily against a rule set that contains no port rules at all."""
+    assert not _rule_is_scoped("iptables -A OUTPUT -p tcp --dport 3128:3129 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport 3128 -j ACCEPT")
+    assert _rule_is_scoped("iptables -A OUTPUT -o lo -p tcp --dport 53 -j ACCEPT")
+
+
+def test_declared_port_rules_are_installed_after_the_resolver(wiz):
+    """iptables resolves `-d <hostname>` AT INSERT TIME, so the fragment must be
+    sourced after unbound is up.
+
+    Sourced from inside install_rules it could never work: the DNS rewrite has
+    already pointed 127.0.0.11:53 at 127.0.0.1:53 and unbound did not exist yet, so
+    every declared `{host, port}` ACCEPT was silently skipped — FR-018 non-functional,
+    and `git push` over declared SSH dropped at push time.
+    """
+    lines = (
+        (wiz.REPO_ROOT / "image" / "egress" / "entrypoint.sh")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+
+    def _stmt(needle: str) -> int:
+        """Line number of the EXECUTABLE statement, never a comment mentioning it.
+
+        The first draft of this test used `text.index(...)` and matched the prose in
+        the wrapper's own comment — a check satisfied by a sentence rather than by
+        the code it names, which is precisely the defect class this file exists to
+        catch. Found by the gate, kept as a comment so it is not reintroduced.
+        """
+        for i, ln in enumerate(lines):
+            stripped = ln.strip()
+            if stripped.startswith("#"):
+                continue
+            if needle in stripped:
+                return i
+        raise AssertionError(f"no executable statement matching {needle!r}")
+
+    unbound_at = _stmt("unbound -c /etc/unbound/unbound.conf")
+    ports_at = _stmt("/etc/egress/ports.rules")
+    policy_at = _stmt("iptables -P OUTPUT DROP")
+    assert unbound_at < ports_at, "declared port rules are sourced before the resolver exists"
+    assert ports_at < policy_at, "declared ports must be admitted before the policy flips to DROP"
+
+
+def test_iptables_failures_cannot_be_swallowed(wiz):
+    """`install_rules || die` suppressed `set -e` for the whole function body, and
+    the function's status was that of its last command — which always succeeded."""
+    text = (wiz.REPO_ROOT / "image" / "egress" / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "command iptables" in text, "the checking wrapper is gone"
+    assert "netfilter rule REJECTED" in text, "a failed rule must name itself"
+    # CODE ONLY. The comment above the wrapper quotes the old form to explain why it
+    # was wrong, and a naive substring check matched that prose — an absence
+    # assertion satisfied by the very sentence documenting the fix.
+    code = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    assert not any("install_rules || die" in ln for ln in code), (
+        "the AND-OR form suppresses set -e for the entire function body"
+    )

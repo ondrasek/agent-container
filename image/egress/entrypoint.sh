@@ -15,6 +15,22 @@ set -eu
 log() { printf '[egress] %s\n' "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
+# EVERY RULE IS CHECKED, AND THE CHECK CANNOT BE SUPPRESSED.
+#
+# `install_rules || die …` did NOT do this. Putting a function on the left of an
+# AND-OR list suppresses `set -e` for its ENTIRE body (POSIX), and the function's
+# status is that of its LAST command — `iptables -P OUTPUT DROP`, which succeeds
+# regardless of every rule before it. So a rule that failed to install was
+# invisible and the entrypoint went on to log the boundary as installed.
+#
+# Shadowing the command instead of adding a helper is deliberate: the generated
+# `ports.rules` fragment is SOURCED into this shell and calls `iptables` directly,
+# so it inherits the check without the generator and the entrypoint having to
+# agree about a helper's name — an agreement that could silently lapse.
+iptables() {
+    command iptables "$@" || die "netfilter rule REJECTED: iptables $*"
+}
+
 SQUID_HTTP_PORT=3128
 SQUID_TLS_PORT=3129
 
@@ -94,34 +110,56 @@ install_rules() {
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     iptables -A OUTPUT -m owner --uid-owner "$SQUID_UID" -j ACCEPT
     iptables -A OUTPUT -m owner --uid-owner "$UNBOUND_UID" -j ACCEPT
-    iptables -A OUTPUT -p tcp --dport "${SQUID_HTTP_PORT}:${SQUID_TLS_PORT}" -j ACCEPT
+    # SCOPED TO LOOPBACK DELIBERATELY. Unscoped this matches on destination PORT
+    # alone, so it ACCEPTs a connection to ANY address in the world on 3128/3129 —
+    # and the nat REDIRECT only matches dport 443/80, so such a connection is never
+    # handed to squid. It reached this rule and was accepted before `-P OUTPUT DROP`
+    # could apply: an unlogged, unrestricted TCP channel out of the boundary
+    # (`nc <any-ip> 3128`), needing no DNS, while the tool still reported
+    # `enforced: true`. `build_netfilter_rules` never emits an unscoped port ACCEPT
+    # for exactly this reason — SC-010 is "that host and that port only".
+    iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport "${SQUID_HTTP_PORT}:${SQUID_TLS_PORT}" -j ACCEPT
 
-    # Declared non-HTTP destinations (FR-018): `{host, port}` entries become
-    # explicit ACCEPTs. Injected as a shell fragment because the set is
-    # per-environment; absent when nothing non-HTTP is declared.
-    if [ -s /etc/egress/ports.rules ]; then
-        log "applying declared port rules"
-        # shellcheck disable=SC1091  # generated, injected via compose configs
-        . /etc/egress/ports.rules
-    fi
-
-    # FR-017. Everything not permitted above is denied — including protocols and
-    # ports nobody thought of, which is the point. A default-ACCEPT policy with
-    # 80/443 redirected would let an agent reach anything it liked on port 8080,
-    # and the declaration would still read as constraining.
-    iptables -P OUTPUT DROP
 }
 
-install_rules || die "could not install netfilter rules (is NET_ADMIN granted?)"
-log "netfilter installed; OUTPUT policy=DROP"
+install_rules
+log "netfilter installed (policy still ACCEPT — declared ports pending)"
 
 # --- resolver ----------------------------------------------------------------
-# Started before squid because squid resolves upstream names through it.
+# Started before squid because squid resolves upstream names through it, AND
+# before the declared-port rules below because THOSE NEED IT TOO.
 unbound -c /etc/unbound/unbound.conf &
 UNBOUND_PID=$!
 sleep 1
 kill -0 "$UNBOUND_PID" 2>/dev/null || die "unbound exited immediately — check /etc/unbound/allowed.conf"
 log "unbound up (pid ${UNBOUND_PID})"
+
+# DECLARED PORT RULES GO IN *AFTER* THE RESOLVER, and the ordering is the fix.
+#
+# `iptables -d github.com` resolves the operand AT INSERT TIME. Sourced from
+# inside install_rules this could never work: the DNS rewrite above has already
+# pointed 127.0.0.11:53 at 127.0.0.1:53 — root is not exempt, so this shell's own
+# lookups are rewritten too — and unbound did not exist yet. getaddrinfo failed,
+# the ACCEPT was skipped, and with the old swallowed-failure handling the boundary
+# still logged as installed. FR-018 was therefore non-functional on Docker, and
+# `git push` over a declared SSH remote was packet-dropped AT PUSH TIME, after the
+# work existed: Hard Constraint #1 breaking in the exact ordering it forbids.
+#
+# Safe to run with the policy still ACCEPT: nothing untrusted is in this namespace
+# yet. The agent container cannot start until the healthcheck passes, and that
+# needs squid, which starts below — after the policy flips.
+if [ -s /etc/egress/ports.rules ]; then
+    log "applying declared port rules"
+    # shellcheck disable=SC1091  # generated, injected via compose configs
+    . /etc/egress/ports.rules
+fi
+
+# FR-017. Everything not permitted above is denied — including protocols and
+# ports nobody thought of, which is the point. A default-ACCEPT policy with
+# 80/443 redirected would let an agent reach anything it liked on port 8080,
+# and the declaration would still read as constraining.
+iptables -P OUTPUT DROP
+log "netfilter complete; OUTPUT policy=DROP"
 
 # This container's own resolution rides the SAME rewrite: squid's /etc/resolv.conf
 # still says 127.0.0.11 and lands on unbound, so squid can resolve declared names
