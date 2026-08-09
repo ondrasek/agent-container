@@ -2523,7 +2523,9 @@ def test_git_push_over_a_declared_ssh_endpoint_actually_pushes(acc):
                     "inspect",
                     n,
                     "--format",
-                    '{{(index .NetworkSettings.Networks "%s").IPAddress}}' % net,
+                    # Concatenated, not %-formatted or f-string: the Go template is
+                    # all braces, so both alternatives would fight the syntax.
+                    '{{(index .NetworkSettings.Networks "' + net + '").IPAddress}}',
                 ],
                 capture_output=True,
                 text=True,
