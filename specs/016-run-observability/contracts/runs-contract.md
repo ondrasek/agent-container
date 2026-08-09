@@ -81,3 +81,16 @@ Records prune by age and count per environment, with documented defaults, at ing
 
 Documentation states the relationship (FR-014); `runs show` points at `logs` for detail rather than
 duplicating it.
+
+
+## C16 — `runs list --changed <path>` answers SC-007
+
+`agent-container runs list [<environment>] --changed <path> [--json]` returns the runs whose
+`repository.paths` contain that path, newest-first.
+
+It reads **stored records only** — no repository access, so it works months later, on a different
+machine, and against history that has since been rewritten (research R11).
+
+A run whose `paths_truncated` is true and which does **not** match MUST be reported as an uncertain
+result rather than silently omitted: the path may have been in the part that was cut. A confident
+"no run changed that file" from a truncated list is the failure this contract exists to prevent.

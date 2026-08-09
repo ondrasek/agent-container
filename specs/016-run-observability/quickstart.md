@@ -171,3 +171,25 @@ This is the one free-text field and the one place a credential can arrive (resea
 `docs/threat-model.md`). Every other field is tool-generated or git-derived. The tool does **not**
 redact: a redactor that misses one value converts caution into misplaced confidence. Do not put
 credentials in a task.
+
+
+---
+
+## S13 — Which of these runs changed this file? (SC-007)
+
+```bash
+# after at least five runs against one environment
+agent-container runs list demo --changed src/auth/session.py
+agent-container runs list demo --changed src/auth/session.py --json | jq -r '.runs[].run_id'
+```
+
+**Expected**: exactly the runs that touched that file, newest-first — verified with **N ≥ 5** runs
+present. (C16, SC-007)
+
+**It must work with the repository absent.** Delete or move the clone and run it again: the answer
+is unchanged, because the paths were captured when the run ended rather than resolved from SHAs now
+(research R11). The same property is why a later rebase does not erase the answer.
+
+**A wrong answer that looks right**: a confident empty result. If any candidate record has
+`paths_truncated: true`, the command must say the answer is uncertain rather than report nothing
+found — the path may have been in the part that was cut.

@@ -230,3 +230,40 @@ file already sitting on a volume).
 with the other `driver_*` argv builders, and it must be exercised against a **remote context** in
 acceptance — a test that only ever runs locally would pass while the remote path, the one this
 mechanism exists for, was never executed.
+
+---
+
+## R11 — Which run changed a file: capture the PATHS, do not resolve the SHAs later
+
+**Decision**: the entrypoint records the **changed file paths** in the record at exit, alongside
+the commit SHAs. The query is then a lookup over stored records and touches no repository.
+
+**Rationale**: SC-007 requires an operator to identify which of N runs changed a given file. The
+record holds commit SHAs, and a SHA is not a file list — so something has to bridge them. There
+are only two moments where that can happen, and they are not equivalent:
+
+| | Resolve at QUERY time | Capture at WRITE time |
+|---|---|---|
+| needs the repository present | **yes**, months later, on the machine asking | no |
+| survives rewritten history | **no** — the spec's own edge case | **yes** — paths were recorded when the commits existed |
+| survives the repository being deleted or moved | no | yes |
+| cost | a git call per candidate run, per query | one `git diff --name-only` at exit |
+
+Query-time resolution fails exactly when the record is most valuable: long after the run, on a
+machine that may not have the repository, against history someone has since rebased. The spec
+already anticipates this — *"a run whose commits were later rewritten … must degrade gracefully"* —
+and capture-at-write-time is what makes that graceful rather than a lookup returning nothing.
+
+**So one decision closes two findings**: SC-007 becomes answerable (G1), and the rewritten-history
+edge case degrades to *"the paths are what they were at the time"* rather than to an empty result
+(G3).
+
+**The list must be bounded, and the bound must be stated.** A run that touches ten thousand files
+would otherwise write a record larger than everything else combined. Capped, with an explicit
+`paths_truncated` flag — **never a silent cap**, because a truncated list that looks complete would
+answer SC-007 with a confident *"no run changed that file"* when one did. That is the shape this
+project keeps finding: a check that passes while the thing it names is broken.
+
+**Rejected**: storing a full diff (this is a summary, not a log — the feature's first assumption);
+resolving lazily and caching (all the fragility of query-time resolution plus a cache to invalidate);
+recording only the commit count (does not answer the question at all).

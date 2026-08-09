@@ -52,10 +52,20 @@ added, and then SC-002 cannot be measured.
   "branch": "<name>|null",
   "upstream": "<remote/branch>|null",
   "commits": ["<sha>", "..."],
+  "paths": ["<repo-relative path>", "..."],
+  "paths_truncated": true | false,
   "pushed": true | false | null,
   "state": "ok" | "no-repository" | "no-upstream" | "detached" | "unreadable"
 }
 ```
+
+`paths` is what the run's commits changed, **captured at exit** rather than resolved from the SHAs
+later (research R11). This is what makes SC-007 answerable without the repository being present —
+and what makes the spec's *"commits later rewritten"* edge case degrade to *"the paths are what
+they were at the time"* instead of to an empty result.
+
+`paths_truncated` exists because the list is capped. **The cap is never silent**: a truncated list
+that looked complete would answer *"no run changed that file"* with confidence when one did.
 
 `commits` is what `end_head` contains that `start_head` did not. `pushed` compares local against
 upstream at exit.

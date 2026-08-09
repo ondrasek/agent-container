@@ -147,6 +147,18 @@ bin/tests/                 hermetic construction + vocabulary + pruning; accepta
 7. **Teardown ingests first** (FR-001b) — `down` and `wipe` pull pending records before removing
    the volume that holds them.
 8. **Retention is defined and enforced** (FR-011), and pruning is deleting files.
+   **The defaults are 90 days and 500 records per environment**, whichever prunes first. Named
+   here rather than left as "documented defaults", because FR-011 requires retention to be
+   *defined* — and T041 checks that the documented number is the enforced one, which is
+   unanswerable while no number exists. 500 records is roughly a year of four nightly runs; 90 days
+   is past the point where a run's commits are ordinary history.
+
+9. **`stopped` needs no kill switch.** The spec lists Feature 015 as a dependency for
+   distinguishing a stopped run from a failed one. 015 is unbuilt, and it is **not a blocker**: a
+   container stopped by `down`, `stop` or the runtime receives SIGTERM, which is what T014's trap
+   observes. 015 would add an operator-facing way to *trigger* that stop; the record does not care
+   who sent the signal. Stated because a reader checking dependencies would otherwise conclude this
+   feature cannot ship until 015 does.
 
 ## Phasing
 
@@ -167,6 +179,7 @@ failing the run, concurrency, retention, and the threat-model reconciliation.
 | Deviation | Why needed | Rejected alternative |
 |---|---|---|
 | A sixth layout location | records are durable; state dir is documented safe-to-delete | reusing state dir — it would make "safe to delete" false, and Feature 011's map is load-bearing |
+| Changed paths stored in the record | SC-007 must be answerable without the repository, months later, against rewritten history | resolving SHAs at query time — fails exactly when the record is most valuable (research R11) |
 | A tenth volume (identity change) | the record must outlive the container in every workspace mode | `shellenv` — operator-writable by design; workspace — absent in bind/ephemeral |
 | Record-writing logic in the entrypoint | only the entrypoint is present when a detached run ends | CLI-side capture — misses detached runs, which are the default |
 | Storing raw task text | FR-002 requires it | pattern redaction — a redactor that misses one value converts caution into misplaced confidence |

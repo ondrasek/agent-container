@@ -1,7 +1,7 @@
 # Tasks: Run Observability (Feature 016)
 
-**Input**: [plan.md](./plan.md) · [research.md](./research.md) (R1–R10) · [data-model.md](./data-model.md) ·
-[contracts/runs-contract.md](./contracts/runs-contract.md) (C1–C15) · [quickstart.md](./quickstart.md) (S1–S12)
+**Input**: [plan.md](./plan.md) · [research.md](./research.md) (R1–R11) · [data-model.md](./data-model.md) ·
+[contracts/runs-contract.md](./contracts/runs-contract.md) (C1–C16) · [quickstart.md](./quickstart.md) (S1–S13)
 
 **Format**: `- [ ] TNNN [P?] [Story?] description with file path`
 `[P]` = parallelisable (different files, no dependency on incomplete work).
@@ -128,6 +128,33 @@ later phase is decoration.
 
 ---
 
+## Phase 5b: User Story 2 (cont.) — which run changed this file (SC-007)
+
+Added after `/speckit-analyze` found SC-007 with **zero** implementing tasks (finding G1). One
+design decision (research R11) settles it and also resolves the rewritten-history edge case (G3):
+**capture the paths at exit, do not resolve the SHAs at query time.**
+
+- [ ] T051 [US2] Capture changed paths at exit in `image/entrypoint.sh`
+      (`git diff --name-only <start_head>..<end_head>`) into `repository.paths` (data-model §3).
+      Captured at WRITE time, so the answer needs no repository months later and survives a rebase
+      — query-time resolution fails exactly when the record is most valuable (research R11)
+- [ ] T052 [US2] Cap the path list and set `paths_truncated`. **Never a silent cap**: a truncated
+      list that looks complete answers SC-007 with a confident *"no run changed that file"* when one
+      did — the defect shape this project keeps finding
+- [ ] T053 [US2] `runs list --changed <path>` (C16), reading **stored records only** — no
+      repository access, so it works on another machine and against rewritten history
+- [ ] T054 [P] [US2] A candidate record with `paths_truncated: true` that does not match MUST be
+      reported as **uncertain**, not silently omitted (C16). Test both: a match, and an uncertain
+      non-match
+- [ ] T055 [US2] Acceptance S13: with **N ≥ 5** runs, `--changed` returns exactly the runs that
+      touched the file (SC-007) — and still does with the repository **deleted**, which is what
+      proves the capture-at-write-time property rather than assuming it
+- [ ] T056 [P] [US2] A commit SHA that no longer resolves degrades gracefully (spec edge case,
+      finding G3): `paths` still answers, and `commits` is rendered as unresolvable rather than
+      dropped or crashing
+
+---
+
 ## Phase 6: The honest edges
 
 - [ ] T038 A record write that fails **surfaces without failing the run** (FR-008, C11) — as a
@@ -138,6 +165,14 @@ later phase is decoration.
 - [ ] T040 Retention: prune by age and count at ingestion, with documented defaults (FR-011, C14)
 - [ ] T041 [P] Test that pruning is bounded and that the documented default is the enforced one —
       a documented number the code does not use is the recurring defect of this repo
+- [ ] T057 **Records lost to an out-of-band volume removal must be VISIBLE** (spec edge case,
+      finding G2). T017 drains on tool teardown, but `docker volume rm` behind the tool's back
+      loses pending records silently. Detect the gap — a known environment whose runs volume has
+      vanished with records never ingested — and say so
+- [ ] T058 [P] **Test that the record's field set is CLOSED** (finding U1, SC-005): every field
+      except `task` is tool- or git-derived. The 100%-no-credentials claim rests entirely on that
+      closure, and nothing currently asserts it — a new free-text field could be added and SC-005
+      would still "pass"
 - [ ] T042 Interactive sessions recorded as a distinct kind with the interactive vocabulary and the
       same repository capture (FR-013); acceptance S8 asserts an ended session is never `finished`
 
