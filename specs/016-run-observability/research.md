@@ -190,3 +190,43 @@ Saying plainly "the task text is recorded verbatim; do not put credentials in it
 protection and stronger information.
 
 **Constitution III requires this reach the threat model**, not just a docstring.
+
+---
+
+## R10 — How ingestion actually reads the volume (MEASURED)
+
+**Decision**: a throwaway container mounts the runs volume and streams its contents to the CLI's
+stdout: `docker run --rm -v <runs-volume>:/mnt alpine tar cf - -C /mnt .`
+
+**Rationale**: R7 said teardown drains pending records "before removing volumes" and never said
+*how*. That omission matters precisely where this feature is aimed — a **remote** host. Three
+machines are involved and only one of them has the operator's store:
+
+| Machine | Holds |
+|---|---|
+| operator's machine | the durable store, `$XDG_DATA_HOME/agent-container/runs/` |
+| the container host (possibly a VPS) | the volume with pending records |
+| the container | wrote them, and is typically gone by now |
+
+There is **no shared filesystem** between the first two, so the records cannot be read directly and
+`docker cp` has no container to copy from once the run has exited.
+
+**Measured**, not assumed:
+
+| Check | Result |
+|---|---|
+| a fresh container reads a volume whose writer is gone | **yes** — file listed and read back |
+| contents stream out as a tarball on stdout | **yes** — `./demo.json` present in the stream |
+
+stdout is what makes this work across a remote Docker context: the throwaway container runs on the
+remote daemon, and only bytes cross the boundary.
+
+**Rejected**: `docker cp` (needs a container; the writer has exited); mounting the volume on the
+operator's machine (impossible for a remote host, which is the case that matters); an agent or
+sidecar that uploads records (a network dependency, a credential, and a new thing to fail — for a
+file already sitting on a volume).
+
+**Consequence for tasks**: ingestion needs the runtime, not the filesystem. It therefore belongs
+with the other `driver_*` argv builders, and it must be exercised against a **remote context** in
+acceptance — a test that only ever runs locally would pass while the remote path, the one this
+mechanism exists for, was never executed.
