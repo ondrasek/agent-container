@@ -2,6 +2,92 @@
 
 <!-- version list -->
 
+## v0.21.1 (2026-08-09)
+
+### Bug Fixes
+
+- **egress**: Say nothing is enforced when nothing is, and stop the pty probe guessing
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`32dab44`](https://github.com/ondrasek/agent-container/commit/32dab44dca251267a0415a75ebcd676d65e26dd2))
+
+### Chores
+
+- **specs**: Untrack the active-feature pointer
+  ([`8102989`](https://github.com/ondrasek/agent-container/commit/8102989211307ed672debc0fbb4a48dd41c73f11))
+
+### Code Style
+
+- Build the inspect template by concatenation
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`2f4c9e9`](https://github.com/ondrasek/agent-container/commit/2f4c9e90af9b7827afce552a8a1584ebbe142315))
+
+### Documentation
+
+- **specs**: Clarify Feature 013 doctor-preflight
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`0b4237a`](https://github.com/ondrasek/agent-container/commit/0b4237a1244840f87ea004053b8431288b61e740))
+
+- **specs**: Clarify Feature 015 kill-switch
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`65522a9`](https://github.com/ondrasek/agent-container/commit/65522a9926a888052dae6ff5363cb3444211038e))
+
+- **specs**: Finish reconciling 012, and mark T138 partial rather than done
+  ([`745c67f`](https://github.com/ondrasek/agent-container/commit/745c67f3e810f55015bf10878cbd7d379eb561e0))
+
+- **specs**: Outcomes, retention, identity and reconciliation
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`57fc6d2`](https://github.com/ondrasek/agent-container/commit/57fc6d251361f57acf1af92e5bf70cda0371d0cc))
+
+- **specs**: Reconcile 012's task list with the tree
+  ([`b17b726`](https://github.com/ondrasek/agent-container/commit/b17b726c9f2d93323a9c5b9c111d2385b2a9748a))
+
+- **specs**: Run records are a separate store from the inventory
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`a6fc7fc`](https://github.com/ondrasek/agent-container/commit/a6fc7fc48e1846424e71e270d7615495c0132e15))
+
+- **specs**: Self-exclusion, a narrower image, and no passphrase recovery
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`58c149e`](https://github.com/ondrasek/agent-container/commit/58c149e7c0c4dab4a8c7266292756e77fe93183a))
+
+- **specs**: Specify Feature 013 doctor-preflight
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`61bacca`](https://github.com/ondrasek/agent-container/commit/61bacca8f9f6a3d0d4bb995e7f5db07176acdc08))
+
+- **specs**: Specify Feature 014 host-inventory
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`77c8b33`](https://github.com/ondrasek/agent-container/commit/77c8b330cb118c6ba5e8f30194592832e86ba5e3))
+
+- **specs**: Specify Feature 015 kill-switch
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`b44092a`](https://github.com/ondrasek/agent-container/commit/b44092ad8f005943907e7331769b5a73e430a274))
+
+- **specs**: Specify Feature 016 run-observability
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`3886e8f`](https://github.com/ondrasek/agent-container/commit/3886e8faea80ea3acccda433526417b7faa8563a))
+
+- **specs**: Specify Feature 017 control-plane
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`39bcce6`](https://github.com/ondrasek/agent-container/commit/39bcce6ee35a2b924e01611767b4c902c6b2b55d))
+
+- **specs**: The control plane mints its own key
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`9e66b26`](https://github.com/ondrasek/agent-container/commit/9e66b261c527d244bbacdfc2cc988d79131d64a3))
+
+- **specs**: Two stores, and the inventory needs its own home
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`8c989af`](https://github.com/ondrasek/agent-container/commit/8c989af18967b127be1a25e51a30c7ecdb2831c7))
+
+- **specs**: Who writes the record, and how it learns what changed
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`c562db2`](https://github.com/ondrasek/agent-container/commit/c562db27a7689bcafd0c7a3c95224516a9c1e8a7))
+
+### Testing
+
+- **egress**: Push for real over a declared SSH endpoint, with a control
+  ([#012](https://github.com/ondrasek/agent-container/pull/12),
+  [`17a0d7d`](https://github.com/ondrasek/agent-container/commit/17a0d7dee577d7a0e20588d77978bafd1891245c))
+
+
 ## v0.21.0 (2026-08-07)
 
 ### Bug Fixes
