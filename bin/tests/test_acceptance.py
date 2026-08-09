@@ -2401,3 +2401,177 @@ def test_an_undeclared_environment_keeps_its_own_network(acc):
     assert reach.returncode == 0, (
         f"egress was restricted without a declaration (curl exit {reach.returncode})"
     )
+
+
+# --- T138 / quickstart S18: a REAL git push over a declared SSH endpoint ------
+
+_GIT_SERVER_DOCKERFILE = """FROM alpine:3.21
+RUN apk add --no-cache openssh-server git \
+ && ssh-keygen -A \
+ && adduser -D -s /bin/sh git \\
+ && passwd -u git 2>/dev/null || true
+COPY authorized_keys /home/git/.ssh/authorized_keys
+RUN chown -R git:git /home/git/.ssh && chmod 700 /home/git/.ssh \
+ && chmod 600 /home/git/.ssh/authorized_keys \
+ && mkdir -p /srv/repo.git && git init --bare -b main /srv/repo.git \
+ && chown -R git:git /srv/repo.git
+EXPOSE 22
+CMD ["/usr/sbin/sshd","-D","-e"]
+"""
+# `passwd -u` is load-bearing, not tidying: `adduser -D` leaves the account LOCKED,
+# and sshd refuses PUBLIC-KEY auth for a locked account. Without it the push fails
+# with `Permission denied (publickey)` — which reads exactly like a boundary refusal
+# while the boundary is in fact working, since the connection reached the server to
+# be refused at all.
+
+_PUSH_SCRIPT = """
+export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_push -o IdentitiesOnly=yes -o IdentityAgent=none \
+ -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+D=$(mktemp -d); cd "$D"
+git init -q -b main .
+git config user.email t@example.com; git config user.name T
+date > file.txt
+git add file.txt; git commit -qm "{msg}"
+git remote add origin ssh://git@{host}:22/srv/repo.git
+git push origin main 2>&1 | tail -6; echo "exit=${{PIPESTATUS[0]}}"
+"""
+
+
+def test_git_push_over_a_declared_ssh_endpoint_actually_pushes(acc):
+    """T138, quickstart S18 — the assertion the feature calls unshippable if it fails.
+
+    HERMETIC ON PURPOSE. The obvious version pushes to github.com, which needs a
+    write credential and touches real infrastructure; it also cannot express the
+    NEGATIVE case, because there is no second GitHub to leave undeclared. So the
+    destination is a throwaway SSH git server on the compose network: the declared
+    one must accept a real push, and an identical UNDECLARED one must not. Without
+    that control the test proves only that something worked — a boundary permitting
+    everything passes the positive arm.
+
+    The transport arm (`ssh -T`) was already covered and is not what this adds. What
+    was never exercised is a COMPLETE push — several round trips and a pack upload —
+    over a connection the packet filter had to permit.
+    """
+    laptop = _gen_keypair(acc.tmp / "lapS18")
+    push = _gen_keypair(acc.tmp / "pushkey")
+    names = ("acc-s18-declared", "acc-s18-undeclared")
+
+    def drop_servers():
+        """Stop THEN remove, on every exit path.
+
+        The first version removed without stopping and only cleaned up after the
+        final assertion, so one failure left both servers running and every later
+        run died at `docker run` with a name clash — a broken test reporting the
+        wrong reason from the second attempt onward.
+        """
+        for n in names:
+            subprocess.run([RUNTIME, "stop", n], capture_output=True)
+            subprocess.run([RUNTIME, "rm", "-v", n], capture_output=True)
+
+    srv_ctx = acc.tmp / "gitsrv"
+    srv_ctx.mkdir(parents=True, exist_ok=True)
+    (srv_ctx / "Dockerfile").write_text(_GIT_SERVER_DOCKERFILE)
+    (srv_ctx / "authorized_keys").write_text(push.with_suffix(".pub").read_text())
+    assert (
+        subprocess.run(
+            [RUNTIME, "build", "-q", "-t", "acc-gitsrv:test", str(srv_ctx)],
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    ), "could not build the throwaway git server"
+
+    drop_servers()
+    try:
+        for n in names:
+            assert (
+                subprocess.run(
+                    [RUNTIME, "run", "-d", "--name", n, "acc-gitsrv:test"], capture_output=True
+                ).returncode
+                == 0
+            )
+        time.sleep(4)
+
+        proj = _phase_b_project(acc, "accs18")
+        acc.register("accs18")
+        # The first deploy CREATES the compose network. Only then can the servers
+        # join it and have an address, and the declaration names an address — so it
+        # cannot be written before the network exists.
+        assert (
+            acc.cli(
+                ["up", "accs18", "--authorized-key", str(laptop.with_suffix(".pub"))], cwd=proj
+            ).returncode
+            == 0
+        )
+        net = subprocess.run(
+            [
+                RUNTIME,
+                "inspect",
+                "agent-egress-accs18",
+                "--format",
+                "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+            ],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        ips = {}
+        for n in names:
+            subprocess.run([RUNTIME, "network", "connect", net, n], capture_output=True)
+            ips[n] = subprocess.run(
+                [
+                    RUNTIME,
+                    "inspect",
+                    n,
+                    "--format",
+                    '{{(index .NetworkSettings.Networks "%s").IPAddress}}' % net,
+                ],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            assert ips[n], f"no address for {n} on {net}"
+
+        spec = proj / ".agent-container" / "environments.yaml"
+        spec.write_text(
+            spec.read_text().replace(
+                "      allow:\n        - provider: anthropic\n",
+                f"      allow:\n        - provider: anthropic\n"
+                f"        - {{host: {ips[names[0]]}, port: 22}}\n",
+            )
+        )
+        assert acc.cli(["redeploy", "accs18"], cwd=proj).returncode == 0
+
+        agent = "agent-container-accs18"
+        subprocess.run([RUNTIME, "exec", agent, "sh", "-c", "mkdir -p ~/.ssh; chmod 700 ~/.ssh"])
+        subprocess.run([RUNTIME, "cp", str(push), f"{agent}:/home/dev/.ssh/id_push"])
+        subprocess.run(
+            [RUNTIME, "exec", "-u", "root", agent, "chown", "dev:dev", "/home/dev/.ssh/id_push"]
+        )
+        subprocess.run([RUNTIME, "exec", agent, "chmod", "600", "/home/dev/.ssh/id_push"])
+
+        declared = _exec(
+            "accs18",
+            ["bash", "-lc", _PUSH_SCRIPT.format(host=ips[names[0]], msg="s18 declared")],
+        )
+        assert "exit=0" in declared.stdout, (
+            "a real push to a DECLARED ssh endpoint failed — S18 says the feature is "
+            f"unshippable if this fails:\n{declared.stdout}\n{declared.stderr}"
+        )
+        received = subprocess.run(
+            [RUNTIME, "exec", names[0], "git", "--git-dir=/srv/repo.git", "log", "--oneline", "-1"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "s18 declared" in received, (
+            f"the push reported success but the server has nothing: {received!r}"
+        )
+
+        undeclared = _exec(
+            "accs18",
+            ["bash", "-lc", _PUSH_SCRIPT.format(host=ips[names[1]], msg="s18 undeclared")],
+        )
+        assert "exit=0" not in undeclared.stdout, (
+            "an UNDECLARED ssh endpoint accepted a push — without this arm the "
+            f"assertion above proves only that something worked:\n{undeclared.stdout}"
+        )
+    finally:
+        drop_servers()
