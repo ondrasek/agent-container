@@ -562,7 +562,7 @@ The gate and the tier are both green; these are what the run found in addition.
       the client address both discard real refusals). The fix belongs in the **healthcheck**,
       which is a readiness gate the fail-closed behaviour depends on (T129c/R20) and so
       needs its own start-up-window measurement
-- [ ] T153 **quickstart S14's stated expectation for the undeclared port is wrong about the
+- [X] T153 **quickstart S14's stated expectation for the undeclared port is wrong about the  — **DONE.** S14 now states the measured behaviour: an undeclared port is CLOSED, not timed out — `kex_exchange_identification: Connection closed by remote host`, because 443 is REDIRECTed into squid which has no declared SNI for an SSH handshake. The distinction is operational: a timeout points at netfilter or routing, a closed connection identifies the proxy as the refusing component.
       mechanism** — the same defect shape S13 already had. It says `ssh -p 443 git@github.com`
       "**times out**". Measured: the connection is DNAT'd into squid, which terminates it, so
       ssh reports `kex_exchange_identification: Connection closed by remote host` /
@@ -575,7 +575,7 @@ The gate and the tier are both green; these are what the run found in addition.
       `{host: github.com, port: 22}` declared, `https://github.com/` gives curl exit 35
       direct and `CONNECT tunnel failed, response 403` proxied, while the declared provider
       on 443 still returns 0
-- [ ] T154 **S15 cannot be executed as written: the agent image has neither `dig` nor `nc`.**
+- [X] T154 **S15 cannot be executed as written: the agent image has neither `dig` nor `nc`.**  — **DONE.** The `dig`/`nc` steps are replaced with a raw-socket probe needing no package, since neither tool is in the image and agents must never `apt install` at runtime. Expected results are the measured ones: 8.8.8.8 and 1.1.1.1 fail at SEND (`Operation not permitted`) rather than losing a reply, and 127.0.0.1 answers RCODE 5 (REFUSED), not NXDOMAIN.
       The step says to run `dig +time=5 +tries=1 @8.8.8.8 attacker.example.com`; both tools
       are absent, and agents must never `apt install` at runtime. The property was verified
       instead with the acceptance module's own `_DNS_PROBE` (raw-socket UDP/53), which is
@@ -623,9 +623,9 @@ Fixed in this pass:
       stated one.
 - [X] T156 **`sidecars_outside` is invisible to drift detection**, so `apply` reports "matching" after — **DONE.** `sidecars_outside` now rides the drift token. It changes WHICH container's egress is filtered while leaving the allowlist and both enforcement modes untouched, so moving a redis out of the boundary was reported as no change at all. Order-insensitive, because a reordered list is the same deployment and a token that moved would redeploy every environment whose YAML was merely tidied. The two fields are separated in the token so a crafted host name cannot forge the same value as a membership change.
       a change that moves a sidecar in or out of the boundary.
-- [ ] T157 **`test_completions.sh` flakes under load** — a pty-driven zsh completion assertion went
+- [X] T157 **`test_completions.sh` flakes under load** — a pty-driven zsh completion assertion went  — **DONE.** The probe waited `sleep 0.5` for `compinit` — a bet that lost under load, delivering TAB to a shell with no completion system and returning empty. It now WAITS FOR THE PROMPT instead of guessing. A probe that never reaches a prompt is reported as NOT EXERCISED rather than as a failure: an empty buffer says nothing about whether the completion is correct, and calling it a failure sends whoever reads CI into `completions/` to debug a working file.
       empty twice immediately after the container tier, green on five other runs, with zero changes
       to `completions/`. A hard CI gate that can go red while nothing it names is broken.
-- [ ] T158 **The proxy strength statement is printed only when nothing is enforced**, so the text
+- [X] T158 **The proxy strength statement is printed only when nothing is enforced**, so the text  — **DONE.** The unenforced branch described a PROXY. Phase A carried declarations by proxy env vars; Phase B removed that state — `egress_enforcement_mode` returns only `transparent` or `none`, and under `none` no proxy is deployed either. So the statement asserted 'the proxy refuses requests from clients that honour proxy settings' about an environment containing no proxy, printed exactly when the operator most needs to know nothing is constraining the container. It now says nothing is enforced and what that means, while still naming which agents WOULD be constrained.
       asserting proxy-level enforcement describes an environment that has none. Defensible under
       FR-021a but worth resolving.

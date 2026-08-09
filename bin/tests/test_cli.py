@@ -435,19 +435,26 @@ def test_builtin_default_outside_the_set_refuses_under_strict(wiz):
         )
 
 
-def test_strength_statement_says_all_three_required_things(wiz):
-    """FR-008/FR-008a, contract C5 — the PROXY statement.
+def test_the_unenforced_statement_says_NOTHING_is_enforced(wiz):
+    """FR-008/FR-008a, contract C5 — the NOT-ENFORCED statement.
 
-    Scoped to the proxy explicitly. These clauses are not universal truths about
-    the feature; they are true of the fallback mechanism, and asserting them
-    unconditionally would force the packet-level statement to keep saying a thing
-    that is false of it.
+    This branch used to describe a PROXY. Phase A had a third state where the
+    declaration was carried by proxy environment variables; Phase B removed it.
+    `egress_enforcement_mode` returns only `transparent` or `none`, and when it
+    returns `none` no proxy is deployed either — so the old text asserted "the proxy
+    refuses requests from clients that honour proxy settings" about an environment
+    containing no proxy, at exactly the moment the operator most needs to know that
+    nothing is constraining the container.
     """
     s = wiz.egress_strength_statement("claude")
-    assert "not packet-level" in s
-    assert "does not stop a process that ignores them" in s
-    assert "claude" in s and "opencode" in s, "must name which agents honour the proxy"
-    assert "~/.agent-env/env" in s, "FR-008a: a shell can override the proxy settings"
+    assert "NOT enforced" in s
+    assert "no packet filter" in s and "no allowlisting proxy" in s
+    assert "anything the host network allows" in s, "say what the absence MEANS"
+    assert "proxy refuses" not in s, "must not describe a proxy that is not deployed"
+    assert "claude" in s and "opencode" in s, (
+        "still name which agents WOULD be constrained — it makes the absence concrete"
+    )
+    assert "~/.agent-env/env" in s, "FR-008a: a shell can set its own proxy settings"
 
 
 def test_strength_statement_flags_an_agent_not_known_to_honour(wiz):

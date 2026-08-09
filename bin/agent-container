@@ -5873,8 +5873,6 @@ def egress_strength_statement(agent: str | None, *, transparent: bool = False) -
     would be the same defect with the sign flipped, so the residual limits are
     named as specifically as the guarantees.
     """
-    honours = ", ".join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))
-    known = AGENT_HONOURS_PROXY.get(agent or "", False)
     if transparent:
         return (
             "egress enforcement is packet-level. Routing is programmed into the network "
@@ -5891,14 +5889,34 @@ def egress_strength_statement(agent: str | None, *, transparent: bool = False) -
             "egress.sidecars_outside are outside the boundary entirely, and anything "
             "they can reach is reachable through them."
         )
+    # NOT ENFORCED — and this branch used to describe a PROXY.
+    #
+    # Phase A had a third state: the declaration was carried by proxy environment
+    # variables, which constrained a cooperating client and nothing else. Phase B
+    # removed it. `egress_enforcement_mode` now returns only `transparent` or
+    # `none` (there is deliberately no `cooperative`), and when it returns `none`
+    # NO proxy is deployed either — `egress_filter_body` is None, so the sidecar,
+    # the allowlist and the proxy variables are all absent.
+    #
+    # So the old text here asserted "the proxy refuses requests from clients that
+    # honour proxy settings" about an environment with no proxy in it. It was the
+    # feature's own honesty requirement describing a mechanism that was not there —
+    # printed at exactly the moment the operator most needs to know that nothing is
+    # constraining the container.
+    #
+    # The agent list is still named: which agents WOULD honour proxy settings is
+    # what makes the absence concrete rather than abstract.
+    honours = ", ".join(sorted(a for a, v in AGENT_HONOURS_PROXY.items() if v))
+    known = AGENT_HONOURS_PROXY.get(agent or "", False)
     return (
-        f"egress enforcement is proxy-level, not packet-level. The proxy refuses "
-        f"requests from clients that honour proxy settings; it does not stop a process "
-        f"that ignores them and opens a direct connection, because this feature does "
-        f"not do packet filtering. Known to honour "
-        f"the proxy: {honours}"
-        f"{'' if known else f' (NOT including {agent!r})'}. "
-        f"A shell inside the container can also override the proxy settings via "
+        f"egress is NOT enforced for this environment. The declaration was read and "
+        f"is being reported, but no boundary was deployed: there is no packet filter, "
+        f"no allowlisting proxy and no forced resolver, so this container can reach "
+        f"anything the host network allows. Nothing here depends on the agent's "
+        f"cooperation because there is nothing to cooperate with. Agents that honour "
+        f"proxy settings, and would therefore be constrained if one were deployed: "
+        f"{honours}{'' if known else f' (NOT including {agent!r})'}. "
+        f"A shell inside the container can also set its own proxy settings via "
         f"~/.agent-env/env, which is sourced by every interactive shell from a volume "
         f"that survives teardown — the tool cannot see or prevent that."
     )
