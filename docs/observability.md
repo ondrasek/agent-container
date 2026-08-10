@@ -101,6 +101,14 @@ runs no trap — without a file already on the volume a killed run would leave n
 Ingestion completes such a record as `stopped` with `ended_at` unknown and a note saying it was
 reconstructed, which is honest about what is and is not known.
 
+**"At start" means FIRST — and there is still a window it cannot cover.** The entrypoint opens the
+record before the shell-env seed, the SSH host key and the git identity, so that everything which
+can `die` during setup is accounted for too. What it cannot cover is the interval before it runs at
+all: a runtime reports a container `Up` the moment its process is created, and on an idle Linux
+host the record lands 0.3-0.6s later, most of it bash starting up. A container killed inside that
+interval leaves no record, and no ordering fixes that — there is no run yet to record. Runs killed
+after their agent has started are the ones this guarantees.
+
 **Draining happens on contact, not on a schedule.** `up`, `redeploy`, `down`, `wipe`,
 `runs list` and `runs show` each drain that host first, so listing a detached run that finished
 thirty seconds ago finds it rather than answering "no runs".

@@ -2642,6 +2642,45 @@ def _wait_container(name: str, predicate, timeout: int = 60) -> str:
     raise AssertionError(f"{cname} never reached the expected state (last status: {status!r})")
 
 
+def _wait_run_started(name: str, needle: str, timeout: int = 60) -> None:
+    """Block until the RUN is under way — the workload process the entrypoint
+    supervises is alive inside the container.
+
+    `Up` IS NOT THAT, and the difference is the whole reason this helper exists.
+    The runtime marks a container `Up` the instant its process is created, which
+    is before the entrypoint has executed a line: measured on an idle Linux host,
+    the pending record lands 0.27-0.57s after `Up` first reads true, of which
+    0.08-0.35s is bash starting up and reading a 1300-line script. A `docker kill`
+    fired straight off that status arrived inside the window 8 times out of 8. So
+    a test that killed on `Up` alone would be demanding a record for a run that
+    had not started — something no entrypoint can produce, because the runtime
+    published `Up` before it got to run — and it would be demanding it flakily,
+    passing on macOS+Lima only because the daemon round trips there are slower
+    than the container's own startup. That is the failure this replaces.
+
+    The wait is on the RUNTIME's process list, never on the entrypoint's log and
+    never through the CLI: waiting for 'run record ... opened' would wait for the
+    very thing the caller then asserts, and the assertion would hold by
+    construction. `docker top` names an independent fact — the stand-in agent is
+    running — and the entrypoint opens the record BEFORE it launches the agent, so
+    once this returns, a missing record is a defect and the caller still fails.
+    """
+    cname = f"agent-container-{name}"
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        top = subprocess.run([RUNTIME, "top", cname], capture_output=True, text=True)
+        last = top.stdout or top.stderr
+        if top.returncode == 0 and needle in top.stdout:
+            return
+        time.sleep(0.2)
+    raise AssertionError(
+        f"{cname} never started its workload ({needle!r} never appeared in "
+        f"`{RUNTIME} top`); the run never began, so nothing about how it ENDS can "
+        f"be tested here. Last output:\n{last}"
+    )
+
+
 def test_a_record_survives_purge(acc):
     """T023 / quickstart S2 (C3, FR-001, SC-001) — THE feature. A headless run's
     record must still be retrievable after the container and all ten of its
@@ -2697,7 +2736,7 @@ def test_a_detached_run_is_ingested_on_next_contact(acc):
     # separating them is that this writer is still alive — so this asserts the
     # in-flight record is NOT declared `stopped`. Getting this wrong would make
     # every mid-run `runs list` report a live run as killed.
-    _wait_container("acc16det", lambda s: s.startswith("Up"))
+    _wait_run_started("acc16det", "sleep 20")
     inflight = _runs(acc, "acc16det")
     assert len(inflight) == 1 and inflight[0]["outcome"] is None, (
         f"a run still in progress was given an ending: {inflight}"
@@ -2725,7 +2764,10 @@ def test_a_killed_run_still_yields_a_record(acc):
 
     The wrong answer that looks right is NO RECORD AT ALL — an empty listing reads
     like 'nothing to report' rather than 'every abnormal run is being lost', so
-    the emptiness is asserted against explicitly."""
+    the emptiness is asserted against explicitly.
+
+    The kill lands while the run is PROVABLY in progress (see `_wait_run_started`):
+    a record is owed for a run that started, and only for one that started."""
     ws = _fake_agent(acc, "killed", "exec sleep 600")
     r = acc.up(
         "acc16kil",
@@ -2738,7 +2780,7 @@ def test_a_killed_run_still_yields_a_record(acc):
         wait=False,
     )
     assert r.returncode == 0, f"up failed:\n{r.stderr}"
-    _wait_container("acc16kil", lambda s: s.startswith("Up"))
+    _wait_run_started("acc16kil", "sleep 600")
 
     kill = subprocess.run(
         [RUNTIME, "kill", "agent-container-acc16kil"], capture_output=True, text=True
@@ -2784,7 +2826,7 @@ def test_a_record_survives_purge_of_a_RUNNING_environment(acc):
         wait=False,
     )
     assert r.returncode == 0, f"up failed:\n{r.stderr}"
-    _wait_container("acc16liv", lambda s: s.startswith("Up"))
+    _wait_run_started("acc16liv", "sleep 600")
 
     acc.down("acc16liv", purge=True)  # torn down mid-run
     assert acc.volumes_of("acc16liv") == []

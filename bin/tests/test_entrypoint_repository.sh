@@ -102,9 +102,20 @@ agent_script() {
 
 # A bare "remote" plus a clone of it, so `@{u}` resolves and a push is a real
 # push rather than a simulated one.
+#
+# `-b main` on the BARE repo as well as the seed, because a bare repository's
+# HEAD is what `git clone` checks out — and left to the host's
+# `init.defaultBranch` it points at `master` while the only branch pushed is
+# `main`. The clone then warns "remote HEAD refers to nonexistent ref", checks
+# out nothing, and lands on an unborn `master` with NO upstream. Every `ok`,
+# `pushed` and `origin/main` case here would be asserting against a repository
+# this helper never built: the entrypoint answered `no-upstream` correctly and
+# the suite read it as a capture failure. It passed on a developer box with
+# `init.defaultBranch=main` configured and failed on CI, which has no such
+# global — so the fixture, not the subject, has to name the branch.
 make_cloned_repo() {
     local bare="${SB}/${CASE}/remote.git" seed="${SB}/${CASE}/seed"
-    git init -q --bare "${bare}"
+    git init -q --bare -b main "${bare}"
     git init -q -b main "${seed}"
     printf 'seed\n' > "${seed}/README"
     git -C "${seed}" add README
