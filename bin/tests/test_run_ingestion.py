@@ -425,6 +425,33 @@ def test_a_failed_clear_keeps_the_record_and_warns(wiz, runtime):
     assert any("could not clear" in m for m in runtime.warnings)
 
 
+def test_a_backlog_is_cleared_in_several_batches_and_all_of_them_are_attempted(wiz, runtime):
+    """A crash-looping environment writes a record every few seconds, so one drain
+    can have to clear tens of thousands — more than ARG_MAX allows on one argv
+    (measured: E2BIG between 10k and 20k paths of this shape). The OSError that used
+    to raise here left through `ingest_records` and skipped retention entirely.
+
+    Every batch is attempted even after one fails, because the failure that matters
+    is a single unremovable record: aborting on it would leave every remaining
+    already-durable record on the volume, to be re-ingested on every contact from
+    then on.
+
+    Driven at `_clear_ingested` rather than through a 20k-record drain: the property
+    is about the argv this step builds, and staging that many records durably first
+    would buy nothing but a slow test in a suite documented as fast.
+    """
+    names = [f"20260401T{i:06d}Z-{'c' * 100}.json" for i in range(1200)]
+    runtime.clear_rc = 1  # every batch fails, so none of them may be skipped
+    wiz._clear_ingested("local", LOCAL_HOST, "acme", "v", "img", names)
+    batches = _clear_calls(runtime)
+    assert len(batches) > 1, "the whole backlog went out as one argv"
+    cleared = [
+        a.removeprefix(f"{wiz.RUNS_INGEST_MOUNT}/") for c in batches for a in c if ".json" in a
+    ]
+    assert cleared == names, "batching lost or reordered a record"
+    assert len(runtime.warnings) == len(batches), "a failed batch went unreported"
+
+
 def test_an_unstorable_record_is_left_on_the_volume(wiz, runtime, monkeypatch):
     """If the durable write fails, the volume copy is the only copy left — so it
     must not be among the names handed to the clear step."""

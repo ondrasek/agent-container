@@ -82,9 +82,19 @@ later phase is decoration.
       feature. Land it before Phase 4 and stop if it fails
 - [x] T024 [US1] Acceptance: S3 — a **detached** run is ingested on next contact, with the CLI
       never attached when the run ended (SC-002a). This is the case the whole design is shaped for
-- [x] T025 [US1] Acceptance: S4 — a `docker kill`ed run still yields a record marked `stopped`
+- [X] T025 [US1] Acceptance: S4 — a `docker kill`ed run still yields a record marked `stopped`
       (SC-008). **A wrong answer that looks right is no record at all**: SIGKILL runs no trap, so
-      this passes only if T012's start-side write exists
+      this passes only if T012's start-side write exists.
+      This is one of the two tests that failed on Linux CI and passed on macOS. Two causes, both
+      fixed: the entrypoint opened the record after the shell-env seed, host-key generation and git
+      identity (now section `1r`, first), and the test killed on the runtime's `Up` status, which is
+      published BEFORE the entrypoint executes a line — 0/8 records on native Linux. The precondition
+      is now `_wait_run_started`, which waits for the workload process to exist. It reads
+      `/proc/<pid>/cmdline` INSIDE the container via `<runtime> exec`, not `<runtime> top`: `docker
+      top` runs `ps -ef` on the daemon host so its CMD column carries arguments, while `podman top`'s
+      default COMMAND column is `comm` alone — the needle `sleep 600` could never match there, and
+      ADR 0001 decided on podman. The two runtimes do not even take the same kind of argument for
+      that column, so /proc is the only answer that means the same thing to both
 
 ---
 
@@ -105,17 +115,24 @@ later phase is decoration.
       "committed and did not push", the failure Constitution I exists to prevent; conflating it
       with "could not tell" makes the loudest signal in the feature unreliable
 - [x] T030 [US2] Make commit-without-push **loud** in both human and `--json` output (FR-005, C8)
-- [~] T031 [P] [US2] Acceptance: S5 — a run that commits without pushing is identifiable, and a
+- [X] T031 [P] [US2] Acceptance: S5 — a run that commits without pushing is identifiable, and a
       run with no upstream reports `null` rather than `false` (SC-003).
-      **GAP: no acceptance test exists.** Both halves were verified BY HAND against real
-      containers during T050 (a committing run flagged `!! push` / `pushed: false`, and a
-      repository with no upstream reporting `pushed: null` with no alarm), and both are
-      unit-covered in `bin/tests/test_repository_effect.py` — but nothing in
-      `bin/tests/test_acceptance.py` exercises it, so a regression is caught by no automated tier
-- [~] T032 [P] [US2] Acceptance: S6 — an `ephemeral` workspace with no clone yields
+      **GAP CLOSED.** `test_committing_without_pushing_is_LOUD_and_no_upstream_is_NOT`
+      (`bin/tests/test_acceptance.py:3320`): one interactive seed plus three real headless runs
+      building three mutually exclusive git positions, all exiting 0 and recorded `finished` —
+      which is the point, since SC-003's failure is a run that looks like a clean success. Asserts
+      `set(payload["unpushed"]) == {blind, plain}` (set equality, so an invented alarm fails too),
+      the human alarm line exactly once naming both ids and NOT the no-upstream one, and
+      `pushed: false` / `pushed: null` on the right records. VERIFIED PASSING in the full tier
+- [X] T032 [P] [US2] Acceptance: S6 — an `ephemeral` workspace with no clone yields
       `state: no-repository`, not a crash and not a null record.
-      **GAP: no acceptance test exists.** Verified BY HAND during T050 (an ephemeral-workspace
-      headless run recorded `state: no-repository`), and unit-covered; same exposure as T031
+      **GAP CLOSED.** `test_an_ephemeral_workspace_with_no_clone_records_no_repository`
+      (`bin/tests/test_acceptance.py:3479`), asserting `repository is not None` with
+      `state: no-repository`, and the rendered rows POSITIVELY (a null repository renders one row
+      and a captured one four, so their presence is what separates "looked and found nothing" from
+      "never looked"). Needed one additive `acc` fixture change — an optional keyword-only
+      `mount=[…]` — because a stand-in agent cannot live on an ephemeral workspace. VERIFIED
+      PASSING in the full tier
 
 ---
 
@@ -171,7 +188,20 @@ design decision (research R11) settles it and also resolves the rewritten-histor
       the construction was actually used.
       Discharged by T047's five REAL concurrent environments — there is no separate unit-level
       test, because a unit test with one writer cannot exercise the property this task names
-- [x] T040 Retention: prune by age and count at ingestion, with documented defaults (FR-011, C14)
+- [X] T040 Retention: prune by age and count at ingestion, with documented defaults (FR-011, C14).
+      **The COUNT rule was rewritten after review found the first two versions defeated.** Plain
+      newest-first let one night of restart records evict every older record; the per-UTC-day share
+      that replaced it held only while the burst stayed inside one day, and the motivating scenario
+      is an OVERNIGHT loop, which crosses UTC midnight by construction — measured, 600 records on
+      one day preserved all 30 days of history and the SAME burst split across two days deleted
+      every one of them with 500 records. The rule is now `_round_robin_keeps` over the UTC day,
+      parameter-free (no share constant to be defeated at `bound/S` buckets), and SHARED with the
+      egress store, which passes the destination as its bucket instead. Two further fixes here:
+      `_record_epoch` clamps `started_at` to the moment the store wrote the record down, so a
+      container clock in the future can no longer make a record immortal under the age bound; and
+      the age bound skips whatever the CURRENT drain just took custody of, because a host switched
+      off for four months was having its records stored, its volume copy cleared and its stored
+      copy deleted inside one command
 - [x] T041 [P] Test that pruning is bounded and that the documented default is the enforced one —
       a documented number the code does not use is the recurring defect of this repo
 - [x] T057 **Records lost to an out-of-band volume removal must be VISIBLE** (spec edge case,
@@ -218,7 +248,18 @@ design decision (research R11) settles it and also resolves the rewritten-histor
       value it predicts (see T042). Two defects found and fixed here: the gate's own
       `TOOL_HINTS` lookup never fired (`local a=$1 b=${T[$a]}` expands before it binds, so every
       failure since the table was written lost its hint), and `bin/tests/test_entrypoint_repository.sh`
-      was a suite the gate never ran
+      was a suite the gate never ran.
+      **RE-RUN after the post-merge CI failure and the review findings**: `scripts/quality-gate.sh`
+      unpiped → 0; `pytest -m acceptance bin/tests/test_acceptance.py` with no `-k` → **69 passed,
+      2 skipped** in 11m15s (the same two Hetzner skips; +2 over the previous run are T031 and
+      T032). `pytest bin/tests -m acceptance` — CI's own invocation — collects the identical 71.
+      Both CI failures reproduced first and then fixed: `bin/tests/test_entrypoint_repository.sh`
+      was creating its fixture with `git init --bare` and no `-b`, so the bare repo's HEAD followed
+      the HOST's `init.defaultBranch` — `main` in this operator's `~/.gitconfig`, `master` on a CI
+      runner with no global config — and the clone landed on an unborn `master` with no upstream, so
+      eleven assertions were reading a correct entrypoint answer as a capture failure. Now
+      `git init -q --bare -b main`; all five shell suites verified under `HOME=<empty dir>`, the CI
+      condition (repository suite 45 passed/11 failed → **56 passed/0 failed**)
 
 ---
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -272,6 +273,7 @@ def acc(_image):
         task=None,
         workspace=None,
         workspace_dir=None,
+        mount=None,
         repo=None,
         foreground=False,
         wait=True,
@@ -302,6 +304,11 @@ def acc(_image):
             argv += ["--workspace", workspace]
         if workspace_dir is not None:
             argv += ["--workspace-dir", str(workspace_dir)]
+        for m in mount or []:
+            # Repeatable, as the flag is. Needed for a run whose stand-in agent
+            # cannot live on the workspace: an `ephemeral` workspace is a fresh
+            # container layer, so nothing on the host can seed it (T032).
+            argv += ["--mount", str(m)]
         if repo is not None:
             argv += ["--repo", repo]
         if foreground:
@@ -2606,7 +2613,9 @@ _FAKE_AGENT_PATH = "PATH=/workspace:/usr/local/sbin:/usr/local/bin:/usr/sbin:/us
 
 
 def _fake_agent(acc, name: str, body: str) -> Path:
-    """A workspace directory holding an executable `claude` that runs `body`."""
+    """A directory holding an executable `claude` that runs `body` — mounted as the
+    workspace, or (T032) mounted elsewhere and put on PATH when the workspace has
+    to stay empty."""
     d = acc.tmp / f"fakeagent-{name}"
     d.mkdir(parents=True, exist_ok=True)
     exe = d / "claude"
@@ -2615,11 +2624,38 @@ def _fake_agent(acc, name: str, body: str) -> Path:
     return d
 
 
-def _runs(acc, name: str) -> list[dict]:
-    """`runs list <name> --json`, unwrapped from the Feature 009 envelope."""
+def _runs_payload(acc, name: str) -> dict:
+    """The WHOLE `runs list <name> --json` payload, unwrapped from the Feature 009
+    envelope: the verbatim records plus the derived keys (`unpushed`, `usage`).
+
+    The derived keys are the machine-readable half of the alarms (T030, C8) — an
+    agent that had to re-derive commit-without-push from each record is an agent
+    that can forget to — so a test that only ever read `runs` would leave the two
+    halves free to disagree, which is SC-003's failure exactly."""
     r = acc.cli(["runs", "list", name, "--json"])
     assert r.returncode == 0, f"runs list {name} failed:\n{r.stdout}\n{r.stderr}"
-    return json.loads(r.stdout)["data"]["runs"]
+    return json.loads(r.stdout)["data"]
+
+
+def _runs(acc, name: str) -> list[dict]:
+    """`runs list <name> --json`, unwrapped from the Feature 009 envelope."""
+    return _runs_payload(acc, name)["runs"]
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Human output with rich's styling removed, for assertions about the WORDS.
+
+    MEASURED, not precautionary: with FORCE_COLOR set (this developer's shell sets
+    it, and CI runners may) rich styles a captured pipe exactly as it styles a
+    terminal, and its highlighter puts escape sequences around the number and the
+    parentheses of `2 run(s)` — which reads correctly on screen and is not a
+    substring of what the test captured. Failing there would report the terminal
+    rather than the tool; avoiding it by only ever asserting on words that styling
+    cannot split would report less than the test claims to check."""
+    return _ANSI.sub("", text)
 
 
 def _wait_container(name: str, predicate, timeout: int = 60) -> str:
@@ -2658,26 +2694,46 @@ def _wait_run_started(name: str, needle: str, timeout: int = 60) -> None:
     passing on macOS+Lima only because the daemon round trips there are slower
     than the container's own startup. That is the failure this replaces.
 
-    The wait is on the RUNTIME's process list, never on the entrypoint's log and
-    never through the CLI: waiting for 'run record ... opened' would wait for the
-    very thing the caller then asserts, and the assertion would hold by
-    construction. `docker top` names an independent fact — the stand-in agent is
-    running — and the entrypoint opens the record BEFORE it launches the agent, so
-    once this returns, a missing record is a defect and the caller still fails.
+    The wait is on the container's own process table, never on the entrypoint's log
+    and never through the CLI: waiting for 'run record ... opened' would wait for
+    the very thing the caller then asserts, and the assertion would hold by
+    construction. The stand-in agent's command line names an independent fact, and
+    the entrypoint opens the record BEFORE it launches the agent, so once this
+    returns, a missing record is a defect and the caller still fails.
+
+    READ FROM /proc INSIDE THE CONTAINER, NOT FROM `<runtime> top`, and that is the
+    whole reason this is not a one-liner. `docker top` runs `ps -ef` on the daemon
+    host, whose CMD column carries the full command line, so a needle containing an
+    ARGUMENT ('sleep 600') matches. `podman top`'s default COMMAND column is
+    documented as the process's `comm` — its own manual's example prints `sh`,
+    `sleep`, `vi` with no arguments, and `args` is a descriptor an operator has to
+    ask for. The two runtimes do not even take the same kind of argument for it
+    (`docker top` forwards ps options, `podman top` takes psgo descriptors), so
+    there is no one invocation that means the same thing to both. ADR 0001 decided
+    on podman and `_detect_runtime` selects it on any host without docker, so
+    binding these tests to docker's default output format would leave them
+    unrunnable there — silently, by never matching. `/proc/<pid>/cmdline` is the
+    kernel's own answer, identical under both.
     """
     cname = f"agent-container-{name}"
+    # NUL-separated, so `tr` is what makes a needle with a space in it findable.
+    # Failures are swallowed per file: a process that exits between the glob and the
+    # read is normal and must not abort the sweep.
+    script = 'for f in /proc/[0-9]*/cmdline; do tr "\\0" " " < "$f" 2>/dev/null; echo; done'
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
-        top = subprocess.run([RUNTIME, "top", cname], capture_output=True, text=True)
-        last = top.stdout or top.stderr
-        if top.returncode == 0 and needle in top.stdout:
+        ps = subprocess.run(
+            [RUNTIME, "exec", cname, "sh", "-c", script], capture_output=True, text=True
+        )
+        last = ps.stdout or ps.stderr
+        if ps.returncode == 0 and needle in ps.stdout:
             return
         time.sleep(0.2)
     raise AssertionError(
-        f"{cname} never started its workload ({needle!r} never appeared in "
-        f"`{RUNTIME} top`); the run never began, so nothing about how it ENDS can "
-        f"be tested here. Last output:\n{last}"
+        f"{cname} never started its workload ({needle!r} never appeared in the "
+        f"container's own /proc); the run never began, so nothing about how it ENDS "
+        f"can be tested here. Last output:\n{last}"
     )
 
 
@@ -3207,3 +3263,278 @@ def test_a_commit_that_can_no_longer_be_resolved_still_reads(acc):
     still = acc.cli(["runs", "list", "acc16sha", "--changed", "src/auth/session.py", "--json"])
     assert still.returncode == 0, still.stderr
     assert [x["run_id"] for x in json.loads(still.stdout)["data"]["runs"]] == [run["run_id"]]
+
+
+# --- T031: the push alarm, against real runs that really commit ---------------
+#
+# The three git positions below are the ones C8 has to tell apart, and they are
+# built by the RUN rather than by the harness: `pushed` and `commits` are captured
+# inside the container from the repository as it stands at exit (FR-004a), so a
+# test that hand-wrote a record would be exercising the renderer against data no
+# entrypoint ever produced.
+#
+# The repository is on the PERSISTENT workspace for the reason T055 records: a
+# bind workspace is read-only and root-owned inside the container under Lima, and
+# git refuses the directory outright.
+#
+# `origin` is a bare repo in the container's own layer, not on any network. What
+# the exit capture reads is the LOCAL tracking ref (`@{u}` and `merge-base
+# --is-ancestor` touch no remote), so the 'remote' does not have to outlive the
+# container that made it — and no credential, egress declaration or real host is
+# dragged into a test about a push flag.
+_UNATTRIBUTABLE_UNPUSHED = (
+    "cd /workspace "
+    "&& git init -q -b main . "
+    "&& git init -q --bare -b main /home/dev/origin.git "
+    "&& git remote add origin /home/dev/origin.git "
+    f"&& echo pushed > pushed.txt && {_GIT_ID} add -A && {_GIT_ID} commit -qm p1 "
+    "&& git push -q -u origin main "
+    f"&& echo at-risk > at-risk.txt && {_GIT_ID} add -A && {_GIT_ID} commit -qm p2 #A"
+)
+_COMMITTED_WITHOUT_PUSHING = (
+    f"cd /workspace && echo more >> at-risk.txt && {_GIT_ID} commit -aqm p3 #B"
+)
+_COMMITTED_WITH_NO_UPSTREAM = (
+    "cd /workspace && git branch --unset-upstream "
+    f"&& echo more >> at-risk.txt && {_GIT_ID} commit -aqm p4 #C"
+)
+
+
+def _seed_task_runner_over_ssh(acc, name: str) -> None:
+    """Deploy <name> interactively, put the task-running stand-in agent on its
+    persistent workspace, and stop it again (volumes kept).
+
+    Deliberately NOT `_seed_repo_over_ssh`: the first run below must start on a
+    workspace that holds NO repository, because that is what makes its commit list
+    unattributable — and an unattributable commit list with `pushed: false` is the
+    precise shape a defect in `push_status` once rendered as 'nothing to push'.
+    """
+    key = _gen_keypair(acc.tmp / f"{name}-key")
+    port = acc.up(name, workspace="persistent", authorized_key=[key.with_suffix(".pub")])
+    script = f"set -e; cd /workspace; printf '%s' '{_TASK_RUNNER}' > claude; chmod +x claude"
+    r = _ssh(port, key, script)
+    assert r.returncode == 0, f"seeding {name} failed:\n{r.stdout}\n{r.stderr}"
+    acc.down(name)  # no --purge: the workspace and the records stay
+
+
+def test_committing_without_pushing_is_LOUD_and_no_upstream_is_NOT(acc):
+    """T031 / quickstart S5 (C8, FR-005, FR-004a, SC-003). Three real runs, three
+    git positions, one classifier — and the alarm must fire on exactly two of them.
+
+    All three runs exit 0 and are recorded `finished`. That is the point: SC-003's
+    failure is a run that "looks like a clean success", and every one of these
+    does. The only thing separating the work that is safe from the work that
+    exists solely in a container now gone is what the record says about `pushed`.
+
+    The three positions:
+
+    * `_UNATTRIBUTABLE_UNPUSHED` — the run CREATES the repository, pushes once,
+      then commits again without pushing. `pushed: false` with `commits: []`,
+      because nothing in a history the run did not start with is attributable to
+      it (the record says so in a note). This is the shape a HIGH defect got wrong:
+      `push_status` classified on `commits`, so an empty list — which the writer
+      emits for UNKNOWN as well as for none — rendered as "nothing to push" and
+      left `--json`'s `unpushed` empty, announcing a clean success for a run whose
+      work was only in the container. Both halves are asserted here.
+    * `_COMMITTED_WITHOUT_PUSHING` — the ordinary shape: an attributable commit,
+      an upstream to compare against, and `pushed: false`.
+    * `_COMMITTED_WITH_NO_UPSTREAM` — committed with the upstream unset, so
+      `pushed` is `null` and the record says "could not tell". C8 requires this NOT
+      to be the alarm: conflating "could not tell" with "did not push" is what
+      makes the loudest signal in the feature unreliable.
+
+    If the first record ever stops carrying `commits: []`, this test no longer
+    covers the regression it was written for — construct that shape another way
+    rather than relaxing the assertion.
+    """
+    _seed_task_runner_over_ssh(acc, "acc16psh")
+    for task in (
+        _UNATTRIBUTABLE_UNPUSHED,
+        _COMMITTED_WITHOUT_PUSHING,
+        _COMMITTED_WITH_NO_UPSTREAM,
+    ):
+        _headless_run(acc, "acc16psh", task)
+
+    payload = _runs_payload(acc, "acc16psh")
+    records = payload["runs"]
+    assert len(records) == 4, f"expected the seeding session plus three runs: {records}"
+    by_task = _by_task(records)
+    assert set(by_task) == {
+        _UNATTRIBUTABLE_UNPUSHED,
+        _COMMITTED_WITHOUT_PUSHING,
+        _COMMITTED_WITH_NO_UPSTREAM,
+    }, sorted(by_task)
+
+    # --- the two records that must alarm, and the one that must not ---
+    blind = by_task[_UNATTRIBUTABLE_UNPUSHED]
+    plain = by_task[_COMMITTED_WITHOUT_PUSHING]
+    quiet = by_task[_COMMITTED_WITH_NO_UPSTREAM]
+    for rec in (blind, plain, quiet):
+        assert rec["outcome"] == "finished" and rec["exit_code"] == 0, (
+            f"the run itself must have succeeded — a failure would give an operator "
+            f"another reason to look, and this is about the ones that do not: {rec}"
+        )
+        assert rec["repository"] is not None, (
+            f"`repository: null` means NOT CAPTURED (data-model §1), and every one of "
+            f"these runs had a workspace to measure: {rec}"
+        )
+
+    assert plain["repository"]["pushed"] is False, (
+        "the run committed and did not push, which is the failure Constitution I "
+        f"exists to prevent — it must be recorded as false, not left unknown: "
+        f"{plain['repository']}"
+    )
+    assert plain["repository"]["state"] == "ok", plain["repository"]
+    assert plain["repository"]["upstream"] == "origin/main", plain["repository"]
+    assert len(plain["repository"]["commits"]) == 1, (
+        f"one commit was made after the last push, one must be attributed: {plain['repository']}"
+    )
+    assert "at-risk.txt" in plain["repository"]["paths"], plain["repository"]
+
+    assert blind["repository"]["pushed"] is False, (
+        "the run committed on top of what it pushed and the exit head is provably "
+        f"not on the upstream — that is the alarm, whatever the commit list says: "
+        f"{blind['repository']}"
+    )
+    assert blind["repository"]["commits"] == [], (
+        "expected an UNKNOWN (empty + flagged) commit list here: the run created the "
+        f"repository, so none of the history at exit is attributable to it: {blind['repository']}"
+    )
+    assert blind["repository"]["paths_truncated"] is True, (
+        f"an empty list that is NOT flagged reads as a confident 'changed nothing': "
+        f"{blind['repository']}"
+    )
+    assert any("held no repository" in n for n in blind["notes"]), blind["notes"]
+
+    assert quiet["repository"]["pushed"] is None, (
+        "`pushed: false` with no upstream would be an alarm about a comparison "
+        f"nobody could make (C8 — null, never false): {quiet['repository']}"
+    )
+    assert quiet["repository"]["state"] == "no-upstream", quiet["repository"]
+    assert quiet["repository"]["upstream"] is None, quiet["repository"]
+    assert len(quiet["repository"]["commits"]) == 1, (
+        f"the commit is attributable even with nowhere to push it: {quiet['repository']}"
+    )
+
+    # --- the machine-readable alarm (C8, T030) ---
+    # Set equality, not "contains": it fails both when an alarm is MISSING and when
+    # one is invented for the run that merely could not tell — and the seeding
+    # session, which committed nothing at all, must be in neither.
+    assert set(payload["unpushed"]) == {blind["run_id"], plain["run_id"]}, (
+        f"`unpushed` names the wrong runs. quiet={quiet['run_id']} must NOT be there "
+        f"(pushed is null); blind={blind['run_id']} must be (empty commit list, "
+        f"pushed false): {payload['unpushed']}"
+    )
+
+    # --- the human alarm, which has to agree with it ---
+    listed = acc.cli(["runs", "list", "acc16psh"])
+    assert listed.returncode == 0, f"runs list failed:\n{listed.stdout}\n{listed.stderr}"
+    alarm = [ln for ln in _plain(listed.stdout).splitlines() if "COMMITTED WITHOUT PUSHING" in ln]
+    assert len(alarm) == 1, (
+        f"the listing must say, in words, that work is only in a container:\n{listed.stdout}"
+    )
+    assert "2 run(s)" in alarm[0], alarm[0]
+    # The ids are on that line because they are the argument `runs show` takes: a
+    # count alone announces a problem and leaves the operator to find it.
+    assert blind["run_id"] in alarm[0] and plain["run_id"] in alarm[0], alarm[0]
+    assert quiet["run_id"] not in alarm[0], (
+        f"a run with no upstream was reported as committed-without-pushing: {alarm[0]}"
+    )
+
+    # --- one record, rendered: the exact shape the defect got wrong ---
+    shown = acc.cli(["runs", "show", blind["run_id"]])
+    assert shown.returncode == 0, f"runs show failed:\n{shown.stdout}\n{shown.stderr}"
+    text = _plain(shown.stdout)
+    assert "COMMITTED WITHOUT PUSHING" in text, (
+        f"the loudest signal in the feature is silent for a record whose commit list "
+        f"is unknown:\n{text}"
+    )
+    # The regression's own words. It rendered reassurance from an absence of data.
+    assert "nothing to push" not in text, text
+    assert "changed files UNKNOWN" in text, (
+        f"the empty path list of a run that changed files must read as unknown, not "
+        f"as 'no files changed':\n{text}"
+    )
+
+    quiet_shown = acc.cli(["runs", "show", quiet["run_id"]])
+    assert quiet_shown.returncode == 0, f"runs show failed:\n{quiet_shown.stderr}"
+    quiet_text = _plain(quiet_shown.stdout)
+    assert "could not tell" in quiet_text, quiet_text
+    assert "COMMITTED WITHOUT PUSHING" not in quiet_text, quiet_text
+
+
+# --- T032: a workspace that holds no repository is a RECORD, not an error ------
+#
+# An `ephemeral` workspace is the container's own layer, so — unlike the
+# persistent one above — nothing on the host can seed it, and the stand-in agent
+# has to arrive some other way. `--mount` puts it OUTSIDE /workspace, which is
+# also what keeps the test honest: the workspace stays exactly as empty as a
+# throwaway run with no `--repo` leaves it.
+_STANDIN_BIN = "/opt/agentbin"
+_STANDIN_BIN_PATH = (
+    f"PATH={_STANDIN_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+
+
+def test_an_ephemeral_workspace_with_no_clone_records_no_repository(acc):
+    """T032 / quickstart S6 (C7, research R4, data-model §3). A run on an empty
+    ephemeral workspace must leave a record that SAYS the workspace held no
+    repository.
+
+    `git rev-parse --is-inside-work-tree` exits 128 there (R4, measured), and an
+    ephemeral workspace with no clone is the ordinary case for a throwaway run —
+    so the two wrong answers are a run that dies on the capture and a record whose
+    `repository` is null. Null is not a synonym for 'nothing to report': the data
+    model gives it one meaning, NOT CAPTURED, which is what a `never-started`
+    record carries. A run that looked and found nothing knows something a run that
+    never looked does not, and a null here would throw that away — and would make
+    `runs list --changed` unable to rule the run out (it rules out
+    `no-repository`, never a null).
+    """
+    ws = _fake_agent(acc, "ephemeral", "exit 0")
+    r = acc.up(
+        "acc16eph",
+        mode="headless",
+        agent="claude",
+        task="nothing to clone",
+        workspace="ephemeral",
+        mount=[f"{ws}:{_STANDIN_BIN}"],
+        env_extra=[_STANDIN_BIN_PATH],
+        foreground=True,
+        wait=False,
+    )
+    assert r.returncode == 0, f"up failed:\n{r.stdout}\n{r.stderr}"
+
+    runs = _runs(acc, "acc16eph")
+    assert len(runs) == 1, f"one run, one record: {runs}"
+    rec = runs[0]
+    assert rec["outcome"] == "finished" and rec["exit_code"] == 0, (
+        f"the capture must not have cost the run its own result (FR-008): {rec}"
+    )
+    assert rec["ended_at"], f"the record was never completed: {rec}"
+    repo = rec["repository"]
+    assert repo is not None, (
+        "`repository: null` means NOT CAPTURED (data-model §1) — this run looked and "
+        f"found nothing, which is a different and better-known fact: {rec}"
+    )
+    assert repo["state"] == "no-repository", (
+        f"the five states of C7 are each a record, not an error: {repo}"
+    )
+    assert repo["end_head"] is None and repo["branch"] is None, repo
+    assert repo["pushed"] is None, (
+        f"there was no upstream to compare against, so `pushed` is null and never "
+        f"false — false is the alarm FR-005 requires to mean something: {repo}"
+    )
+    assert repo["commits"] == [] and repo["paths"] == [], repo
+
+    # Rendered, and asserted POSITIVELY. `render_repository` emits ONE row for a
+    # null repository and four for a captured one, so the presence of the push and
+    # files rows is what distinguishes 'looked, found nothing' from 'never looked'
+    # — where an absence check would also pass on output that merely wrapped.
+    shown = acc.cli(["runs", "show", rec["run_id"]])
+    assert shown.returncode == 0, f"runs show failed:\n{shown.stdout}\n{shown.stderr}"
+    text = _plain(shown.stdout)
+    assert "no-repository" in text, text
+    assert "could not tell" in text, text
+    assert "no files changed" in text, text
+    assert "COMMITTED WITHOUT PUSHING" not in text, text

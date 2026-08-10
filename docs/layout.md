@@ -12,6 +12,7 @@ name used two ways anywhere else in the docs, this file wins.
 | **User configuration** | `~/.config/agent-container/` | one operator machine — does **not** travel |
 | **Derived host state** | `$XDG_STATE_HOME/agent-container/<host>/` | computed; safe to delete |
 | **Run records** | `$XDG_DATA_HOME/agent-container/runs/<host>/<environment>/` | one operator machine — **durable**; outlives every container |
+| **Egress events** | `$XDG_DATA_HOME/agent-container/egress/<host>/<environment>/` | one operator machine — **durable**; a sibling of the run records, never inside them |
 | **Image sources** | `<checkout>/image/` | the tool's own repo |
 
 "Project directory" is **not** used: it is ambiguous between the first two.
@@ -115,6 +116,13 @@ The container writes each record to a volume first, because when a detached run 
 is the only thing left to write anything. The tool drains that volume into this store on its next
 contact with the host — and teardown drains **before** removing volumes, or the account of the run
 being torn down goes with it.
+
+`egress/` beside it holds **egress events** (Feature 012): the same placement and the same
+write-safety, a different schema and a different retention, because they have a different producer
+(the boundary, not the agent) and a different lifetime (continuous, not at run end). They arrive by
+a different route — the tool distils the boundary container's own log, so they need **no volume** at
+all. One non-record file lives there too, a `watermark` holding how far that log has been read;
+deleting it costs a re-read and nothing else. See [egress.md](egress.md).
 
 ## Inside the container
 

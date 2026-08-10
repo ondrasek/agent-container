@@ -77,6 +77,23 @@ __agent_container_runs_envs() {
     done | LC_ALL=C sort -u
 }
 
+# Feature 012 FR-010: environments that have EGRESS EVENTS, from the sibling store
+# ${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/egress/<host>/<env>/.
+# A separate directory from `runs` for the same reason it is a separate schema —
+# a different producer with a different lifetime — so completing `egress` from the
+# run store would offer environments that have run and never reached for anything,
+# and miss the reverse.
+__agent_container_egress_envs() {
+    local egress_dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/egress"
+    local d
+    [[ -d "${egress_dir}" ]] || return 0
+    for d in "${egress_dir}"/*/*/; do
+        [[ -d "${d}" ]] || continue
+        d="${d%/}"
+        printf '%s\n' "${d##*/}"
+    done | LC_ALL=C sort -u
+}
+
 # Run ids, for `runs show`. Same store, one level deeper: <run-id>.json.
 __agent_container_runs_ids() {
     local runs_dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/runs"
@@ -127,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress plan apply status destroy menu context skill commands completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -268,6 +285,21 @@ _agent_container() {
             else
                 __agent_container_add_names __agent_container_runs_envs
             fi
+            ;;
+        egress)
+            if [[ "${prev}" == "--host" ]]; then
+                return 0  # a host name we do not complete
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--host --json" -- "${cur}") )
+                return 0
+            fi
+            # From the EGRESS store, and from state as well: an environment whose
+            # boundary has refused nothing has no directory here, and it is exactly
+            # the one an operator asks about to be told that silence means nothing
+            # was refused.
+            __agent_container_add_names __agent_container_egress_envs
+            __agent_container_add_names __agent_container_names_local
             ;;
         completions)
             COMPREPLY=( $(compgen -W "bash zsh" -- "${cur}") )

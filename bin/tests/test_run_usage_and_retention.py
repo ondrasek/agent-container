@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 import types
 from pathlib import Path
 
@@ -616,10 +617,17 @@ def _assert_the_documented_numbers_are_the_enforced_ones(wiz):
     help_text = wiz.runs_app.info.help
     assert f"{wiz.RETENTION_MAX_AGE_DAYS} days" in help_text
     assert f"{wiz.RETENTION_MAX_RECORDS} records" in help_text
+    doc = _DOC.read_text()
     assert (
         f"{wiz.RETENTION_MAX_AGE_DAYS} days, or {wiz.RETENTION_MAX_RECORDS} records per environment"
-        in _DOC.read_text()
+        in doc
     )
+    # HOW the count is allocated is on this list too, because it decides which records
+    # a burst costs the operator — and there is no third number for it to drift by, so
+    # what has to agree is the RULE. Both surfaces must name the axis; that the axis is
+    # actually enforced is proved behaviourally further down, not by this string.
+    assert "spent on distinct UTC days first" in help_text
+    assert "spent on distinct UTC days first" in doc
     assert (
         f"{wiz.RETENTION_MAX_AGE_DAYS} days and {wiz.RETENTION_MAX_RECORDS} records"
         in _PLAN.read_text()
@@ -642,6 +650,28 @@ def test_a_default_that_drifted_from_its_documentation_is_caught(wiz, monkeypatc
         _assert_the_documented_numbers_are_the_enforced_ones(wiz)
 
 
+def test_the_documented_ALLOCATION_rule_is_the_enforced_one(wiz, tmp_path, monkeypatch):
+    """Proof-it-can-fail for the axis claim, and it has to be behavioural: there is no
+    constant to bump, so the way the documented rule and the code can part company is
+    that the prose keeps promising distinct days while the code stops bucketing by
+    them. Collapsing every record into one bucket IS a plain newest-first rule.
+
+    Both halves are asserted together — the words on both surfaces, and the behaviour
+    those words describe — because either alone is the recurring defect: a string
+    match that passes over a rule nobody enforces, or a behaviour nothing tells the
+    operator about."""
+    _assert_the_documented_numbers_are_the_enforced_ones(wiz)
+    d = tmp_path / "store"
+    history = _history(wiz, d, range(2, 32))
+    _burst(d, "2026-04-01", 600)
+    monkeypatch.setattr(wiz, "_utc_day", lambda epoch: "one-bucket")
+    removed = set(wiz.prune_run_store(d, now=_now(1) + 90 * 86400))
+    assert set(history) <= removed, (
+        "with the day axis collapsed the burst must evict the history — otherwise "
+        "the documented rule is not what keeps it"
+    )
+
+
 def test_the_enforced_bound_is_the_constant_and_not_a_second_copy(wiz, tmp_path, monkeypatch):
     """The other direction: the constant must be what `prune_run_store` actually
     reads. A rule that hard-coded 90 beside a constant saying 90 would satisfy the
@@ -650,6 +680,368 @@ def test_the_enforced_bound_is_the_constant_and_not_a_second_copy(wiz, tmp_path,
     d = tmp_path / "store"
     _write_record(wiz, d, "two-days-old", _at(1))
     assert wiz.prune_run_store(d, now=_now(3)) == ["two-days-old.json"]
+
+
+def test_the_count_is_spent_on_distinct_DAYS_before_any_day_gets_a_second_record(
+    wiz, tmp_path, monkeypatch
+):
+    """The allocation, at a size small enough to state exactly. Four slots, a burst of
+    three on one day and ten older days holding one run each: the burst may have ONE
+    of the four, because the other three are the newest three days that also have a
+    record. A newest-first rule would give the burst three of the four."""
+    monkeypatch.setattr(wiz, "RETENTION_MAX_RECORDS", 4)
+    d = tmp_path / "store"
+    burst = set(_burst(d, "2026-04-01", 3))
+    _history(wiz, d, range(2, 12))
+    wiz.prune_run_store(d, now=_now(1) + 90 * 86400)
+    kept = {p.name for p in d.iterdir()}
+    assert len(kept) == wiz.RETENTION_MAX_RECORDS
+    assert len(kept & burst) == 1, f"the burst took more than its round: {sorted(kept)}"
+
+
+def test_the_bound_the_round_robin_fills_is_the_CONSTANT_and_not_a_second_copy(
+    wiz, tmp_path, monkeypatch
+):
+    """The other direction for the count bound: lower it and the same store must lose
+    more. A rule that read a hard-coded 500 would satisfy the text binding above and
+    ignore every future change to it."""
+    monkeypatch.setattr(wiz, "RETENTION_MAX_RECORDS", 3)
+    d = tmp_path / "store"
+    _history(wiz, d, range(2, 12))  # ten days, one record each
+    wiz.prune_run_store(d, now=_now(1) + 90 * 86400)
+    assert len(list(d.iterdir())) == 3
+
+
+def test_both_stores_share_ONE_count_rule_with_different_axes(wiz, tmp_path, monkeypatch):
+    """The run store buckets by UTC day and the egress store by destination, and both
+    go through `_round_robin_keeps`. Asserted because a second copy of the rule is how
+    a fix to one store silently misses the other — this repository has done exactly
+    that twice (T118/T129d), and the rule was reimplemented per store before this."""
+    axes: list[str] = []
+    real = wiz._round_robin_keeps
+    monkeypatch.setattr(
+        wiz,
+        "_round_robin_keeps",
+        lambda rows, limit: axes.extend(b for _w, b, _p in rows) or real(rows, limit),
+    )
+    runs = tmp_path / "runs"
+    _write_record(wiz, runs, "20260401T000000Z-aaaa", _at(1))
+    wiz.prune_run_store(runs, now=_now(2))
+    assert axes == ["2026-01-01"], f"the run store's axis is not the UTC day: {axes}"
+
+    axes.clear()
+    egress = tmp_path / "egress"
+    wiz.atomic_write_json(
+        egress, "e.json", {"timestamp": _at(1), "host": "api.openai.com", "decision": "refused"}
+    )
+    wiz.prune_egress_store(egress, now=_now(2))
+    assert axes == ["api.openai.com"], f"the egress store's axis is not the destination: {axes}"
+
+
+# --- T040: a crash-loop burst must not evict the records that explain it ------
+#
+# The tool deploys a headless run with `restart: on-failure` and NO retry limit, so
+# an agent that cannot start is restarted for as long as it is left alone and every
+# restart writes a record — measured at ~9 records in ~40s, i.e. thousands in a
+# night. Under a plain newest-first count bound that one burst evicts every older
+# record of the environment: the store stays bounded and stops being worth reading,
+# which is the letter of FR-011 with none of its point.
+
+
+def _burst(directory: Path, day: str, count: int, start_hour: int = 0) -> list[str]:
+    """`count` records stamped on `day` from `start_hour`, as a restart loop writes them.
+
+    Written directly rather than through the atomic helper: this is about which
+    records survive, and a few thousand fsyncs would make it slow enough to skip.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    names = []
+    for i in range(count):
+        h, m, sec = start_hour + i // 3600, i // 60 % 60, i % 60
+        assert h < 24, "a burst that ran past midnight needs a second _burst call, by day"
+        name = f"{day.replace('-', '')}T{h:02d}{m:02d}{sec:02d}Z-b{i:05d}"
+        (directory / f"{name}.json").write_text(
+            json.dumps({"started_at": f"{day}T{h:02d}:{m:02d}:{sec:02d}Z"})
+        )
+        names.append(f"{name}.json")
+    return names
+
+
+def _history(wiz, directory: Path, days: range) -> list[str]:
+    """One record per day across `days` of January — the runs a crash loop in April
+    must not cost the operator. January only, so every stamp is a REAL date: an
+    invalid one would fall back to the file's mtime and rank as today's, which would
+    quietly make this fixture the burst rather than the history."""
+    return [_write_record(wiz, directory, f"jan{d:02d}", _at(d)).name for d in days]
+
+
+def test_a_crash_loop_burst_does_not_evict_the_history_that_explains_it(wiz, tmp_path):
+    """The property, stated as an operator would: after a night of restart records,
+    the runs from BEFORE the loop are all still there. Under a plain newest-first rule
+    every one of them is gone, and the store contains 500 copies of the same failure
+    and nothing that shows what changed."""
+    d = tmp_path / "store"
+    history = _history(wiz, d, range(2, 32))  # 30 runs, one a day, all within 90 days
+    burst = _burst(d, "2026-04-01", 600)
+    now = _now(1) + 90 * 86400  # 2026-04-01, so January 2nd is still inside the age bound
+    removed = set(wiz.prune_run_store(d, now=now))
+    assert removed.isdisjoint(history), "the burst evicted the runs that explain it"
+    assert set(history) <= {p.name for p in d.iterdir()}
+    # The store is still bounded: the history takes one slot per day in the first pass
+    # and the burst takes every slot no other day wanted.
+    assert len(list(d.iterdir())) == wiz.RETENTION_MAX_RECORDS
+    assert len(removed & set(burst)) == len(burst) - (wiz.RETENTION_MAX_RECORDS - len(history))
+
+
+def test_a_burst_that_CROSSES_UTC_MIDNIGHT_still_does_not_evict_the_history(wiz, tmp_path):
+    """The scenario the rule is documented for is an OVERNIGHT loop, which crosses UTC
+    midnight by construction — so the protection has to hold when the burst occupies
+    more than one day.
+
+    The per-day SHARE this replaces failed here and only here, which is why it stood
+    for a while: with a share of half the bound, two days of burst at their share
+    consumed all 500 slots before any older day was examined. Measured on that rule —
+    600 records on ONE day left all 30 history runs intact, and 500 split across two
+    days deleted every one of them. Fewer records, total loss.
+    """
+    d = tmp_path / "store"
+    history = _history(wiz, d, range(2, 32))
+    # 22:00 on the 31st into the 1st and 2nd: one loop, three UTC days.
+    burst = set(_burst(d, "2026-03-31", 250, start_hour=22))
+    burst |= set(_burst(d, "2026-04-01", 250))
+    burst |= set(_burst(d, "2026-04-02", 500))
+    removed = set(wiz.prune_run_store(d, now=_now(1) + 91 * 86400))
+    assert removed.isdisjoint(history), (
+        "a burst spanning three UTC days evicted the history — the day axis only "
+        "protects a burst that happens to stay inside one day"
+    )
+    assert len(list(d.iterdir())) == wiz.RETENTION_MAX_RECORDS
+    assert removed <= burst
+
+
+def test_the_newest_record_survives_a_burst_that_blew_the_cap(wiz, tmp_path):
+    """FR-011 bounds the store; it does not license losing the run an operator is
+    most likely to be asking about. The newest record is first in the order the count
+    bound fills and its bucket is the first one walked, so it cannot be the record
+    that pays for the burst."""
+    d = tmp_path / "store"
+    _burst(d, "2026-04-01", wiz.RETENTION_MAX_RECORDS + 50)
+    newest = max(p.name for p in d.iterdir())
+    wiz.prune_run_store(d, now=_now(1) + 90 * 86400)
+    assert (d / newest).exists()
+
+
+def test_the_round_robin_is_a_priority_and_never_deletes_below_the_count_bound(wiz, tmp_path):
+    """The allocation must not become a third bound. An environment that legitimately
+    ran 450 times today, in a store holding only those 450, must lose none of them —
+    deleting the 251st would be data loss for no space at all."""
+    d = tmp_path / "store"
+    _burst(d, "2026-04-01", wiz.RETENTION_MAX_RECORDS - 50)
+    assert wiz.prune_run_store(d, now=_now(1) + 90 * 86400) == []
+
+
+def test_the_allocation_needs_no_number_of_its_own(wiz):
+    """PARAMETER-FREE is the property, not an implementation note. The share constant
+    this replaces had to be chosen without knowing how many days there would be, and
+    any share S is defeated by bound/S buckets at S apiece — which is the midnight
+    case above. A store rule with no third number cannot drift from its prose, so the
+    absence is asserted rather than left to be reintroduced by the next reader."""
+    assert not hasattr(wiz, "RETENTION_MAX_RECORDS_PER_DAY")
+    assert "no number of its own" in _DOC.read_text()
+
+
+def test_a_time_no_clock_can_render_does_not_break_the_prune(wiz, tmp_path, monkeypatch):
+    """`_record_epoch` returns infinity for a record that vanished mid-prune, and the
+    round-robin rule has to bucket it. One missing file must not fail the whole prune —
+    retention is an errand on the way to the operator's real command."""
+    assert wiz._utc_day(float("inf")) == ""
+    d = tmp_path / "store"
+    _write_record(wiz, d, "gone", _at(1))
+    monkeypatch.setattr(wiz, "_record_epoch", lambda p: float("inf"))
+    assert wiz.prune_run_store(d, now=_now(20)) == []
+
+
+def test_a_FUTURE_dated_record_is_not_IMMORTAL_under_the_age_bound(wiz, tmp_path):
+    """`started_at` comes from inside a container, so it is the one time value in a
+    record that a broken clock can put in the future — and unclamped it is `>= cutoff`
+    for every cutoff the age rule can compute, so the age bound can NEVER take it. A
+    store can then be permanently full of records dated 2098 that no passage of time
+    removes.
+
+    The count bound is a separate story and the round-robin rule already handles it:
+    600 bogus records spread over two bogus days are two buckets, so 30 real days still
+    take a slot each in the first pass. Both halves are asserted, but only the SECOND
+    one fails without the clamp — stated so nobody reads the first as its proof.
+
+    `_record_epoch` clamps to the moment this store wrote the record down, because no
+    run can have started after the tool recorded it. That is a reading a real clock
+    produced, so the record ages, buckets and eventually goes."""
+    d = tmp_path / "store"
+    history = _history(wiz, d, range(2, 32))
+    bogus = set(_burst(d, "2098-01-01", 300)) | set(_burst(d, "2098-01-02", 300))
+    removed = set(wiz.prune_run_store(d, now=_now(1) + 91 * 86400))
+    assert removed.isdisjoint(history), "future-dated records evicted the real ones"
+    # THE CLAMP'S OWN ASSERTION. `now` here is a decade past the real clock that set
+    # every one of these files' mtimes, so a store that ages from a believable time is
+    # empty and one that trusts `started_at` still holds 500 records dated 2098.
+    survivors = bogus - removed
+    assert survivors, "the fixture proved nothing: no bogus record survived the count bound"
+    assert set(wiz.prune_run_store(d, now=time.time() + 10 * 365 * 86400)) >= survivors
+
+
+def test_a_record_RESCUED_from_a_long_dead_host_is_not_destroyed_by_the_same_drain(
+    wiz, tmp_path, monkeypatch
+):
+    """An ordinary host switched off for four months. The drain stores its records,
+    removes the volume copy, and then prunes — so without the exemption the tool
+    destroys, inside ONE command, the records that command existed to rescue, and the
+    operator's listing is empty. No clock skew is needed.
+
+    The exemption is for the AGE bound only: `protect` is not a way past the count."""
+    d = tmp_path / "store"
+    rescued = _write_record(wiz, d, "four-months-old", _at(1)).name
+    now = _now(1) + (wiz.RETENTION_MAX_AGE_DAYS * 86400) + 60
+    assert wiz.prune_run_store(d, now=now, protect=frozenset([rescued])) == []
+    assert (d / rescued).exists(), "the drain deleted the record it had just rescued"
+    # Pruned on a LATER contact, once it has been readable at least once.
+    assert wiz.prune_run_store(d, now=now) == [rescued]
+
+
+def test_the_drain_RESCUES_a_record_past_the_age_bound_instead_of_destroying_it(
+    wiz, drain, monkeypatch
+):
+    """End to end, and this is the wiring rather than the rule. `prune_run_store` could
+    be provably correct about `protect` while `ingest_records` never fills it — an
+    argument nothing passes is this repository's recurring defect — so the assertion is
+    on the STORE after a real drain of a four-month-old record.
+
+    The record is `finished`, so the drain clears it from the volume: its only other
+    copy is gone by the time the prune runs, which is what makes this loss permanent
+    rather than a re-ingestion away."""
+    import io
+    import tarfile
+
+    rec = _record(wiz, run_id="ancient", started_at=_at(1), ended_at=_at(1), exit_code=0)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        body = json.dumps(rec).encode()
+        info = tarfile.TarInfo("./ancient.json")
+        info.size = len(body)
+        tf.addfile(info, io.BytesIO(body))
+    payload = buf.getvalue()
+    monkeypatch.setattr(
+        wiz.subprocess,
+        "run",
+        lambda argv, capture_output=False, timeout=None, **kw: subprocess.CompletedProcess(
+            argv, 0, payload, b""
+        ),
+    )
+    # `now` is real, so the January record is far past the 90-day bound.
+    ingested = wiz.ingest_records("local", dict(LOCAL_HOST), "acme", "img")
+    assert ingested == ["ancient"]
+    stored = [p.name for p in wiz.runs_store_dir("local", "acme").iterdir()]
+    assert stored == ["ancient.json"], (
+        "the drain stored the record, cleared the volume copy and then deleted the "
+        f"stored copy — all in one command, so nothing was rescued: {stored}"
+    )
+
+
+# --- T040: what pruning must never touch, and never do quietly ---------------
+
+
+def test_retention_makes_no_call_to_a_HOST_and_so_cannot_reach_a_pending_record(
+    wiz, tmp_path, monkeypatch
+):
+    """The one deletion that could never be noticed. A record still pending on a
+    container volume has left nothing behind: prune it and the store is simply short
+    of runs, with nothing anywhere looking wrong. Pruning therefore reads the durable
+    store and nothing else — asserted as "issues no command at all", because that is
+    the property that keeps it true after a refactor."""
+
+    def forbidden(*a, **kw):
+        raise AssertionError("retention reached the container runtime")
+
+    monkeypatch.setattr(wiz, "query", forbidden)
+    monkeypatch.setattr(wiz.subprocess, "run", forbidden)
+    d = tmp_path / "store"
+    _write_record(wiz, d, "ancient", _at(1))
+    assert wiz.prune_run_store(d, now=_now(1) + (wiz.RETENTION_MAX_AGE_DAYS * 86400) + 60) == [
+        "ancient.json"
+    ]
+
+
+def test_retention_runs_even_when_the_drain_RAISES(wiz, drain, monkeypatch):
+    """The hole this closes, and the reason `ingest_records` uses `finally`: the drain
+    raises on a large backlog (the clear step's argv exceeded ARG_MAX), the exception
+    left through `ingest_records` to `drain_host_records`'s handler, and the prune
+    never ran. Retention became unreachable on exactly the crash-looping environment
+    that needed it — on every contact, forever, while the store grew without bound."""
+    _write_record(wiz, wiz.runs_store_dir("local", "acme"), "ancient", _at(1))
+    monkeypatch.setattr(
+        wiz, "_ingest_from_volume", lambda *a, **k: (_ for _ in ()).throw(OSError("E2BIG"))
+    )
+    with pytest.raises(OSError):
+        wiz.ingest_records("local", dict(LOCAL_HOST), "acme", "img")
+    assert list(wiz.runs_store_dir("local", "acme").iterdir()) == []
+    assert any("pruned 1 run record(s)" in m for m in drain.logs)
+
+
+def test_a_prune_that_itself_fails_does_not_MASK_the_drains_own_failure(wiz, drain, monkeypatch):
+    """The hazard `finally` introduces, and the reason retention swallows OSError
+    here. Bookkeeping raising inside a `finally` would replace the drain's exception
+    with a complaint about the store — so the operator is told retention is unhappy
+    and never told why the drain failed, which is C11's masking failure exactly."""
+    monkeypatch.setattr(
+        wiz, "_ingest_from_volume", lambda *a, **k: (_ for _ in ()).throw(OSError("the real one"))
+    )
+    monkeypatch.setattr(
+        wiz, "prune_run_store", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only store"))
+    )
+    with pytest.raises(OSError, match="the real one"):
+        wiz.ingest_records("local", dict(LOCAL_HOST), "acme", "img")
+    assert any("could not apply run-record retention" in m for m in drain.warnings)
+
+
+def test_the_announcement_names_WHICH_records_were_taken(wiz, drain):
+    """ "pruned 4000 records" answers a question no operator has. The range of run ids
+    is what lets them tell whether the run they came looking for is among them."""
+    d = wiz.runs_store_dir("local", "acme")
+    _write_record(wiz, d, "20260101T000000Z-aaaa", _at(1))
+    _write_record(wiz, d, "20260101T000001Z-bbbb", _at(1))
+    wiz.ingest_records("local", dict(LOCAL_HOST), "acme", "img")
+    said = " ".join(drain.logs)
+    assert "20260101T000000Z-aaaa .. 20260101T000001Z-bbbb" in said
+
+
+# --- T040: the clear step's argv is bounded (the backlog that broke retention) --
+
+
+def _clear_argv_bytes(wiz, batch: list[str]) -> int:
+    argv = wiz.driver_ingest_clear_argv(LOCAL_HOST, "v", "img", batch)
+    return sum(len(a.encode()) + 1 for a in argv)
+
+
+def test_a_backlog_is_cleared_in_batches_that_cannot_exceed_ARG_MAX(wiz):
+    """Measured on this project's own machine (ARG_MAX 1 MiB): `subprocess.run`
+    raises OSError(E2BIG) between 10k and 20k record paths, which one crash-looping
+    environment reaches in about a day. Bounded in BYTES rather than in files because
+    a run id may be 128 characters (RUN_ID_RE), and a file count that was safe for
+    short ids would not be for long ones."""
+    names = [f"20260401T{i:06d}Z-{'c' * 100}.json" for i in range(20000)]
+    batches = wiz._clear_batches(names)
+    assert len(batches) > 1, "20k records went out as one argv"
+    assert [n for b in batches for n in b] == names, "batching lost or reordered a record"
+    for b in batches:
+        assert _clear_argv_bytes(wiz, b) < wiz.MAX_CLEAR_ARGV_BYTES * 2
+
+
+def test_one_over_long_name_still_gets_its_own_batch_rather_than_being_dropped(wiz):
+    """A record dropped here would sit on the volume with nothing saying why. The
+    runtime is entitled to refuse it loudly instead."""
+    assert wiz._clear_batches(["x" * (wiz.MAX_CLEAR_ARGV_BYTES * 2)]) == [
+        ["x" * (wiz.MAX_CLEAR_ARGV_BYTES * 2)]
+    ]
+    assert wiz._clear_batches([]) == []
 
 
 # --- T038: a record write that fails surfaces, and never fails the run -------

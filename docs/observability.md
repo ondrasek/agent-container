@@ -221,14 +221,81 @@ forgotten on another.
 
 500 records is roughly a year of four nightly runs; 90 days is past the point where a run's commits
 are ordinary history. The figures in `runs --help` are interpolated from the constants that do the
-deleting, and a test binds **the two above** to those same constants in both directions — a
-documented number the code does not use is this repository's recurring defect, and this page is
+deleting, and a test binds **both figures on this page** to those same constants in both directions —
+a documented number the code does not use is this repository's recurring defect, and this page is
 where an operator would come to read one.
+
+### The count is spent on distinct UTC days first
+
+The 500 is not "the newest 500". It is filled **one record per UTC day, newest day first, round and
+round** until it runs out — so the newest run of every day that has one survives before any day gets
+a second record.
+
+The reason is the tool's own restart policy. A headless run is deployed with `restart: on-failure`
+and no retry limit, so an agent that cannot start at all — a missing credential, an unresolvable
+clone URL — is restarted for as long as the operator leaves it running, and every restart writes a
+record. Measured: **9 records in about 40 seconds**, which is thousands overnight. Under a plain
+"keep the newest 500" that one burst evicts every older record of the environment, including the
+runs that show what it was doing before it broke. The store stays bounded and becomes worthless:
+the letter of FR-011 with none of its point.
+
+**The allocation has no number of its own, and that is the point rather than a detail.** An earlier
+version of this rule gave any single UTC day at most half the count. It held for a burst that stayed
+inside one day and failed for the scenario it was written for: an *overnight* loop crosses UTC
+midnight by construction, and two days sitting at half the bound each consume all 500 slots before
+an older day is ever examined. Measured on that rule — 600 records on one day left all 30 days of
+prior history intact, and **500** records split across two days deleted every one of them. Fewer
+records, total loss. Any fixed share S has the same hole at `500/S` buckets; round-robin takes the
+share from the data instead, so K days get `500/K` apiece and there is no midnight to cross.
+
+Round-robin is a **priority, not a third bound**. Every day empties before the count is reached, so
+**nothing is deleted while the store is under the count bound** — a rule that deleted today's 251st
+run from a store holding 251 records would be losing data for no space.
+
+The cost, stated rather than left to be discovered: while a day holds more records than its round,
+the survivors are no longer a contiguous "everything since *date*" window, so `runs list --changed`
+is thinner across that day than it would have been. That is the incompleteness any prune creates,
+placed on the day that produced thousands of identical records instead of on the days that produced
+distinct ones.
+
+The egress store next door uses the same mechanism with a different axis — the **destination**
+rather than the day — because the burst it has to survive is one endpoint an agent retries. Same
+rule, two axes, one implementation.
+
+### What pruning will not do
+
+- **It never deletes a record that has not been ingested yet.** Pruning reads the durable store and
+  nothing else; a record still pending on a container volume is not a candidate. An un-ingested
+  record leaves nothing behind, so its loss would be the one loss nobody could notice.
+- **It never deletes a record in the same command that rescued it.** A host switched off for four
+  months hands over records that are all past 90 days, and the drain removes the volume copy before
+  retention runs — so the age bound skips whatever this drain has just taken custody of. They are
+  pruned on a later contact, by which time they have been readable at least once and the
+  announcement names them. The *count* bound still applies: being outnumbered by 500 newer records
+  is a different story from being old.
+- **It never deletes the newest record of an environment under the count bound.** The newest record
+  is first in the fill order and its day is the first day walked. (The *age* bound will delete it
+  once it is 90 days old — that is the rule doing its job, and it is the only way an environment's
+  store legitimately becomes empty.)
+- **It never treats a clock as gospel.** A record's age comes from the run's own `started_at`, which
+  is written inside a container, clamped to the moment this store wrote the record down — no run can
+  have started after the tool recorded it. Without that clamp a `started_at` in the future is newer
+  than every cutoff the age rule can compute, so the record is immortal *and* holds a count slot
+  forever; measured, 600 such records evicted all 30 real ones and ten years' passage removed none.
+- **It is never silent.** Every prune logs the count, the rule that took the records and the range
+  of run ids removed, on stderr — so it is present in `--json` mode too, where the deletion would
+  otherwise be invisible to the agent FR-012 exists for.
 
 Unlike Feature 014's host inventory, which is small and must keep its oldest entries indefinitely,
 run records accumulate with every run and lose value quickly. That opposite retention need is
 precisely why the two are separate stores, even though they share placement and the same
 atomic-write machinery.
+
+The same split now has a second consumer. Feature 012's **egress events** live in
+`egress/<host>/<environment>/` beside the run records: same placement, same atomic write and the
+same listing helper, their own schema and their own retention rule — theirs spends the count bound
+on distinct *destinations* first, because the burst it has to survive is one endpoint an agent
+retries rather than one night of restarts. See [egress.md](egress.md#the-durable-record--what-was-refused-after-the-container-is-gone).
 
 ## The task text is the one field that can carry a credential
 

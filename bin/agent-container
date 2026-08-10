@@ -34,6 +34,7 @@ import fcntl
 import hashlib
 import inspect
 import io
+import itertools
 import json
 import operator
 import os
@@ -1240,30 +1241,114 @@ RETENTION_MAX_RECORDS = 500
 
 
 def _record_epoch(path: Path) -> float:
-    """When the RUN happened, in epoch seconds, for the age rule.
+    """When the RUN happened, in epoch seconds, for both retention bounds.
 
     Read from `started_at` and not from the file's mtime, because mtime is when the
     record was INGESTED — for a detached run that is whenever the operator next ran
     a command, and for a re-ingested one it is today. An age rule built on mtime
     would keep a year-old run alive because the tool touched its file this morning.
 
+    CLAMPED TO THE MOMENT THIS STORE WROTE THE RECORD DOWN (`min` with mtime),
+    because no run can have started after the tool recorded it. Without that clamp a
+    `started_at` in the future — a skewed container clock, a bogus value — is
+    `>= cutoff` for every cutoff the age rule can compute, so the age bound can NEVER
+    remove it, and it sorts first so it holds a count slot forever. Measured before
+    the clamp: 600 records stamped 2098 evicted all 30 real ones, and advancing the
+    clock by ten years removed none of them. With it, such a record ages and buckets
+    from the day the tool first saw it, which is a reading a real clock produced.
+
     An unreadable or unparseable `started_at` falls back to mtime, which is always
-    LATER than the run it describes. So the fallback errs toward KEEPING a record,
-    and pruning is the one operation in this feature that cannot be undone.
+    LATER than the run it describes. So the fallback errs toward KEEPING a record
+    under the age rule, and pruning is the one operation in this feature that cannot
+    be undone.
     """
     try:
+        custody = path.stat().st_mtime
+    except OSError:
+        # The file went away under us. Return the far future so the caller keeps it
+        # rather than deleting a path it can no longer even read.
+        return float("inf")
+    try:
         rec = json.loads(path.read_text())
-        return float(calendar.timegm(time.strptime(str(rec["started_at"]), TIME_FORMAT)))
+        started = float(calendar.timegm(time.strptime(str(rec["started_at"]), TIME_FORMAT)))
     except OSError, ValueError, TypeError, KeyError, json.JSONDecodeError:
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            # The file went away under us. Return the far future so the caller
-            # keeps it rather than deleting a path it can no longer even read.
-            return float("inf")
+        return custody
+    return min(started, custody)
 
 
-def prune_run_store(directory: Path, now: float | None = None) -> list[str]:
+def _utc_day(epoch: float) -> str:
+    """The UTC day `epoch` falls in, or "" for a value no clock can render.
+
+    "" is a real bucket rather than an error: `_record_epoch` returns infinity for a
+    record that vanished mid-prune, and a bucketing rule that raised on it would
+    turn one missing file into a failure of the whole prune.
+    """
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(epoch))
+    except OverflowError, OSError, ValueError:
+        return ""
+
+
+def _round_robin_keeps(rows: list[tuple[float, str, Path]], limit: int) -> set[Path]:
+    """Which of `rows` — `(when, bucket, path)`, NEWEST FIRST — the count bound
+    keeps: one pass per bucket, newest first, until `limit` is reached.
+
+    ONE RULE, TWO AXES. The run store buckets by UTC DAY and the egress store by
+    DESTINATION, because the burst each has to survive is different — a restart loop
+    writes thousands of records over a few hours, an agent retrying a misconfigured
+    provider produces thousands of events at one host — but the property wanted is
+    the same, so the mechanism is shared rather than reimplemented per store.
+
+    PLAIN NEWEST-FIRST IS WHAT THIS REPLACES, and it is defeated by the very failure
+    that makes growth unbounded: the tool gives a headless run `restart: on-failure`
+    with no retry limit, so an agent that cannot start is restarted for as long as
+    the operator leaves it and each restart writes a record (measured: ~9 records in
+    ~40s, i.e. thousands overnight). Newest-first lets that one burst evict EVERY
+    older record — the store stays bounded and becomes worthless, the letter of
+    FR-011 with none of its point.
+
+    PARAMETER-FREE, which is the other half of the argument and the reason this is
+    not a per-bucket share constant. A share has to be picked without knowing how
+    many buckets there will be, and any share S with `limit/S` buckets at S apiece
+    consumes the whole bound before an older bucket is ever examined. Measured on the
+    share this replaces (250 of 500 per UTC day): a burst confined to ONE day left
+    all 30 days of prior history intact, and the SAME burst split across two UTC days
+    — an overnight loop, which is the motivating scenario — deleted every one of
+    them with 500 records instead of 600. Round-robin allocates from the data, so K
+    buckets get `limit/K` apiece with no number to drift and no midnight to cross.
+
+    Nothing is deleted while the store is UNDER the bound: every bucket empties
+    before `limit` is reached, so this is a priority order and not a second bound. A
+    bound would delete today's 251st run from a store holding 251 records, which is
+    data loss for no space.
+
+    The global newest record is always kept: `rows` is newest-first, so its bucket is
+    the first this walks and its own newest record is the first thing taken.
+
+    The trade-off, stated because it is real: while a bucket is over its round-robin
+    share the surviving set is no longer a contiguous "everything since <date>"
+    window, so an answer from it — C16's `--changed` in particular — is thinner
+    across that bucket than a newest-first store would have been. That is the
+    incompleteness any prune creates, moved onto the bucket that produced redundant
+    records and away from the ones that produced distinct records.
+    """
+    by_bucket: dict[str, list[Path]] = {}
+    for _when, bucket, path in rows:
+        by_bucket.setdefault(bucket, []).append(path)
+    queues = [q for q in by_bucket.values() if q]
+    keep: set[Path] = set()
+    while queues and len(keep) < limit:
+        for queue in queues:
+            keep.add(queue.pop(0))
+            if len(keep) >= limit:
+                break
+        queues = [q for q in queues if q]
+    return keep
+
+
+def prune_run_store(
+    directory: Path, now: float | None = None, protect: frozenset[str] = frozenset()
+) -> list[str]:
     """Delete the records past EITHER retention bound; return the names deleted.
 
     Both bounds are applied — "whichever prunes first" — because they bound two
@@ -1273,7 +1358,25 @@ def prune_run_store(directory: Path, now: float | None = None) -> list[str]:
     alone.
 
     Ordered by the run's own time (newest first) with the filename breaking ties, so
-    the count rule keeps the newest N and does so identically on two machines.
+    two machines prune the same store identically. Which records the count bound
+    then keeps is `_round_robin_keeps` over the UTC day, and the NEWEST record is
+    always among them.
+
+    `protect` NAMES THE RECORDS THIS COMMAND HAS JUST TAKEN CUSTODY OF, and they are
+    exempt from the AGE bound alone. A host switched off for four months hands over
+    records that are all past 90 days, and the drain removes the volume copy before
+    this runs — so without the exemption the tool stored them, deleted their only
+    other copy, and deleted the stored copy, all inside one command, and the operator
+    never saw the listing they asked for. They are pruned on a LATER contact, by
+    which time they have been readable at least once and the announcement names them.
+    The COUNT bound still applies to them: being outnumbered by 500 newer records is
+    a different and legitimate story, and exempting them from it would let one drain
+    put the store over its documented bound.
+
+    Reads only `directory`, which is the DURABLE store. A record still pending on a
+    container volume is not a candidate and cannot be: retention must never delete
+    an account of a run that has not been ingested yet, because that one leaves
+    nothing behind to notice it is missing.
 
     A file that cannot be deleted is a warning and not a failure: retention is
     bookkeeping done on the way to the operator's actual command (R8), and a
@@ -1286,9 +1389,17 @@ def prune_run_store(directory: Path, now: float | None = None) -> list[str]:
     ordered = sorted(
         ((_record_epoch(p), p.name, p) for p in paths), key=operator.itemgetter(0, 1), reverse=True
     )
+    keep = _round_robin_keeps(
+        [
+            (when, _utc_day(when), path)
+            for when, name, path in ordered
+            if when >= cutoff or name in protect
+        ],
+        RETENTION_MAX_RECORDS,
+    )
     removed: list[str] = []
-    for rank, (epoch, name, path) in enumerate(ordered):
-        if rank < RETENTION_MAX_RECORDS and epoch >= cutoff:
+    for _epoch, name, path in ordered:
+        if path in keep:
             continue
         try:
             path.unlink()
@@ -1668,7 +1779,20 @@ def container_running(rt: str, cname: str) -> bool:
 
 
 def container_exists(rt: str, cname: str) -> bool:
-    r = query([rt, "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
+    return runtime_container_exists([rt], cname)
+
+
+def runtime_container_exists(base_argv: list[str], cname: str) -> bool:
+    """Does `cname` exist (running or not) on the runtime `base_argv` addresses?
+
+    Takes the base argv rather than a runtime name so a HOST's runtime can be asked
+    the same question (`driver_runtime_argv`), which is what the egress drain needs
+    to tell "this environment was torn down" from "its boundary is broken". One
+    implementation for both, because the filter is the load-bearing part: `ps -a`
+    plus an anchored name, matched EXACTLY against the returned lines — a substring
+    match here would report `agent-egress-acme-2` as `agent-egress-acme`.
+    """
+    r = query(base_argv + ["ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
     return cname in r.stdout.splitlines()
 
 
@@ -4011,19 +4135,65 @@ def ingest_records(
     that ingested nothing: the store is bounded per environment, and an environment
     whose volume has gone away still has a store that must stop growing — it just
     stopped growing on its own.
+
+    `finally` is what makes "unconditionally" true rather than merely intended. It
+    was not: the drain RAISES on a large backlog (the clear step's argv exceeded
+    ARG_MAX — measured, see `_clear_ingested`), the exception left through this
+    function to `drain_host_records`'s handler, and the prune below never ran. That
+    is retention becoming unreachable exactly on the crash-looping environment that
+    needs it, on every contact, forever — the store then grows without bound while
+    a bounded-store rule sits three lines away.
+
+    `rescued` is filled AS RECORDS ARE WRITTEN, not returned, so the `finally` holds
+    the list even when the drain raises part-way through it. Those names are exempt
+    from the age bound for this one prune (see `prune_run_store`): a host switched off
+    for four months hands over records that are all past 90 days, and the clear step
+    has already removed their only other copy, so pruning them here would destroy in
+    one command the records this command existed to rescue.
     """
-    ingested = _ingest_from_volume(host_name, host_rec, name, image, live)
-    pruned = prune_run_store(runs_store_dir(host_name, name))
-    if pruned:
-        # Deleting durable records is announced. The whole feature is that the
-        # account of a run outlives its container, so the tool removing one is the
-        # last thing that may happen quietly — and the message names the rule, so
-        # an operator who wants the record back knows which bound took it.
-        log(
-            f"{name}: pruned {len(pruned)} run record(s) past retention "
-            f"({RETENTION_MAX_AGE_DAYS} days / {RETENTION_MAX_RECORDS} records per environment)"
-        )
-    return ingested
+    rescued: list[str] = []
+    try:
+        return _ingest_from_volume(host_name, host_rec, name, image, live, rescued)
+    finally:
+        _prune_and_announce(host_name, name, frozenset(rescued))
+
+
+def _prune_and_announce(host_name: str, name: str, rescued: frozenset[str] = frozenset()) -> None:
+    """Prune <name>'s durable store and say so — see `ingest_records` (FR-011, C14).
+
+    Deleting durable records is announced. The whole feature is that the account of
+    a run outlives its container, so the tool removing one is the last thing that may
+    happen quietly. The message names the rule, so an operator who wants a record
+    back knows which bound took it, and names the ID RANGE it took, so they can tell
+    whether the run they came looking for is among them — "pruned 4000 records" alone
+    answers the question an operator does not have.
+
+    NEVER RAISES, because `ingest_records` calls it from a `finally`: an exception
+    escaping here would REPLACE the drain's own exception with a complaint about
+    bookkeeping — the exact masking failure T038/C11 exists to prevent, and this is
+    the one place where a bookkeeping error would be reported instead of the failure
+    the operator is waiting to read.
+
+    On stderr (`log`), so it is present in `--json` mode too: the prune is a side
+    effect of a command whose stdout belongs to the caller's parser, and a deletion
+    that only a human-readable mode reported would be silent for the agent that FR-012
+    exists for.
+    """
+    try:
+        pruned = prune_run_store(runs_store_dir(host_name, name), protect=rescued)
+    except OSError as e:
+        warn(f"{name}: could not apply run-record retention ({e})")
+        return
+    if not pruned:
+        return
+    span = min(pruned).removesuffix(".json")
+    if len(pruned) > 1:
+        span += f" .. {max(pruned).removesuffix('.json')}"
+    log(
+        f"{name}: pruned {len(pruned)} run record(s) past retention "
+        f"({RETENTION_MAX_AGE_DAYS} days / {RETENTION_MAX_RECORDS} records per environment, "
+        f"the count spent on distinct UTC days first): {span}"
+    )
 
 
 # How long a drain may block on a host before giving up and answering from the
@@ -4033,10 +4203,11 @@ RUNS_PROBE_TIMEOUT = 10.0
 
 
 def _ingest_from_volume(
-    host_name: str, host_rec: dict, name: str, image: str, live: bool
+    host_name: str, host_rec: dict, name: str, image: str, live: bool, rescued: list[str]
 ) -> list[str]:
     """The drain itself — see `ingest_records`, which owns the contract and adds
-    retention around this."""
+    retention around this. `rescued` is appended to as each record becomes durable,
+    so the caller's `finally` can protect them even if this raises."""
     volume = runs_volume_name(name)
     # BOUNDED, because a drain runs on the way to almost every command. Against an
     # unreachable host this probe blocks on the runtime's own connect timeout, so
@@ -4085,7 +4256,6 @@ def _ingest_from_volume(
         warn(f"{name}: the drain of {volume} on {host_name} was not a readable archive ({e})")
         return []
     store = runs_store_dir(host_name, name)
-    written: list[str] = []
     clearable: list[str] = []
     for filename, rec in pending:
         rec["host"] = host_name
@@ -4097,7 +4267,7 @@ def _ingest_from_volume(
         except OSError as e:
             warn(f"{name}: could not store run record '{filename}' ({e}); left on the volume")
             continue
-        written.append(filename)
+        rescued.append(filename)
         # Only a COMPLETE record is cleared. An in-flight one is still owned by a
         # writer that will rewrite it at exit, and removing it now would mean a
         # SIGKILL between here and then leaves nothing on the volume to finalise —
@@ -4107,7 +4277,43 @@ def _ingest_from_volume(
             clearable.append(filename)
     if clearable:
         _clear_ingested(host_name, host_rec, name, volume, image, clearable)
-    return [f.removesuffix(".json") for f in written]
+    return [f.removesuffix(".json") for f in rescued]
+
+
+# Per-`rm`-container budget for the record paths on argv. The names are attacker-
+# irrelevant but UNBOUNDED IN NUMBER: a headless run gets `restart: on-failure` with
+# no retry limit, so one crash-looping environment writes a record every few seconds
+# for as long as it is left alone, and a single drain then has to clear all of them.
+# Measured on this project's own machine (ARG_MAX 1 MiB, macOS): `subprocess.run`
+# raises OSError(E2BIG) somewhere between 10k and 20k paths of this shape — reached
+# by roughly a day of the cadence above. That exception used to escape the drain and
+# skip retention entirely (see `ingest_records`), so the fix is both: bound the argv
+# HERE, and prune regardless THERE.
+#
+# 64 KiB rather than "some number of files", because a run id may be 128 characters
+# (RUN_ID_RE) and a count that was safe for short ids would not be for long ones. It
+# is two orders of magnitude below the smallest ARG_MAX this tool runs against, which
+# leaves room for the runtime's own argv and the environment it inherits.
+MAX_CLEAR_ARGV_BYTES = 64 << 10
+
+
+def _clear_batches(filenames: list[str]) -> list[list[str]]:
+    """`filenames` split into batches that each fit MAX_CLEAR_ARGV_BYTES.
+
+    At least one name per batch even if that one name is over budget: dropping it
+    would leave a stored record on the volume with nothing saying why, and the
+    runtime is entitled to refuse it loudly instead.
+    """
+    batches: list[list[str]] = []
+    used = MAX_CLEAR_ARGV_BYTES
+    for f in filenames:
+        cost = len(f.encode()) + len(RUNS_INGEST_MOUNT) + 2
+        if used + cost > MAX_CLEAR_ARGV_BYTES:
+            batches.append([])
+            used = 0
+        batches[-1].append(f)
+        used += cost
+    return batches
 
 
 def _clear_ingested(
@@ -4120,16 +4326,22 @@ def _clear_ingested(
     theatre: a pruned record would be re-ingested by the next contact, and the
     prune would look like it worked.
 
+    Batched (see MAX_CLEAR_ARGV_BYTES) so a backlog cannot exceed ARG_MAX, and every
+    batch is attempted even after one fails: the failure that matters is a single
+    unremovable record, and aborting on it would leave thousands of already-durable
+    ones on the volume to be re-ingested on every contact from then on.
+
     A failed clear is a warning, not a failure: the records are already durable,
     and re-ingesting them is idempotent because a record's id IS its filename.
     """
-    r = query(driver_ingest_clear_argv(host_rec, volume, image, filenames))
-    if r.returncode != 0:
-        warn(
-            f"{name}: stored {len(filenames)} run record(s) but could not clear them from "
-            f"{volume} on {host_name} ({r.stderr.strip() or f'exit {r.returncode}'}). "
-            f"They will be re-ingested (harmless) and the volume keeps growing."
-        )
+    for batch in _clear_batches(filenames):
+        r = query(driver_ingest_clear_argv(host_rec, volume, image, batch))
+        if r.returncode != 0:
+            warn(
+                f"{name}: stored {len(batch)} run record(s) but could not clear them from "
+                f"{volume} on {host_name} ({r.stderr.strip() or f'exit {r.returncode}'}). "
+                f"They will be re-ingested (harmless) and the volume keeps growing."
+            )
 
 
 def drain_host_records(host_name: str, host_rec: dict, names: list[str] | None = None) -> list[str]:
@@ -4172,7 +4384,1076 @@ def drain_host_records(host_name: str, host_rec: dict, names: list[str] | None =
             )
         except (Fatal, OSError, subprocess.SubprocessError) as e:
             warn(f"{env}: could not drain pending run records from {host_name} ({e})")
+    # THE EGRESS EVENTS SHARE THESE CONTACT POINTS DELIBERATELY (Feature 012 FR-010).
+    # The one that cannot be missed is `down_container`'s: it stops, drains, THEN
+    # removes — and removing the boundary destroys its log, which is where the events
+    # still are. A separate hook for egress would be a second list of contact points
+    # to keep in step with this one, and the moment they diverged the drain that
+    # matters would be the one left out.
+    #
+    # A SECOND LOOP, not the one above. An egress failure must not cost a run record
+    # (or the reverse), and the two warnings must never be confusable: an operator
+    # reading "could not drain" needs to know which store is short.
+    for env in envs:
+        try:
+            ingest_egress_events(host_name, host_rec, env)
+        except (Fatal, OSError, subprocess.SubprocessError) as e:
+            warn(f"{env}: could not collect egress events from {host_name} ({e})")
     return ingested
+
+
+# --- Feature 012 FR-010 / US3: the durable egress record ----------------------
+#
+# WHY THE BOUNDARY'S LOG IS THE SOURCE AND NOTHING NEW PRODUCES EVENTS. squid
+# already writes one line per connection and unbound one per reply, both into the
+# boundary container's own stream, and both by deliberate work: T130 found unbound's
+# refusals going to a syslog nobody ran, T150 found squid's access log in a file no
+# verb could read. `logs --egress` streams exactly that. A second producer — the
+# sidecar writing records to a volume the tool then ingests — would be a mechanism
+# that can DISAGREE with the one the operator reads, and the disagreement would
+# present as "the tool says nothing was refused" beside a log that says it was. So
+# the durable record is a NARROWING of that stream: same source, same facts, the
+# interesting ones kept.
+#
+# What the choice buys beyond one truth:
+#   * NO tenth volume. Research R9 deferred this story behind an identity migration;
+#     reading the log means that migration is not paid at all. What the story
+#     actually waited for is Feature 016's durable STORE and its write/list helpers
+#     (FR-011a) — reused here verbatim, under this schema.
+#   * NO container-authored filenames. Run-record ingestion has to refuse member
+#     names that arrive from inside a container; every name here is composed by this
+#     tool from fields it parsed, so that class of check has nothing to guard.
+#
+# What it costs, said out loud because it is real: the pending window is the
+# RUNTIME's log retention rather than a volume this tool owns. Lines the log driver
+# has already rotated away were never ingested and cannot be recovered, and each
+# drain reads the last EGRESS_LOG_TAIL_LINES lines. Contact the host — any command
+# that drains — and the window resets.
+
+EGRESS_SCHEMA = 1
+
+# EVERY FIELD OF AN EGRESS EVENT AND WHERE ITS VALUE COMES FROM (data-model §6).
+# The closure is the point. §6's narrowness — no request bodies, no headers, no
+# tokens, no model names, no prompt content — is a Constitution III claim about what
+# this store can possibly hold, and a claim about a record's fields is worth exactly
+# as much as the thing that enumerates them. A test asserts every event this build
+# writes carries these keys and no others, so a field added without a line here
+# fails rather than quietly widening the store.
+#
+# `host` IS THE DESTINATION, and `deployment_host` is the machine the environment
+# runs on. The collision is inherited: §6 names the destination `host` and Feature
+# 016's run record uses `host` for the deployment host. §6 wins here because the
+# destination is what an egress event is ABOUT — and the other field is spelled out
+# rather than shortened so no reader has to guess which "host" a value is.
+EGRESS_FIELD_PROVENANCE: dict[str, str] = {
+    "schema": "this build (EGRESS_SCHEMA)",
+    "environment": "the tool — whose boundary logged it",
+    "deployment_host": "the tool — which host that environment runs on",
+    "timestamp": "the container runtime's own log timestamp (`logs --timestamps`)",
+    "host": "the DESTINATION — the SNI squid matched, or the host of the request target",
+    "provider": "the tool's provider table, reverse-looked-up from `host`",
+    "declared": "the allowlist the deployed boundary was given, or the resolver's own verdict",
+    "decision": "what the boundary did",
+    "stage": "which daemon observed it — the resolver, or the proxy",
+}
+
+EGRESS_DECISION_REFUSED = "refused"
+EGRESS_DECISION_PERMITTED = "permitted"
+# WHICH DAEMON SAW IT, and this is not cosmetic: T131 went to trouble to keep a
+# policy refusal distinguishable from a name that does not exist, and the same
+# distinction one layer up is "the name was never resolved" versus "the connection
+# was terminated after the ClientHello". They send an operator to different places,
+# and §6 has no field that carries it — so this one is an addition to §6, made
+# deliberately and flagged, not a quiet extra.
+EGRESS_STAGE_DNS = "dns"
+EGRESS_STAGE_CONNECT = "connect"
+
+# How many trailing log lines one drain reads. The boundary logs every connection,
+# not only the refused ones, so this window is consumed mostly by traffic this store
+# discards — which is the honest reason it is large rather than tidy. It bounds two
+# things at once: the bytes crossing a possibly-remote runtime connection on a drain
+# that runs in front of almost every command, and the memory this holds while
+# parsing (~150 bytes a line, so a few megabytes at this size).
+EGRESS_LOG_TAIL_LINES = 20000
+# Longer than RUNS_PROBE_TIMEOUT because this transfers that window, where the run
+# probe asks a yes/no question. Still bounded: a drain is an errand on the way to the
+# operator's command, and an unreachable host must cost a pause rather than a hang.
+EGRESS_LOG_TIMEOUT = 30.0
+
+
+def egress_store_dir(host: str, environment: str) -> Path:
+    """Where the DURABLE egress events for one environment on one host live.
+
+    A SIBLING of runs_store_dir — not a subdirectory of it, and not rows inside a run
+    record. FR-011a made this argument for Feature 014's inventory and it holds here
+    for the same two reasons: a different producer (the boundary, not the agent) and a
+    different lifetime (continuous, not at run end). Shared placement and shared
+    write-safety are the parts that ARE reused.
+
+    >>> egress_store_dir("vps", "demo").parts[-4:]
+    ('agent-container', 'egress', 'vps', 'demo')
+    """
+    return DATA_DIR / "egress" / host / environment
+
+
+def driver_egress_logs_argv(host: dict, name: str, tail: int = EGRESS_LOG_TAIL_LINES) -> list[str]:
+    """Read the boundary's log from the host that runs it.
+
+    `--timestamps` is load-bearing, not decoration: it makes the RUNTIME stamp every
+    line, so one time source serves both daemons. squid's own `%ts` field is in its
+    access log and unbound's line prefix is a different format again, configurable,
+    and has changed across releases — deriving the record's one time field from
+    whichever producer wrote the line would mean two parsers that can disagree about
+    when the same event happened.
+
+    Not `-f`: this returns what is there and exits. A follow would never return, and
+    this runs in front of the operator's real command.
+
+    >>> driver_egress_logs_argv({"driver": "podman", "context": "vps"}, "acme", 10)
+    ['podman', '--connection', 'vps', 'logs', '--timestamps', '--tail', '10', 'agent-egress-acme']
+    """
+    return driver_runtime_argv(host) + [
+        "logs",
+        "--timestamps",
+        "--tail",
+        str(tail),
+        egress_container_name(name),
+    ]
+
+
+# The runtime's own per-line prefix. Both runtimes emit RFC3339; docker in UTC,
+# podman with a local offset — so the offset is APPLIED rather than assumed absent.
+# A record whose timestamp silently carried the host's local time would sort and
+# prune against records that carried UTC, and the store's whole ordering is by time.
+_LOG_STAMP_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})[T ](?P<time>\d{2}:\d{2}:\d{2})(?:\.\d+)?"
+    r"(?P<tz>Z|[+-]\d{2}:?\d{2})?\s"
+)
+
+
+def split_log_stamp(line: str) -> tuple[str | None, str]:
+    """(ISO-8601 UTC second, the rest of the line) — the stamp being None when the
+    line carries none.
+
+    >>> split_log_stamp("2026-08-10T10:10:10.123456789Z 1754.000 CONNECT")
+    ('2026-08-10T10:10:10Z', '1754.000 CONNECT')
+    >>> split_log_stamp("2026-08-10T12:10:10.000+02:00 x")
+    ('2026-08-10T10:10:10Z', 'x')
+    >>> split_log_stamp("no stamp here")
+    (None, 'no stamp here')
+    """
+    m = _LOG_STAMP_RE.match(line)
+    if m is None:
+        return None, line
+    rest = line[m.end() :]
+    try:
+        epoch = calendar.timegm(time.strptime(f"{m.group('date')}T{m.group('time')}Z", TIME_FORMAT))
+    except ValueError:
+        return None, rest
+    tz = m.group("tz")
+    if tz and tz != "Z":
+        sign = -1 if tz[0] == "-" else 1
+        hh, _, mm = tz[1:].partition(":")
+        epoch -= sign * (int(hh) * 3600 + int(mm or "0") * 60)
+    return time.strftime(TIME_FORMAT, time.gmtime(epoch)), rest
+
+
+# THE ACCESS-LOG LINE'S SHAPE, and it is pinned to `logformat egress` in
+# image/egress/squid.conf by a test that builds a line from that directive. Bound in
+# both directions on purpose: if the format grows a field, this parser reads the
+# wrong ones, and a parser that reads the wrong ones stores nothing — which makes an
+# empty store mean "nobody could read the record" while presenting as "nothing was
+# refused". That is the single confusion US3 scenario 3 forbids, so it is a test and
+# a runtime count (see `looks_like_squid_access_line`), not a comment.
+SQUID_LOG_FIELDS = 10
+SQUID_FIELD_STATUS = 3  # %Ss/%03>Hs
+SQUID_FIELD_TARGET = 6  # %ru
+SQUID_FIELD_SNI = 8  # sni=%ssl::>sni
+SQUID_FIELD_BUMP = 9  # bump=%ssl::bump_mode
+_SQUID_STAMP_RE = re.compile(r"\d{9,}\.\d+")
+# An IPv6 destination, which HOSTNAME_RE cannot match. Accepted so an event to one is
+# not dropped in silence — this store's whole promise is that silence means nothing
+# happened.
+_IPV6_RE = re.compile(r"[0-9A-Fa-f:]{2,45}")
+
+
+def looks_like_squid_access_line(rest: str) -> bool:
+    """Whether `rest` is one of squid's access-log lines AT ALL.
+
+    Narrow deliberately. squid's own diagnostics (`cache_log stdio:/dev/stderr`) and
+    unbound's replies share this stream, so counting those as unreadable records
+    would make every drain complain about a boundary that is merely starting up —
+    noise that teaches an operator to ignore the one warning that means the record
+    is broken. Only the leading epoch-and-fraction of `%ts.%03tu` qualifies.
+    """
+    return _SQUID_STAMP_RE.fullmatch(rest.split(" ", 1)[0]) is not None
+
+
+# What `%ssl::bump_mode` reads when the boundary TERMINATED the connection, i.e. the
+# SNI was not on the allowlist. squid's own word for the `ssl_bump` decision it took,
+# which is why this and not an inference — see `squid_decision`.
+SQUID_BUMP_TERMINATE = "terminate"
+
+
+def squid_decision(status_field: str, bump_mode: str) -> str | None:
+    """`refused`, `permitted`, or None — from squid's `%Ss/%03>Hs` and
+    `%ssl::bump_mode` fields.
+
+    None means "this transaction ended for a reason that is not a policy verdict at
+    all", and it is a third answer rather than a lean toward either because BOTH of
+    the other two would be a fabrication.
+
+    Read from the tags this configuration can actually produce, each MEASURED on a
+    live boundary and recorded in image/egress/squid.conf:
+
+      * `TCP_DENIED` — an `http_access deny`, i.e. plain HTTP to an undeclared domain,
+        or a CONNECT to a port the proxy's surface does not admit. REFUSED, on the tag
+        alone (`bump` is `-` there; there was no TLS decision to take).
+      * a `NONE…` tag with `bump=terminate` — `ssl_bump terminate all`: the
+        ClientHello was peeked, the SNI was not on the allowlist, no upstream
+        connection was ever made. REFUSED.
+      * a `NONE…` tag with ANYTHING ELSE — NOT an event. Two measured cases sit here
+        and both would be fabrications:
+
+        - A PERMITTED request logs a `NONE_NONE/000 … sni=<declared host>
+          bump=splice` line BEFORE its `TCP_TUNNEL/200`. Status, code, bytes, method,
+          hierarchy and `%err_code` are identical to a terminated line; `bump` is the
+          only field that differs. Without it every permitted HTTPS request to a
+          declared host was stored as a refusal.
+        - `NONE_NONE/409` — research R24 measured squid's intercepted-CONNECT host
+          verification rejecting 10 of 12 HTTPS requests to a DECLARED
+          `s3.amazonaws.com` because its ipcache and the agent's answer had diverged
+          (`SECURITY ALERT: Host header forgery detected`). A divergent-resolution
+          failure, not a policy event.
+
+    EVERYTHING ELSE IS PERMITTED BY POLICY, INCLUDING AN UPSTREAM'S OWN STATUS CODE.
+    `TCP_MISS/503` and `TCP_MISS/403` are the same case: the policy let the request
+    through and the far end answered badly — a WAF, a bot block, a bad API key, a CDN.
+    A `403` clause used to sit here, and it turned every one of those into a refusal of
+    a DECLARED host. It bought nothing: a genuine denial by this configuration always
+    carries `TCP_DENIED`, which the clause above already catches on the tag.
+
+    >>> squid_decision("TCP_TUNNEL/200", "splice"), squid_decision("TCP_DENIED/403", "-")
+    ('permitted', 'refused')
+    >>> squid_decision("NONE_NONE/000", "terminate"), squid_decision("NONE_NONE/000", "splice")
+    ('refused', None)
+    >>> [squid_decision(s, "-") for s in ("TCP_MISS/403", "TCP_MISS/503", "NONE_NONE/409")]
+    ['permitted', 'permitted', None]
+    """
+    tag, _, _code = status_field.partition("/")
+    if tag == "TCP_DENIED":
+        return EGRESS_DECISION_REFUSED
+    if tag.startswith("NONE"):
+        return EGRESS_DECISION_REFUSED if bump_mode == SQUID_BUMP_TERMINATE else None
+    return EGRESS_DECISION_PERMITTED
+
+
+def bare_host(value: str) -> str | None:
+    """The hostname in `value`, or None when there is not one.
+
+    NOTHING BUT THE HOST IS EVER RETURNED, and that is Constitution III rather than
+    tidiness. `%ru` on a plain-HTTP request is the FULL URL: a query string can carry
+    a token, and `user:pass@host` carries one outright. A durable record built from
+    the raw field would make this store a place a credential comes to rest — in the
+    feature whose schema exists to say the boundary cannot see one. So the path,
+    query and userinfo are dropped here, at the only door, and the caller never sees
+    them.
+
+    None for squid's error pseudo-targets: a request-less TCP connection logs
+    `error:transaction-end-before-headers` (measured, research R25), and `error` is a
+    syntactically fine hostname. An event refusing the host `error` would be a
+    fabricated refusal, which is worse than the silence US3 asks for.
+
+    Lower-cased because DNS is case-insensitive and the allowlist is generated in the
+    operator's spelling: without this, one destination in two casings is two records
+    for one event, and `Api.OpenAI.com` misses an `api.openai.com` allowlist entry.
+
+    >>> bare_host("http://user:tok@example.com/v1/chat?key=SECRET")
+    'example.com'
+    >>> bare_host("1.2.3.4:443"), bare_host("[2001:db8::1]:443")
+    ('1.2.3.4', '2001:db8::1')
+    >>> [bare_host(v) for v in ("-", "", "error:transaction-end-before-headers")]
+    [None, None, None]
+    """
+    if not value or value == "-" or value.startswith("error:"):
+        return None
+    v = value.split("://", 1)[-1]
+    v = v.split("/", 1)[0]
+    v = v.rsplit("@", 1)[-1]
+    if v.startswith("["):
+        v = v[1:].split("]", 1)[0]
+    else:
+        v = v.split(":", 1)[0]
+    v = v.lower()
+    if len(v) > HOSTNAME_MAX:
+        return None
+    if HOSTNAME_RE.fullmatch(v) or _IPV6_RE.fullmatch(v):
+        return v
+    return None
+
+
+def parse_squid_egress_line(rest: str) -> dict | None:
+    """`{host, decision, stage}` for one access-log line, or None when the line
+    names no destination or carries no policy verdict.
+
+    The SNI is preferred over the request target because it is the name the client
+    asked for and the name `ssl_bump` matched the allowlist against. On an
+    intercepted connection `%ru` is the ADDRESS the client chose (squid.conf records
+    the measurement), and an address on a CDN answers for thousands of sites — so a
+    record built from it would name the wrong destination on exactly the lines an
+    operator has to act on.
+
+    A line `squid_decision` calls neither refused nor permitted yields NO event: see
+    there for why inventing either verdict for it would be worse than silence. It is
+    not counted as unreadable either — the format was read correctly, the transaction
+    just was not a policy event (`_egress_line_is_unreadable` checks the arity, which
+    is the thing that can actually drift).
+    """
+    if not looks_like_squid_access_line(rest):
+        # ARITY IS NOT ENOUGH TO IDENTIFY THIS FORMAT, measured the moment the format
+        # grew its tenth field: unbound's reply lines are also ten whitespace-separated
+        # tokens, so `nope.example.com. A IN NXDOMAIN 0.010000 0 45` was read as an
+        # access-log line whose status field was a hostname — which is not `TCP_DENIED`
+        # and does not start with `NONE`, so every DNS reply became a PERMITTED event at
+        # the host `nxdomain`. Field 0 is `%ts.%03tu` by the same directive that fixes
+        # the three field positions below, so it is checked with them.
+        return None
+    parts = rest.split()
+    if len(parts) != SQUID_LOG_FIELDS:
+        return None
+    sni = parts[SQUID_FIELD_SNI]
+    sni = sni.removeprefix("sni=") if sni.startswith("sni=") else "-"
+    host = bare_host(sni) or bare_host(parts[SQUID_FIELD_TARGET])
+    bump = parts[SQUID_FIELD_BUMP].removeprefix("bump=")
+    decision = squid_decision(parts[SQUID_FIELD_STATUS], bump)
+    if host is None or decision is None:
+        return None
+    return {
+        "host": host,
+        "decision": decision,
+        "stage": EGRESS_STAGE_CONNECT,
+        "declared": None,  # decided against the deployed allowlist by the caller
+    }
+
+
+# unbound's reply lines (`log-replies: yes`, image/egress/unbound.conf, forced off
+# syslog by build_unbound_conf). Matched by SHAPE and not by position: the fields
+# around it have varied across unbound releases while qname/qtype/`IN`/rcode have
+# been these four adjacent tokens throughout. Anchored on ` info: ` so a diagnostic
+# line can never reach it.
+_UNBOUND_REPLY_RE = re.compile(r" info: \S+ (?P<qname>\S+\.) [A-Za-z0-9]+ IN (?P<rcode>[A-Z]+)\b")
+
+
+def looks_like_unbound_reply_line(rest: str) -> bool:
+    """Whether `rest` is one of unbound's reply lines at all — the loose form of
+    _UNBOUND_REPLY_RE, and the two are a matched pair on purpose.
+
+    This one decides "the resolver was reporting a reply here"; the pattern decides
+    "and this is what it said". A line the loose form accepts and the pattern rejects
+    is a format that has moved, which is the only way this reader can go quiet, and it
+    is counted rather than skipped (see `_egress_line_is_unreadable`).
+    """
+    return " info: " in rest and " IN " in rest
+
+
+def parse_unbound_egress_line(rest: str) -> dict | None:
+    """`{host, decision, stage, declared}` for a REFUSED resolution, or None.
+
+    Only REFUSED, and the exclusions are the point:
+
+      * `NXDOMAIN` is the distinction T131 built the resolver choice around — the
+        name genuinely does not exist. That is a fact about the internet, not a
+        policy event, and storing it would fill this store with an agent's typos and
+        dilute the refusals FR-010 is about.
+      * `NOERROR` is a DECLARED name resolving normally: ordinary traffic, which this
+        store deliberately does not keep.
+
+    `declared` is False WITHOUT consulting any allowlist, because the resolver's
+    verdict IS the allowlist test: build_unbound_conf gives every declared name —
+    ported destinations included — a `local-zone … transparent`, and the baked
+    catch-all `local-zone "." refuse` answers everything else. A REFUSED reply
+    therefore means "not declared" by construction, which is a stronger source than
+    re-deriving it from a file.
+    """
+    m = _UNBOUND_REPLY_RE.search(rest)
+    if m is None or m.group("rcode") != "REFUSED":
+        return None
+    host = bare_host(m.group("qname").rstrip("."))
+    if host is None:
+        return None
+    return {
+        "host": host,
+        "decision": EGRESS_DECISION_REFUSED,
+        "stage": EGRESS_STAGE_DNS,
+        "declared": False,
+    }
+
+
+def provider_for_host(host: str) -> str | None:
+    """Which provider name the TOOL's mapping gives `host`, or None (§6).
+
+    The tool's table rather than the environment's declaration, deliberately: the
+    event worth naming is an agent reaching `api.openai.com` in an environment whose
+    `openai` entry was overridden to a gateway precisely to stop that. Reading the
+    label off the declaration would answer `null` there — at the one destination
+    whose provider is the whole story.
+
+    >>> provider_for_host("api.anthropic.com"), provider_for_host("example.com")
+    ('anthropic', None)
+    """
+    return next((p for p, hosts in PROVIDERS.items() if host in hosts), None)
+
+
+def deployed_egress_allowlist(host_name: str, name: str) -> list[str] | None:
+    """The allowlist the DEPLOYED boundary was given, as squid's own tokens — or None
+    when there is no readable model.
+
+    Read from the generated compose artifact, which is the declaration IN FORCE for
+    the log lines being ingested, and NOT from the project spec. The spec is what the
+    next deploy would apply; judging a refusal that already happened against it would
+    report an attempt as declared that the running boundary terminated. That error is
+    in the permissive direction, which is the one that matters here.
+
+    None on any read or parse failure — the same answer as "we cannot tell", which is
+    what `egress_event_is_recordable` then handles rather than guessing.
+    """
+    try:
+        model = json.loads(compose_file_path(host_name, name).read_text())
+    except OSError, json.JSONDecodeError, ValueError:
+        return None
+    configs = model.get("configs") if isinstance(model, dict) else None
+    entry = configs.get("egress_acl") if isinstance(configs, dict) else None
+    body = entry.get("content") if isinstance(entry, dict) else None
+    if not isinstance(body, str):
+        return None
+    # Lower-cased to meet `bare_host`, which lower-cases the destination: squid
+    # compares these case-insensitively and an operator may have written any casing.
+    return [ln.strip().lower() for ln in body.splitlines() if ln.strip()]
+
+
+def egress_event_is_recordable(decision: str, declared: bool | None) -> bool:
+    """Whether an observed event belongs in the durable store.
+
+    THIS STORE IS NOT A TRAFFIC LOG. FR-010 is about UNDECLARED egress, and an agent
+    talking to its declared provider produces a line per request — thousands in a
+    session, every one of them the expected thing. Keeping those would bury the
+    handful of events the requirement exists for, and would set the retention bound
+    to work evicting refusals to make room for ordinary traffic.
+
+    Two shapes are kept, and the second is the one that would be easy to omit:
+
+      * anything the boundary REFUSED — the observable form of undeclared egress;
+      * anything it PERMITTED that the deployed allowlist does not name — which means
+        the running boundary is not the one this tool configured (an operator
+        override, a hand-edited container), and is a stronger finding than any
+        refusal.
+
+    An unknown `declared` keeps refusals only. Without the allowlist the permitted
+    case cannot be told from ordinary traffic, so the alternatives are to fabricate
+    findings or to store everything; recording the refusals is what remains true.
+
+    >>> [egress_event_is_recordable("refused", d) for d in (True, False, None)]
+    [True, True, True]
+    >>> [egress_event_is_recordable("permitted", d) for d in (True, False, None)]
+    [False, True, False]
+    """
+    if decision == EGRESS_DECISION_REFUSED:
+        return True
+    return declared is False
+
+
+def build_egress_event(
+    environment: str,
+    deployment_host: str,
+    timestamp: str,
+    observed: dict,
+    declared: bool | None,
+) -> dict:
+    """One event, with exactly the fields EGRESS_FIELD_PROVENANCE declares."""
+    return {
+        "schema": EGRESS_SCHEMA,
+        "environment": environment,
+        "deployment_host": deployment_host,
+        "timestamp": timestamp,
+        "host": observed["host"],
+        "provider": provider_for_host(observed["host"]),
+        "declared": declared,
+        "decision": observed["decision"],
+        "stage": observed["stage"],
+    }
+
+
+def egress_event_id(event: dict) -> str:
+    """The event's name in the store: its timestamp, then a digest of the event.
+
+    CONTENT-ADDRESSED BECAUSE THE SOURCE CANNOT BE CLEARED. A run record is removed
+    from its volume once stored (`_clear_ingested`); a container log cannot be, so
+    every drain re-reads lines it has already ingested. The same event must therefore
+    land on the same name, or the store grows by a copy of itself on every contact.
+
+    What that collapses is worth stating plainly: two events whose every recorded
+    field is equal — same second, same destination, same verdict, same stage — become
+    one record, because at §6's own resolution they are indistinguishable. So this
+    store answers WHAT was reached for and WHEN, never HOW MANY times; the retry
+    count is in `logs --egress` while the boundary lives. docs/egress.md says so, so
+    nobody has to infer it from a count that does not add up.
+
+    Shaped like a run id (`<compact-timestamp>-<nonce>`) so the store sorts
+    chronologically by name, which is also what makes a retention announcement's id
+    range readable.
+    """
+    digest = hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()[:8]
+    return f"{event['timestamp'].replace('-', '').replace(':', '')}-{digest}"
+
+
+def ingest_egress_events(host_name: str, host_rec: dict, name: str) -> list[str]:
+    """Read <name>'s boundary log and store the undeclared-egress events in it.
+
+    Returns the event ids newly stored — newly, because re-reading an unclearable
+    source is normal here and an announcement on every contact for the same event
+    would be noise indistinguishable from a new refusal.
+
+    Retention runs in a `finally` around EVERY path, for the reason Feature 016 learned
+    the hard way (see `ingest_records`): a bound skipped exactly when the drain fails is
+    a bound that stops existing on the environment generating the most events. It wraps
+    the early returns too, and that is not symmetry for its own sake — an environment
+    whose declaration was WITHDRAWN never reads a log again, so a prune reachable only
+    through the reading path would leave its events beyond the documented 90 days
+    forever, with the store's own help text still promising otherwise.
+    """
+    try:
+        return _read_egress_log(host_name, host_rec, name)
+    finally:
+        _prune_egress_and_announce(host_name, name)
+
+
+def _read_egress_log(host_name: str, host_rec: dict, name: str) -> list[str]:
+    """The drain itself — see `ingest_egress_events`, which adds retention around it."""
+    if not _previous_model_had_egress(host_name, name):
+        # No boundary was ever deployed here, so there is no log to read and nothing
+        # observed this environment's egress. A LOCAL file read, so an environment
+        # that never declared anything pays no remote call to say so — this runs in
+        # front of almost every command.
+        return []
+    try:
+        proc = subprocess.run(
+            driver_egress_logs_argv(host_rec, name),
+            capture_output=True,
+            timeout=EGRESS_LOG_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        warn(f"{name}: could not read the egress boundary's log on {host_name} ({e})")
+        return []
+    if proc.returncode != 0:
+        _warn_unless_the_boundary_is_gone(host_name, host_rec, name, proc)
+        return []
+    return _store_egress_events(host_name, name, proc)
+
+
+def _warn_unless_the_boundary_is_gone(
+    host_name: str, host_rec: dict, name: str, proc: subprocess.CompletedProcess
+) -> None:
+    """A failed log read is a warning UNLESS the boundary container is simply gone.
+
+    A torn-down environment is the normal end state, and its stored events survive
+    exactly so they can be read afterwards (US3 scenario 2) — warning on every
+    contact that its log cannot be read would be a permanent complaint about nothing,
+    and this feature's one rule about noise is that silence must stay meaningful.
+    Anything else IS worth a warning: a boundary that exists and will not answer is
+    the case where events are accruing and nothing is collecting them.
+
+    The existence probe runs only on this path, so the happy case stays one call.
+    """
+    if runtime_container_exists(driver_runtime_argv(host_rec), egress_container_name(name)):
+        detail = proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}"
+        warn(
+            f"{name}: the egress boundary on {host_name} would not hand over its log "
+            f"({detail}); events in it are NOT recorded — `agent-container logs {name} --egress`"
+        )
+
+
+def _stamps_step_back(streams: list[list[tuple[str | None, str]]]) -> bool:
+    """Whether any single stream contains a stamp below one already seen in it.
+
+    Per stream, because the boundary writes two of them — squid's access log on
+    stdout, unbound's replies on stderr — and the seam between two independently
+    ordered producers is a stamp decrease that means nothing. Flattening them first
+    and asking the same question would report a step-back on every drain, which is
+    the mirror of the defect this exists to close: a detector that always fires is
+    as useless as one that never does.
+
+    Lines with no stamp are skipped rather than treated as zero: an unstamped line
+    is a format the reader does not recognise, and `_egress_line_is_unreadable`
+    already accounts for it. Reading it as time 0 would fake a step-back.
+
+    >>> _stamps_step_back([[("2026-01-01T10:00:00Z", "a"), ("2026-01-01T11:00:00Z", "b")]])
+    False
+    >>> _stamps_step_back([[("2026-01-01T11:00:00Z", "a"), ("2026-01-01T10:00:00Z", "b")]])
+    True
+    >>> _stamps_step_back([[("2026-01-01T11:00:00Z", "a")], [("2026-01-01T10:00:00Z", "b")]])
+    False
+    """
+    for stream in streams:
+        highest = ""
+        for stamp, _rest in stream:
+            if stamp is None:
+                continue
+            if stamp < highest:
+                return True
+            highest = stamp
+    return False
+
+
+def _store_egress_events(host_name: str, name: str, proc: subprocess.CompletedProcess) -> list[str]:
+    """Parse both of the boundary's streams and store what belongs in the store.
+
+    Both streams, because the two producers use different ones: squid's access log is
+    on stdout and unbound's replies (with squid's own diagnostics) on stderr. Reading
+    one would silently lose a whole class of refusal — and DNS refusals are the
+    common shape, since an undeclared name never gets as far as a connection.
+
+    The window is materialised as `(stamp, rest)` pairs BEFORE anything is skipped,
+    because the skip has to be decided against the whole window rather than line by
+    line: a cursor left ahead of every line in it is indistinguishable from "all of
+    this is already read", and that is the one way this reader can go quiet without
+    saying so (see `_usable_egress_watermark`). Bounded by the same
+    EGRESS_LOG_TAIL_LINES the read is.
+    """
+    allowlist = deployed_egress_allowlist(host_name, name)
+    store = egress_store_dir(host_name, name)
+    # PER STREAM, not flattened. The stdout/stderr seam is itself a legitimate stamp
+    # decrease — two independent producers, two independent orderings — so a
+    # step-back detector run over the concatenation would fire on every drain.
+    streams = [
+        [split_log_stamp(line) for line in blob.decode("utf-8", "replace").splitlines()]
+        for blob in (proc.stdout, proc.stderr)
+    ]
+    window = list(itertools.chain.from_iterable(streams))
+    mark = _usable_egress_watermark(store, name, [s for s, _rest in window if s is not None])
+    # ASK THE ORDER, NOT THE MAXIMUM. `_usable_egress_watermark` compares the
+    # window's highest stamp against the cursor, which only catches a step-back once
+    # the PRE-step lines have aged out of the tail. This log is append-only and never
+    # cleared, so the ordinary shape of the next drain holds both pre- and post-step
+    # lines: the maximum still clears the mark, the detector stays quiet, and every
+    # post-step line is dropped by `stamp < mark` before the parser ever sees it.
+    # Measured through this very function: a benign line then a real REFUSED after the
+    # clock moved back an hour stored NOTHING and warned NOTHING.
+    #
+    # A log is appended in clock order, so WITHIN ONE STREAM a stamp below one already
+    # seen earlier in that same stream is direct proof of a step-back — and unlike the
+    # maximum, that proof survives the pre-step lines still being present.
+    if _stamps_step_back(streams):
+        warn(
+            f"{name}: the egress boundary's log clock stepped BACK inside this window, so "
+            f"the read cursor cannot be trusted; re-reading the whole window. Refusals "
+            f"logged after the step would otherwise have been skipped in silence."
+        )
+        _forget_egress_watermark(store)
+        mark = ""
+    seen = mark
+    stored: list[tuple[str, dict]] = []
+    unreadable = 0
+    for stamp, rest in window:
+        if stamp is not None:
+            if stamp < mark:
+                continue  # already ingested and possibly PRUNED since — see below
+            seen = max(seen, stamp)
+        event = _egress_event_from_line(host_name, name, stamp, rest, allowlist)
+        if event is None:
+            unreadable += _egress_line_is_unreadable(stamp, rest)
+            continue
+        filename = f"{egress_event_id(event)}.json"
+        if (store / filename).exists():
+            # Same event, same drain window: the watermark admits the whole of its
+            # own second (see `advance_egress_watermark`), so this is the check
+            # that keeps that overlap idempotent.
+            continue
+        try:
+            atomic_write_json(store, filename, event)
+        except OSError as e:
+            warn(f"{name}: could not store egress event '{filename}' ({e})")
+            continue
+        stored.append((filename.removesuffix(".json"), event))
+    advance_egress_watermark(store, seen)
+    if unreadable:
+        warn(
+            f"{name}: {unreadable} line(s) of the egress boundary's log could not be read as "
+            f"events, so what they recorded is NOT in the store. The log format and this "
+            f"tool's reader have diverged — read them with "
+            f"`agent-container logs {name} --egress`"
+        )
+    _announce_egress_events(name, [e for _id, e in stored])
+    return [event_id for event_id, _e in stored]
+
+
+# HOW FAR THIS ENVIRONMENT'S LOG HAS ALREADY BEEN READ — and it exists to stop
+# retention from being theatre.
+#
+# The source cannot be cleared, so every drain re-reads lines it has ingested. That
+# is harmless while the events are still in the store (the name is the content, so
+# the write is skipped) and NOT harmless once retention has deleted one: the line is
+# still in the window, so the next drain re-creates the event, the next prune deletes
+# it again, and the tool announces both on every command the operator runs — a bound
+# that never converges plus permanent noise, in the feature whose one rule is that
+# silence stays meaningful.
+#
+# Deliberately NOT a `.json` file, so `list_stored_records`' suffix filter keeps it
+# out of every listing: it is a cursor, not a record, and a store whose reader had to
+# know which of its files are records would be one refactor from reporting a cursor as
+# an event.
+EGRESS_WATERMARK = "watermark"
+
+
+def read_egress_watermark(store: Path) -> str:
+    """The newest log stamp already read for this store, or "" for a fresh one.
+
+    "" reads as "read everything", which is the safe direction: the worst case is
+    re-ingesting events that are already there, and the alternative default would skip
+    a window of real events on the first contact after an operator moved the store.
+    """
+    try:
+        return (store / EGRESS_WATERMARK).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _usable_egress_watermark(store: Path, name: str, stamps: list[str]) -> str:
+    """The stored cursor, or "" when this window proves the log's clock STEPPED BACK
+    behind it — in which case the cursor is discarded and the operator is told.
+
+    THIS IS THE ONE WAY THIS READER CAN GO QUIET, so it is detected rather than argued
+    away. A mark newer than every line in the window is indistinguishable from "the
+    whole window is already read": each line is skipped before the parser or the
+    unreadable-line counter ever sees it, nothing is stored, no warning is raised, and
+    `egress` then reports the environment as `watched` with nothing refused. Silence
+    that means breakage is exactly what T034 forbids.
+
+    ONE failure suffices to get there, and it is not the exotic one. The clamp in
+    `advance_egress_watermark` defends only the direction where the boundary's log
+    clock ran AHEAD of this tool's; it does nothing when the log clock steps BACKWARD
+    from a value at or below it — a restored snapshot, a resumed VM, an operator
+    correcting a clock. Every refusal logged in the resulting window would be dropped
+    without a trace.
+
+    So the cursor is discarded and re-earned: the window is read in full (idempotent —
+    an event id IS its content, so nothing is duplicated), and the file is removed so
+    `advance_egress_watermark`'s never-backwards rule cannot re-impose the stale mark
+    and warn about the same step on every command forever. What that costs is one round
+    of re-announcing events retention has already pruned, which is the direction that
+    keeps a refusal rather than losing one.
+
+    An empty window is NOT evidence of a step back — a boundary that has logged nothing
+    since the last drain is the ordinary quiet case — so the cursor stands.
+    """
+    mark = read_egress_watermark(store)
+    if not mark or not stamps or max(stamps) >= mark:
+        return mark
+    warn(
+        f"{name}: the egress boundary's log clock has stepped BACK behind how far this "
+        f"tool had read it (newest line {max(stamps)}, already read to {mark}). Re-reading "
+        f"the whole window rather than skipping it — otherwise a refusal logged in that "
+        f"window would be lost and this store would report nothing was refused."
+    )
+    _forget_egress_watermark(store)
+    return ""
+
+
+def _forget_egress_watermark(store: Path) -> None:
+    """Discard the read cursor, so the window is re-read in full.
+
+    Shared by the two step-back detectors — the one that compares the window's
+    maximum against the cursor, and the one that finds a decrease WITHIN a stream —
+    because a second copy of this could come to differ from the first, and the
+    difference would be which of them silently leaves a stale mark in place.
+
+    A failure to unlink is left in place deliberately, so the next drain warns again.
+    Noisy and correct: the alternative is going quiet about a window this tool cannot
+    account for.
+    """
+    try:
+        (store / EGRESS_WATERMARK).unlink()
+    except OSError as e:
+        warn(f"could not reset how far {store}'s egress log was read ({e})")
+
+
+def advance_egress_watermark(store: Path, stamp: str) -> None:
+    """Record `stamp` as read — never beyond the tool's own clock, and never backwards.
+
+    THE CLAMP IS LOAD-BEARING. A single line stamped in the future (a skewed host
+    clock, a runtime bug) would otherwise park the mark ahead of every real event and
+    blind this store permanently — strictly worse than the duplicate work the mark
+    exists to avoid. The run store's retention had the same hazard from the other
+    direction (a future-dated record was immortal, `_record_epoch`), and both are
+    clamped for the same reason.
+
+    What the clamp costs, precisely: after such a line the mark is THIS moment, so a
+    line older than it is skipped. Nothing real is lost by that — every line of the
+    window was already processed before the mark moved, and a log is appended in clock
+    order, so what arrives next is newer.
+
+    THE CLAMP IS NOT ENOUGH ON ITS OWN, and an earlier version of this docstring
+    claimed it was. It does nothing about a mark this function wrote correctly that a
+    LATER backward step of the boundary's clock leaves ahead of the whole window; that
+    needs no bogus stamp and no second failure, and it is caught on the reading side by
+    `_usable_egress_watermark` instead.
+
+    Compared as STRINGS, which is safe only because TIME_FORMAT is fixed-width UTC and
+    therefore sorts chronologically. That is a property of the format, so it is stated
+    here rather than assumed by whoever next touches it.
+
+    A failure to write is a warning, not an error: the drain's real work is already
+    durable, and the cost of a lost mark is re-reading — which is exactly what happened
+    before this existed.
+    """
+    now = time.strftime(TIME_FORMAT, time.gmtime())
+    mark = min(stamp, now)
+    if not mark or mark <= read_egress_watermark(store):
+        return
+    try:
+        store.mkdir(parents=True, exist_ok=True)
+        (store / EGRESS_WATERMARK).write_text(mark + "\n")
+    except OSError as e:
+        warn(f"could not record how far {store}'s egress log was read ({e})")
+
+
+def _egress_line_is_unreadable(stamp: str | None, rest: str) -> int:
+    """Whether a line that produced no event is one this tool SHOULD have read.
+
+    Narrow to the conditions that mean the RECORD IS BROKEN rather than empty:
+
+      * a reply line or an access-log line arriving with NO runtime timestamp, so no
+        event can carry §6's `timestamp` at all;
+      * a reply line the reply pattern does not match, or an access-log line whose
+        field count is not the one `logformat egress` defines — i.e. a producer's
+        format moved under its reader.
+
+    Everything else the parser discards is discarded CORRECTLY: ordinary permitted
+    traffic, squid's own diagnostics, an NXDOMAIN, a request-less connection that
+    names no destination. Counting those would put a warning on every single drain,
+    which is exactly how an operator learns to ignore the one that matters — and this
+    counter exists only because a reader that has silently stopped matching presents
+    as "nothing was refused". Returns an int so it can be summed directly.
+    """
+    if looks_like_unbound_reply_line(rest):
+        return int(stamp is None or _UNBOUND_REPLY_RE.search(rest) is None)
+    if looks_like_squid_access_line(rest):
+        return int(stamp is None or len(rest.split()) != SQUID_LOG_FIELDS)
+    return 0
+
+
+def _egress_event_from_line(
+    host_name: str, name: str, stamp: str | None, rest: str, allowlist: list[str] | None
+) -> dict | None:
+    """One log line to one storable event, or None when it is not one.
+
+    None covers four different nothings, and they are deliberately not distinguished
+    here: not an event at all (a diagnostic), an event this store does not keep
+    (ordinary permitted traffic, an NXDOMAIN), an event with no usable time, and a
+    line the parser could not read. Only the caller can tell the last two apart from
+    the first two — it holds the line — and only those two are worth a warning.
+    """
+    observed = parse_unbound_egress_line(rest) or parse_squid_egress_line(rest)
+    if observed is None or stamp is None:
+        # §6's `timestamp` is not optional and a fabricated one would sort and prune
+        # against real ones, so a line with no usable time yields no event at all.
+        return None
+    declared = observed["declared"]
+    if declared is None and allowlist is not None:
+        declared = squid_allowlist_permits(allowlist, observed["host"])
+    if not egress_event_is_recordable(observed["decision"], declared):
+        return None
+    return build_egress_event(name, host_name, stamp, observed, declared)
+
+
+def squid_allowlist_permits(tokens: list[str], host: str) -> bool:
+    """Whether the deployed allowlist admits `host` over HTTP/HTTPS.
+
+    Uses `squid_token_matches`, i.e. the same rule as the pre-deploy predicates, for
+    the reason given there. A `{host, port: 22}` destination is deliberately NOT in
+    this list (build_squid_acl excludes ported entries so declaring SSH does not open
+    443 — SC-010), so an HTTPS attempt at one is correctly recorded as undeclared.
+    """
+    return any(squid_token_matches(t, host) for t in tokens)
+
+
+def _announce_egress_events(name: str, events: list[dict]) -> None:
+    """Say, at the drain, that undeclared egress was recorded (US3 scenario 1).
+
+    Without this an operator learns of a refusal only by thinking to ask, and the
+    events worth knowing about are exactly the ones nobody expects to exist. It fires
+    only when something was newly stored, so the silence when nothing happened is
+    intact — that is US3 scenario 3, and it is the reason this is not a per-drain
+    "0 events" line.
+
+    Names the destinations rather than only counting them: "recorded 3 events" answers
+    a question no operator has. On stderr via `log`, so `--json` mode still carries it
+    — a side effect that only the human mode reported would be invisible to the agent
+    FR-013 exists for.
+    """
+    if not events:
+        return
+    hosts = sorted({str(e["host"]) for e in events})
+    shown = ", ".join(hosts[:5]) + (f" (+{len(hosts) - 5} more)" if len(hosts) > 5 else "")
+    log(
+        f"{name}: recorded {len(events)} undeclared-egress event(s) from the boundary's log "
+        f"— {shown}. Read them with `agent-container egress {name}`"
+    )
+
+
+# Retention for the egress store. ITS OWN numbers and ITS OWN AXIS (FR-011a): the run
+# store's constants bound a different producer, so a store that inherited them would
+# be bounded by a rule decided about something else. The MECHANISM is shared —
+# `_round_robin_keeps`, with the destination as the bucket where the run store passes
+# the UTC day — because the property both stores want is the same one.
+#
+# 90 days matches the run store's window by DECISION, not by inheritance: an operator
+# reads the two together — "what did this environment do, and what did it reach for" —
+# and two different horizons would make "nothing before May" mean two things.
+EGRESS_RETENTION_MAX_AGE_DAYS = 90
+# 500 is enough because of the axis, not on its own: round-robin over destinations
+# means the count is spent on DISTINCT hosts first, so 500 keeps the newest event of
+# up to 500 destinations. A store that reaches that has an agent scanning, and 500
+# named destinations is the story rather than a limitation.
+EGRESS_RETENTION_MAX_RECORDS = 500
+
+
+def _egress_epoch_and_host(path: Path) -> tuple[float, str]:
+    """(when the event happened, its destination) for retention.
+
+    From the record's own `timestamp`, not the file's mtime: mtime is when the tool
+    last contacted the host, so an age rule built on it would keep a year-old refusal
+    alive because a drain re-read the line this morning.
+
+    An unreadable record falls back to mtime, which is always LATER than the event —
+    so the fallback errs toward KEEPING, and pruning is the one operation here that
+    cannot be undone. A vanished file returns infinity for the same reason: keep what
+    can no longer even be read rather than delete it. Its destination reads as "" and
+    lands in a bucket of its own, which is the honest answer for a record whose host
+    is unknown.
+    """
+    try:
+        rec = json.loads(path.read_text())
+        epoch = float(calendar.timegm(time.strptime(str(rec["timestamp"]), TIME_FORMAT)))
+        return epoch, str(rec.get("host") or "")
+    except OSError, ValueError, TypeError, KeyError, json.JSONDecodeError:
+        try:
+            return path.stat().st_mtime, ""
+        except OSError:
+            return float("inf"), ""
+
+
+def prune_egress_store(directory: Path, now: float | None = None) -> list[str]:
+    """Delete the events past either retention bound; return the names deleted.
+
+    Both bounds, "whichever prunes first", for the reason prune_run_store gives: they
+    bound two failures neither of which the other catches.
+
+    THE COUNT BOUND IS `_round_robin_keeps` WITH THE DESTINATION AS THE BUCKET, where
+    the run store passes the UTC day. Same rule, different axis, and the axis is the
+    decision: there a burst is the tool's own restart loop spread over hours, here it
+    is ONE destination an agent retries — a misconfigured provider is refused on every
+    attempt — and what an operator asks of this store is WHICH hosts were reached for.
+    So the newest event of every distinct host survives before any host gets a second.
+
+    Reads only `directory`. The pending events are in a container log this function
+    never touches, so it cannot delete an event that has not been ingested — the one
+    loss nobody could notice, made impossible by construction rather than by care.
+
+    A file that cannot be deleted is a warning, not a failure: retention is
+    bookkeeping on the way to the operator's actual command.
+    """
+    paths = list_stored_records(directory)
+    if not paths:
+        return []
+    cutoff = (time.time() if now is None else now) - EGRESS_RETENTION_MAX_AGE_DAYS * 86400
+    ordered = sorted(
+        ((*_egress_epoch_and_host(p), p) for p in paths),
+        key=operator.itemgetter(0, 2),
+        reverse=True,
+    )
+    keep = _round_robin_keeps(
+        [row for row in ordered if row[0] >= cutoff], EGRESS_RETENTION_MAX_RECORDS
+    )
+    removed: list[str] = []
+    for _epoch, _host, path in ordered:
+        if path in keep:
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            warn(f"could not prune egress event {path} ({e})")
+            continue
+        removed.append(path.name)
+    return removed
+
+
+def _prune_egress_and_announce(host_name: str, name: str) -> None:
+    """Prune <name>'s egress store and say so.
+
+    Deleting a durable record is announced for the same reason Feature 016 announces
+    it: the whole feature is that the account outlives the container, so the tool
+    removing one is the last thing that may happen quietly.
+
+    NEVER RAISES, because `ingest_egress_events` calls this from a `finally`: an
+    exception here would REPLACE the drain's own failure with a complaint about
+    bookkeeping, which is the masking failure C11 exists to prevent.
+    """
+    try:
+        pruned = prune_egress_store(egress_store_dir(host_name, name))
+    except OSError as e:
+        warn(f"{name}: could not apply egress-record retention ({e})")
+        return
+    if not pruned:
+        return
+    span = min(pruned).removesuffix(".json")
+    if len(pruned) > 1:
+        span += f" .. {max(pruned).removesuffix('.json')}"
+    log(
+        f"{name}: pruned {len(pruned)} egress event(s) past retention "
+        f"({EGRESS_RETENTION_MAX_AGE_DAYS} days / {EGRESS_RETENTION_MAX_RECORDS} events per "
+        f"environment, spent on distinct destinations first): {span}"
+    )
+
+
+def stored_egress_environments(host: str) -> list[str]:
+    """Environments with an egress store on <host>.
+
+    Read from the store, not from the state dir: an environment torn down last month
+    has no state and still has events, which is the entire requirement (FR-010).
+    """
+    try:
+        return sorted(p.name for p in (DATA_DIR / "egress" / host).iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+def stored_egress_events(host: str, environments: list[str]) -> list[dict]:
+    """Every stored event for <environments> on <host>, NEWEST FIRST.
+
+    Sorted by the event's own fields rather than by file mtime, which is when the
+    tool last contacted the host and is shared to the second by a whole drain — an
+    mtime order would look chronological and be nothing of the kind.
+    """
+    out: list[dict] = []
+    for env in environments:
+        for p in list_stored_records(egress_store_dir(host, env)):
+            rec = read_stored_record(p, kind="egress event")
+            if rec is not None:
+                out.append(rec)
+    return sorted(out, key=_egress_sort_key, reverse=True)
+
+
+def _egress_sort_key(event: dict) -> tuple[str, str, str, str]:
+    """Time first, then the fields that make one event distinct from another in the
+    same second. There is no id field to fall back on — an event's identity IS its
+    content (see `egress_event_id`) — so the tie-break is that content, which keeps
+    two listings of the same store in the same order."""
+    return (
+        str(event.get("timestamp") or ""),
+        str(event.get("environment") or ""),
+        str(event.get("host") or ""),
+        str(event.get("stage") or ""),
+    )
 
 
 def stage_ssh_injection(
@@ -5343,21 +6624,25 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
 # exists — the property C3/SC-001 is measured on.
 
 
-def read_stored_record(path: Path) -> dict | None:
+def read_stored_record(path: Path, kind: str = "run record") -> dict | None:
     """One stored record, or None with a warning.
 
     A record we cannot parse is NAMED rather than skipped quietly: a listing that
     is silently one record short is indistinguishable from a run that never
     happened, and the runs an operator cares about are disproportionately the ones
     that ended badly enough to write something odd.
+
+    `kind` is only the noun in that warning, and it exists so Feature 012's egress
+    events can reuse this reader (FR-011a) without being reported as run records —
+    a warning that names the wrong store sends an operator to the wrong directory.
     """
     try:
         rec = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError, ValueError) as e:
-        warn(f"unreadable run record {path} ({e})")
+        warn(f"unreadable {kind} {path} ({e})")
         return None
     if not isinstance(rec, dict):
-        warn(f"unreadable run record {path}: not an object")
+        warn(f"unreadable {kind} {path}: not an object")
         return None
     return rec
 
@@ -6061,6 +7346,212 @@ def do_runs_show(run_id: str, host: str | None, as_json: bool) -> None:
         emit_json(rec)
         return
     render_run_record(environment, rec)
+
+
+# --- `egress` — reading the durable egress record (Feature 012 T034) ----------
+#
+# THE HARD PART OF THIS SURFACE IS WHAT SILENCE MEANS. US3 scenario 3 asks for no
+# noise when nothing happened, and the trap in delivering it is that an empty answer
+# has three causes an operator cannot tell apart from an empty screen:
+#
+#   1. a boundary is deployed and refused nothing — silence is the good news;
+#   2. no boundary is deployed, so NOTHING OBSERVED this environment's egress — the
+#      same silence, meaning the opposite, and it is FR-004's disclosure: undeclared
+#      egress is unrestricted, and now demonstrably unrecorded;
+#   3. the tool knows nothing about this environment at all.
+#
+# So: no section, no empty table and no "0 events" line anywhere the operator did not
+# ask — and when they DO ask, exactly one line that says which of the three it is. The
+# same distinction is a field in `--json` (`boundary`), because a consumer cannot read
+# prose and would otherwise treat all three as "clean".
+
+
+def egress_environment_status(host_name: str, name: str) -> str:
+    """`watched`, `unwatched` or `unknown` — which of the three silences applies.
+
+    Answered from the generated compose artifact, i.e. what was last DEPLOYED, not
+    from the project spec: a spec that has since gained an `egress:` block would
+    otherwise report an environment as watched for a period in which nothing was
+    watching it. `--purge` removes that artifact, so a purged environment reads as
+    `unknown` — which is the truth: its events survive and the tool can no longer say
+    what was in force when they were recorded.
+
+    `watched` therefore means "its last deployment declared a boundary", NOT "a
+    container is running right now" — and the messages below say exactly that, because
+    a stopped environment would otherwise be told its boundary "is watching". A local
+    file read on purpose: this is called per environment on a listing, and it must not
+    turn a read of the store into one runtime probe per row.
+    """
+    if _previous_model_had_egress(host_name, name):
+        return "watched"
+    if compose_file_path(host_name, name).is_file():
+        return "unwatched"
+    return "unknown"
+
+
+_EGRESS_SILENCE = {
+    "watched": (
+        "no undeclared egress recorded for {where} — its last deployment declared an "
+        "egress boundary, and nothing collected from that boundary's log was refused"
+    ),
+    "unwatched": (
+        "{where} deploys NO egress boundary, so nothing observes its egress: it is "
+        "unrestricted and unrecorded. Silence here does not mean nothing left the "
+        "container — declare `egress:` to make it mean that"
+    ),
+    "unknown": (
+        "no egress events for {where}, and no deployment the tool can ask: if this "
+        "environment was torn down, this means none were ever ingested — not that "
+        "none happened"
+    ),
+}
+
+
+def egress_payload_for_environment(host_name: str, name: str, events: list[dict]) -> dict:
+    """One environment's egress summary for `--json`.
+
+    `boundary` carries the distinction the prose carries. Always present, never null:
+    a consumer that had to infer "nothing was watching" from an empty event list is a
+    consumer that will read case 2 above as case 1.
+
+    `permitted_undeclared` is broken out because it is a different and stronger
+    finding than a refusal — the running boundary admitted something the deployed
+    allowlist does not name — and an aggregate that hid it inside a total would make
+    the strongest event in the store the hardest one to notice.
+    """
+    return {
+        "environment": name,
+        "boundary": egress_environment_status(host_name, name),
+        "events": len(events),
+        "refused": sum(1 for e in events if e.get("decision") == EGRESS_DECISION_REFUSED),
+        "permitted_undeclared": sum(
+            1
+            for e in events
+            if e.get("decision") == EGRESS_DECISION_PERMITTED and e.get("declared") is False
+        ),
+    }
+
+
+def do_egress(environment: str | None, host: str | None, as_json: bool) -> None:
+    """`egress [<environment>]` — the DURABLE record of undeclared egress.
+
+    Drains first, for the reason `runs list` does: this is the command an operator
+    runs to look for the refusal they just caused, and reading the store without
+    collecting from the boundary would answer "nothing" for an event thirty seconds
+    old.
+    """
+    if environment is not None:
+        validate_name(environment)
+    host_name, host_rec = resolve_deploy_host(host)
+    drain_host_records(host_name, host_rec, [environment] if environment else None)
+    # The union of "has events" and "is deployed here": an environment whose boundary
+    # is watching and has refused nothing must appear in the machine-readable answer,
+    # or `boundary: watched` — the whole point of the field — would only ever be
+    # visible for environments that already had a finding.
+    envs = (
+        [environment]
+        if environment
+        else sorted(set(stored_egress_environments(host_name)) | set(host_environments(host_name)))
+    )
+    events = stored_egress_events(host_name, envs)
+    per_env = [
+        egress_payload_for_environment(
+            host_name, env, [e for e in events if e.get("environment") == env]
+        )
+        for env in envs
+    ]
+    if as_json:
+        emit_json({"host": host_name, "environments": per_env, "events": events})
+        return
+    if not events:
+        # ONE LINE, and it names which silence this is. An empty screen would make all
+        # three indistinguishable, which is the failure this whole section exists for.
+        _report_egress_silence(host_name, environment, per_env)
+        return
+    _render_egress_events(environment, events)
+    _report_egress_unwatched(per_env)
+
+
+def _report_egress_silence(host_name: str, environment: str | None, per_env: list[dict]) -> None:
+    """The empty answer, in one line, saying WHICH silence it is."""
+    if environment is not None:
+        state = per_env[0]["boundary"] if per_env else "unknown"
+        log(_EGRESS_SILENCE[state].format(where=f"{environment} on {host_name}"))
+        return
+    watched = [p["environment"] for p in per_env if p["boundary"] == "watched"]
+    unwatched = [p["environment"] for p in per_env if p["boundary"] == "unwatched"]
+    log(
+        f"no undeclared egress recorded on {host_name} — "
+        f"{len(watched)} environment(s) watched by a boundary"
+        + (f" ({', '.join(watched)})" if watched else "")
+        + f", {len(unwatched)} with none and therefore unrecorded"
+        + (f" ({', '.join(unwatched)})" if unwatched else "")
+    )
+
+
+def _report_egress_unwatched(per_env: list[dict]) -> None:
+    """After the table: which environments these events do NOT cover.
+
+    Without it a listing of two refusals reads as the complete account of a host where
+    three environments have no boundary at all — an incomplete answer presented as a
+    complete one, which is the C16 lesson. One line, and only when there is something
+    to say.
+    """
+    unwatched = [p["environment"] for p in per_env if p["boundary"] == "unwatched"]
+    if not unwatched:
+        return
+    console.print(
+        f"[yellow]![/yellow] not covered above: {len(unwatched)} environment(s) deploy no "
+        f"boundary, so their egress is unrestricted and unrecorded: {', '.join(unwatched)}",
+        soft_wrap=True,
+    )
+
+
+def _render_egress_events(environment: str | None, events: list[dict]) -> None:
+    """The table, newest first, plus the one alarm this store can raise."""
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    # The provider ANNOTATES the destination rather than taking a column of its own:
+    # six columns fold at 80 characters, and the column that folds first is the one
+    # that has to be readable — a destination broken across two lines is a listing
+    # whose whole subject cannot be copied (the same reason `runs list` folds instead
+    # of ellipsising its RUN column).
+    cols = ("WHEN", "DESTINATION", "DECISION", "DECLARED", "STAGE")
+    if environment is None:
+        cols = (cols[0], "ENVIRONMENT", *cols[1:])
+    for col in cols:
+        table.add_column(col, overflow="fold")
+    for e in events:
+        provider = e.get("provider")
+        cells = [
+            str(e.get("timestamp") or "?"),
+            str(e.get("host") or "?") + (f" ({provider})" if provider else ""),
+            str(e.get("decision") or "?"),
+            # "unknown" and not "-": `declared` is null when the tool could not read
+            # the allowlist that was in force, and a dash beside a `false` reads as
+            # "no" for the one case where the answer is "we cannot say".
+            {True: "yes", False: "no"}.get(e.get("declared"), "unknown"),
+            str(e.get("stage") or "?"),
+        ]
+        if environment is None:
+            cells.insert(1, str(e.get("environment") or "?"))
+        table.add_row(*cells)
+    console.print(table)
+    admitted = [
+        e
+        for e in events
+        if e.get("decision") == EGRESS_DECISION_PERMITTED and e.get("declared") is False
+    ]
+    if admitted:
+        # The strongest thing this store can say, so it is said in the loudest place.
+        # A refusal is the boundary working; this is the boundary admitting a
+        # destination the deployed allowlist does not name, which means the running
+        # allowlist is not the one this tool generated.
+        console.print(
+            f"[red]![/red] {len(admitted)} event(s) were PERMITTED while UNDECLARED — the "
+            f"running boundary is not enforcing the allowlist this tool generated: "
+            f"{', '.join(sorted({str(e.get('host')) for e in admitted}))}",
+            soft_wrap=True,
+        )
 
 
 def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
@@ -8580,16 +10071,32 @@ def egress_permits_endpoint(
     selects the mechanism, so a declaration that permits a host over HTTPS says
     nothing about reaching it on 22.
     """
-    for _label, pattern, entry_port, _src in entries:
-        if entry_port != port:
-            continue
-        token = squid_acl_line(pattern)
-        if token.startswith("."):
-            if host == token[1:] or host.endswith(token):
-                return True
-        elif host == token:
-            return True
-    return False
+    return any(
+        squid_token_matches(squid_acl_line(pattern), host)
+        for _label, pattern, entry_port, _src in entries
+        if entry_port == port
+    )
+
+
+def squid_token_matches(token: str, host: str) -> bool:
+    """Whether one generated allowlist token covers `host`, THE WAY SQUID WILL: a
+    bare token matches that host exactly; a leading-dot token matches the domain and
+    any subdomain.
+
+    ONE implementation for every caller — the two pre-deploy predicates below and
+    the egress-event ingestion, which asks the same question of the allowlist the
+    DEPLOYED boundary was given. Three copies of a rule whose failure mode is
+    permissive is how the tool comes to call a host reachable that squid refuses,
+    or (in ingestion) to record as declared an attempt the boundary terminated.
+
+    >>> [squid_token_matches(".example.com", h) for h in ("example.com", "a.example.com")]
+    [True, True]
+    >>> squid_token_matches(".example.com", "example.com.attacker.net")
+    False
+    """
+    if token.startswith("."):
+        return host == token[1:] or host.endswith(token)
+    return host == token
 
 
 def egress_permits_host(entries: list[tuple[str, str, int | None, str]], host: str) -> bool:
@@ -8612,16 +10119,11 @@ def egress_permits_host(entries: list[tuple[str, str, int | None, str]], host: s
     >>> egress_permits_host([("g", "github.com", 22, "d")], "github.com")
     False
     """
-    for _label, pattern, port, _src in entries:
-        if port is not None:
-            continue
-        token = squid_acl_line(pattern)
-        if token.startswith("."):
-            if host == token[1:] or host.endswith(token):
-                return True
-        elif host == token:
-            return True
-    return False
+    return any(
+        squid_token_matches(squid_acl_line(pattern), host)
+        for _label, pattern, port, _src in entries
+        if port is None
+    )
 
 
 def check_egress_permits_push(
@@ -10319,7 +11821,8 @@ runs_app = typer.Typer(
         "Durable run records: what each run did and how it ended (survives teardown). "
         f"Records are pruned at ingestion, per environment, at "
         f"{RETENTION_MAX_AGE_DAYS} days or {RETENTION_MAX_RECORDS} records — "
-        f"whichever prunes first."
+        f"whichever prunes first, with the count spent on distinct UTC days first, so "
+        f"one night of restart records cannot evict the history that explains it."
     ),
 )
 app.add_typer(runs_app, name="runs")
@@ -10359,6 +11862,46 @@ def runs_show(
     """Show one complete run record (--json emits it verbatim as stored)."""
     set_json_mode(as_json)
     do_runs_show(run_id, host, as_json)
+
+
+# A TOP-LEVEL COMMAND rather than a group, unlike `runs`: there is one question here
+# ("what left, or tried to leave, that the declaration does not name") and inventing
+# `egress list` would add a mandatory word that selects nothing. It is deliberately
+# NOT a flag on `runs` either — an egress event is a different kind, from a different
+# producer, and rows of one inside a listing of the other is exactly what FR-011a
+# says not to build.
+@app.command(name="egress")
+def egress_cmd(
+    environment: str | None = typer.Argument(
+        None, help="Environment to report (default: every environment on the host)."
+    ),
+    host: str | None = typer.Option(
+        None, "--host", help="Host whose records to read (default: the registry default)."
+    ),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Durable record of UNDECLARED egress: what the boundary refused, and anything it
+    permitted that the declaration does not name (survives teardown).
+
+    Silence means nothing was refused — and when an environment has no boundary, this
+    says so rather than answering nothing. `logs <name> --egress` is the live stream
+    this is distilled from; only the events above are kept, and only what the boundary
+    can see: a destination and a verdict, never a request. Events are pruned at
+    ingestion, per environment, at {age} days or {count} events — spent on distinct
+    destinations first. Each contact reads the last {tail} lines of that log.
+    """
+    set_json_mode(as_json)
+    do_egress(environment, host, as_json)
+
+
+# Interpolated rather than typed into the docstring above, because typer reads the
+# docstring as help and a number written there beside a different number in the code
+# is this project's recurring defect. A test binds all three to their constants.
+egress_cmd.__doc__ = (egress_cmd.__doc__ or "").format(
+    age=EGRESS_RETENTION_MAX_AGE_DAYS,
+    count=EGRESS_RETENTION_MAX_RECORDS,
+    tail=EGRESS_LOG_TAIL_LINES,
+)
 
 
 # The `host` group manages WHERE containers run (registered targets). Container

@@ -80,6 +80,20 @@ __agent_container_runs_targets() {
     compadd -a names
 }
 
+# Feature 012 FR-010: targets for `egress`, from the SIBLING store
+# ${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/egress/<host>/<env>/.
+# The state files are offered as well, and that is the point of this command: an
+# environment whose boundary has refused nothing has no directory here, and it is
+# exactly the one an operator names to be told that silence means nothing was
+# refused.
+__agent_container_egress_targets() {
+    local egress_dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/egress" f
+    local -aU names
+    for f in "$egress_dir"/*/*(N/); do names+=("${f:t}"); done
+    __agent_container_gather_local
+    compadd -a names
+}
+
 _agent-container() {
     local context state state_descr line
     typeset -A opt_args
@@ -111,6 +125,7 @@ _agent-container() {
         'attach:Attach via ssh + tmux (local state or hosts.conf)'
         'logs:Tail container logs'
         'runs:Durable run records (list, show) — survives teardown'
+        'egress:Durable record of undeclared egress — survives teardown'
         'plan:Show the plan for the declarative spec (no mutation)'
         'apply:Converge the declarative spec'
         'status:Report declarative spec drift'
@@ -205,6 +220,12 @@ _agent-container() {
                         '--changed[Only runs whose recorded paths cover PATH (list)]:path:' \
                         '--json[Emit machine-readable JSON]' \
                         '*:record:__agent_container_runs_targets'
+                    ;;
+                egress)
+                    _arguments \
+                        '--host[Host whose records to read]:host:' \
+                        '--json[Emit machine-readable JSON]' \
+                        '*:environment:__agent_container_egress_targets'
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh)'

@@ -263,15 +263,95 @@ The boundary's log is **the only place a refusal is recorded**, and it carries b
 | line | means |
 |---|---|
 | `api.openai.com. A IN REFUSED` | the name is **not declared**. `NXDOMAIN` instead would mean it genuinely does not exist |
-| `NONE_NONE/000 0 CONNECT 140.82.121.4:443 … sni=github.com` | a TLS connection **terminated** because the name it asked for is not on the allowlist. Read the `sni=`, not the URL — the URL is the address the client chose, and on a CDN it fronts thousands of sites |
-| `TCP_DENIED/403 CONNECT api.openai.com:443` | refused through the diagnostic proxy, **with a status** the client can report rather than a silent drop |
-| `TCP_TUNNEL/200 CONNECT api.anthropic.com:443 ORIGINAL_DST/…` | permitted, and spliced — the tunnel was opened, not inspected |
+| `NONE_NONE/000 … sni=github.com bump=terminate` | a TLS connection **terminated** because the name it asked for is not on the allowlist. Read the `sni=`, not the URL — the URL is the address the client chose, and on a CDN it fronts thousands of sites |
+| `TCP_DENIED/403 GET http://github.com/` | refused on the plain-HTTP path, **with a status** the client can report rather than a silent drop |
+| `NONE_NONE/000 … sni=api.anthropic.com bump=splice` | **permitted.** This is the first of the two lines a permitted request logs, and everything but `bump=` is identical to the terminated line above |
+| `TCP_TUNNEL/200 CONNECT api.anthropic.com:443 ORIGINAL_DST/…` | the second line of that same permitted request — spliced, so the tunnel was opened and not inspected |
+
+**`bump=` is the field that tells a refusal from a permission, not the status tag.** Measured on a
+live boundary: a permitted HTTPS request to a declared host logs a first line whose status tag,
+status code, byte count, method, hierarchy and `%err_code` are *identical* to a terminated one.
+`%ssl::bump_mode` is squid's own record of what `ssl_bump` decided, so both the operator reading the
+log and the tool building the durable record ask the enforcer rather than inferring. Grepping
+`NONE_NONE` alone will show you permitted traffic.
 
 The agent's own log shows only the resulting failure with no cause, which is why this flag exists.
 Two things to know before reading it: the container healthcheck contributes a
 `NONE_NONE/000 … error:transaction-end-before-headers` line every few seconds, so filter those out;
 and asking for an environment with no boundary reports that as a **policy** fact ("no egress
 boundary to read"), not as a missing container.
+
+### The durable record — what was refused *after the container is gone*
+
+```console
+$ agent-container egress acme
+$ agent-container egress --json | jq '.data.events[]'
+```
+
+The log above is **live**: it dies with the container, and containers are ephemeral by design
+(Constitution I). So the tool distils that same stream into a durable record on your machine —
+`$XDG_DATA_HOME/agent-container/egress/<host>/<environment>/`, a sibling of the run records and
+**not** a volume. Every command that talks to a host collects it, and **teardown collects before it
+removes the boundary**.
+
+**One producer, one truth.** The events come from the boundary's own log and nothing else writes
+them. A second mechanism could disagree with what `logs --egress` shows, and "the tool says nothing
+was refused" beside a log that says otherwise is worse than having no record.
+
+**What is kept, and what is deliberately not:**
+
+| event | kept |
+|---|---|
+| a refused resolution (`REFUSED`) | **yes** — the common shape; an undeclared name never reaches a connection |
+| a terminated TLS connection (`bump=terminate`) | **yes** |
+| a plain-HTTP denial (`TCP_DENIED`) | **yes**, on the status tag alone |
+| a destination **permitted while undeclared** | **yes**, and it is the loudest event here — the running boundary is not enforcing the allowlist this tool generated |
+| ordinary permitted traffic to a declared host | **no.** This is a record, not a traffic log: one line per request would bury the events above and set retention to work evicting refusals to make room |
+| `NXDOMAIN` | **no.** That name genuinely does not exist — a fact about the internet, not a policy event (and the distinction is why the resolver answers `REFUSED` at all) |
+| an upstream's **own** status code to a declared host — `503`, and equally `403` | **no.** Policy permitted it; the far end said no. A WAF, a bot block, a stale API key and a CDN all answer `403`, and recording those as refusals would be fabricated findings at the rate the agent makes requests. A genuine denial by this configuration always carries `TCP_DENIED` |
+| a divergent-resolution failure (`NONE_NONE/409`, measured) to a declared host | **no**, and **neither verdict is invented for it.** squid's host verification rejected the connection because its own address for the name and the agent's had diverged — so `refused` would fabricate a policy finding and `permitted` would claim a connection that never happened |
+
+Each event carries the destination, a verdict, whether the declaration named it, which daemon saw
+it (`dns` or `connect`), and the provider where the tool's mapping knows one. **Nothing else** —
+no headers, no bodies, no tokens, no model names, no prompt content. The boundary never terminates
+TLS, so it cannot see them; and a plain-HTTP URL's query string and `user:pass@` are dropped at the
+one place they could have entered.
+
+**It answers *what* and *when*, never *how many*.** Two events identical in every recorded field
+collapse into one record — that is what makes re-reading an unclearable log safe. The retry count
+lives in `logs --egress` while the boundary is alive.
+
+**Silence means nothing was refused.** That only holds while something is watching, so an
+environment with no boundary is told so instead of answered with a blank screen:
+
+| you asked about | you are told |
+|---|---|
+| an environment whose last deployment declared a boundary | nothing collected from that boundary's log **was refused** |
+| an environment with **no** boundary | nothing observes its egress: it is **unrestricted and unrecorded** |
+| an environment the tool has no deployment for | none were **ever ingested** — which is not evidence none happened |
+
+The first row says "collected" rather than "happened", and the difference is real: the tool reads
+that log on every contact and before it removes the boundary, but a sidecar removed **out of band**
+takes whatever had not been collected with it. That is the one gap this store cannot close, since a
+log that no longer exists cannot be read late.
+
+`--json` carries the same distinction as a `boundary` field (`watched` / `unwatched` / `unknown`)
+per environment, so a consumer never has to read prose to tell the three apart. A listing also
+names the environments it does *not* cover, because an incomplete answer presented as a complete
+one is worse than no answer.
+
+**Two limits, stated rather than discovered.** Events are pruned at ingestion, per environment, at
+**90 days** or **500 events** — whichever prunes first, and the count is spent on **distinct
+destinations first**, so one endpoint an agent retries all night cannot evict the record of every
+other host it reached for. And the pending window is the *runtime's* log retention, not a volume
+this tool owns: each contact reads the last **20000** lines of the boundary's log, so lines the log
+driver has already rotated away were never ingested. Talk to the host — any command does — and the
+window resets.
+
+Beside the events, each store keeps one `watermark` file: how far that boundary's log has already
+been read. It is what makes the bound above converge — without it a pruned event whose line is still
+in the window comes back on the next command, is pruned again, and both are announced every time.
+It is a cursor, not a record: nothing lists it as an event, and deleting it only causes a re-read.
 
 ## Modes
 

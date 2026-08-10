@@ -162,14 +162,27 @@ selected agent has a built-in default and what that implies (quickstart S4).
 
 ---
 
-## Phase 5: User Story 3 — Undeclared egress is recorded (P2) — **DEFERRED**
+## Phase 5: User Story 3 — Undeclared egress is recorded (P2) — **DELIVERED**
 
-**Deferred to after Feature 016.** Recorded here so the work is tracked, not forgotten. Do **not**
-implement in this feature: T033 would fail, correctly.
+The deferral is discharged: Feature 016 shipped the durable store, so T033's precondition exists and
+the three tasks were implemented against it. The source is the **boundary container's own log
+stream** — the one `logs --egress` shows — and nothing new produces events, so there is no second
+producer that could disagree with what the operator reads, and **no tenth volume**, so research R9's
+identity migration is not paid at all.
 
-- [ ] T032 [US3] **DEFERRED** — Emit egress events from the proxy with the fields in data-model §6 (`timestamp`, `host`, `provider`, `declared`, `decision`) and **nothing more**: no headers, no bodies, no model names. The narrowness is Constitution III holding, not an omission
-- [ ] T033 [US3] **DEFERRED** — Persist egress events into the durable per-container store and its ingestion machinery, under **their own schema** — not as rows in a run record, and not behind a tenth volume of this feature's own (research R9, FR-010). If that store does not yet exist, this task is **blocked**, not worked around
-- [ ] T034 [US3] **DEFERRED** — Surface events through inspection with **no noise when nothing happened** — silence means nothing occurred (spec US3 scenario 3)
+- [~] T032 [US3] Emit egress events from the proxy with the fields in data-model §6 (`timestamp`, `host`, `provider`, `declared`, `decision`) and **nothing more**: no headers, no bodies, no model names. The narrowness is Constitution III holding, not an omission.
+      Delivered: `EGRESS_FIELD_PROVENANCE` closes the field set and a test asserts every event carries those keys and no others; a plain-HTTP URL's path, query and `user:pass@` are dropped in `bare_host` at the one door, with a sentinel test.
+      **GAP — the field set is a SUPERSET of §6 and the spec artifact was not updated.** Four fields beyond §6: `schema`, `environment` and `deployment_host` (which say which store and which environment an event belongs to), and `stage` (`dns` | `connect`), added deliberately because T131 kept a policy refusal distinguishable from a nonexistent name and the same distinction one layer up — "never resolved" versus "terminated after the ClientHello" — sends an operator to different places. **data-model §6 should gain `stage` and the three identity fields**; until it does, §6 and the code disagree.
+      Also delivered here and NOT anticipated by this task: `logformat egress` in `image/egress/squid.conf` gained a tenth field, `bump=%ssl::bump_mode`. MEASURED on a live boundary — a permitted HTTPS request to a declared host logs `NONE_NONE/000 … sni=<host> bump=splice` BEFORE its `TCP_TUNNEL/200`, and every other field of that line is identical to a terminated one, so a reader classifying on the status tag alone recorded every permitted request as a refusal, at the rate the agent makes requests
+- [X] T033 [US3] Persist egress events into the durable per-container store and its ingestion machinery, under **their own schema** — not as rows in a run record, and not behind a tenth volume of this feature's own (research R9, FR-010).
+      Verified present: `egress_store_dir` (a sibling of `runs_store_dir`), `EGRESS_SCHEMA`, Feature 016's `atomic_write_json` / `list_stored_records` reused verbatim, its own retention (`prune_egress_store`, 90 days / 500 events, the count spent on distinct DESTINATIONS first via the shared `_round_robin_keeps`), and ingestion wired into `drain_host_records` in a second loop so an egress failure cannot cost a run record. Content-addressed ids plus a watermark cursor, because the source cannot be cleared
+- [X] T034 [US3] Surface events through inspection with **no noise when nothing happened** — silence means nothing occurred (spec US3 scenario 3).
+      Verified present: `agent-container egress [ENV] [--host] [--json]`, in both completions and in `commands --json`. The empty answer is told apart as three NAMED states rather than an empty screen — `watched` (a boundary was declared; nothing collected from its log was refused), `unwatched` (no boundary is deployed, so nothing observes this environment's egress), `unknown` (no deployment to ask; none were ever ingested, which is not evidence none happened) — carried in `--json` as a `boundary` field per environment. No empty table and no "0 events" line anywhere the operator did not ask
+
+**Remaining gap for this story, named rather than ticked**: there is **no acceptance-tier test** that
+causes a REAL refusal on a live boundary, tears the environment down and reads the durable store.
+Every guard above is unit-level plus one live measurement taken by hand while fixing the classifier.
+That is the same exposure Feature 016's T031/T032 carried until the tier caught up with them.
 
 ---
 
