@@ -43,13 +43,19 @@ TOOL_HINTS=(
     [shell-execution]="bin/tests/test_entrypoint_execution.sh failed — Feature 004 entrypoint mode branch (interactive agent launch / headless workload+exit code / clone-on-start). Read the mode-branch + clone-on-start sections of entrypoint.sh and the failing assertion label."
     [shell-completions]="bin/tests/test_completions.sh failed — bash/zsh completion parity or an injection guard. Read completions/agent-container.{bash,zsh}."
     [shell-tmux-layout]="bin/tests/test_entrypoint_tmux_layout.sh failed — real-tmux window layout. Read the tmux section of entrypoint.sh."
+    [shell-repository]="bin/tests/test_entrypoint_repository.sh failed — Feature 016 repository-effect capture in entrypoint.sh (section 3r/3e): the five C7 states, pushed-by-ancestry, the changed-path list and its cap. Read the runs_repo_* helpers and the failing assertion label."
     [vulture]="Dead code in bin/agent-container flagged by vulture (>=80% confidence). Read the reported line; if truly unused, delete it. If it is used dynamically (a Typer command, a doctest-only helper, a dynamic attribute) it is a false positive — raise the confidence or add a vulture whitelist entry with a rationale."
     [xenon]="A function in bin/agent-container exceeds cyclomatic-complexity rank B (CC>10). Read the reported function and extract helpers to cut branching (each if/elif/for/while/and/or/except/ternary/comprehension-if is +1). Target rank B or better."
     [refurb]="A modernization refurb suggests for bin/agent-container. Run 'uv run --no-project --with refurb refurb --explain FURBxxx' to see it, then apply the one-line change. If it is a false positive, add the code to [tool.refurb] ignore in pyproject.toml with a rationale (see FURB143)."
 )
 
 fail() {
-    local name="$1" cmd="$2" output="$3" hint="${TOOL_HINTS[$name]:-}"
+    local name="$1" cmd="$2" output="$3"
+    # `hint` MUST be assigned on its own line. `local a=$1 b=${T[$a]}` expands every
+    # argument BEFORE the builtin binds any of them, so the subscript was empty on
+    # every call: bash printed "bad array subscript" and the hint came out blank —
+    # the whole TOOL_HINTS table above was dead text for every failure it names.
+    local hint="${TOOL_HINTS[$name]:-}"
     {
         echo ""
         echo "QUALITY GATE FAILED [$name]:"
@@ -173,6 +179,10 @@ run_check "shell-entrypoint"      bash bin/tests/test_entrypoint.sh
 run_check "shell-execution"       bash bin/tests/test_entrypoint_execution.sh
 run_check "shell-completions"     bash bin/tests/test_completions.sh
 run_check "shell-tmux-layout"     bash bin/tests/test_entrypoint_tmux_layout.sh
+# Every shell suite is enumerated by hand here, so a new file under bin/tests/ is
+# a suite NOBODY runs until this list names it — the pytest line above globs a
+# directory, this one does not, and the difference is invisible in a green gate.
+run_check "shell-repository"      bash bin/tests/test_entrypoint_repository.sh
 
 debuglog "=== ALL CHECKS PASSED ==="
 exit 0

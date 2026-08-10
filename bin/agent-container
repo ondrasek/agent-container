@@ -28,20 +28,24 @@
 # literally (no expansion), with a one-time warning.
 
 import atexit
+import calendar
 import contextlib
 import fcntl
 import hashlib
 import inspect
+import io
 import json
 import operator
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import termios
 import time
@@ -68,6 +72,11 @@ STATE_DIR = (
     Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
 )
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
+# Feature 016 R1: the SIXTH layout location, and it is DATA_HOME rather than a
+# corner of STATE_DIR because docs/layout.md documents the state dir as "computed;
+# safe to delete". A durable record kept somewhere safe to delete is a
+# contradiction, and it would quietly make Feature 011's own map false.
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "agent-container"
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 # Feature 001: the host registry (hosts.json) supersedes the flat hosts.conf
 # address book. DEFAULT_HOST is the implicit local host name; per-host runtime
@@ -426,14 +435,41 @@ def ssh_volume_name(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}-ssh"
 
 
+# Where the container writes a pending run record, and the mount point of the
+# runs volume. Outside /home/dev on purpose: everything under the home directory
+# is writable by whatever the operator or the agent runs, and the account of a
+# run must not live where the subject of the account can edit it (research R2).
+RUNS_MOUNT_PATH = "/var/lib/agent-container/runs"
+
+
+def runs_volume_name(name: str) -> str:
+    """Carries the PENDING run record (Feature 016) from the container to the
+    next CLI contact with the host.
+
+    Its own volume rather than a corner of an existing one: the workspace volume
+    does not exist in `bind`/`ephemeral` mode — which is where a disposable
+    headless run lives — and shellenv is operator-writable by design (R2).
+
+    >>> runs_volume_name("acme")
+    'agent-container-acme-runs'
+    """
+    return f"{CONTAINER_PREFIX}{name}-runs"
+
+
 def all_volume_mounts(name: str) -> list[str]:
-    """The nine per-container '-v' volume args, in the canonical fixed order
-    (workspace, claude, codex, pi, shellenv, tmux, ssh). pi-coding-agent's
+    """The ten per-container '-v' volume args, in the canonical fixed order
+    (workspace, claude, codex, pi, shellenv, tmux, ssh, runs). pi-coding-agent's
     config/auth dir is ~/.pi (verified from
     the package: piConfig.configDir='.pi', getAgentDir()->~/.pi/agent).
 
+    The doctest below MOVED when Feature 016 added the runs volume, and moving it
+    is the point: it is an exact-equality pin on the identity contract, so a tenth
+    volume cannot be added without a deliberate edit here. Every pre-016 entry is
+    byte-identical and in its original position — the set grew, nothing was
+    renamed or reordered.
+
     >>> all_volume_mounts("acme")
-    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-env', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh']
+    ['agent-container-acme-workspace:/workspace', 'agent-container-acme-claude:/home/dev/.claude', 'agent-container-acme-codex:/home/dev/.codex', 'agent-container-acme-pi:/home/dev/.pi', 'agent-container-acme-opencode:/home/dev/.config/opencode', 'agent-container-acme-opencode-data:/home/dev/.local/share/opencode', 'agent-container-acme-shellenv:/home/dev/.agent-env', 'agent-container-acme-tmux:/home/dev/.config/tmux', 'agent-container-acme-ssh:/home/dev/.ssh', 'agent-container-acme-runs:/var/lib/agent-container/runs']
     """
     return [
         f"{volume_name(name)}:/workspace",
@@ -445,14 +481,20 @@ def all_volume_mounts(name: str) -> list[str]:
         f"{shellenv_volume_name(name)}:/home/dev/.agent-env",
         f"{tmux_volume_name(name)}:/home/dev/.config/tmux",
         f"{ssh_volume_name(name)}:/home/dev/.ssh",
+        f"{runs_volume_name(name)}:{RUNS_MOUNT_PATH}",
     ]
 
 
 def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
+    The exact-equality doctest MOVED when Feature 016 appended the runs volume.
+    That failure was the identity contract noticing a shape change (Constitution
+    IV) — the nine pre-016 names are unchanged and still in their original order,
+    so `--purge`, `wipe` and the completions keep addressing the same storage.
+
     >>> per_container_volumes("acme")
-    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    ['agent-container-acme-workspace', 'agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh', 'agent-container-acme-runs']
     """
     return [
         volume_name(name),
@@ -464,23 +506,29 @@ def per_container_volumes(name: str) -> list[str]:
         shellenv_volume_name(name),
         tmux_volume_name(name),
         ssh_volume_name(name),
+        runs_volume_name(name),
     ]
 
 
 def other_container_volumes(name: str) -> list[str]:
-    """The eight NON-workspace per-container volume names (Feature 004). The
+    """The nine NON-workspace per-container volume names (Feature 004). The
     workspace volume is mode-dependent (persistent only), so bind/ephemeral
-    deployments declare only these eight in the compose model's `volumes:`.
+    deployments declare only these nine in the compose model's `volumes:`.
+
+    The runs volume is in here, which is the whole reason Feature 016 gave it one:
+    a `bind` or `ephemeral` run declares no workspace volume, and a run record
+    that only survived in `persistent` mode would be absent for precisely the
+    disposable runs the record is most needed for.
 
     >>> other_container_volumes("acme")
-    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh']
+    ['agent-container-acme-claude', 'agent-container-acme-codex', 'agent-container-acme-pi', 'agent-container-acme-opencode', 'agent-container-acme-opencode-data', 'agent-container-acme-shellenv', 'agent-container-acme-tmux', 'agent-container-acme-ssh', 'agent-container-acme-runs']
     """
     ws = volume_name(name)
     return [v for v in per_container_volumes(name) if v != ws]
 
 
 def other_volume_mounts(name: str) -> list[str]:
-    """The eight non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
+    """The nine non-workspace '-v' mounts (Feature 004): all_volume_mounts minus
     the leading workspace mount, which the workspace mode selects separately."""
     ws_prefix = f"{volume_name(name)}:"
     return [m for m in all_volume_mounts(name) if not m.startswith(ws_prefix)]
@@ -1074,6 +1122,507 @@ def migrate_flat_state() -> None:
             continue
         local_dir.mkdir(parents=True, exist_ok=True)
         os.replace(f, target)
+
+
+# --- durable record store (Feature 016) --------------------------------------
+#
+# One file per record, written to a temporary name in the target directory and
+# atomically renamed into place (research R3). That single choice is what gives
+# FR-009 without a lock: two runs cannot select the same name, and a partially
+# written record is never visible because it is never AT its final name — no
+# append, no fcntl, nothing that has to work across a remote daemon.
+#
+# The write and list helpers below take the DIRECTORY as a parameter and know
+# nothing about run records. FR-011a says Feature 014's inventory adopts this
+# machinery: shared placement and write-safety, separate schema and separate
+# retention. A helper that reached for a run record's fields could not be shared,
+# and 014 would grow a second, subtly different atomic write.
+
+
+def runs_store_dir(host: str, environment: str) -> Path:
+    """Where the DURABLE records for one environment on one host live.
+
+    Namespaced by host because the same environment name can be deployed to
+    several hosts (Constitution IV makes the identity per-host), and a record
+    that lost which host it came from could not answer "which of last night's
+    runs is which".
+
+    >>> runs_store_dir("vps", "demo").parts[-4:]
+    ('agent-container', 'runs', 'vps', 'demo')
+    """
+    return DATA_DIR / "runs" / host / environment
+
+
+def atomic_write_json(directory: Path, filename: str, payload: object) -> Path:
+    """Serialise `payload` to `directory/filename` so a reader never sees a
+    partial file. Returns the final path.
+
+    The temporary MUST be created in the target directory: os.replace is atomic
+    only within a filesystem, and a temp file in $TMPDIR can land on a different
+    one — where the "atomic" rename degrades to a copy that a reader can catch
+    half-done. That is the failure this helper exists to prevent, so the temp
+    directory is not a parameter.
+
+    fsync before the rename: the rename orders the NAME, not the CONTENT. Without
+    it a crash can leave a correctly-named, zero-length record — which reads as a
+    corrupt record rather than as a missing one, and a corrupt record is the one
+    outcome worse than no record at all.
+
+    0600 (mkstemp's default, preserved through the rename): the record's task text
+    is the one field that can carry a credential the operator typed (data-model
+    §5), so the file is not world-readable.
+
+    Knows nothing about what it is writing — see the section note (FR-011a).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{filename}.", suffix=".tmp")
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        target = directory / filename
+        os.replace(tmp_path, target)
+    except BaseException:
+        # Leave no debris at a name a listing could later pick up. The suffix
+        # already excludes it from list_stored_records, but a temp file that
+        # accumulates on every failed write is a slow leak in a directory whose
+        # whole retention story is "delete files".
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def list_stored_records(directory: Path, suffix: str = ".json") -> list[Path]:
+    """Records in `directory`, NEWEST FIRST. Empty list when the directory does
+    not exist — an environment that has never run is not an error.
+
+    Ordered by mtime and NOT by name, because this helper is shared (FR-011a) and
+    only run records happen to have sortable ids; Feature 014's inventory need not.
+    The name is the tie-break so equal mtimes still yield a stable order rather
+    than the filesystem's arbitrary one — two records written in the same second
+    must not reorder between two listings of the same directory.
+
+    The suffix filter is what keeps a half-written record invisible: atomic_write_json
+    stages under a dot-prefixed `.tmp` name, so an in-flight write can never be
+    listed as a finished record.
+    """
+    try:
+        entries = [p for p in directory.iterdir() if p.is_file() and p.name.endswith(suffix)]
+    except FileNotFoundError, NotADirectoryError:
+        return []
+    return sorted(entries, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+
+
+# The record's one time shape (data-model §1), written by utc_now and read back by
+# retention. Declared here rather than at either site because it is the contract
+# BETWEEN them: a writer and a reader with their own copies would drift, and the
+# only symptom would be every record silently ageing from the mtime fallback.
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+# --- retention (FR-011, C14, research R8) ------------------------------------
+#
+# The defaults are DECIDED and named here, not "documented somewhere": 90 days and
+# 500 records per environment, whichever prunes first (plan.md decision 8). 500
+# records is roughly a year of four nightly runs; 90 days is past the point where a
+# run's commits are ordinary history. A test binds these constants to the text that
+# states them, because a documented number the code does not use is this project's
+# recurring defect.
+#
+# Retention is the one part of this store machinery Feature 014 must NOT adopt
+# (FR-011a): its inventory has to keep its oldest entries indefinitely, and one
+# rule shared by both stores would necessarily be the wrong rule for one of them.
+RETENTION_MAX_AGE_DAYS = 90
+RETENTION_MAX_RECORDS = 500
+
+
+def _record_epoch(path: Path) -> float:
+    """When the RUN happened, in epoch seconds, for the age rule.
+
+    Read from `started_at` and not from the file's mtime, because mtime is when the
+    record was INGESTED — for a detached run that is whenever the operator next ran
+    a command, and for a re-ingested one it is today. An age rule built on mtime
+    would keep a year-old run alive because the tool touched its file this morning.
+
+    An unreadable or unparseable `started_at` falls back to mtime, which is always
+    LATER than the run it describes. So the fallback errs toward KEEPING a record,
+    and pruning is the one operation in this feature that cannot be undone.
+    """
+    try:
+        rec = json.loads(path.read_text())
+        return float(calendar.timegm(time.strptime(str(rec["started_at"]), TIME_FORMAT)))
+    except OSError, ValueError, TypeError, KeyError, json.JSONDecodeError:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            # The file went away under us. Return the far future so the caller
+            # keeps it rather than deleting a path it can no longer even read.
+            return float("inf")
+
+
+def prune_run_store(directory: Path, now: float | None = None) -> list[str]:
+    """Delete the records past EITHER retention bound; return the names deleted.
+
+    Both bounds are applied — "whichever prunes first" — because they bound two
+    different failures that the other one misses entirely: an environment that runs
+    every ten minutes blows the count long before anything reaches the age bound,
+    and one that ran twice a year ago keeps two records forever under the count rule
+    alone.
+
+    Ordered by the run's own time (newest first) with the filename breaking ties, so
+    the count rule keeps the newest N and does so identically on two machines.
+
+    A file that cannot be deleted is a warning and not a failure: retention is
+    bookkeeping done on the way to the operator's actual command (R8), and a
+    read-only store must not become a reason `runs list` stops working.
+    """
+    paths = list_stored_records(directory)
+    if not paths:
+        return []
+    cutoff = (time.time() if now is None else now) - RETENTION_MAX_AGE_DAYS * 86400
+    ordered = sorted(
+        ((_record_epoch(p), p.name, p) for p in paths), key=operator.itemgetter(0, 1), reverse=True
+    )
+    removed: list[str] = []
+    for rank, (epoch, name, path) in enumerate(ordered):
+        if rank < RETENTION_MAX_RECORDS and epoch >= cutoff:
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            warn(f"could not prune run record {path} ({e})")
+            continue
+        removed.append(name)
+    return removed
+
+
+# --- the run record itself ----------------------------------------------------
+
+RUN_SCHEMA = 1
+# The outcome vocabulary is CLOSED and SCOPED TO THE KIND (data-model §2, C5).
+# An interactive session has no completion semantics, so `finished`/`failed` are
+# absent from its set rather than merely discouraged: FR-003 requires them to be
+# unrepresentable, and a rule kept by convention becomes prose the first time a
+# kind is added — after which SC-002 ("zero ambiguous endings") cannot be measured.
+RUN_OUTCOMES: dict[str, tuple[str, ...]] = {
+    "headless": ("finished", "failed", "stopped", "never-started"),
+    "interactive": ("ended", "stopped"),
+}
+# The one outcome the TOOL authors (C6, research R5): the container never ran, so
+# nothing inside it existed to report. Named here so the ingestion path cannot
+# assume every record arrives from a volume.
+RUN_OUTCOME_NEVER_STARTED = "never-started"
+# The one outcome legal for BOTH kinds (data-model §2), which is why it is what a
+# reconstructed pending record gets: ingestion cannot know the kind's own ending,
+# and `stopped` is true of every container that went away under a run.
+RUN_OUTCOME_STOPPED = "stopped"
+
+# The repository effect's states are CLOSED too (data-model §3, C7), and every one
+# of them is a RECORD rather than an error: research R4 measured no-upstream
+# (`git rev-parse @{u}` → 128), detached HEAD (`git symbolic-ref -q HEAD` → 1) and
+# no-repository (→ 128) as ordinary situations. An `ephemeral` workspace with no
+# clone is the common case for a throwaway run, so a state outside this set means
+# a caller invented one, not that a new situation appeared.
+REPOSITORY_STATES = ("ok", "no-repository", "no-upstream", "detached", "unreadable")
+
+# EVERY FIELD OF A RECORD AND WHERE ITS VALUE COMES FROM (data-model §1, §5).
+#
+# SC-005 claims no credential value appears in any record, 100% of runs. That is
+# not the property of a filter — research R9 rejected pattern redaction, because a
+# redactor that misses one value converts an operator's caution into misplaced
+# confidence. It is the property of THIS TABLE HAVING EXACTLY ONE `operator` ROW.
+# Widen the field set with a second free-text field and SC-005 becomes false while
+# every existing test still passes, which is why T058 asserts the table rather than
+# trusting the sentence in the data model.
+#
+#   tool     — this file or the entrypoint composed it from what it already knew
+#   git      — read out of the workspace's repository, so it is SHAs and paths
+#   agent    — the agent's own usage report, bounded to NUMBERS by validate_usage;
+#              the bound is what keeps this row out of the `operator` column
+#   operator — typed by a human. `task`, and nothing else, ever.
+RECORD_FIELD_PROVENANCE: dict[str, str] = {
+    "schema": "tool",
+    "run_id": "tool",
+    "environment": "tool",
+    "host": "tool",
+    "agent": "tool",
+    "kind": "tool",
+    "task": "operator",
+    "started_at": "tool",
+    "ended_at": "tool",
+    "outcome": "tool",
+    "exit_code": "tool",
+    "repository": "git",
+    "usage": "agent",
+    "notes": "tool",
+}
+
+# `usage.units` is the one place an AGENT's vocabulary enters a record, and FR-015
+# forbids normalising it — so the keys are whatever the agent calls them. What is
+# NOT free is their shape: an identifier-shaped key and a number, because a string
+# value here would open a second free-text field in the record and quietly falsify
+# the closure RECORD_FIELD_PROVENANCE states above.
+USAGE_UNIT_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+
+# A run id is generated INSIDE the container and arrives here as a tar member
+# name, and it is also what `runs show <run-id>` takes from the command line. It
+# therefore becomes a path component of a file on the operator's machine from two
+# untrusted directions, so it is validated against a closed charset and REFUSED
+# rather than sanitised: an extractor that "cleans" a hostile name is one silent
+# bug away from writing outside the store, and there is no legitimate run id this
+# pattern rejects.
+RUN_ID_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")
+
+
+def utc_now() -> str:
+    """The record's one time format: RFC 3339, UTC (data-model §1).
+
+    One helper rather than a format string at each site, because a listing sorts
+    on this text — two sites that disagreed about the shape would order records by
+    which code path wrote them. Retention READS the same field back through
+    TIME_FORMAT, so a writer and a parser that drifted apart would silently age
+    every record from the mtime fallback instead.
+    """
+    return time.strftime(TIME_FORMAT, time.gmtime())
+
+
+def new_run_id() -> str:
+    """A run id for the one record the TOOL authors (C6).
+
+    Sortable first so a listing is chronological without parsing timestamps, and
+    suffixed with randomness because sortable alone is not unique: two
+    environments that fail to start in the same second would otherwise choose the
+    same name, and one-file-per-record holds FR-009 only while two runs cannot.
+
+    >>> a, b = new_run_id(), new_run_id()
+    >>> a != b and RUN_ID_RE.fullmatch(a) is not None
+    True
+    """
+    return f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(4)}"
+
+
+def validate_repository_effect(repo: dict) -> None:
+    """Refuse a repository effect a reader could only misread (C7, C8).
+
+    Both rules describe a record that would MISLEAD rather than one that is merely
+    incomplete, which is why they are refusals and not warnings:
+
+      - `state` comes from the closed set. R4 measured the awkward cases as
+        ordinary situations with a word each, so an unrecognised state is an
+        invented one — and it would render as itself, looking authoritative.
+      - **`pushed` is null, never `false`, when no upstream was recorded.**
+        `false` means "committed and did not push", the failure Constitution I
+        exists to prevent and the loudest signal this feature has (FR-005). Spent
+        once on "could not tell", every future one is unreliable. `true` is
+        refused on the same footing: without an upstream there was nothing to
+        compare against, so it would be a verification that never happened.
+
+    This is where the TOOL's own records are made honest, and that is all it can
+    be: a record written by the container is built in shell and arrives through
+    ingestion without passing here. The read side (`push_status`) therefore treats
+    the same contradiction defensively rather than assuming this guard held.
+    """
+    state = repo.get("state")
+    if state not in REPOSITORY_STATES:
+        die(
+            f"run record: unknown repository state {state!r} "
+            f"(legal: {', '.join(REPOSITORY_STATES)})"
+        )
+    if repo.get("upstream") is None and repo.get("pushed") is not None:
+        die(
+            "run record: pushed must be null when no upstream was recorded (C8) — "
+            "false means 'committed and did not push', and conflating it with "
+            "'could not tell' makes the loudest signal in the feature unreliable"
+        )
+
+
+# --- usage (data-model §4, FR-006/FR-015, C9/C10) ----------------------------
+#
+# WHAT IS EXTRACTED PER AGENT, AND WHY THAT IS CURRENTLY NOTHING (T034).
+#
+# The record is written inside the container, so usage could only be captured from
+# what the agent's invocation emits. `run_headless_agent` in image/entrypoint.sh
+# runs `claude -p`, `codex exec`, `pi -p` and `opencode run` — the prose forms. None
+# of them is asked for a machine-readable report, so there is nothing to parse and
+# every record written today carries `usage_unreported()`.
+#
+# NOTHING IS INVENTED FOR THEM. A figure this tool made up would be worse than the
+# gap FR-006 already allows for, and a `0` is the exact failure SC-004 counts. What
+# stops this from rotting into an assumption is a test that pins the entrypoint's
+# record body to the unreported shape: the day an invocation starts reporting usage,
+# that test fails and the extraction has to be written, rather than the tool
+# continuing to file a real figure as unknown.
+
+
+def usage_unreported() -> dict:
+    """The usage of a run whose agent reported nothing (data-model §4).
+
+    A constructor rather than a literal at each site, because the ONE thing this
+    value must never become is `0` (FR-006, SC-004) and the one thing it must never
+    become is absent (research R6: a consumer reads an absent key as zero). Both
+    mistakes are edits to a literal somebody copied; neither is an edit to this.
+
+    >>> usage_unreported()
+    {'reported': False}
+    """
+    return {"reported": False}
+
+
+def validate_usage(usage: dict) -> None:
+    """Refuse a usage block that would misstate what the agent said (C9, C10).
+
+    Three rules, each naming a way the record would MISLEAD rather than merely be
+    incomplete:
+
+      - **`reported` is a bool and always present.** It is the field that separates
+        "nothing was reported" from "nothing was consumed", and SC-004 is the count
+        of times those two got confused.
+      - **An unreported usage carries nothing else.** `{"reported": false,
+        "units": {...}}` says both at once, and a consumer would believe whichever
+        key it looked at first.
+      - **A reported usage names its agent and carries numeric units under
+        identifier-shaped keys.** The agent is named because FR-015/C10 forbid
+        normalising across agents — units are only meaningful next to whose they
+        are. The values are numbers because a string would make `units` a second
+        free-text field, and SC-005's closure (RECORD_FIELD_PROVENANCE) rests on
+        `task` being the only one.
+
+    Like validate_repository_effect, this can only police the records this TOOL
+    builds: a container-written record is composed in shell and reaches the store
+    through ingestion without passing here. So `render_usage` and `aggregate_usage`
+    treat a malformed usage as UNKNOWN rather than trusting this guard held —
+    unknown is the answer that cannot silently understate a total.
+    """
+    reported = usage.get("reported")
+    if not isinstance(reported, bool):
+        die("run record: usage.reported must be true or false (data-model §4)")
+    if not reported:
+        if set(usage) != {"reported"}:
+            die(
+                "run record: an unreported usage carries nothing but "
+                "{'reported': False} — a units key beside it states both "
+                "'nothing was reported' and a figure, and a consumer would "
+                "believe whichever it read first"
+            )
+        return
+    if usage.get("agent") not in AGENTS:
+        die(
+            f"run record: reported usage must name one of {', '.join(AGENTS)} "
+            f"(FR-015: units are only meaningful next to whose they are)"
+        )
+    units = usage.get("units")
+    if not isinstance(units, dict) or not units:
+        die("run record: reported usage must carry a non-empty units object")
+    for key, value in units.items():
+        if not isinstance(key, str) or USAGE_UNIT_KEY_RE.fullmatch(key) is None:
+            die(f"run record: usage unit key {key!r} is not an identifier")
+        # `bool` before `int` on purpose: True is an int in Python and would sum
+        # into a total as 1, turning a flag into a quantity nobody reported.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            die(
+                f"run record: usage unit '{key}' must be a number, not "
+                f"{type(value).__name__} — a free-text value here would widen the "
+                f"record's one operator-authored field to two (SC-005)"
+            )
+    if set(usage) - {"reported", "agent", "units"}:
+        die(f"run record: unknown usage keys {sorted(set(usage) - {'reported', 'agent', 'units'})}")
+
+
+def build_run_record(
+    *,
+    run_id: str,
+    environment: str,
+    agent: str,
+    kind: str,
+    outcome: str,
+    started_at: str,
+    ended_at: str | None = None,
+    task: str | None = None,
+    exit_code: int | None = None,
+    host: str | None = None,
+    repository: dict | None = None,
+    usage: dict | None = None,
+    notes: list[str] | None = None,
+) -> dict:
+    """Build one record in the schema of data-model §1, REFUSING an illegal
+    kind/outcome pair (C5) rather than emitting a record no consumer can read.
+
+    Four invariants of §1 are enforced here rather than trusted, because this is
+    the only place a record is constructed and therefore the only place they can
+    be made unrepresentable:
+      - the outcome must come from THIS kind's closed set (FR-003);
+      - an interactive session carries no task (FR-002) — it was never given one,
+        and a task on a session record would be an invented fact;
+      - `exit_code` is headless-only and absent for `never-started` — a session
+        has no exit status, and a container that never ran produced none. A `0`
+        there would read as a clean run that never happened;
+      - a repository effect, when present, satisfies C7 and C8
+        (`validate_repository_effect`), and a usage block satisfies §4
+        (`validate_usage`).
+
+    `host` is None by default and stamped at INGESTION: the container does not
+    reliably know what the operator calls its host.
+
+    `usage` defaults to unreported rather than to zero. A false zero silently
+    understates every total it enters (FR-006, SC-004), which is worse than a gap
+    that says it is a gap.
+
+    >>> r = build_run_record(run_id="20260809T101010Z-ab12", environment="demo",
+    ...     agent="claude", kind="headless", outcome="finished",
+    ...     started_at="2026-08-09T10:10:10Z", ended_at="2026-08-09T10:12:00Z",
+    ...     exit_code=0, task="tidy the imports")
+    >>> r["schema"], r["outcome"], r["exit_code"], r["host"]
+    (1, 'finished', 0, None)
+    >>> r["usage"]
+    {'reported': False}
+    >>> build_run_record(run_id="x", environment="demo", agent="claude",
+    ...     kind="interactive", outcome="finished", started_at="t")
+    Traceback (most recent call last):
+    ...
+    Fatal: run record: outcome 'finished' is not legal for kind 'interactive' (legal: ended, stopped)
+    """
+    if kind not in RUN_OUTCOMES:
+        die(f"run record: unknown kind '{kind}' (legal: {', '.join(sorted(RUN_OUTCOMES))})")
+    if outcome not in RUN_OUTCOMES[kind]:
+        die(
+            f"run record: outcome '{outcome}' is not legal for kind '{kind}' "
+            f"(legal: {', '.join(RUN_OUTCOMES[kind])})"
+        )
+    if agent not in AGENTS:
+        # The field set is closed (C13/SC-005) and every non-task field is
+        # tool-generated; an agent name that is not one of ours means the caller
+        # invented one, not that a new agent appeared.
+        die(f"run record: unknown agent '{agent}' (legal: {', '.join(AGENTS)})")
+    if kind == "interactive" and task is not None:
+        die("run record: an interactive session has no task (data-model §1, FR-002)")
+    if exit_code is not None and (kind != "headless" or outcome == RUN_OUTCOME_NEVER_STARTED):
+        die(f"run record: exit_code is not meaningful for kind '{kind}' outcome '{outcome}'")
+    if repository is not None:
+        validate_repository_effect(repository)
+    if usage is not None:
+        validate_usage(usage)
+    return {
+        "schema": RUN_SCHEMA,
+        "run_id": run_id,
+        "environment": environment,
+        "host": host,
+        "agent": agent,
+        "kind": kind,
+        "task": task,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "repository": repository,
+        # ALWAYS present, and `reported: False` is a value — not an absence.
+        # Omitting the key would be indistinguishable from a schema change, and a
+        # consumer would read the absence as zero (research R6).
+        "usage": usage if usage is not None else usage_unreported(),
+        "notes": list(notes or []),
+    }
 
 
 # --- runtime -----------------------------------------------------------------
@@ -2586,6 +3135,90 @@ def driver_down_argv(
     return driver_compose_argv(host, project, file, *args, override=override)
 
 
+# --- Feature 016: pending records travel as a TARBALL, not over a filesystem --
+# The operator's machine and the container host share no filesystem — the host is
+# typically a VPS — and once a detached run has exited there is no container for
+# `docker cp` to copy from. So ingestion goes through the RUNTIME: a throwaway
+# container mounts the runs volume and streams its contents to our stdout as a tar
+# (research R10, measured). Only bytes cross the boundary, which is what lets one
+# code path serve a local daemon and a remote context alike — and the remote case
+# is the entire reason the mechanism exists.
+#
+# These are argv builders and nothing else, so the shape can be asserted without a
+# runtime, exactly like the rest of the driver seam.
+
+RUNS_INGEST_MOUNT = "/mnt"
+
+
+def driver_ingest_argv(host: dict, volume: str, image: str) -> list[str]:
+    """Stream a runs volume's contents to OUR stdout as a tar.
+
+    `--entrypoint tar` is LOAD-BEARING, not tidiness. The agent image sets
+    ENTRYPOINT to entrypoint.sh, so without it `tar cf - -C /mnt .` arrives as
+    ARGUMENTS to the entrypoint: stdout then carries the entrypoint's own output,
+    which parses as an empty archive and makes the drain report success having
+    ingested nothing. A wrong answer that looks right, for every record.
+
+    Read-only mount and `--network none`: this container reads a directory and
+    exits. Neither write access nor a network would buy anything, and on a host
+    with an egress declaration (Feature 012) a networked helper the tool starts
+    behind the operator's back is the last thing this project should add.
+
+    >>> driver_ingest_argv({"driver": "docker", "context": "vps"}, "ac-acme-runs", "img")
+    ['docker', '--context', 'vps', 'run', '--rm', '--network', 'none', '-v', 'ac-acme-runs:/mnt:ro', '--entrypoint', 'tar', 'img', 'cf', '-', '-C', '/mnt', '.']
+    """
+    return driver_runtime_argv(host) + [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        f"{volume}:{RUNS_INGEST_MOUNT}:ro",
+        "--entrypoint",
+        "tar",
+        image,
+        "cf",
+        "-",
+        "-C",
+        RUNS_INGEST_MOUNT,
+        ".",
+    ]
+
+
+def driver_ingest_clear_argv(
+    host: dict, volume: str, image: str, filenames: list[str]
+) -> list[str]:
+    """Remove the NAMED records from the volume, once they are durably stored.
+
+    Names the files instead of emptying the directory: a run that wrote a record
+    between the tar read and this call has not been ingested, and a wildcard would
+    delete it unread. That record is exactly the one nobody would ever notice was
+    missing.
+
+    `--entrypoint rm` with the paths as argv — no shell anywhere in the chain, so
+    a metacharacter in a filename has nothing to be interpreted by. The names are
+    also already validated against RUN_ID_RE before they reach here; this is the
+    second of the two, because either alone is one refactor from being the only one.
+
+    >>> driver_ingest_clear_argv({"driver": "podman", "context": ""}, "v", "img", ["a.json"])
+    ['podman', 'run', '--rm', '--network', 'none', '-v', 'v:/mnt', '--entrypoint', 'rm', 'img', '-f', '--', '/mnt/a.json']
+    """
+    return driver_runtime_argv(host) + [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        f"{volume}:{RUNS_INGEST_MOUNT}",
+        "--entrypoint",
+        "rm",
+        image,
+        "-f",
+        "--",
+        *[f"{RUNS_INGEST_MOUNT}/{f}" for f in filenames],
+    ]
+
+
 def driver_reachable_address(host: dict) -> str:
     """Address used for attach: the host's own address (localhost for local)."""
     return host.get("address") or "localhost"
@@ -2648,7 +3281,7 @@ def build_compose_model(
     port = port_for_name(name)
     # Feature 004: the /workspace mount is workspace-mode dependent. Default (and
     # every pre-004 caller) → the persistent named volume; ephemeral → nothing
-    # mounted (None); bind → the caller's '<abs>:/workspace'. The other eight volumes
+    # mounted (None); bind → the caller's '<abs>:/workspace'. The other nine volumes
     # are always mounted.
     ws = (
         f"{volume_name(name)}:/workspace"
@@ -2703,7 +3336,7 @@ def build_compose_model(
         files = [env_file] if isinstance(env_file, Path) else list(env_file)
         service["env_file"] = [str(f) for f in files]
     # The workspace named volume is declared ONLY in persistent mode (Constitution
-    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other eight are
+    # IV refinement, FR-013): bind/ephemeral must NOT create it. The other nine are
     # always declared. `--purge`/`wipe` tolerate the workspace volume's absence.
     declared = (
         per_container_volumes(name) if declare_workspace_volume else other_container_volumes(name)
@@ -2740,7 +3373,7 @@ def build_compose_model(
         # A second service in the model the tool GENERATES — never the operator's
         # <name>.services.yaml, which is validated services-only and stays theirs.
         # No `ports:` (reachable only over the project network), no `volumes:` (the
-        # nine-volume identity contract is untouched), no `env_file:` (an operator
+        # per-container volume identity contract is untouched), no `env_file:` (an operator
         # env-file must never reach the security control itself).
         model["services"][EGRESS_SERVICE_KEY] = {
             "container_name": egress_container_name(name),
@@ -2834,6 +3467,89 @@ def write_compose_file(host: str, name: str, model: dict) -> Path:
     p = compose_file_path(host, name)
     p.write_text(json.dumps(model, indent=2) + "\n")
     return p
+
+
+def deployed_volume_set(host: str, name: str) -> set[str] | None:
+    """The per-container volumes the LAST GENERATED model declared, or None when
+    there is no readable model (nothing this tool deployed — nothing to migrate).
+
+    Reads the generated compose file rather than probing the runtime, for the same
+    two reasons _previous_model_had_egress does: this is consulted on every deploy
+    and on every reconcile, and the tests that call those paths are hermetic — they
+    are documented never to require docker or podman, so a runtime probe here would
+    make the migration untestable exactly where it needs proving.
+
+    None on ANY read or parse failure. That is deliberately the same answer as "no
+    drift": a failed read is not evidence of a stale shape, and inventing one would
+    recreate a healthy environment on every deploy.
+    """
+    try:
+        model = json.loads(compose_file_path(host, name).read_text())
+    except OSError, json.JSONDecodeError, ValueError:
+        return None
+    vols = model.get("volumes") if isinstance(model, dict) else None
+    if not isinstance(vols, dict):
+        return None
+    return set(vols)
+
+
+def volume_set_migration(host: str, name: str, desired: list[str]) -> tuple[list[str], list[str]]:
+    """(to_adopt, to_release): how the deployed volume set differs from the one
+    about to be declared. Both empty when there is nothing to migrate.
+
+    THE IDENTITY LOCK CANNOT SEE THIS (Constitution IV, and the T118/T129d lesson).
+    Feature 016 added a tenth volume while container name, port and all nine
+    existing volume names stayed byte-identical — so every identity check passes
+    while the deployed shape differs, and an environment left alone keeps writing
+    its run records into the container's own layer, where teardown destroys them.
+    A missing record is silent by nature: nothing about it looks wrong.
+
+    SYMMETRIC, because T129d proved the reverse path is the one that gets
+    forgotten. It compares SETS rather than asking "does it have the runs volume",
+    so `to_release` is populated by the same code that populates `to_adopt` — a
+    volume the deployed model declares and the new one does not (a workspace mode
+    moved to bind/ephemeral today; a withdrawn volume tomorrow). There is no
+    one-directional branch that a rollback could slip past untested.
+
+    No `compose down` is issued for this, unlike the port migration: compose
+    recreates a container whose mount set changed, and the port case needed a
+    teardown only because compose cannot bind a port the current owner still
+    holds. The reason does not carry over, and a teardown that buys nothing is
+    just another way to lose a running environment.
+    """
+    deployed = deployed_volume_set(host, name)
+    if deployed is None:
+        return [], []
+    want = set(desired)
+    return sorted(want - deployed), sorted(deployed - want)
+
+
+def announce_volume_set_migration(host: str, name: str, desired: list[str]) -> bool:
+    """Say out loud that the deployed volume set differs from the declared one, and
+    return whether it does. Announced, not silent: an operator whose container is
+    recreated deserves to know it was a migration and not a bug — and on the release
+    side, that a volume they still pay for is no longer addressed by `--purge`.
+
+    The wording states the FACT and not what happens next, because the three call
+    sites differ: `up` on a running container recreates nothing, a deploy recreates
+    immediately, and `apply` recreates via its own drift path. A message that
+    promised a recreate would be false on the one path where the operator has to
+    act.
+    """
+    adopt, release = volume_set_migration(host, name, desired)
+    if adopt:
+        warn(
+            f"{name}: the deployed volume set is missing {', '.join(adopt)}. "
+            f"Recreating the container attaches it; every existing volume is "
+            f"re-attached, not recreated."
+        )
+    if release:
+        warn(
+            f"{name}: {', '.join(release)} is no longer part of this deployment. "
+            f"The volume is NOT deleted — it is left on the host, and `down --purge` "
+            f"no longer removes it. Remove it by hand if you want the space back."
+        )
+    return bool(adopt or release)
 
 
 def quadlet_active(name: str) -> bool:
@@ -3029,6 +3745,434 @@ def assert_host_empty(host: dict) -> None:
             f"({', '.join(names)}); remove them first "
             f"(e.g. agent-container down <name> --host {hostname})"
         )
+
+
+# --- Feature 016: drain-on-contact (research R7 + R10) -----------------------
+# A detached headless run is the DEFAULT, so at the moment a run ends there is no
+# CLI attached to write anything down — only the entrypoint, which leaves the
+# record on a volume. The tool therefore learns of it the next time it talks to
+# that host, and that is the whole of ingestion: read the volume, write the record
+# durably, then clear what was written.
+#
+# Never fatal and never silent. The operator's actual command must not fail
+# because a record could not be read (FR-008), and a drain that failed quietly
+# would look exactly like a host with nothing pending — which is the one thing an
+# operator would never think to check.
+
+# A record is a summary, not a log (the feature's first assumption), so a single
+# one is a few kilobytes. The cap is here because the tar arrives from inside a
+# container: a member that large is not a record, and reading it into memory to
+# discover that is how a small helper becomes a way to exhaust the CLI.
+MAX_RECORD_BYTES = 1 << 20
+
+
+def host_environments(host_name: str) -> list[str]:
+    """Environment names this tool has deployed to <host>, from its state dir.
+
+    The state dir is what still remembers an environment whose container is gone —
+    which is precisely the environment whose records are still pending and whose
+    volume nothing else would think to look at.
+    """
+    d = host_state_dir(host_name)
+    names = {p.stem for p in d.glob("*.port")}
+    names |= {p.name.removesuffix(".compose.yaml") for p in d.glob("*.compose.yaml")}
+    return sorted(n for n in names if NAME_RE.fullmatch(n))
+
+
+def resolve_ingest_image(images: dict[str, str], name: str) -> str:
+    """The image for the throwaway container — one that CERTAINLY exists on that host.
+
+    Research R10 measured the mechanism with `alpine`, which assumes a registry
+    pull. That assumption does not survive this project's own hosts: a declared
+    egress boundary (Feature 012) can refuse the pull, and the tool never asks a
+    host to fetch anything else. The environment's OWN image is present by
+    construction — the records exist because that container ran there — and it is
+    the image whose `dev` user wrote them, so the 0700 record directory is readable
+    without widening anything.
+
+    Falls back to the locally-built tag: right for a local host, and the only guess
+    left once the container itself is gone. The override exists for a host that
+    keeps neither.
+
+    >>> resolve_ingest_image({"agent-container-acme": "acme-agent"}, "acme")
+    'acme-agent'
+    >>> resolve_ingest_image({}, "acme") == IMAGE_NAME
+    True
+    """
+    return (
+        os.environ.get("AGENT_CONTAINER_INGEST_IMAGE")
+        or images.get(container_name(name))
+        or IMAGE_NAME
+    )
+
+
+def host_drain_facts(host_rec: dict) -> tuple[dict[str, str], set[str]]:
+    """({container name: image}, {container names still alive}) for one host.
+
+    Both come from ONE `ps`, because the drain needs both and asking twice would
+    let them disagree — a container that exits between the two calls would be
+    reported as alive by one answer and imaged by the other.
+
+    "Alive" deliberately counts `Restarting` as well as `Up`. It gates the
+    reconstruction of pending records (`_reconstruct_pending`), and there the
+    conservative direction is to leave a record pending: a record wrongly left
+    pending is corrected by the next contact, while a record wrongly declared
+    `stopped` is a false statement about a run that is still going.
+
+    host_ps_rows is fail-CLOSED by design (a down daemon must never read as 'no
+    containers'), which is right for lifecycle callers and wrong here: a drain is
+    an errand on the way to the operator's real command, and it must not be the
+    thing that kills it. The empty answer degrades to the IMAGE_NAME fallback,
+    which either works or produces a loud failure from the run itself — and it
+    cannot mislabel anything, because a host that cannot be asked for `ps` cannot
+    be asked for a volume either, so no record is ingested at all.
+    """
+    try:
+        rows = host_ps_rows(host_rec, include_stopped=True)
+    except Fatal, OSError, subprocess.SubprocessError:
+        return {}, set()
+    images = {cname: image for cname, image, _status, _uptime in rows if image}
+    live = {
+        cname for cname, _image, status, _uptime in rows if status.startswith(("Up", "Restarting"))
+    }
+    return images, live
+
+
+def pending_records_from_tar(blob: bytes) -> list[tuple[str, dict]]:
+    """(filename, record) pairs from a drain tarball, skipping what is not a record.
+
+    Member names come from inside the container and each one would become a
+    filename in the operator's durable store, so they are checked and REFUSED, not
+    repaired: `tar cf - -C /mnt .` emits `./<run-id>.json` for a record and nothing
+    else, so a member carrying a directory component, a `..` or a name that is not
+    a run id is not a record needing cleanup — it is something that should not be
+    there, and saying so is more useful than quietly fixing it.
+
+    A refused member is also never handed to the clear step, so nothing this
+    function distrusts can reach an `rm`.
+    """
+    out: list[tuple[str, dict]] = []
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r|*") as tf:
+        for member in tf:
+            if not member.isfile():
+                continue
+            filename = member.name.removeprefix("./")
+            stem = filename.removesuffix(".json")
+            if filename == stem or RUN_ID_RE.fullmatch(stem) is None:
+                warn(f"ignoring '{member.name}' on the runs volume: not a run record")
+                continue
+            if member.size > MAX_RECORD_BYTES:
+                warn(f"ignoring run record '{filename}': {member.size} bytes is not a summary")
+                continue
+            fh = tf.extractfile(member)
+            if fh is None:
+                continue
+            rec = _decode_record(filename, fh.read())
+            if rec is not None:
+                out.append((filename, rec))
+    return out
+
+
+def _decode_record(filename: str, raw: bytes) -> dict | None:
+    """Parse one record, refusing a schema this build does not understand.
+
+    `schema` exists so a consumer can refuse a record rather than MISREAD it
+    (data-model §1), which only means something if something actually refuses. A
+    refused record is left on the volume rather than dropped: the tool that wrote
+    it can still read it, and losing it here to make a warning go away would be the
+    opposite of the feature.
+    """
+    try:
+        rec = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+        warn(f"ignoring unreadable run record '{filename}' ({e})")
+        return None
+    if not isinstance(rec, dict):
+        warn(f"ignoring run record '{filename}': not an object")
+        return None
+    if rec.get("schema") != RUN_SCHEMA:
+        warn(
+            f"leaving run record '{filename}' on the volume: schema {rec.get('schema')!r}, "
+            f"this build reads {RUN_SCHEMA}"
+        )
+        return None
+    undeclared = sorted(set(rec) - set(RECORD_FIELD_PROVENANCE))
+    if undeclared:
+        # SC-005 is a claim about the records IN THE STORE, and this is the only
+        # door records enter it by that the tool did not compose itself. The
+        # record is still stored — dropping a field would lose an operator's data
+        # to make a warning go away, and C2 says `runs show --json` is verbatim —
+        # but the claim is narrowed out loud, because "no credential value beyond
+        # the task text" is only true of the field set this build declares.
+        warn(
+            f"run record '{filename}' carries undeclared field(s) {undeclared}: stored as-is, "
+            f"but the tool's no-credentials statement covers only the fields it declares"
+        )
+    return rec
+
+
+def _reconstruct_pending(rec: dict) -> dict:
+    """Complete a record no exit path ever completed (data-model §7).
+
+    A pending record — `outcome` and `ended_at` both null — is what SIGKILL leaves
+    behind: no trap runs, so the start-side write is the only thing on the volume.
+    Storing it as-is would list the run with a `?` outcome, which is the failure
+    SC-008 names: the run IS recorded as having been killed, so leaving the
+    strongest fact about it unstated turns a recorded kill into an unexplained gap.
+
+    `stopped` is asserted; `ended_at` is NOT invented. The container's clock stopped
+    at an instant nobody observed, and the ingestion time would be the time the
+    operator next ran a command — which for a detached run can be the next morning.
+    The note says the record was reconstructed so the null reads as "not known"
+    rather than as a bug in the writer.
+
+    >>> _reconstruct_pending({"outcome": None, "ended_at": None, "notes": []})
+    {'outcome': 'stopped', 'ended_at': None, 'notes': ['reconstructed at ingestion: the container went away without completing this record (no exit path ran); ended_at is unknown']}
+    >>> _reconstruct_pending({"outcome": "failed", "notes": []})  # already complete
+    {'outcome': 'failed', 'notes': []}
+    """
+    if rec.get("outcome") is not None:
+        return rec
+    rec["outcome"] = RUN_OUTCOME_STOPPED
+    notes = rec.get("notes")
+    rec["notes"] = [*notes] if isinstance(notes, list) else []
+    rec["notes"].append(
+        "reconstructed at ingestion: the container went away without completing this "
+        "record (no exit path ran); ended_at is unknown"
+    )
+    return rec
+
+
+def warn_records_lost_with_the_volume(host_name: str, host_rec: dict, name: str) -> None:
+    """Say when an environment's runs volume has gone missing under the tool (T057).
+
+    A missing volume is usually nothing at all: an environment that has never been
+    deployed has none, and one this tool tore down has none either — `down --purge`
+    drains FIRST and then removes the volume together with the generated model, so
+    it deliberately leaves no model behind for this to ask about.
+
+    What is NOT nothing is a model that still DECLARES the runs volume while the
+    host no longer has it. Something removed it outside the tool (`docker volume
+    rm`, a pruned host, a rebuilt VPS), and every record still pending on it went
+    with it. That loss is invisible by construction: an un-ingested record leaves
+    nothing behind, so the store simply has fewer runs in it than the operator ran,
+    and nothing anywhere looks wrong. T017's drain covers the tool's own teardown;
+    this covers the case that goes around the tool.
+
+    TWO conditions, and the second is not optional. The first is the MODEL rather
+    than the absence, so a never-deployed or properly-purged environment never
+    triggers it. The second is that the daemon ANSWERED: `volume inspect` fails
+    identically for "no such volume" and for a host that cannot be reached at all,
+    and without the second probe this would announce records permanently lost every
+    time a VPS was merely asleep. A warning that cries wolf on a reachable-tomorrow
+    host is one an operator learns to scroll past — which would cost exactly the
+    case it exists for. So the claim is only made when `volume ls` succeeded and
+    `volume inspect` did not: the daemon was asked, and it does not have it.
+    """
+    declared = deployed_volume_set(host_name, name)
+    if declared is None or runs_volume_name(name) not in declared:
+        return
+    if query(driver_runtime_argv(host_rec) + ["volume", "ls", "-q"]).returncode != 0:
+        return  # the host could not be asked, so nothing about it is known
+    warn(
+        f"{name}: {runs_volume_name(name)} is part of this deployment but no longer "
+        f"exists on {host_name} — it was removed outside the tool. Any run records "
+        f"still pending on it are GONE and cannot be recovered; records already "
+        f"ingested are unaffected. `agent-container up {name}` recreates the volume."
+    )
+
+
+def ingest_records(
+    host_name: str, host_rec: dict, name: str, image: str, live: bool = False
+) -> list[str]:
+    """Pull <name>'s pending records off its runs volume into the durable store.
+
+    `live` says the container is still up, and it changes what may be concluded
+    about a record no exit path completed: while the writer is alive that record is
+    IN FLIGHT, and both declaring it `stopped` and clearing it from the volume
+    would be wrong about a run that is still going. So a pending record from a live
+    container is stored as pending and LEFT on the volume, and the next contact
+    after the container is gone finalises it.
+
+    Returns the run ids ingested. Stamps `host` AND `environment` HERE and nowhere
+    else: the container writes both null on purpose. It is never told what the
+    operator's registry calls its host, and telling it its own environment name
+    would create a second copy that can drift from the volume the tool actually
+    keys on — while the drain reads `agent-container-<name>-runs`, so it knows
+    both with certainty. A record that lost them could not answer "which of last
+    night's runs is which" (data-model §1).
+
+    THE ORDER OF THE LAST TWO STEPS IS THE PROPERTY. Every record is written
+    durably — mkstemp, fsync, rename — before a single one is cleared from the
+    volume. Clearing first would trade a record that is merely un-ingested for one
+    that is gone.
+
+    Retention runs LAST and unconditionally (FR-011, C14), including on the paths
+    that ingested nothing: the store is bounded per environment, and an environment
+    whose volume has gone away still has a store that must stop growing — it just
+    stopped growing on its own.
+    """
+    ingested = _ingest_from_volume(host_name, host_rec, name, image, live)
+    pruned = prune_run_store(runs_store_dir(host_name, name))
+    if pruned:
+        # Deleting durable records is announced. The whole feature is that the
+        # account of a run outlives its container, so the tool removing one is the
+        # last thing that may happen quietly — and the message names the rule, so
+        # an operator who wants the record back knows which bound took it.
+        log(
+            f"{name}: pruned {len(pruned)} run record(s) past retention "
+            f"({RETENTION_MAX_AGE_DAYS} days / {RETENTION_MAX_RECORDS} records per environment)"
+        )
+    return ingested
+
+
+# How long a drain may block on a host before giving up and answering from the
+# local store. Short on purpose: the drain is opportunistic and sits in front of
+# read-only commands, so an unreachable host must cost a pause, not a hang.
+RUNS_PROBE_TIMEOUT = 10.0
+
+
+def _ingest_from_volume(
+    host_name: str, host_rec: dict, name: str, image: str, live: bool
+) -> list[str]:
+    """The drain itself — see `ingest_records`, which owns the contract and adds
+    retention around this."""
+    volume = runs_volume_name(name)
+    # BOUNDED, because a drain runs on the way to almost every command. Against an
+    # unreachable host this probe blocks on the runtime's own connect timeout, so
+    # `runs list` — which needs nothing but the LOCAL store to answer — hung instead
+    # of printing records already ingested. The drain is an opportunistic refresh;
+    # it must never be the reason a read-only query cannot complete.
+    try:
+        probe = query(
+            driver_runtime_argv(host_rec) + ["volume", "inspect", volume],
+            timeout=RUNS_PROBE_TIMEOUT,
+        )
+    except subprocess.SubprocessError:
+        # Unreachable, not absent — and the two must not be conflated. Warning that
+        # records "were lost with the volume" here would accuse an operator of
+        # destroying evidence that is sitting safely on a host they cannot reach.
+        warn(
+            f"{name}: {host_name} did not answer within {RUNS_PROBE_TIMEOUT:g}s; pending records "
+            f"stay on the host and will be ingested on a later contact. Showing what is stored."
+        )
+        return []
+    if probe.returncode != 0:
+        # No volume: nothing pending. Probed rather than assumed, because
+        # `run -v <name>:…` CREATES a named volume as a side effect — a drain that
+        # ran unconditionally would quietly re-create the volume it found missing,
+        # erasing the very evidence that records were lost to an out-of-band
+        # `volume rm` (the spec's own edge case).
+        warn_records_lost_with_the_volume(host_name, host_rec, name)
+        return []
+    try:
+        proc = subprocess.run(
+            driver_ingest_argv(host_rec, volume, image), capture_output=True, timeout=120
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        warn(f"{name}: could not read pending run records from {volume} on {host_name} ({e})")
+        return []
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}"
+        warn(
+            f"{name}: could not read pending run records from {volume} on {host_name} "
+            f"({detail}). They stay on the volume — `down --purge` would discard them."
+        )
+        return []
+    try:
+        pending = pending_records_from_tar(proc.stdout)
+    except tarfile.TarError as e:
+        warn(f"{name}: the drain of {volume} on {host_name} was not a readable archive ({e})")
+        return []
+    store = runs_store_dir(host_name, name)
+    written: list[str] = []
+    clearable: list[str] = []
+    for filename, rec in pending:
+        rec["host"] = host_name
+        rec["environment"] = name
+        if not live:
+            _reconstruct_pending(rec)
+        try:
+            atomic_write_json(store, filename, rec)
+        except OSError as e:
+            warn(f"{name}: could not store run record '{filename}' ({e}); left on the volume")
+            continue
+        written.append(filename)
+        # Only a COMPLETE record is cleared. An in-flight one is still owned by a
+        # writer that will rewrite it at exit, and removing it now would mean a
+        # SIGKILL between here and then leaves nothing on the volume to finalise —
+        # the store would keep a pending record forever, which is the one shape
+        # `runs list` cannot explain.
+        if rec.get("outcome") is not None:
+            clearable.append(filename)
+    if clearable:
+        _clear_ingested(host_name, host_rec, name, volume, image, clearable)
+    return [f.removesuffix(".json") for f in written]
+
+
+def _clear_ingested(
+    host_name: str, host_rec: dict, name: str, volume: str, image: str, filenames: list[str]
+) -> None:
+    """Remove records from the volume AFTER they are durably stored.
+
+    A drain that only ever read would leave every record on its volume forever, so
+    the volume grows without bound and — worse — retention (FR-011) becomes
+    theatre: a pruned record would be re-ingested by the next contact, and the
+    prune would look like it worked.
+
+    A failed clear is a warning, not a failure: the records are already durable,
+    and re-ingesting them is idempotent because a record's id IS its filename.
+    """
+    r = query(driver_ingest_clear_argv(host_rec, volume, image, filenames))
+    if r.returncode != 0:
+        warn(
+            f"{name}: stored {len(filenames)} run record(s) but could not clear them from "
+            f"{volume} on {host_name} ({r.stderr.strip() or f'exit {r.returncode}'}). "
+            f"They will be re-ingested (harmless) and the volume keeps growing."
+        )
+
+
+def drain_host_records(host_name: str, host_rec: dict, names: list[str] | None = None) -> list[str]:
+    """Ingest pending records for <names> on <host>, defaulting to every
+    environment the tool knows there. Returns the run ids ingested.
+
+    SCOPED ON PURPOSE. Lifecycle commands pass the one environment they act on;
+    `runs list` with no argument passes None and drains the host. Draining every
+    environment on every `up` would start a throwaway container per environment on
+    every deploy, and nothing is lost by not doing it — an undrained record sits on
+    its volume until the next contact that names it, which is exactly where the
+    design already puts it.
+    """
+    if host_rec.get("driver") not in ("docker", "podman"):
+        return []  # attach-only host: reachable over ssh, cannot run a container
+    envs = host_environments(host_name) if names is None else list(names)
+    if not envs:
+        return []
+    try:
+        ensure_tunnel(host_rec)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        # FR-008/C11, and the promise this section's own header makes: a drain is an
+        # errand on the way to the operator's real command and must never be the
+        # thing that kills it. The case that matters is `runs list` against a host
+        # that has gone away — the durable store is the whole point of the feature,
+        # and it is read from local disk, so failing here would deny an operator
+        # records that survived precisely so they could be read now.
+        warn(f"could not reach {host_name} to collect pending run records ({e})")
+        return []
+    images, live = host_drain_facts(host_rec)
+    ingested: list[str] = []
+    for env in envs:
+        try:
+            ingested += ingest_records(
+                host_name,
+                host_rec,
+                env,
+                resolve_ingest_image(images, env),
+                live=container_name(env) in live,
+            )
+        except (Fatal, OSError, subprocess.SubprocessError) as e:
+            warn(f"{env}: could not drain pending run records from {host_name} ({e})")
+    return ingested
 
 
 def stage_ssh_injection(
@@ -3228,7 +4372,16 @@ class ExecSpec:
 def resolve_task(task: str | None) -> str | None:
     """Resolve --task: a bare string is the task text; a leading '@' reads a LOCAL
     file whose whole content is the task (research R2). Delivered later as an
-    injected file (never argv/env, no size cap)."""
+    injected file (never argv/env, no size cap).
+
+    Every task the tool accepts funnels through here — `up --task`, `redeploy
+    --task`, and a declarative `container.task` — and each is recorded verbatim in
+    the run record (C13). A rule stated only at this funnel is read by no operator
+    at all, so each acceptance site carries it where its task is TYPED: the help of
+    the two flags does that, and a NEW site owes the same. `container.task` is the
+    site with no help string to carry it — its statement has to be made where the
+    key is documented.
+    """
     if task is None:
         return None
     if task.startswith("@"):
@@ -3335,6 +4488,62 @@ def stage_task_injection(
     f.write_text(task_text)
     f.chmod(0o644)
     return [("task", f, INJECT_TASK_PATH)]
+
+
+def record_never_started(host_name: str, name: str, spec: ExecSpec, reason: str) -> str | None:
+    """The ONE record the tool authors itself (C6, research R5).
+
+    By definition nothing inside the container ran, so nothing inside could
+    report — the asymmetry R5 insists on stating, or the ingestion path would
+    assume every record arrives from a volume. This one is written straight to the
+    durable store; there is no volume in this story.
+
+    `exit_code` and `repository` are null rather than `0` and `{}`. A zero would
+    read as a clean run that never happened, and an empty repository effect would
+    claim the run changed nothing when the truth is that it never looked — which is
+    the distinction the spec's edge case asks for between a run that never started
+    and one that started and failed.
+
+    Interactive is deliberately absent rather than handled: `never-started` is not
+    in the interactive vocabulary (data-model §2), so a session that failed to come
+    up is UNREPRESENTABLE as a record instead of being filed under a borrowed word.
+
+    Returns the run id, or None when nothing was recorded.
+
+    NOTHING BELOW MAY RAISE (FR-008, C11). The one caller is an `except Fatal:`
+    block that re-raises the failure the operator is actually waiting to read, so an
+    exception escaping here would REPLACE that failure with a complaint about
+    bookkeeping — the run would report the wrong reason for not starting, which is
+    worse than reporting no record. The construction is inside the guard too, and
+    not only the write: `build_run_record` refuses an illegal record by calling
+    `die`, and a `die` is a Fatal like any other.
+    """
+    if spec.mode != "headless":
+        return None
+    now = utc_now()
+    try:
+        record = build_run_record(
+            run_id=new_run_id(),
+            environment=name,
+            agent=spec.agent,
+            kind="headless",
+            outcome=RUN_OUTCOME_NEVER_STARTED,
+            started_at=now,
+            ended_at=now,
+            task=spec.task,
+            host=host_name,
+            repository=None,
+            notes=[reason],
+        )
+        atomic_write_json(runs_store_dir(host_name, name), f"{record['run_id']}.json", record)
+    except (Fatal, OSError, ValueError, TypeError) as e:
+        # Not silent, though (C11's other half). The run is already failing on its
+        # own terms; this warning exists so a missing record is not later mistaken
+        # for a run that never happened.
+        warn(f"{name}: the run never started and its record could not be written either ({e})")
+        return None
+    log(f"recorded run {record['run_id']} as never-started ({reason})")
+    return record["run_id"]
 
 
 def compose_up_exec(
@@ -3470,6 +4679,15 @@ def compose_up_exec(
             f"recreated. Volumes are preserved; the port number is unchanged."
         )
         down_container(host_name, host_rec, name, purge=False)
+    # Feature 016 T010, the same class of blind spot one level down: the volume SET
+    # changed while every identity value stayed the same. Announced here, before the
+    # model is written, so the warning describes the shape being left rather than
+    # the one already on disk — deployed_volume_set reads that file.
+    announce_volume_set_migration(
+        host_name,
+        name,
+        per_container_volumes(name) if declare_ws else other_container_volumes(name),
+    )
     _dests = resolve_destinations(egress) if _enforced else []
     # R24/T155: the LAST silent property of the boundary, said out loud at deploy.
     warn_pinned_port_destinations(_dests, transparent=_transparent)
@@ -3585,6 +4803,12 @@ def do_up(
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     host_name, host_rec = resolve_deploy_host(host)
     ensure_tunnel(host_rec)
+    # Drain-on-contact (FR-001a, research R7). A detached run — the default
+    # headless mode — ends with no CLI attached, so its record waits on the volume
+    # until something talks to the host. `up` on the same environment is the most
+    # common next contact, and doing it BEFORE the deploy means the previous run's
+    # account is safe before this one starts overwriting the volume's state.
+    drain_host_records(host_name, host_rec, [name])
     cname = container_name(name)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
 
@@ -3595,6 +4819,20 @@ def do_up(
             f"container {cname} already running on {host_name}"
             + (f" (port {port})" if port else "")
         )
+        # `up` on a running container is a deliberate no-op, which is exactly why the
+        # volume-set migration has to be MENTIONED here (T010). This is the one path
+        # that neither recreates nor reconciles, so an environment kept alive by `up`
+        # would carry a stale volume set indefinitely with nothing ever saying so.
+        # It is not recreated behind the operator's back — `up` never does that — so
+        # the message has to name the command that would.
+        if announce_volume_set_migration(
+            host_name,
+            name,
+            per_container_volumes(name)
+            if spec.workspace == "persistent"
+            else other_container_volumes(name),
+        ):
+            warn(f"run: agent-container redeploy {name}{hflag}")
         log(f"attach with: agent-container attach {name}{hflag}")
         return
     if cname in existing:
@@ -3602,31 +4840,43 @@ def do_up(
             f"container {cname} exists but is not running on {host_name}. Run: agent-container down {name}{hflag}"
         )
 
-    # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
-    # never gets a half-configured environment built from files we no longer read.
-    refuse_superseded_layout(name)
-    env_file = _resolve_env_files(name, env_file_override)
+    # Everything from here on can fail with the container never having run — a
+    # missing image, an unresolvable credential, compose refusing. C6 says that is
+    # a DIFFERENT outcome from a run that started and failed, and only the tool can
+    # say so, because there was never anything inside to say it.
+    try:
+        # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
+        # never gets a half-configured environment built from files we no longer read.
+        refuse_superseded_layout(name)
+        env_file = _resolve_env_files(name, env_file_override)
 
-    # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
-    # container is created; https:// uses GH_TOKEN and needs none.
-    clone_credential_precheck(spec, env_file, push_key)
+        # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
+        # container is created; https:// uses GH_TOKEN and needs none.
+        clone_credential_precheck(spec, env_file, push_key)
 
-    # The image builds on the host via compose (`up --build`) — no pre-built
-    # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
-    with deployment_lock(host_name, name):
-        compose_up_exec(
-            host_name,
-            host_rec,
-            name,
-            env_file,
-            resolved_mounts,
-            host_key,
-            authorized_keys or [],
-            push_key=push_key,
-            known_hosts=known_hosts,
-            spec=spec,
-            extra_injected_configs=extra_injected_configs,
-        )
+        # The image builds on the host via compose (`up --build`) — no pre-built
+        # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
+        with deployment_lock(host_name, name):
+            compose_up_exec(
+                host_name,
+                host_rec,
+                name,
+                env_file,
+                resolved_mounts,
+                host_key,
+                authorized_keys or [],
+                push_key=push_key,
+                known_hosts=known_hosts,
+                spec=spec,
+                extra_injected_configs=extra_injected_configs,
+            )
+    except Fatal as e:
+        # Fatal only. A headless FOREGROUND run leaves through typer.Exit carrying
+        # the agent's exit code, and that container DID run — recording it here
+        # would file a completed run as never-started, which is the one distinction
+        # C6 exists to preserve.
+        record_never_started(host_name, name, spec, f"never started: {e}")
+        raise
 
 
 def down_container(
@@ -3635,6 +4885,35 @@ def down_container(
     ensure_tunnel(host_rec)
     cname = container_name(name)
     compose_file = compose_file_path(host_name, name)
+    # STOP, THEN DRAIN, THEN REMOVE — all three, in that order, and each for its
+    # own reason (FR-001b / C4).
+    #
+    # The drain is before the removal because `--purge` destroys the runs volume,
+    # and a drain placed after that is not a late drain, it is no drain — an
+    # environment being destroyed is the single most likely moment for its record
+    # to matter and the easiest one to lose it at.
+    #
+    # The STOP is before the drain because `compose down --volumes` kills the
+    # container and drops its volume in ONE step, leaving no instant in between at
+    # which the container's own final record could be collected. Measured: without
+    # this, tearing down a RUNNING environment stored the pending record written at
+    # start and destroyed the `stopped` one the SIGTERM trap wrote — the run ended
+    # up recorded with a null outcome forever, which is exactly the ambiguous
+    # ending SC-002 requires to be impossible. Stopping first lets the entrypoint
+    # complete its own record (it writes before it waits, inside the grace period)
+    # so the drain finds a finished one.
+    #
+    # Only the base file: the sidecars are torn down by the `down` below, and
+    # stopping the agent is all the record needs. Unconditional rather than gated
+    # on `purge`, because this same function runs the port-owner migration's
+    # teardown, and a drain that only happened on the destructive path would leave
+    # every other teardown accumulating records that a later `--purge` discards in
+    # one go.
+    if compose_file.is_file():
+        query(driver_stop_argv(host_rec, compose_project(name), compose_file))
+    else:
+        query(driver_runtime_argv(host_rec) + ["stop", cname])
+    drain_host_records(host_name, host_rec, [name])
     # host_container_names is fail-closed (it dies on an unreachable daemon). On
     # the teardown path that would strand the local state: down/wipe must still
     # clear the per-host state (and drop the derived compose artifact on purge)
@@ -3857,27 +5136,37 @@ def do_redeploy(
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     host_name, host_rec = resolve_deploy_host(host)
     ensure_tunnel(host_rec)
+    # Drain-on-contact, and here it is also protective: `redeploy` recreates the
+    # container, which is the moment a still-pending record from the run being
+    # replaced would otherwise be overwritten by the new one starting.
+    drain_host_records(host_name, host_rec, [name])
     if container_name(name) not in host_container_names(host_rec, include_stopped=True):
         warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
-    # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
-    # never gets a half-configured environment built from files we no longer read.
-    refuse_superseded_layout(name)
-    env_file = _resolve_env_files(name, env_file_override)
-    clone_credential_precheck(spec, env_file, push_key)
-    with deployment_lock(host_name, name):
-        compose_up_exec(
-            host_name,
-            host_rec,
-            name,
-            env_file,
-            resolved_mounts,
-            host_key,
-            authorized_keys or [],
-            redeploy=True,
-            push_key=push_key,
-            known_hosts=known_hosts,
-            spec=spec,
-        )
+    try:
+        # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
+        # never gets a half-configured environment built from files we no longer read.
+        refuse_superseded_layout(name)
+        env_file = _resolve_env_files(name, env_file_override)
+        clone_credential_precheck(spec, env_file, push_key)
+        with deployment_lock(host_name, name):
+            compose_up_exec(
+                host_name,
+                host_rec,
+                name,
+                env_file,
+                resolved_mounts,
+                host_key,
+                authorized_keys or [],
+                redeploy=True,
+                push_key=push_key,
+                known_hosts=known_hosts,
+                spec=spec,
+            )
+    except Fatal as e:
+        # C6, same as `up`: `redeploy --mode headless` is a way to start a run, so
+        # a redeploy that never produced a container is a run that never started.
+        record_never_started(host_name, name, spec, f"never started: {e}")
+        raise
 
 
 def do_wipe(name: str, yes: bool, host: str | None = None) -> None:
@@ -4045,6 +5334,733 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
             style=style,
         )
     console.print(table)
+
+
+# --- Feature 016: reading the durable store (C1, C2) -------------------------
+# Everything below reads STORED RECORDS ONLY. No repository is consulted and no
+# container is inspected, which is what lets these answer months later, on a
+# machine that no longer has the clone, about an environment that no longer
+# exists — the property C3/SC-001 is measured on.
+
+
+def read_stored_record(path: Path) -> dict | None:
+    """One stored record, or None with a warning.
+
+    A record we cannot parse is NAMED rather than skipped quietly: a listing that
+    is silently one record short is indistinguishable from a run that never
+    happened, and the runs an operator cares about are disproportionately the ones
+    that ended badly enough to write something odd.
+    """
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        warn(f"unreadable run record {path} ({e})")
+        return None
+    if not isinstance(rec, dict):
+        warn(f"unreadable run record {path}: not an object")
+        return None
+    return rec
+
+
+def stored_environments(host: str) -> list[str]:
+    """Environments with a record directory on <host>.
+
+    Read from the durable store and NOT from the state dir, because the two answer
+    different questions: the state dir knows what is deployed, this knows what has
+    run. An environment torn down last month has no state and still has records —
+    which is the entire feature (C3).
+    """
+    try:
+        return sorted(p.name for p in (DATA_DIR / "runs" / host).iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+def stored_records(host: str, environments: list[str]) -> list[dict]:
+    """Every stored record for <environments> on <host>, NEWEST FIRST.
+
+    Ordered by `started_at`, not by file mtime. mtime is when the record was
+    INGESTED, and a whole host drained in one contact shares it to the second — so
+    an mtime ordering would sort a listing by nothing at all, while looking
+    chronological. list_stored_records still does the directory read, because its
+    suffix filter is what keeps a half-written record out of the listing.
+    """
+    out: list[dict] = []
+    for env in environments:
+        for p in list_stored_records(runs_store_dir(host, env)):
+            rec = read_stored_record(p)
+            if rec is not None:
+                out.append(rec)
+    return sorted(out, key=_run_sort_key, reverse=True)
+
+
+def _run_sort_key(rec: dict) -> tuple[str, str]:
+    """`started_at` then `run_id`. The id breaks the tie so two runs that started
+    in the same second do not reorder between two listings of the same store."""
+    return (str(rec.get("started_at") or ""), str(rec.get("run_id") or ""))
+
+
+def find_stored_record(host: str, run_id: str) -> tuple[str, dict] | None:
+    """(environment, record) for <run-id> on <host>, searching every environment.
+
+    `runs show` takes an id and not an environment (C2), and an id does not carry
+    the environment it came from — so the search is over directories rather than a
+    lookup. The id is validated by the caller before it is ever joined to a path.
+    """
+    for env in stored_environments(host):
+        p = runs_store_dir(host, env) / f"{run_id}.json"
+        if p.is_file():
+            rec = read_stored_record(p)
+            if rec is not None:
+                return env, rec
+    return None
+
+
+def render_usage(usage: object) -> str:
+    """Usage as one line — `unknown` as THE WORD when the agent reported nothing.
+
+    Never `0` (C9, FR-006, SC-004): a false zero silently understates every total
+    it enters, and a total that is quietly wrong is worse than one that admits a
+    gap. Reported usage keeps the agent's own keys and names the agent (C10,
+    FR-015), so nothing here invites adding two agents' numbers together.
+
+    `reported` must be exactly `True`, not merely truthy. A record written in shell
+    and ingested without passing `validate_usage` can carry the STRING `"false"`,
+    which is truthy in Python — and a truthiness test would render that record as a
+    report, turning the one field that separates "nothing was said" from "nothing
+    was consumed" into whichever the writer happened to serialise. Measured, not
+    imagined: `{"reported": "no"}` rendered as a reported usage before this.
+
+    >>> render_usage({"reported": False})
+    'unknown (the agent reported none)'
+    >>> render_usage({"reported": True, "agent": "claude", "units": {"input_tokens": 12}})
+    'claude: input_tokens=12'
+    >>> render_usage({"reported": "false"})
+    'unknown (the agent reported none)'
+    >>> render_usage(None)
+    'unknown (the agent reported none)'
+    """
+    if not isinstance(usage, dict) or usage.get("reported") is not True:
+        return "unknown (the agent reported none)"
+    units = usage.get("units")
+    agent = usage.get("agent") or "unnamed agent"
+    if not isinstance(units, dict) or not units:
+        return f"{agent}: reported, but recorded no units"
+    return f"{agent}: " + " ".join(f"{k}={v}" for k, v in sorted(units.items()))
+
+
+def usage_units(usage: object, agent: str) -> dict[str, float] | None:
+    """This record's summable units, or None when its usage is an UNKNOWN
+    COMPONENT of any total it would enter (FR-007).
+
+    One rule, deliberately all-or-nothing: a record contributes only when it says
+    it reported, names the agent that ran, and carries numbers. Anything else is
+    unknown rather than partially counted, because a half-counted record produces a
+    total that is quietly wrong — worse than one that admits a gap (research R6).
+
+    The agent-name check is not pedantry. `units` is stored unnormalised (FR-015),
+    so a total is only meaningful within one agent; a usage claiming a different
+    agent from the one that ran means nobody can say whose units these are, and
+    adding them to either bucket would invent the equivalence C10 forbids.
+
+    >>> usage_units({"reported": True, "agent": "claude", "units": {"t": 2}}, "claude")
+    {'t': 2}
+    >>> usage_units({"reported": False}, "claude") is None
+    True
+    >>> usage_units({"reported": True, "agent": "codex", "units": {"t": 2}}, "claude") is None
+    True
+    """
+    if not isinstance(usage, dict) or usage.get("reported") is not True:
+        return None
+    if usage.get("agent") != agent:
+        return None
+    units = usage.get("units")
+    if not isinstance(units, dict) or not units:
+        return None
+    out: dict[str, float] = {}
+    for key, value in units.items():
+        if (
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
+            return None
+        out[key] = value
+    return out
+
+
+def aggregate_usage(records: list[dict]) -> dict:
+    """Usage totals for a listing, PER AGENT, with the unknowns counted (FR-007).
+
+    `unknown_components` is the requirement, not a nicety: FR-007 says an aggregate
+    must state when a component is unknown rather than silently excluding it, and a
+    sum with three unreported runs quietly missing from it looks exactly like a sum
+    of everything. The count is carried at both levels so neither reading of the
+    payload can lose it.
+
+    THERE IS NO CROSS-AGENT TOTAL, and its absence is the point (FR-015, C10). Two
+    agents' `input_tokens` are not the same quantity; a key here that added them
+    would produce the one number a reader would quote, and it would mean nothing.
+
+    >>> agg = aggregate_usage([
+    ...     {"agent": "claude", "usage": {"reported": True, "agent": "claude",
+    ...                                   "units": {"input_tokens": 10}}},
+    ...     {"agent": "claude", "usage": {"reported": False}},
+    ... ])
+    >>> agg["runs"], agg["unknown_components"]
+    (2, 1)
+    >>> agg["by_agent"]["claude"]
+    {'runs': 2, 'reported': 1, 'unknown_components': 1, 'units': {'input_tokens': 10}}
+    """
+    by_agent: dict[str, dict] = {}
+    unknown = 0
+    for rec in records:
+        agent = str(rec.get("agent") or "?")
+        slot = by_agent.setdefault(
+            agent, {"runs": 0, "reported": 0, "unknown_components": 0, "units": {}}
+        )
+        slot["runs"] += 1
+        units = usage_units(rec.get("usage"), agent)
+        if units is None:
+            slot["unknown_components"] += 1
+            unknown += 1
+            continue
+        slot["reported"] += 1
+        for key, value in units.items():
+            slot["units"][key] = slot["units"].get(key, 0) + value
+    return {"runs": len(records), "unknown_components": unknown, "by_agent": by_agent}
+
+
+def render_usage_totals(agg: dict) -> list[str]:
+    """The usage aggregate as lines for a human, unknowns first.
+
+    The unknown count leads the summary rather than trailing it, because the whole
+    of FR-007 is that a reader must not take the figures below for the whole story.
+    A summary that printed the totals and mentioned the gap afterwards would be read
+    in the order it was printed.
+
+    Nothing is added across agents, and the line says so whenever there is more than
+    one — the reader with two rows in front of them is exactly the reader about to
+    add them (C10).
+
+    >>> render_usage_totals(aggregate_usage([{"agent": "claude", "usage": {"reported": False}}]))
+    ['usage: unknown for all 1 run(s) — no agent reported any (never counted as zero)']
+    """
+    if not agg["runs"]:
+        return []
+    reporting = {a: s for a, s in agg["by_agent"].items() if s["units"]}
+    if not reporting:
+        return [
+            f"usage: unknown for all {agg['runs']} run(s) — no agent reported any "
+            f"(never counted as zero)"
+        ]
+    lines = [
+        f"usage: {agg['runs']} run(s), {agg['unknown_components']} with no usage reported "
+        f"(unknown, never counted as zero)"
+    ]
+    for agent, slot in sorted(reporting.items()):
+        units = " ".join(f"{k}={v}" for k, v in sorted(slot["units"].items()))
+        lines.append(f"  {agent}: {slot['reported']} of {slot['runs']} run(s) reported — {units}")
+    if len(reporting) > 1:
+        lines.append("  (per agent; agents' units are not comparable and are never added together)")
+    return lines
+
+
+PUSH_UNPUSHED = "unpushed"
+# One row per push status, so the word the classifier returns and the words the
+# operator reads cannot drift apart. `!!` marks the one status that is an alarm.
+PUSH_ROWS: dict[str, tuple[str, str]] = {
+    PUSH_UNPUSHED: (
+        "!! push",
+        "COMMITTED WITHOUT PUSHING — the work is only in the container",
+    ),
+    "pushed": ("push", "pushed"),
+    "unknown": ("push", "could not tell (no upstream to compare against)"),
+    # NO "nothing" ROW. `push_status` can no longer return it: `pushed: false` means
+    # the exit head is provably not on the upstream, so there is always something
+    # outstanding. The row existed for an empty `commits` list, which the writer also
+    # emits when the list is UNKNOWN — and "nothing to push" was then an affirmative
+    # falsehood about a run whose work was only in the container.
+}
+
+
+def push_status(repo: object) -> str:
+    """Where this run's commits stand against its upstream, as ONE closed word:
+    `none` · `pushed` · `unpushed` · `unknown` · `nothing`.
+
+    One classifier, because the human rendering and the machine-readable flag
+    (C8, FR-005) have to agree about what counts as commit-without-push. Two sites
+    deciding it separately is how `--json` ends up silent about a run the table
+    shouts about, and SC-003 is then measured on whichever one the reader chose.
+
+    `pushed: null` is `unknown` and never `unpushed`: "could not tell" and "did
+    not push" are different facts, and only one of them is an alarm (C8).
+
+    A `pushed: false` recorded with NO upstream contradicts C8 — the writer should
+    have said null. It is read as `unpushed` regardless, because the two mistakes
+    are not symmetric: a false alarm sends an operator to look at work that turns
+    out to be safe, while a swallowed one loses the work Constitution I exists to
+    protect. Records this tool builds cannot reach that shape
+    (`validate_repository_effect` refuses it); one written by an older or foreign
+    writer can, and this is the side that meets it.
+
+    >>> push_status({"state": "ok", "commits": ["abc"], "pushed": False})
+    'unpushed'
+    >>> push_status({"state": "no-upstream", "commits": ["abc"], "pushed": None})
+    'unknown'
+    >>> push_status({"state": "ok", "commits": [], "pushed": True})
+    'pushed'
+    >>> push_status(None)
+    'none'
+
+    An empty `commits` with `pushed: false` still alarms — the writer emits `[]` for
+    an UNKNOWN list as well as an empty one, and the push flag is decided
+    independently of it:
+
+    >>> push_status({"state": "ok", "commits": [], "pushed": False, "paths_truncated": True})
+    'unpushed'
+    """
+    if not isinstance(repo, dict):
+        return "none"
+    pushed = repo.get("pushed")
+    if pushed is None:
+        return "unknown"
+    if pushed:
+        return "pushed"
+    # `pushed: false` IS the alarm, whatever the commit list says.
+    #
+    # This used to fall back to "nothing" on an empty `commits`, and that was wrong
+    # in the one direction that loses work. `pushed: false` is computed as NOT
+    # `merge-base --is-ancestor <end_head> @{u}` — the exit head is PROVABLY not on
+    # the upstream, so something is outstanding by definition. Meanwhile the writer
+    # emits `commits: []` when the list is UNKNOWN as well as when it is empty:
+    # unattributable history, a `rev-list` failure, or the exit-capture deadline
+    # expiring under SIGTERM. Reading that as reassurance produced "nothing to push"
+    # and an empty `unpushed` key for a run whose work existed only in the
+    # container — SC-003's "looks like a clean success", produced by the very check
+    # written to prevent it.
+    #
+    # The asymmetry this file already argues for `pushed: false` with no upstream
+    # applies unchanged: a false alarm sends an operator to look at work that turns
+    # out to be safe; a swallowed one loses the work Constitution I exists to
+    # protect. `commits` is CONTEXT for the alarm, never its trigger.
+    return PUSH_UNPUSHED
+
+
+def unpushed_run_ids(records: list[dict]) -> list[str]:
+    """Run ids of the records that committed without pushing (C8, FR-005).
+
+    This is what makes the failure loud in `--json` (T030): each record is served
+    verbatim, so an agent reading the list would otherwise have to re-derive the
+    alarm from `repository.pushed` — and an agent that forgets to is exactly the
+    SC-003 case of a run that "looks like a clean success".
+    """
+    return [
+        str(r.get("run_id") or "?")
+        for r in records
+        if push_status(r.get("repository")) == PUSH_UNPUSHED
+    ]
+
+
+# How many changed paths `runs show` spells out before it stops and gives a count
+# instead. A rendering cap, not a capture cap: the record still holds the whole
+# list, and the line says how many there are either way.
+PATHS_SHOWN = 10
+
+
+def render_changed_paths(paths: list, truncated: bool) -> str:
+    """The changed-path summary, with the capture cap SAID rather than implied.
+
+    `paths_truncated` is never rendered as a footnote or omitted (C16, R11): a
+    list that looks complete is what answers "no run changed that file" with
+    confidence when one did, so the truncation travels in the same words as the
+    count.
+
+    >>> render_changed_paths(["a.py", "b.py"], False)
+    '2 changed: a.py, b.py'
+    >>> render_changed_paths(["a.py"], True)
+    '1 changed, LIST TRUNCATED AT CAPTURE — the run changed more: a.py'
+    >>> render_changed_paths([], False)
+    'no files changed'
+
+    An EMPTY list that is flagged truncated is not an empty list — it is an unknown
+    one, and saying "no files changed" about it is a definite claim about data the
+    writer never had:
+
+    >>> render_changed_paths([], True)
+    'changed files UNKNOWN — the list could not be captured'
+    """
+    if not paths:
+        # EMPTY AND TRUNCATED IS UNKNOWN, NOT NONE. The writer emits an empty list
+        # both when nothing changed and when the capture failed or hit its deadline,
+        # so "no files changed" here would answer a question the record cannot
+        # answer — and it is the same sentence a genuinely clean run produces, which
+        # is what makes it indistinguishable.
+        return (
+            "changed files UNKNOWN — the list could not be captured"
+            if truncated
+            else "no files changed"
+        )
+    head = f"{len(paths)} changed"
+    if truncated:
+        head += ", LIST TRUNCATED AT CAPTURE — the run changed more"
+    if len(paths) <= PATHS_SHOWN:
+        return f"{head}: " + ", ".join(str(p) for p in paths)
+    return f"{head} (runs show --json for the full list)"
+
+
+def render_repository(repo: object) -> list[tuple[str, str]]:
+    """Rows describing the repository effect, or a row saying there is none.
+
+    Commit-without-push is stated in those words (C8, FR-005): it is the failure
+    Constitution I exists to prevent, and a renderer that printed `pushed: false`
+    among nine other fields would technically contain the information while
+    guaranteeing nobody reads it.
+
+    >>> render_repository(None)
+    [('repository', 'no repository effect recorded')]
+    >>> render_repository({"state": "ok", "commits": ["abc"], "pushed": False})[-1]
+    ('!! push', 'COMMITTED WITHOUT PUSHING — the work is only in the container')
+    >>> render_repository({"state": "ok", "commits": ["abc"], "pushed": None})[-1]
+    ('push', 'could not tell (no upstream to compare against)')
+    """
+    if not isinstance(repo, dict):
+        return [("repository", "no repository effect recorded")]
+    commits = repo.get("commits") or []
+    rows = [
+        ("repository", str(repo.get("state") or "unknown")),
+        ("commits", ", ".join(str(c) for c in commits) if commits else "none"),
+        PUSH_ROWS[push_status(repo)],
+    ]
+    paths = repo.get("paths")
+    if isinstance(paths, list):
+        # Only when a list was actually captured. A row saying "no files changed"
+        # for a record that never carried the field would answer SC-007 for a run
+        # nobody asked about the paths of.
+        rows.append(("files", render_changed_paths(paths, bool(repo.get("paths_truncated")))))
+    return rows
+
+
+def render_run_record(environment: str, rec: dict) -> None:
+    """Render one record for a human.
+
+    It is a SUMMARY and points at the logs rather than pretending to be them (C15,
+    FR-014). The two have opposite lifetimes — the record outlives the container
+    and the logs do not — so a rendering that looked like log output would promise
+    detail that is already gone.
+    """
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    for field_name, value in (
+        ("run", str(rec.get("run_id") or "?")),
+        ("environment", str(rec.get("environment") or environment)),
+        ("host", str(rec.get("host") or "?")),
+        ("agent", str(rec.get("agent") or "?")),
+        ("kind", str(rec.get("kind") or "?")),
+        ("outcome", str(rec.get("outcome") or "pending")),
+        ("exit code", "-" if rec.get("exit_code") is None else str(rec.get("exit_code"))),
+        ("started", str(rec.get("started_at") or "?")),
+        ("ended", str(rec.get("ended_at") or "still pending")),
+        ("task", str(rec.get("task")) if rec.get("task") is not None else "-"),
+    ):
+        table.add_row(field_name, value)
+    for field_name, value in render_repository(rec.get("repository")):
+        table.add_row(field_name, value)
+    table.add_row("usage", render_usage(rec.get("usage")))
+    for note in rec.get("notes") or []:
+        table.add_row("note", str(note))
+    console.print(table)
+    console.print("this is a summary, not the logs.")
+    # soft_wrap: the line is a COMMAND. Rich would otherwise fold it at the
+    # console width, and a wrapped command is one an operator cannot copy.
+    console.print(
+        f"logs, while the container lives: agent-container logs {environment}", soft_wrap=True
+    )
+
+
+# --- `runs list --changed <path>` (C16, SC-007) ------------------------------
+#
+# Answered from STORED RECORDS ONLY. No repository is opened and no SHA is
+# resolved: the paths were captured when each run ended (research R11), which is
+# what lets this answer months later, on a machine that never had the clone, and
+# against history someone has since rebased. Query-time resolution would fail
+# exactly when the record is most valuable.
+#
+# The whole design turns on one asymmetry: a MATCH is a fact, but a NON-match is
+# only a fact when the record's path list is known to be complete. Where it is
+# not, the run is reported as uncertain — a confident "no run changed that file"
+# built on a truncated list is the failure C16 exists to prevent.
+
+CHANGED_MATCH = "match"
+CHANGED_UNCERTAIN = "uncertain"
+CHANGED_NO = "no"
+
+
+def normalise_changed_path(path: str) -> str:
+    """The path as `repository.paths` holds it: repo-relative, no leading `./`.
+
+    An empty path, an absolute one, or one containing `..` is REFUSED. Records
+    carry repo-relative paths and this command reads nothing but records, so there
+    is no repository root here to resolve such a path against — searching for it
+    would match nothing at all, and a confident empty answer is precisely what
+    C16 forbids. Refusing says which question cannot be answered.
+
+    >>> normalise_changed_path("./src/auth/session.py")
+    'src/auth/session.py'
+    >>> normalise_changed_path("src/auth/")
+    'src/auth'
+    """
+    wanted = path.strip()
+    while wanted.startswith("./"):
+        wanted = wanted[2:]
+    wanted = wanted.rstrip("/")
+    if not wanted or Path(wanted).is_absolute() or ".." in wanted.split("/"):
+        die(
+            f"'{path}' is not a repository-relative path",
+            code="invalid_changed_path",
+            entity=path,
+            remedy="pass the path as the repository sees it, e.g. src/auth/session.py",
+        )
+    return wanted
+
+
+def path_is_covered(recorded: str, wanted: str) -> bool:
+    """Does one recorded path answer for `wanted`?
+
+    Exact match, or `wanted` naming a directory the recorded path sits under —
+    an operator asking about `src/auth` means the directory, and a match on the
+    file alone would answer "no run touched it" for a run that rewrote all of it.
+
+    >>> path_is_covered("src/auth/session.py", "src/auth")
+    True
+    >>> path_is_covered("src/authz/session.py", "src/auth")
+    False
+    """
+    return recorded == wanted or recorded.startswith(f"{wanted}/")
+
+
+def changed_path_verdict(rec: dict, wanted: str) -> tuple[str, str]:
+    """`(verdict, reason)` for one stored record against one path (C16).
+
+    `reason` is non-empty only for `uncertain`, and it names WHICH kind of
+    incomplete knowledge produced it — the operator's next step differs between
+    "the list was cut" and "this run recorded no list at all".
+
+    Two records can be ruled out with no path list at all, and only two: a
+    container that never started and a workspace that held no repository. Neither
+    could have changed a file. Every other missing list is silence, and silence is
+    not evidence — the same reasoning as truncation, one step earlier.
+    """
+    # A never-started record carries `repository: null` (C6), and an ingested
+    # record can carry anything at all; collapsing both to an empty mapping keeps
+    # every lookup below on one path, so a non-dict cannot reach a `.get` and turn
+    # an unanswerable query into a traceback.
+    raw = rec.get("repository")
+    repo: dict = raw if isinstance(raw, dict) else {}
+    paths = repo.get("paths")
+    if isinstance(paths, list):
+        if any(path_is_covered(str(p), wanted) for p in paths):
+            return CHANGED_MATCH, ""
+        if repo.get("paths_truncated"):
+            return (
+                CHANGED_UNCERTAIN,
+                "the path list was truncated when the run ended; the path may have been cut",
+            )
+        return CHANGED_NO, ""
+    if rec.get("outcome") == RUN_OUTCOME_NEVER_STARTED or repo.get("state") == "no-repository":
+        return CHANGED_NO, ""
+    return CHANGED_UNCERTAIN, "this run recorded no path list, so it cannot be ruled out"
+
+
+def select_changed(records: list[dict], wanted: str) -> tuple[list[dict], list[dict]]:
+    """Split records into (matched, uncertain) for `wanted`, order preserved.
+
+    The uncertain entries are DELIBERATELY not records: they are not answers to
+    the question, and putting them in the same list as the matches would let a
+    consumer read `runs` as "the runs that changed this file" and be wrong.
+    """
+    matched: list[dict] = []
+    uncertain: list[dict] = []
+    for rec in records:
+        verdict, reason = changed_path_verdict(rec, wanted)
+        if verdict == CHANGED_MATCH:
+            matched.append(rec)
+        elif verdict == CHANGED_UNCERTAIN:
+            uncertain.append(
+                {
+                    "run_id": str(rec.get("run_id") or "?"),
+                    "environment": str(rec.get("environment") or "?"),
+                    "reason": reason,
+                }
+            )
+    return matched, uncertain
+
+
+def do_runs_list(
+    environment: str | None, host: str | None, as_json: bool, changed: str | None = None
+) -> None:
+    """`runs list [<environment>] [--changed <path>]` (C1, C16), newest first."""
+    if environment is not None:
+        validate_name(environment)
+    host_name, host_rec = resolve_deploy_host(host)
+    # Drain first (R7). This is the command an operator runs to look for the record
+    # of a detached run, so a listing that read the store without draining would
+    # answer "no runs" for a run that finished thirty seconds ago. Scoped to the
+    # named environment when there is one, so listing one does not start a
+    # throwaway container per environment on the host.
+    drain_host_records(host_name, host_rec, [environment] if environment else None)
+    envs = [environment] if environment else stored_environments(host_name)
+    records = stored_records(host_name, envs)
+    uncertain: list[dict] = []
+    if changed is not None:
+        records, uncertain = select_changed(records, normalise_changed_path(changed))
+    if as_json:
+        # `runs` stays the verbatim records (C1/C2). The two derived keys are what
+        # make the alarms machine-readable (T030, C16): an agent that had to
+        # re-derive them from the records is an agent that can forget to, and a
+        # forgotten one is a run that "looks like a clean success" (SC-003).
+        #
+        # `unpushed` and `usage` are ALWAYS present, even empty. A key that appeared
+        # only when non-empty would make "no run committed without pushing" and
+        # "this build does not report it" identical to a consumer — and the same
+        # trap holds for an aggregate whose `unknown_components` vanished exactly
+        # when it was zero. `uncertain` appears with --changed, which is the only
+        # mode in which the concept exists.
+        payload: dict = {
+            "runs": records,
+            "unpushed": unpushed_run_ids(records),
+            "usage": aggregate_usage(records),
+        }
+        if changed is not None:
+            payload["uncertain"] = uncertain
+        emit_json(payload)
+        return
+    if not records:
+        # C1: ONE LINE, not an empty screen. "nothing was recorded" and "the command
+        # did nothing" look identical when the answer is blank space.
+        where = f"{environment} on {host_name}" if environment else host_name
+        if changed is not None:
+            # Never a bare "none" while a run is unaccounted for: with uncertain
+            # candidates present, "no run changed that file" is the confident wrong
+            # answer C16 names.
+            log(f"no stored record shows a change to {changed} ({where})")
+            report_uncertain_changed(uncertain, changed)
+            return
+        log(f"no run records for {where}")
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    # ENVIRONMENT is dropped when one was named: the column would repeat the
+    # argument on every row, and the width it costs is what pushes the run id past
+    # an 80-column terminal.
+    cols = ("RUN", "AGENT", "KIND", "OUTCOME", "STARTED")
+    if environment is None:
+        cols = ("RUN", "ENVIRONMENT", *cols[1:])
+    for col in cols:
+        # overflow="fold", not the default ellipsis: the RUN column IS the argument
+        # `runs show` takes, and on a narrow terminal the default renders it as
+        # `20260809T101010Z-…` — a listing whose primary key cannot be copied.
+        table.add_column(col, overflow="fold")
+    for rec in records:
+        cells = [
+            str(rec.get("run_id") or "?"),
+            str(rec.get("agent") or "?"),
+            str(rec.get("kind") or "?"),
+            # A null outcome is not a missing field, it is a run still in flight —
+            # its container is up and no exit path has run yet. `?` would read as
+            # "this record is broken" for the one case where nothing is wrong.
+            str(rec.get("outcome") or "pending"),
+            str(rec.get("started_at") or "?"),
+        ]
+        if environment is None:
+            cells.insert(1, str(rec.get("environment") or "?"))
+        table.add_row(*cells)
+    console.print(table)
+    report_unpushed(records)
+    # After the table and before the uncertainty report: the totals describe the
+    # rows above them, while `--changed`'s uncertainty describes what is NOT above
+    # them and has to be the last thing read.
+    for line in render_usage_totals(aggregate_usage(records)):
+        console.print(line, soft_wrap=True)
+    if changed is not None:
+        report_uncertain_changed(uncertain, changed)
+
+
+def report_unpushed(records: list[dict]) -> None:
+    """Say, after the table, which runs committed without pushing (FR-005, C8).
+
+    A listing does not carry the repository effect per row — the columns an
+    operator scans are what the run was, not what it left behind — so without this
+    line a commit-without-push is present in the store and invisible on screen,
+    which is SC-003's "looks like a clean success" exactly.
+
+    The ids are spelled out because they are the RUN column's values and the
+    argument `runs show` takes: a count alone would announce a problem and leave
+    the operator to find it.
+    """
+    ids = unpushed_run_ids(records)
+    if not ids:
+        return
+    console.print(
+        f"[red]![/red] {len(ids)} run(s) COMMITTED WITHOUT PUSHING — the work is only in "
+        f"the container: {', '.join(ids)}",
+        soft_wrap=True,
+    )
+
+
+def report_uncertain_changed(uncertain: list[dict], changed: str) -> None:
+    """Name the runs that could NOT be ruled out for `--changed` (C16, T054).
+
+    Omitting them would turn every answer into a confident one, including the
+    answers built on a truncated path list — the failure C16 exists to prevent.
+    Each is named with its reason, because "the list was cut" and "no list was
+    recorded" send the operator to different places.
+    """
+    if not uncertain:
+        return
+    console.print(
+        f"[red]![/red] {len(uncertain)} run(s) cannot be ruled out for {changed} — "
+        f"this answer is NOT complete:",
+        soft_wrap=True,
+    )
+    for item in uncertain:
+        console.print(
+            f"  {item['run_id']} ({item['environment']}): {item['reason']}", soft_wrap=True
+        )
+
+
+def do_runs_show(run_id: str, host: str | None, as_json: bool) -> None:
+    """`runs show <run-id>` (C2) — one complete record."""
+    if RUN_ID_RE.fullmatch(run_id) is None:
+        # The id is joined to a store path below. Refused, not sanitised: there is
+        # no legitimate run id this rejects, and a `..` reaching the join is how a
+        # read command becomes a way to read arbitrary files.
+        die(
+            f"'{run_id}' is not a run id",
+            code="invalid_run_id",
+            entity=run_id,
+            remedy="agent-container runs list",
+        )
+    host_name, host_rec = resolve_deploy_host(host)
+    # An id does not say which environment it belongs to, so the whole host is
+    # drained: the record being asked for may be the one still on a volume.
+    drain_host_records(host_name, host_rec)
+    found = find_stored_record(host_name, run_id)
+    if found is None:
+        die(
+            f"no run record '{run_id}' on {host_name}",
+            code="run_not_found",
+            entity=run_id,
+            remedy=f"agent-container runs list --host {host_name}",
+        )
+    environment, rec = found
+    if as_json:
+        # C2: VERBATIM as stored. `runs show --json` is how an agent reads a record,
+        # and a rendering step here would make the machine-readable form a
+        # derivative of the human one rather than the record itself.
+        emit_json(rec)
+        return
+    render_run_record(environment, rec)
 
 
 def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
@@ -6780,8 +8796,8 @@ def phase_a_port_owner_stale(host_rec: dict, host_name: str, name: str, enforced
     """Whether a RUNNING container still publishes the port the egress service now
     owns — i.e. it was deployed before the shared-namespace migration.
 
-    THE IDENTITY LOCK CANNOT SEE THIS. Container name, port number and all nine
-    volume names are unchanged; only which service publishes the port moved. So a
+    THE IDENTITY LOCK CANNOT SEE THIS. Container name, port number and every
+    volume name are unchanged; only which service publishes the port moved. So a
     baseline diff passes while the deployed shape is stale, and the environment
     keeps running with Phase A's cooperative enforcement while its declaration
     reads as a boundary.
@@ -7183,16 +9199,25 @@ def config_drift(
 
 
 def env_reconcile(
-    host_rec: dict, name: str, spec: ExecSpec, egress: object = None
+    host_rec: dict, name: str, spec: ExecSpec, egress: object = None, *, host_name: str
 ) -> tuple[str, str]:
     """Reconcile the declared env's DETERMINISTIC identity (Constitution IV — no state
     file) against reality, returning (state, detail):
       absent   — no container for the identity
-      drifted  — present-but-stopped, OR running with a config delta vs the spec
-      matching — running and the agent-config matches the spec
+      drifted  — present-but-stopped, running with a config delta vs the spec, OR
+                 deployed with a different VOLUME SET than the spec now declares
+      matching — running and both the agent-config and the volume set match
     `detail` is a human-readable delta ('' for absent/matching). Because both the
     desired config and the identity derive only from the spec (never an absolute
-    path), a fresh checkout at any location reconciles identically (FR-005/SC-003)."""
+    path), a fresh checkout at any location reconciles identically (FR-005/SC-003).
+
+    `host_name` is KEYWORD-ONLY AND REQUIRED, and it is the host's registry key —
+    not something read off `host_rec`, which does not carry its own key. The same
+    trap `_previous_model_had_egress` documents: an empty key resolves to a path
+    that never exists, so every environment would report a matching volume set and
+    Feature 016's migration would never fire. That failure is invisible, because
+    "no migration needed" is also the answer for the common case.
+    """
     cname = container_name(name)
     all_names = host_container_names(host_rec, include_stopped=True)
     if cname not in all_names:
@@ -7203,8 +9228,6 @@ def env_reconcile(
     if live is None:
         return "matching", ""  # running but not inspectable — existence-level match
     diffs = config_drift(env_desired_config(spec, egress), live)
-    if not diffs:
-        return "matching", ""
     # Redact any credential embedded in the repo/clone URL before it reaches the
     # detail string — status/apply log this, so an ssh://user:tok@ or https://…:token@
     # repo must never be printed verbatim (Constitution III; adversarial-verify MEDIUM).
@@ -7213,6 +9236,25 @@ def env_reconcile(
         if f == "repo":
             want, live = _redact_url_userinfo(want), _redact_url_userinfo(live)
         parts.append(f"{f}: {live!r}→{want!r}")
+    # Feature 016 T010. Without this, an environment deployed before the runs volume
+    # existed reports "matching" forever: name, port and all nine original volume
+    # names are unchanged, so nothing `apply` compares can see the difference. The
+    # container keeps running, writes its run records into its own layer, and
+    # teardown destroys them — the exact failure the feature exists to prevent, and
+    # a silent one, because a missing record looks like a run that had nothing to say.
+    adopt, release = volume_set_migration(
+        host_name,
+        name,
+        per_container_volumes(name)
+        if spec.workspace == "persistent"
+        else other_container_volumes(name),
+    )
+    if adopt:
+        parts.append(f"volumes to add: {', '.join(adopt)}")
+    if release:
+        parts.append(f"volumes no longer declared: {', '.join(release)}")
+    if not parts:
+        return "matching", ""
     return "drifted", "; ".join(parts)
 
 
@@ -7313,7 +9355,9 @@ def _reconcile_plan(environments: list[dict], host_override: str | None):
             continue
         host_name, host_rec = resolve_deploy_host(host_override or binding_name)
         ensure_tunnel(host_rec)
-        state, detail = env_reconcile(host_rec, name, env_exec_spec(env), env.get("egress"))
+        state, detail = env_reconcile(
+            host_rec, name, env_exec_spec(env), env.get("egress"), host_name=host_name
+        )
         plans.append((env, name, host_name, host_rec, state, detail))
         log(f"  {name} → host={host_name}: {state}" + (f" ({detail})" if detail else ""))
     return plans
@@ -7993,11 +10037,23 @@ def up(
     agent: str = typer.Option(
         "claude", "--agent", help="Primary agent to run: claude | codex | pi | opencode."
     ),
+    # The task-text rule is stated HERE, at the flag the operator types the task
+    # into, and not only in docs/threat-model.md — a warning read after the paste
+    # is not a warning. `task` is the ONE field of a run record an operator authors
+    # (C13, research R9); every other field is tool- or git-derived and structurally
+    # cannot carry a secret. Nothing redacts it, deliberately: a pattern-based
+    # redactor that missed one value would turn the operator's caution into
+    # misplaced confidence. `commands --json` re-emits this help by introspection,
+    # so the machine-readable interface inherits the statement rather than
+    # restating it out of step.
     task: str | None = typer.Option(
         None,
         "--task",
         help="Initial task (interactive) / the task to run (headless). Text, or "
-        "@FILE to read a local file. Delivered as an injected file (never argv/env).",
+        "@FILE to read a local file. Delivered as an injected file (never argv/env). "
+        "RECORDED VERBATIM in the run record, which outlives the container "
+        "(`agent-container runs show`) — never put a credential in the task text; "
+        "nothing redacts it.",
     ),
     workspace: str = typer.Option(
         "persistent",
@@ -8094,7 +10150,7 @@ def down(
     purge: bool = typer.Option(
         False,
         "--purge",
-        help="Also delete all nine per-container volumes (workspace + agent logins, shell env, tmux config, ssh).",
+        help="Also delete all ten per-container volumes (workspace + agent logins, shell env, tmux config, ssh, pending run records).",
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
     as_json: bool = JSON_OPT,
@@ -8157,7 +10213,14 @@ def redeploy(
     ),
     mode: str = typer.Option("interactive", "--mode", help="Execution mode (as for `up`)."),
     agent: str = typer.Option("claude", "--agent", help="Primary agent (as for `up`)."),
-    task: str | None = typer.Option(None, "--task", help="Initial/headless task (as for `up`)."),
+    # Restated, not delegated to `up`: this is a second place a task is typed, and
+    # "as for `up`" is not read by someone who is about to paste one here.
+    task: str | None = typer.Option(
+        None,
+        "--task",
+        help="Initial/headless task (as for `up`). RECORDED VERBATIM in the run "
+        "record, which outlives the container — never put a credential in it.",
+    ),
     workspace: str = typer.Option(
         "persistent", "--workspace", help="Workspace mode (as for `up`)."
     ),
@@ -8237,6 +10300,65 @@ def list_cmd(
     host (a --local view skips remote queries)."""
     set_json_mode(as_json)
     do_list(as_json, local_only)
+
+
+# The `runs` group reads the DURABLE record store, not the host. It is a group and
+# not a top-level `runs` verb for the same reason `host` is: `list` and `show` mean
+# different things here than they do for containers, and flattening them would give
+# the tool two `list`s that answer different questions. Deliberately read-only —
+# there is no `runs rm`; retention prunes at ingestion (FR-011), so a record's
+# lifetime is a documented rule rather than an operator action that could be
+# forgotten on one machine and not another.
+runs_app = typer.Typer(
+    no_args_is_help=True,
+    # The retention rule is stated HERE, in the help an operator reads at the point
+    # of use, and interpolated from the constants that enforce it — a number typed
+    # into prose beside a different number in the code is this project's recurring
+    # defect, and a test binds these two together in both directions.
+    help=(
+        "Durable run records: what each run did and how it ended (survives teardown). "
+        f"Records are pruned at ingestion, per environment, at "
+        f"{RETENTION_MAX_AGE_DAYS} days or {RETENTION_MAX_RECORDS} records — "
+        f"whichever prunes first."
+    ),
+)
+app.add_typer(runs_app, name="runs")
+
+
+@runs_app.command("list")
+def runs_list(
+    environment: str | None = typer.Argument(
+        None, help="Environment to list (default: every environment recorded on the host)."
+    ),
+    host: str | None = typer.Option(
+        None, "--host", help="Host whose records to read (default: the registry default)."
+    ),
+    changed: str | None = typer.Option(
+        None,
+        "--changed",
+        metavar="PATH",
+        help="Only runs whose recorded changed paths cover PATH (repository-relative). "
+        "Reads stored records only — no repository needed, and a rewritten history "
+        "does not change the answer.",
+    ),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """List run records newest-first, ingesting anything still pending on the host."""
+    set_json_mode(as_json)
+    do_runs_list(environment, host, as_json, changed)
+
+
+@runs_app.command("show")
+def runs_show(
+    run_id: str = typer.Argument(..., help="Run id (as shown by `runs list`)."),
+    host: str | None = typer.Option(
+        None, "--host", help="Host whose records to search (default: the registry default)."
+    ),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Show one complete run record (--json emits it verbatim as stored)."""
+    set_json_mode(as_json)
+    do_runs_show(run_id, host, as_json)
 
 
 # The `host` group manages WHERE containers run (registered targets). Container

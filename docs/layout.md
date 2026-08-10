@@ -11,6 +11,7 @@ name used two ways anywhere else in the docs, this file wins.
 | **Project config** | `<root>/.agent-container/` | one project — **travels with the repository** |
 | **User configuration** | `~/.config/agent-container/` | one operator machine — does **not** travel |
 | **Derived host state** | `$XDG_STATE_HOME/agent-container/<host>/` | computed; safe to delete |
+| **Run records** | `$XDG_DATA_HOME/agent-container/runs/<host>/<environment>/` | one operator machine — **durable**; outlives every container |
 | **Image sources** | `<checkout>/image/` | the tool's own repo |
 
 "Project directory" is **not** used: it is ambiguous between the first two.
@@ -97,6 +98,24 @@ A bare `./.env` in your project root is **not** read — it belongs to whoever p
 (Compose, direnv, a framework). If one is present and no agent-container env file resolves, the
 tool refuses rather than deploying without it.
 
+## Run records are observations — not state, not configuration
+
+`$XDG_DATA_HOME/agent-container/runs/<host>/<environment>/<run-id>.json` — one JSON file per agent
+run, on the operator's machine (`~/.local/share/...` when `XDG_DATA_HOME` is unset).
+
+**Not derived host state**, though both are XDG and both are per-machine: that location is
+documented *computed; safe to delete*, and a record of a run that already ended cannot be
+recomputed. Keeping records there would make this file's own description of it false.
+
+**Not user configuration**, which is what the operator *writes*; a record is what the tool
+*observes*, and a directory holding both cannot be hand-edited safely. **Not project config**,
+which travels with the repository and would commit one machine's observations to everyone's.
+
+The container writes each record to a volume first, because when a detached run ends the entrypoint
+is the only thing left to write anything. The tool drains that volume into this store on its next
+contact with the host — and teardown drains **before** removing volumes, or the account of the run
+being torn down goes with it.
+
 ## Inside the container
 
 | Path | Holds | Lifetime |
@@ -106,6 +125,7 @@ tool refuses rather than deploying without it.
 | `~/.agent-env` | persistent shell environment | the `-shellenv` volume |
 | `~/.claude`, `~/.codex`, `~/.pi` | per-agent config + credentials | one volume each |
 | `~/.config/opencode`, `~/.local/share/opencode` | opencode config; credentials + sessions | two volumes |
+| `/var/lib/agent-container/runs` | run records awaiting ingestion | the `-runs` volume |
 | `/run/agent-container/` | injected secrets | **vanish with the container** |
 
 `/workspace/.agent-container` keeps the name because it *is* your project config delivered

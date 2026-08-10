@@ -31,6 +31,11 @@ SCRIPT_PATH = Path(__file__).resolve().parents[1] / "agent-container"
 _counter = itertools.count()
 
 
+def _no_drain(*_args, **_kwargs) -> list[str]:
+    """Stand-in for Feature 016's drain_host_records — see `load_wiz`."""
+    return []
+
+
 @pytest.fixture
 def load_wiz(monkeypatch, tmp_path):
     """Factory that loads a fresh, env-isolated instance of the script.
@@ -41,13 +46,25 @@ def load_wiz(monkeypatch, tmp_path):
     created: list[str] = []
 
     def _load(
-        *, home: Path | None = None, xdg_state: Path | None = None, xdg_config: Path | None = None
+        *,
+        home: Path | None = None,
+        xdg_state: Path | None = None,
+        xdg_config: Path | None = None,
+        xdg_data: Path | None = None,
     ):
         if home is None:
             home = tmp_path / "home"
         home.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(home))
-        for var, val in (("XDG_STATE_HOME", xdg_state), ("XDG_CONFIG_HOME", xdg_config)):
+        # XDG_DATA_HOME joined the list with Feature 016's durable run store. A
+        # leaked one would point DATA_DIR at the operator's real ~/.local/share and
+        # a test would write records there — the docstring's isolation promise has
+        # to cover every XDG dir the script reads, not the ones it read first.
+        for var, val in (
+            ("XDG_STATE_HOME", xdg_state),
+            ("XDG_CONFIG_HOME", xdg_config),
+            ("XDG_DATA_HOME", xdg_data),
+        ):
             if val is None:
                 monkeypatch.delenv(var, raising=False)
             else:
@@ -69,6 +86,18 @@ def load_wiz(monkeypatch, tmp_path):
         module = importlib.util.module_from_spec(spec)
         sys.modules[mod_name] = module
         loader.exec_module(module)
+        # Feature 016: every lifecycle command now drains pending run records
+        # before doing its work, and draining reaches the container RUNTIME. This
+        # module docstring promises the suite never requires docker or podman, and
+        # a test whose `query` fake answers "success" would otherwise let the drain
+        # spawn a REAL container from a hermetic test.
+        #
+        # So it is neutralised in every loaded instance, and the real implementation
+        # is kept beside it under a second name: bin/tests/test_run_ingestion.py —
+        # the file that owns the drain — puts it back explicitly. That is what stops
+        # this from quietly becoming a suite-wide way of never testing it.
+        module.real_drain_host_records = module.drain_host_records
+        module.drain_host_records = _no_drain
         created.append(mod_name)
         return module
 
@@ -79,8 +108,12 @@ def load_wiz(monkeypatch, tmp_path):
 
 @pytest.fixture
 def wiz(load_wiz, tmp_path):
-    """Default isolated module: XDG state/config under tmp_path."""
-    return load_wiz(xdg_state=tmp_path / "xdg-state", xdg_config=tmp_path / "xdg-config")
+    """Default isolated module: XDG state/config/data under tmp_path."""
+    return load_wiz(
+        xdg_state=tmp_path / "xdg-state",
+        xdg_config=tmp_path / "xdg-config",
+        xdg_data=tmp_path / "xdg-data",
+    )
 
 
 @pytest.fixture

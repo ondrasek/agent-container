@@ -44,6 +44,9 @@ Volume=agent-container-${NAME}-opencode-data:/home/dev/.local/share/opencode
 Volume=agent-container-${NAME}-shellenv:/home/dev/.agent-env
 Volume=agent-container-${NAME}-tmux:/home/dev/.config/tmux
 Volume=agent-container-${NAME}-ssh:/home/dev/.ssh
+# Feature 016: the pending run record, on its own volume so it survives the
+# container in every workspace mode.
+Volume=agent-container-${NAME}-runs:/var/lib/agent-container/runs
 EnvironmentFile=${ENV_FILE}
 # UTC unless the .env overrides TZ.
 Timezone=UTC

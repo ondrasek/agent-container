@@ -53,9 +53,17 @@ setup_sandbox() {
     SANDBOX="$(mktemp -d)"
     export XDG_STATE_HOME="${SANDBOX}/state"
     export XDG_CONFIG_HOME="${SANDBOX}/config"
+    export XDG_DATA_HOME="${SANDBOX}/data"
     mkdir -p "${XDG_STATE_HOME}/agent-container" "${XDG_CONFIG_HOME}/agent-container"
     printf '2206\n' > "${XDG_STATE_HOME}/agent-container/acme.port"
     printf '2220\n' > "${XDG_STATE_HOME}/agent-container/blog.port"
+    # Feature 016 durable run store. 'demolished' deliberately has NO state file:
+    # it is the environment that was torn down and whose records outlived it, and
+    # it is the assertion that proves `runs list` completes from the record store
+    # rather than from the state files (where it would be invisible).
+    mkdir -p "${XDG_DATA_HOME}/agent-container/runs/local/acme" \
+             "${XDG_DATA_HOME}/agent-container/runs/local/demolished"
+    : > "${XDG_DATA_HOME}/agent-container/runs/local/acme/20260809T101010Z-ab12.json"
     cat > "${XDG_CONFIG_HOME}/agent-container/hosts.conf" <<'EOF'
 # sample hosts
 VPS_HOST=vps.example.com
@@ -176,6 +184,41 @@ test_tool() {
     assert_has "${tool}:keys-flag"   "--authorized-key" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "keys" ""
     assert_has "${tool}:keys-name"   "acme" "${COMPREPLY[@]}"     # local running names
+
+    # 10) Feature 016: the `runs` group.
+    run_comp "${func}" "${tool}" ""
+    assert_has "${tool}:subcmd-runs" "runs" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "runs" ""
+    assert_has "${tool}:runs-sub" "list" "${COMPREPLY[@]}"
+    assert_has "${tool}:runs-sub" "show" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "runs" "list" ""
+    # THE point of a separate source: 'demolished' has records and no state file.
+    # Completing from state would offer nothing for the environments this feature
+    # exists to answer for — a completion that looks like it works and is blind to
+    # every torn-down environment.
+    assert_has  "${tool}:runs-env" "demolished" "${COMPREPLY[@]}"
+    assert_has  "${tool}:runs-env" "acme"       "${COMPREPLY[@]}"
+    assert_lacks "${tool}:runs-env" "blog"      "${COMPREPLY[@]}"   # deployed, never ran
+    run_comp "${func}" "${tool}" "runs" "show" ""
+    assert_has  "${tool}:runs-id" "20260809T101010Z-ab12" "${COMPREPLY[@]}"
+    assert_lacks "${tool}:runs-id" "acme"                 "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "runs" "list" "--"
+    assert_has "${tool}:runs-flag" "--json" "${COMPREPLY[@]}"
+    assert_has "${tool}:runs-flag" "--host" "${COMPREPLY[@]}"
+    assert_has "${tool}:runs-flag" "--changed" "${COMPREPLY[@]}"
+    # --changed is `runs list`-only. Offered on `show` it would complete a flag
+    # that errors, which is worse than not completing it at all.
+    run_comp "${func}" "${tool}" "runs" "show" "--"
+    assert_lacks "${tool}:runs-show-flag" "--changed" "${COMPREPLY[@]}"
+    # A --changed VALUE is a path INSIDE the recorded repository, which may not
+    # exist here at all; falling through to the record completer would offer run
+    # ids where a path goes.
+    run_comp "${func}" "${tool}" "runs" "list" "--changed" ""
+    assert_lacks "${tool}:runs-changed" "demolished" "${COMPREPLY[@]}"
+    # A --host VALUE must not fall through to the record completer: offering run
+    # ids where a host name goes reads as a working completion and is nonsense.
+    run_comp "${func}" "${tool}" "runs" "list" "--host" ""
+    assert_lacks "${tool}:runs-host" "demolished" "${COMPREPLY[@]}"
 }
 
 # COMPL-1 regression: a hostile hosts.conf key or state-file name carrying a
@@ -188,14 +231,28 @@ test_security_no_exec() {
     mkdir -p "${sbx}/state/agent-container" "${sbx}/config/agent-container"
     : > "${sbx}/state/agent-container/\$(touch PWNED-state).port"
     printf '$(touch PWNED-hosts)_HOST=x\n' > "${sbx}/config/agent-container/hosts.conf"
+    # Feature 016 added a THIRD name source (the durable run store), and a name
+    # source that never runs the injection probe is a source nobody checked.
+    mkdir -p "${sbx}/data/agent-container/runs/local/\$(touch PWNED-runs)"
+    : > "${sbx}/data/agent-container/runs/local/\$(touch PWNED-runs)/\$(touch PWNED-id).json"
     (
         cd "${sbx}" || exit 0
         export XDG_STATE_HOME="${sbx}/state" XDG_CONFIG_HOME="${sbx}/config"
+        export XDG_DATA_HOME="${sbx}/data"
         # shellcheck disable=SC1090
         source "${script}"
         cur=""; COMP_WORDS=("${tool}" attach ""); COMP_CWORD=2; COMPREPLY=()
         "${func}" 2>/dev/null || true
+        cur=""; COMP_WORDS=("${tool}" runs list ""); COMP_CWORD=3; COMPREPLY=()
+        "${func}" 2>/dev/null || true
+        cur=""; COMP_WORDS=("${tool}" runs show ""); COMP_CWORD=3; COMPREPLY=()
+        "${func}" 2>/dev/null || true
     )
+    if [[ -e "${sbx}/PWNED-runs" || -e "${sbx}/PWNED-id" ]]; then
+        fail=$((fail + 1)); note "FAIL: ${tool}: completion EXECUTED code from a hostile run record name"
+    else
+        pass=$((pass + 1))
+    fi
     if [[ -e "${sbx}/PWNED-state" || -e "${sbx}/PWNED-hosts" ]]; then
         fail=$((fail + 1)); note "FAIL: ${tool}: completion EXECUTED code from a hostile name"
     else
@@ -320,6 +377,26 @@ completion NOT exercised (harness limitation, not a completion defect)"
         else
             fail=$((fail + 1))
             note "FAIL: zsh '${verb} --agent ${pre}<TAB>' should complete to '${want}', got: ${got}"
+        fi
+    done
+    # Feature 016: the `runs` arm, EXECUTED. Grepping the zsh file would prove only
+    # that the words are present — which is exactly what it proved for `--agent`
+    # while that completion returned nothing. The second probe also exercises the
+    # durable-store gatherer: 'demolished' has records and no state file, so a
+    # completion reading state instead would return the prefix unchanged.
+    for probe in "agent-container runs sh|runs show" \
+                 "agent-container runs list demol|runs list demolished"; do
+        pline="${probe%%|*}"; want="${probe#*|}"
+        got="$(zsh_complete "${pline}")"
+        if [[ "${got}" == *"${want}"* ]]; then
+            pass=$((pass + 1))
+        elif [[ "${got}" == *"__HARNESS_NOT_READY__"* || -z "${got}" ]]; then
+            skip=$((skip + 1))
+            note "SKIP: zsh '${pline}<TAB>' — pty never became ready; completion NOT \
+exercised (harness limitation, not a completion defect)"
+        else
+            fail=$((fail + 1))
+            note "FAIL: zsh '${pline}<TAB>' should complete to '${want}', got: ${got}"
         fi
     done
 else

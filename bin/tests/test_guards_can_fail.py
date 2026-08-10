@@ -70,6 +70,7 @@ def test_guards_pass_on_the_unmodified_fixture(wiz, fake_root):
     """Control. If the copied tree already failed, every proof below would be
     vacuous — passing for the wrong reason is exactly what is being guarded."""
     tpl.test_entrypoint_dispatch_matches_canonical_agent_list(wiz)
+    tpl.test_entrypoint_writes_to_the_runs_mount_path(wiz)
     tpl.test_dockerfile_installs_exactly_the_canonical_agents(wiz)
     tpl.test_completions_offer_exactly_the_canonical_agents(wiz)
     tpl.test_orchestration_templates_mount_the_full_volume_set(wiz)
@@ -79,11 +80,24 @@ def test_guards_pass_on_the_unmodified_fixture(wiz, fake_root):
 def test_entrypoint_guard_fails_when_an_agent_arm_disappears(wiz, fake_root):
     _corrupt(
         fake_root / "image" / "entrypoint.sh",
-        "opencode) exec opencode run",
-        "gone) exec opencode run",
+        "opencode) cmd=(opencode run",
+        "gone) cmd=(opencode run",
     )
     with pytest.raises(AssertionError, match="entrypoint.sh disagrees"):
         tpl.test_entrypoint_dispatch_matches_canonical_agent_list(wiz)
+
+
+def test_runs_mount_guard_fails_when_the_entrypoint_writes_elsewhere(wiz, fake_root):
+    """The drift this catches is invisible from either side alone: the CLI still
+    mounts the volume, the entrypoint still writes a record, and the record is
+    simply somewhere the volume is not."""
+    _corrupt(
+        fake_root / "image" / "entrypoint.sh",
+        'RUNS_DIR="${AGENT_CONTAINER_RUNS_DIR:-/var/lib/agent-container/runs}"',
+        'RUNS_DIR="${AGENT_CONTAINER_RUNS_DIR:-/tmp/agent-container-runs}"',
+    )
+    with pytest.raises(AssertionError, match="RUNS_MOUNT_PATH"):
+        tpl.test_entrypoint_writes_to_the_runs_mount_path(wiz)
 
 
 def test_dockerfile_guard_fails_when_an_agent_is_not_installed(wiz, fake_root):

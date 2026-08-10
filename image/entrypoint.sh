@@ -6,6 +6,11 @@
 #   2. Install/persist/generate the SSH host key + assemble authorized_keys
 #      (from bind-mount, env, or the persisted ~/.ssh volume) as the dev user.
 #   3. Configure git identity + HTTPS credential helper for the dev user.
+#   3r. Open this run's record on the 'runs' volume (Feature 016) — written at
+#      START so a run that is KILLED still leaves one, completed on every exit
+#      path this script can still reach.
+#   3e. Take the repository baseline once the workspace is populated, so the
+#      record can state what the run committed and whether it pushed.
 #   4. Start sshd in the background.
 #   5. Start a detached tmux session named 'main' for the dev user.
 #   6. Stay alive as PID 1, forwarding SIGTERM/SIGINT to a clean shutdown.
@@ -176,6 +181,647 @@ git config --global credential.https://github.com.helper \
     '!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f'
 
 log "Configured git identity for ${GIT_USER_NAME}"
+
+# --- 3r. Run record — open it at START (Feature 016) -------------------------
+# Every run leaves a small durable JSON record that outlives its container. The
+# CONTAINER writes it because a DETACHED headless run — the default headless
+# mode — ends with no CLI attached: the entrypoint is the only thing present at
+# that moment (FR-001a). The tool ingests it off the per-container 'runs' volume
+# on its next contact with this host, and stamps the fields only it knows.
+#
+# WRITTEN AT START, NOT ONLY AT EXIT. `docker kill` sends SIGKILL, which runs no
+# trap and leaves this script no exit path at all — so the file written here is
+# the ONLY reason a killed run is recoverable (data-model §7, SC-008). A record
+# emitted solely at exit would lose exactly the abnormally-ended runs an operator
+# goes looking for, and would lose them silently.
+#
+# It sits BEFORE the credential/config/clone sections rather than after them
+# because clone-on-start (3d) can `die`: a container that started, failed to set
+# itself up, and was then torn down would otherwise leave no account at all.
+#
+# Ordering inside this section is deliberate: state, then encoders, then the
+# repository capture, then the writer, then the exit paths, then the single call
+# that opens the record.
+RUNS_DIR="${AGENT_CONTAINER_RUNS_DIR:-/var/lib/agent-container/runs}"
+RUNS_ID=""              # non-empty ONLY once a record has been opened
+RUNS_STARTED_AT=""
+RUNS_KIND=""
+RUNS_AGENT=""
+RUNS_TASK_JSON="null"
+RUNS_NOTES=()
+RUNS_COMPLETED=0
+RUNS_SIGNALLED=0
+AGENT_PID=""            # the headless agent, once started (see run_headless_agent)
+
+# Repository effect (T026/T027/T051/T052). The baseline is taken at start and
+# kept HERE, in shell state, rather than in the pending record — see
+# runs_repo_capture_start for why half an effect is worse than none.
+RUNS_REPO_JSON="null"       # the stated effect; null means NOT CAPTURED (see runs_emit)
+RUNS_REPO_DIR=""            # the workspace the baseline was taken from
+RUNS_REPO_START_HEAD=""
+RUNS_REPO_START_STATE=""
+RUNS_REPO_CAPTURED=0        # 1 ONLY once a baseline exists to measure against
+RUNS_GIT_DEADLINE=0         # wall-clock bound on the exit capture; 0 = unbounded
+RUNS_PROBE_STATE=""         # runs_repo_probe's four outputs. Globals because bash
+RUNS_PROBE_HEAD=""          # cannot return five values and a subshell would lose
+RUNS_PROBE_BRANCH=""        # them; declared here so `set -u` can never bite on a
+RUNS_PROBE_UPSTREAM=""      # path that reads them before a probe has run.
+
+# The changed-path and commit lists are CAPPED at this many entries. A run that
+# touched ten thousand files would otherwise write a record larger than every
+# other record combined (research R11) — but the cap is NEVER SILENT: it sets
+# `repository.paths_truncated` and adds a note naming the real total, because a
+# truncated list that looked complete would answer "no run changed that file"
+# with confidence when one did (C16, T052).
+RUNS_PATHS_MAX=200
+
+# Feature 004's execution shape is resolved HERE, ahead of its own section below,
+# because the record's `kind`, `agent` and `task` are read off it.
+# AGENT_CONTAINER_MODE (default interactive) selects the container's shape;
+# AGENT_CONTAINER_AGENT (claude|codex|pi|opencode) names the primary agent, and
+# when UNSET the pre-004 bare-shell layout is preserved (no agent auto-launched).
+# The optional initial/headless task arrives as an EPHEMERAL injected file.
+AGENT_CONTAINER_MODE="${AGENT_CONTAINER_MODE:-interactive}"
+AGENT_CONTAINER_AGENT="${AGENT_CONTAINER_AGENT:-}"
+TASK_FILE="${INJECT_DIR}/task"
+
+# JSON string encoder. The task text is operator-authored free text (data-model
+# §5) in which quotes, backslashes and newlines are ORDINARY — leave one
+# unescaped and the record is not JSON, a failure that surfaces at INGESTION,
+# long after the container that could have been asked about it is gone.
+#
+# Every C0 control character is replaced unconditionally rather than behind a
+# "does the string contain one?" test. Such a test is one more thing that can be
+# wrong about locale and collation, and if it were wrong the record would be
+# silently unparseable — which is the failure it was added to prevent.
+json_string() {
+    local s=${1-} i ch esc
+    # Backslash FIRST: every replacement below INSERTS backslashes, which must
+    # not then be escaped a second time.
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    for (( i = 1; i < 32; i++ )); do
+        printf -v ch '%b' "\\0$(printf '%03o' "${i}")"
+        case "${i}" in
+            8)  esc='\b' ;;
+            9)  esc='\t' ;;
+            10) esc='\n' ;;
+            12) esc='\f' ;;
+            13) esc='\r' ;;
+            *)  printf -v esc '\\u%04x' "${i}" ;;
+        esac
+        s=${s//"${ch}"/${esc}}
+    done
+    printf '"%s"' "${s}"
+}
+
+# An absent value is `null`, never the empty string. `"start_head": ""` would read
+# as a commit whose id is empty rather than as a commit nobody could name — the
+# same false-precision trap as a `0` for unreported usage (research R6).
+json_or_null() {
+    if [[ -z "${1-}" ]]; then printf 'null'; else json_string "$1"; fi
+}
+
+# A JSON array of the arguments, each encoded as a string.
+json_array() {
+    local out='' e
+    for e in "$@"; do
+        [[ -n "${out}" ]] && out+=", "
+        out+="$(json_string "${e}")"
+    done
+    printf '[%s]' "${out}"
+}
+
+# A diagnostic that reaches BOTH channels. FR-008/C11: a record that could not be
+# written cleanly must not fail the run and must not be silent. `notes` is the
+# in-record half; the log is the half that still exists when the record itself is
+# the thing that could not be written.
+runs_note() {
+    log "run record: $*"
+    RUNS_NOTES+=("$*")
+}
+
+runs_notes_json() {
+    local out='' n
+    # The ${a[@]+"${a[@]}"} form, because `set -u` treats an empty array's
+    # expansion as an unset variable on older bash.
+    for n in ${RUNS_NOTES[@]+"${RUNS_NOTES[@]}"}; do
+        [[ -n "${out}" ]] && out+=", "
+        out+="$(json_string "${n}")"
+    done
+    printf '[%s]' "${out}"
+}
+
+# 32 bits of entropy after the timestamp. The id must be unique within one
+# environment on one host, and a restart loop can start two runs inside the same
+# second — the seconds-resolution stamp alone would then collide and the second
+# run would overwrite the first's record.
+runs_nonce() {
+    local n
+    n="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    [[ -n "${n}" ]] || printf -v n '%04x%04x' "${RANDOM}" "${RANDOM}"
+    printf '%s' "${n}"
+}
+
+# --- Repository effect (T026/T027/T051/T052) ---------------------------------
+# What the run changed, read from git at START and again at EXIT. NO AGENT
+# INVOLVEMENT anywhere below: the run that most needs a record is the one where
+# the agent crashed (FR-004a), so nothing here may depend on the agent
+# cooperating, reporting, or even having got as far as running.
+
+# Bounded git, always against the workspace the baseline was taken from.
+#
+# The bound exists because the EXIT capture runs inside the runtime's stop grace
+# period (research R5): SIGTERM opens it, SIGKILL closes it, and a git call that
+# blocks in between costs the whole RECORD, not merely the repository detail it
+# was fetching. Two bounds, because either alone is insufficient — `timeout` caps
+# ONE call, and half a dozen capped calls still add up past the grace period, so
+# RUNS_GIT_DEADLINE caps the sequence. 124 is `timeout`'s own status for "did not
+# finish in time", reused here so callers have one code to recognise.
+#
+# `timeout` is coreutils, which the image has. The fallback is for the
+# off-container harness on a host without it — so the bound, exactly like the
+# fsync below, is the CONTAINER's guarantee and not the harness's.
+git_bounded() {
+    if [[ "${RUNS_GIT_DEADLINE}" -ne 0 && "$(date +%s)" -ge "${RUNS_GIT_DEADLINE}" ]]; then
+        return 124
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 git -C "${RUNS_REPO_DIR}" "$@" 2>/dev/null
+    else
+        git -C "${RUNS_REPO_DIR}" "$@" 2>/dev/null
+    fi
+}
+
+# Read the workspace's git position into RUNS_PROBE_*, classifying it into one of
+# the five states of C7 / data-model §3.
+#
+# EVERY ONE OF THEM IS A RECORD, NOT AN ERROR. Research R4 MEASURED the exit
+# codes these branches read — `rev-parse @{u}` → 128 with no upstream,
+# `symbolic-ref -q HEAD` → 1 when detached, and 128 outside a repository — and an
+# `ephemeral` workspace with no clone is the ordinary case for a throwaway run.
+# A capture that treated any of them as a failure would report the absence of a
+# repository as the absence of a run.
+#
+# `x="$(cmd)" || rc=$?` throughout, never a bare assignment: under `set -e` a
+# plain `x="$(failing)"` ends the script, and these branches exist precisely to
+# handle git FAILING. The assignment is the first command of an AND-OR list,
+# which errexit is specified to ignore.
+runs_repo_probe() {
+    RUNS_PROBE_STATE="" RUNS_PROBE_HEAD="" RUNS_PROBE_BRANCH="" RUNS_PROBE_UPSTREAM=""
+    local out rc=0
+    out="$(git_bounded rev-parse --is-inside-work-tree)" || rc=$?
+    if [[ "${rc}" -eq 124 ]]; then RUNS_PROBE_STATE="unreadable"; return 0; fi
+    # A bare repository prints `false` and exits 0, which is the same answer as
+    # "no repository" for this purpose: there is no work tree for a run to change.
+    if [[ "${rc}" -ne 0 || "${out}" != "true" ]]; then
+        RUNS_PROBE_STATE="no-repository"
+        return 0
+    fi
+
+    rc=0
+    out="$(git_bounded rev-parse HEAD)" || rc=$?
+    if [[ "${rc}" -eq 124 ]]; then RUNS_PROBE_STATE="unreadable"; return 0; fi
+    # A non-zero HERE — with a work tree confirmed above — is an UNBORN branch: a
+    # repository with no commits yet (`git init`, or a clone of an empty repo).
+    # That is neither `no-repository` nor `unreadable`; the branch is known and
+    # the run may be about to make the first commit. The head simply stays null,
+    # and the exit capture treats the empty tree as the baseline.
+    [[ "${rc}" -eq 0 ]] && RUNS_PROBE_HEAD="${out}"
+
+    rc=0
+    out="$(git_bounded symbolic-ref -q --short HEAD)" || rc=$?
+    if [[ "${rc}" -eq 124 ]]; then RUNS_PROBE_STATE="unreadable"; return 0; fi
+    if [[ "${rc}" -ne 0 || -z "${out}" ]]; then
+        # `symbolic-ref -q` exits 1 on a detached HEAD (R4, measured). A detached
+        # run is on no branch and therefore has no upstream to push to, so this
+        # returns rather than falling through to the upstream probe — asking for
+        # `@{u}` here would report `no-upstream` for a state that already has a
+        # more specific name.
+        RUNS_PROBE_STATE="detached"
+        return 0
+    fi
+    RUNS_PROBE_BRANCH="${out}"
+
+    rc=0
+    out="$(git_bounded rev-parse --abbrev-ref '@{u}')" || rc=$?
+    if [[ "${rc}" -eq 124 ]]; then RUNS_PROBE_STATE="unreadable"; return 0; fi
+    if [[ "${rc}" -ne 0 || -z "${out}" ]]; then
+        # 128 (R4, measured). A branch with nowhere to push is an ordinary state,
+        # and it is the one that makes `pushed` null rather than false (C8) —
+        # `false` means "committed and did not push", which FR-005 requires to be
+        # loud, and conflating it with "could not tell" would make the loudest
+        # signal in the feature unreliable.
+        RUNS_PROBE_STATE="no-upstream"
+        return 0
+    fi
+    RUNS_PROBE_UPSTREAM="${out}"
+    RUNS_PROBE_STATE="ok"
+}
+
+# Take the baseline. Called ONCE, after clone-on-start has populated the
+# workspace — before it, a clone's entire imported history would be measured as
+# something this run committed.
+#
+# The baseline is kept in shell state and the PENDING record still says
+# `repository: null`, deliberately. A pending record carrying a start head but no
+# end state would have to serialise `commits` and `paths` as empty, and empty
+# renders as "changed nothing" — a confident wrong answer for the one case that
+# reads a pending record, the SIGKILLed run that may well have committed. The
+# effect is stated once, at exit, when both ends of it are known; until then
+# `null` means what runs_emit says it means: not captured.
+runs_repo_capture_start() {
+    [[ -n "${RUNS_ID}" ]] || return 0
+    RUNS_REPO_DIR="${WORKSPACE_DIR}"
+    # No sequence deadline at start: nothing is racing a SIGKILL yet. The
+    # per-call `timeout` still applies.
+    RUNS_GIT_DEADLINE=0
+    runs_repo_probe
+    RUNS_REPO_START_HEAD="${RUNS_PROBE_HEAD}"
+    RUNS_REPO_START_STATE="${RUNS_PROBE_STATE}"
+    RUNS_REPO_CAPTURED=1
+    log "run record ${RUNS_ID}: repository baseline is '${RUNS_PROBE_STATE}'${RUNS_PROBE_HEAD:+ at ${RUNS_PROBE_HEAD}}"
+}
+
+# Measure the effect and build RUNS_REPO_JSON. Called from runs_complete, so it
+# runs on every exit path the entrypoint can still reach — including the SIGTERM
+# one, where it spends part of the stop grace period on purpose: whether a run
+# that was stopped had committed first is exactly what an operator asks.
+runs_repo_capture_exit() {
+    [[ "${RUNS_REPO_CAPTURED}" -eq 1 ]] || return 0
+    # 5s of a 10s default grace period. The repository detail is worth having and
+    # it is NOT worth the record — this deadline is what keeps the second true.
+    RUNS_GIT_DEADLINE=$(( $(date +%s) + 5 ))
+
+    runs_repo_probe
+    local state="${RUNS_PROBE_STATE:-unreadable}" head="${RUNS_PROBE_HEAD}"
+    local branch="${RUNS_PROBE_BRANCH}" upstream="${RUNS_PROBE_UPSTREAM}"
+    local -a commits=() paths=()
+    local truncated="false" pushed="null" rc=0 tmp="" base="" line p n=0
+
+    # Was there a baseline to measure AGAINST? `no-repository` and `unreadable`
+    # at start mean there was not, and the difference is not academic: a
+    # workspace that GAINED a repository during the run — an agent that cloned
+    # into it — has a full history at exit and none of it is this run's work.
+    # Attributing it would be the loudest wrong answer this record can give.
+    local attributable=0
+    case "${RUNS_REPO_START_STATE}" in
+        ok|no-upstream|detached) attributable=1 ;;
+    esac
+
+    # `pushed` is a statement about the workspace at exit, so it is computed
+    # wherever both ends of the comparison exist — independently of whether the
+    # commits can be attributed. Ancestry, not equality: after a push the
+    # tracking ref moves to the tip, and a remote that has since moved AHEAD does
+    # not make this run's work unpushed.
+    if [[ -n "${head}" && -n "${upstream}" ]]; then
+        rc=0
+        git_bounded merge-base --is-ancestor "${head}" '@{u}' >/dev/null || rc=$?
+        case "${rc}" in
+            0) pushed="true" ;;
+            1) pushed="false" ;;
+            *) runs_note "git could not compare the workspace against ${upstream} (exit ${rc}); 'pushed' is left unknown rather than guessed" ;;
+        esac
+    fi
+
+    if [[ -z "${head}" ]]; then
+        # Nothing to measure to. Unborn at exit, or a workspace that no longer
+        # holds a repository at all. When there WAS a baseline, that silence is
+        # flagged: an empty list here would read as "this run changed nothing".
+        if [[ "${attributable}" -eq 1 ]]; then
+            truncated="true"
+            runs_note "the workspace held a repository at start but no commit could be read at exit (state '${state}'); the changed-path list is INCOMPLETE, not empty"
+        fi
+    elif [[ "${attributable}" -eq 0 ]]; then
+        truncated="true"
+        runs_note "the workspace held no repository when this run started (state '${RUNS_REPO_START_STATE:-unknown}'), so the history present at exit is not this run's work; the changed-path list is INCOMPLETE, not empty"
+    else
+        tmp="$(mktemp 2>/dev/null)" || tmp=""
+        if [[ -z "${tmp}" ]]; then
+            truncated="true"
+            runs_note "could not stage git's output; the changed-path list is INCOMPLETE, not empty"
+        else
+            # What end_head contains that start_head did not (data-model §3). An
+            # empty start head is the unborn case: every commit reachable from
+            # the tip was made during this run.
+            local range="${head}"
+            [[ -n "${RUNS_REPO_START_HEAD}" ]] && range="${RUNS_REPO_START_HEAD}..${head}"
+            rc=0
+            git_bounded rev-list "${range}" > "${tmp}" || rc=$?
+            if [[ "${rc}" -ne 0 ]]; then
+                truncated="true"
+                runs_note "git could not list this run's commits (exit ${rc}); 'commits' is empty because it is UNKNOWN, not because there were none, and paths_truncated is set so no query reads this record as a confident no"
+            else
+                while IFS= read -r line; do
+                    [[ -n "${line}" ]] || continue
+                    n=$((n + 1))
+                    [[ "${n}" -le "${RUNS_PATHS_MAX}" ]] && commits+=("${line}")
+                done < "${tmp}"
+                if [[ "${n}" -gt "${RUNS_PATHS_MAX}" ]]; then
+                    truncated="true"
+                    # paths_truncated is set here even though the diff below is
+                    # taken across the WHOLE range and so may well be complete.
+                    # Erring towards "uncertain" costs a query a hedge; erring
+                    # the other way lets a capped record answer "no run changed
+                    # that file" with confidence (C16).
+                    runs_note "this run's commit list was capped at ${RUNS_PATHS_MAX} of ${n} commits; the record's account of this run is incomplete, so paths_truncated is set"
+                fi
+            fi
+
+            base="${RUNS_REPO_START_HEAD}"
+            if [[ -z "${base}" ]]; then
+                # Unborn at start: diff against the EMPTY TREE. Asked of git
+                # rather than hardcoded as 4b825dc…, so the baseline is one a
+                # reader can verify instead of a constant taken on trust.
+                base="$(git_bounded hash-object -t tree /dev/null)" || base=""
+            fi
+            if [[ -z "${base}" ]]; then
+                truncated="true"
+                runs_note "git could not name an empty-tree baseline; the changed-path list is INCOMPLETE, not empty"
+            else
+                rc=0
+                # `-z` is load-bearing. Without it git C-QUOTES any path holding a
+                # space, a quote or a non-ASCII byte (src/"a b".py → "src/\"a b\".py"),
+                # and the record would carry a name that matches nothing when
+                # `runs list --changed` is later asked about the real one (C16).
+                # NUL-delimited output must be read by `read -d ''` and never
+                # through a variable: bash DROPS NUL bytes, which would silently
+                # concatenate every path into one.
+                git_bounded diff --name-only -z "${base}" "${head}" > "${tmp}" || rc=$?
+                if [[ "${rc}" -ne 0 ]]; then
+                    truncated="true"
+                    runs_note "git could not list the changed paths (exit ${rc}); the list is INCOMPLETE, not empty"
+                else
+                    n=0
+                    while IFS= read -r -d '' p; do
+                        n=$((n + 1))
+                        [[ "${n}" -le "${RUNS_PATHS_MAX}" ]] && paths+=("${p}")
+                    done < "${tmp}"
+                    if [[ "${n}" -gt "${RUNS_PATHS_MAX}" ]]; then
+                        truncated="true"
+                        runs_note "the changed-path list was capped at ${RUNS_PATHS_MAX} of ${n} paths — repository.paths_truncated is true, so a run missing from 'runs list --changed' may still have touched the file"
+                    fi
+                fi
+            fi
+            rm -f "${tmp}" 2>/dev/null || true
+        fi
+    fi
+
+    # One line, like `usage` above it: the record is machine-read, and a nested
+    # multi-line fragment would only make the file prettier for nobody.
+    RUNS_REPO_JSON="$(printf '{ "start_head": %s, "end_head": %s, "branch": %s, "upstream": %s, "commits": %s, "paths": %s, "paths_truncated": %s, "pushed": %s, "state": %s }' \
+        "$(json_or_null "${RUNS_REPO_START_HEAD}")" \
+        "$(json_or_null "${head}")" \
+        "$(json_or_null "${branch}")" \
+        "$(json_or_null "${upstream}")" \
+        "$(json_array ${commits[@]+"${commits[@]}"})" \
+        "$(json_array ${paths[@]+"${paths[@]}"})" \
+        "${truncated}" \
+        "${pushed}" \
+        "$(json_string "${state}")")"
+}
+
+# The outcome vocabulary, CLOSED and SCOPED TO THE KIND (data-model §2, C5).
+# Stated here as data rather than left implicit in runs_complete's if/else,
+# because FR-003 requires `finished` and `failed` to be UNREPRESENTABLE for a
+# session rather than merely unwritten by today's branches — and THIS FILE is
+# where every real interactive record is produced. The tool's own validator never
+# sees one: an ingested record is stamped and stored VERBATIM, so a branch added
+# here that named a session `failed` would reach `runs list` unchallenged, and
+# SC-002 ("zero interactive sessions marked finished or failed") would stop being
+# measurable anywhere.
+#
+# `never-started` is deliberately ABSENT from the headless set even though the
+# vocabulary has it. It is the TOOL's outcome for a container that never ran (C6),
+# and a record written from inside one is itself the proof that it did.
+runs_outcome_is_legal() {
+    case "$1:$2" in
+        headless:finished|headless:failed|headless:stopped) return 0 ;;
+        interactive:ended|interactive:stopped) return 0 ;;
+    esac
+    return 1
+}
+
+# Write the record at its final name, atomically. ALWAYS RETURNS 0 — see
+# runs_on_exit for why that is the contract rather than an oversight.
+#   $1 outcome (empty => null, i.e. still pending)
+#   $2 ended_at (empty => null, i.e. still pending)
+#   $3 exit_code (empty => null)
+runs_emit() {
+    local outcome_json='null' ended_json='null' exit_json='null' body final tmp
+    if [[ -n "${1:-}" ]]; then
+        if runs_outcome_is_legal "${RUNS_KIND}" "$1"; then
+            outcome_json="$(json_string "$1")"
+        else
+            # REFUSED — and the record is still written, with `outcome` left null,
+            # which is the one honest answer available. Coercing to `stopped`
+            # (the outcome legal for both kinds) would assert that an operator
+            # stopped a run nobody stopped, and dying here would trade a
+            # mislabelled record for no record at all, which C11 forbids. Null
+            # means "no exit path named an ending this kind can have"; ingestion
+            # completes it as `stopped` and says it reconstructed it, so the two
+            # notes together state exactly what was and was not known.
+            runs_note "outcome '$1' is not in the vocabulary for a '${RUNS_KIND}' run and was REFUSED (FR-003, C5); this record is left with no outcome rather than an invented one"
+        fi
+    fi
+    [[ -n "${2:-}" ]] && ended_json="$(json_string "$2")"
+    [[ -n "${3:-}" ]] && exit_json="$3"
+
+    if ! mkdir -p "${RUNS_DIR}" 2>/dev/null; then
+        runs_note "cannot create ${RUNS_DIR}; this run will have no record. An image built before the 'runs' volume existed has no dev-owned mount point there — rebuild and redeploy."
+        return 0
+    fi
+    final="${RUNS_DIR}/${RUNS_ID}.json"
+    # Staged under a DOT-prefixed name ending in .tmp, in the SAME directory: the
+    # tool's listing skips exactly that shape, so a half-written record can never
+    # be read as a finished one, and a rename within one directory is atomic —
+    # which is what gives FR-009 (no interleaving, no loss) with no lock at all.
+    tmp="${RUNS_DIR}/.${RUNS_ID}.json.$$.tmp"
+
+    # `environment` and `host` are BOTH null here and BOTH stamped at ingestion.
+    # The record arrives on the volume `agent-container-<name>-runs`, so the tool
+    # draining it knows the environment with certainty; the container is never
+    # told its own environment name, and telling it would create a second copy
+    # that can drift from the volume the tool actually keys on.
+    #
+    # `task` is recorded for a HEADLESS run only. An interactive session has no
+    # task (FR-002), and the tool REFUSES to construct an interactive record that
+    # carries one — a task on a session record would be an invented fact.
+    #
+    # `repository` is null until the EXIT capture states an effect (T026/T027).
+    # Null means "not captured" — the run ended before the workspace was
+    # inspected, or was killed outright — and it is NOT the `no-repository` state
+    # of C7, which is a positive statement that the workspace held no repository.
+    # The two must not be read as the same answer: one is silence, the other is
+    # a measurement.
+    body=$(cat <<EOF
+{
+  "schema": 1,
+  "run_id": $(json_string "${RUNS_ID}"),
+  "environment": null,
+  "host": null,
+  "agent": $(json_string "${RUNS_AGENT}"),
+  "kind": $(json_string "${RUNS_KIND}"),
+  "task": ${RUNS_TASK_JSON},
+  "started_at": $(json_string "${RUNS_STARTED_AT}"),
+  "ended_at": ${ended_json},
+  "outcome": ${outcome_json},
+  "exit_code": ${exit_json},
+  "repository": ${RUNS_REPO_JSON},
+  "usage": { "reported": false },
+  "notes": $(runs_notes_json)
+}
+EOF
+)
+    # umask rather than a follow-up chmod, so the file is NEVER briefly readable:
+    # `task` is the one field that can carry a credential the operator typed
+    # (data-model §5), and a window is still a window.
+    if ! ( umask 0077; printf '%s\n' "${body}" > "${tmp}" ) 2>/dev/null; then
+        rm -f "${tmp}" 2>/dev/null
+        runs_note "could not stage the record at ${tmp}"
+        return 0
+    fi
+    # fsync before the rename: the rename orders the NAME, not the CONTENT, so a
+    # host crash between the two can leave a correctly-named EMPTY record — which
+    # reads as corruption rather than as absence, the one outcome worse than no
+    # record at all. `sync <file>` is coreutils, which the image has; the fallback
+    # is for the off-container test harness on a BSD `sync`, which takes no
+    # operand. So this durability claim is the CONTAINER's, not the harness's.
+    sync "${tmp}" 2>/dev/null || true
+    if ! mv -f "${tmp}" "${final}" 2>/dev/null; then
+        rm -f "${tmp}" 2>/dev/null
+        runs_note "could not place the record at ${final}"
+        return 0
+    fi
+    return 0
+}
+
+# Complete the record. $1 is the run's own exit status, or empty when it is not
+# yet known (the signal path). Idempotent by construction — see below.
+runs_complete() {
+    local rc="${1-}" outcome ended exit_code=""
+    [[ -n "${RUNS_ID}" ]] || return 0
+    # Completed exactly ONCE. The signal path completes the record first — so it
+    # is durable inside the runtime's stop grace period — and only then waits for
+    # the agent and exits; the EXIT trap that follows must not overwrite
+    # `stopped` with the status of a process that was killed.
+    [[ "${RUNS_COMPLETED}" -eq 0 ]] || return 0
+    RUNS_COMPLETED=1
+    # BEFORE the outcome is decided and the record written, because this is the
+    # only moment the workspace's end state exists to be read — and it must
+    # happen on the crash and signal paths too, not just the clean one. It is
+    # wrapped so a git problem cannot stop the record itself from being written:
+    # a run with no repository detail is a loss, a run with no record is the
+    # failure this whole feature exists to prevent.
+    runs_safely runs_repo_capture_exit
+    ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [[ "${RUNS_SIGNALLED}" -eq 1 ]]; then
+        # `stopped` is the one outcome legal for BOTH kinds (data-model §2).
+        outcome="stopped"
+        # exit_code stays null deliberately: the agent had not exited when this
+        # record was made durable, and writing 143 would be an invented fact
+        # about a process whose status nobody had yet collected.
+    elif [[ "${RUNS_KIND}" == "headless" ]]; then
+        if [[ "${rc}" == "0" ]]; then outcome="finished"; else outcome="failed"; fi
+        exit_code="${rc}"
+    else
+        # The interactive vocabulary is `ended` | `stopped` and nothing else
+        # (FR-003): a session has no completion semantics, so `failed` is not
+        # available for an entrypoint that exited badly. The status goes in a
+        # note instead of being smuggled into an outcome the vocabulary forbids.
+        outcome="ended"
+        [[ "${rc}" == "0" ]] || runs_note "the entrypoint exited ${rc} before the session was stopped"
+    fi
+    runs_emit "${outcome}" "${ended}" "${exit_code}"
+}
+
+# EVERY ENTRY INTO THE RECORD MACHINERY GOES THROUGH HERE, AND NONE OF THEM CAN
+# FAIL THE RUN.
+#
+# `set -e` is live at all four call sites — top level, both signal handlers and
+# the exit trap — so a non-zero escaping this machinery would end the run: at
+# start, BEFORE THE AGENT EVER RAN; in a handler, by replacing the run's own
+# status with the status of its bookkeeping. FR-008/C11 forbid both, and the
+# first was measured, not imagined: a `return 1` on runs_emit's unwritable-volume
+# path killed the entrypoint during startup and every downstream test with it.
+#
+# The status is dropped HERE, once, rather than by a `|| true` at each site that
+# a later edit can forget to add. This is the mirror image of the egress
+# entrypoint's shadowed `iptables`: there a failure had to be impossible to
+# SWALLOW, here it has to be impossible to PROPAGATE. Same discipline, opposite
+# direction — and the reason dropping the status costs no diagnosis is that
+# runs_emit reports every failure through runs_note first.
+runs_safely() {
+    "$@" || log "run record: internal error in ${1} — the run itself is unaffected"
+    return 0
+}
+
+# EXIT trap, installed only once a record exists.
+runs_on_exit() {
+    local rc=$?
+    # `set +e` as well as runs_safely: the wrapper protects the completion, this
+    # protects everything else this handler might ever contain. The status is
+    # captured above and restored by the explicit `exit` below, which is the only
+    # exit this handler takes.
+    set +e
+    runs_safely runs_complete "${rc}"
+    exit "${rc}"
+}
+
+# Early TERM/INT handler, live from the moment the record opens until the
+# mode-specific handler replaces it. It exists so that a `down` issued while the
+# container is still cloning a large repository — the longest step before either
+# mode's own trap is installed — still produces a record rather than a pending
+# file the tool has to reconstruct. Deliberately superseded below by
+# headless_shutdown (headless) and shutdown (interactive), which additionally
+# stop the things those modes started.
+runs_signal_stop() {
+    RUNS_SIGNALLED=1
+    log "shutdown signal received during setup"
+    runs_safely runs_complete ""
+    exit 143
+}
+
+# Open the record: fix the fields that are known at start, write it PENDING
+# (ended_at and outcome both null — the pair that identifies a record no exit
+# path has completed), and arm the exit paths.
+runs_start() {
+    if [[ "${AGENT_CONTAINER_MODE}" == "headless" ]]; then
+        RUNS_KIND="headless"
+        # The same default the headless dispatch applies, so the record can never
+        # name a different agent from the one that ran.
+        RUNS_AGENT="${AGENT_CONTAINER_AGENT:-claude}"
+    else
+        RUNS_KIND="interactive"
+        RUNS_AGENT="${AGENT_CONTAINER_AGENT}"
+    fi
+    # No agent is the pre-004 bare-shell layout: nothing is auto-launched, so
+    # there is no run to account for — and `agent` is closed to the four
+    # supported names, so there is nothing truthful to put in it either. Said out
+    # loud rather than skipped quietly, because "no record" must never be
+    # something an operator has to infer.
+    if [[ -z "${RUNS_AGENT}" ]]; then
+        log "NOTE: no agent configured (bare-shell session) — no run record is written for this container"
+        return 0
+    fi
+    RUNS_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(runs_nonce)"
+    RUNS_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [[ "${RUNS_KIND}" == "headless" && -f "${TASK_FILE}" ]]; then
+        # `$(cat f)` alone strips trailing newlines; the `printf x` / `%x` pair
+        # keeps the task BYTE-IDENTICAL to what the operator passed, which is
+        # what quickstart S12 checks. Encoded once, here, so the exit path — the
+        # one bounded by the stop grace period — never re-walks a large task.
+        local _t
+        _t="$(cat "${TASK_FILE}"; printf 'x')"
+        RUNS_TASK_JSON="$(json_string "${_t%x}")"
+    fi
+    runs_safely runs_emit "" "" ""
+    trap runs_on_exit EXIT
+    trap runs_signal_stop TERM INT
+    log "run record ${RUNS_ID} opened (pending) under ${RUNS_DIR}"
+}
+
+runs_safely runs_start
 
 # --- 3a. Canonical agent config (Feature 003, US3) --------------------------
 # Operator-canonical agent config is delivered FRESH each boot as ephemeral
@@ -417,14 +1063,22 @@ if [[ -n "${CLONE_URL}" ]]; then
     fi
 fi
 
+# --- 3e. Repository baseline (Feature 016, T026) ----------------------------
+# Take the workspace's git position now, AFTER clone-on-start and BEFORE either
+# mode launches its agent. The ordering is the whole point: measured before the
+# clone, a fresh clone's entire imported history would be recorded as commits
+# this run made; measured after the agent starts, the agent's own first commit
+# would be missing from the baseline and so invisible in the effect.
+#
+# Runs for both modes — an interactive session changes a repository exactly as a
+# headless run does (FR-013) — and never fails the run (runs_safely).
+runs_safely runs_repo_capture_start
+
 # --- Feature 004: execution mode + per-agent invocation ---------------------
-# AGENT_CONTAINER_MODE (default interactive) selects the container's shape.
-# AGENT_CONTAINER_AGENT (claude|codex|pi|opencode) names the primary agent; when UNSET the
-# pre-004 bare-shell layout is preserved (no agent auto-launched). The optional
-# initial/headless task arrives as an EPHEMERAL injected file (never argv/env).
-AGENT_CONTAINER_MODE="${AGENT_CONTAINER_MODE:-interactive}"
-AGENT_CONTAINER_AGENT="${AGENT_CONTAINER_AGENT:-}"
-TASK_FILE="${INJECT_DIR}/task"
+# AGENT_CONTAINER_MODE, AGENT_CONTAINER_AGENT and TASK_FILE are resolved in
+# section 3r, which needs them to open the run record before clone-on-start can
+# `die`. They are read, not re-defaulted, here — a second `:-` default is a
+# second answer, and the record would eventually name an agent that did not run.
 
 # Feature 010 FR-012: fail CLEARLY when the selected agent is not in this image
 # (an image built before the agent was added). Without this the failure surfaces
@@ -458,11 +1112,36 @@ build_interactive_cmd() {
     esac
 }
 
-# Headless: exec the agent's non-interactive form as PID 1's workload so the
-# CONTAINER exits with the agent's exit code (004 FR-002). The task (possibly empty)
-# is read from the injected file. Uses `exec` — the agent replaces this entrypoint.
+# Headless TERM/INT handler (Feature 016 T014). Replaces runs_signal_stop once
+# there is an agent to stop as well as a record to close.
+headless_shutdown() {
+    RUNS_SIGNALLED=1
+    log "shutdown signal received, stopping the headless agent"
+    # Forward FIRST — it does not block, so the agent begins flushing while the
+    # record is written. Then make the record durable. Only THEN wait.
+    #
+    # SIGTERM starts the runtime's stop grace period and SIGKILL ends it, so
+    # everything before the wait must be bounded, and it is: a kill, a date, and
+    # a rename. The wait is not bounded, and does not need to be — by the time it
+    # runs the record is already on the volume, so a SIGKILL at the end of the
+    # grace period costs nothing (research R5, SC-008).
+    if [[ -n "${AGENT_PID}" ]]; then
+        kill -TERM "${AGENT_PID}" 2>/dev/null || true
+    fi
+    runs_safely runs_complete ""
+    local rc=143
+    if [[ -n "${AGENT_PID}" ]]; then
+        wait "${AGENT_PID}"
+        rc=$?
+    fi
+    exit "${rc}"
+}
+
+# Headless: run the agent's non-interactive form as the container's workload so
+# the CONTAINER exits with the agent's exit code (004 FR-002). The task (possibly
+# empty) is read from the injected file.
 run_headless_agent() {
-    local a="$1" t=""
+    local a="$1" t="" rc=0
     [[ -f "${TASK_FILE}" ]] && t="$(cat "${TASK_FILE}")"
     # Validate the NAME before probing for the binary. Reversed, an unknown agent
     # such as 'gpt' would report "not installed in this image — run redeploy",
@@ -472,15 +1151,33 @@ run_headless_agent() {
         *) die "headless mode: unknown agent '${a}' (choose claude|codex|pi|opencode)" ;;
     esac
     require_agent_binary "${a}"
+    local -a cmd
     case "${a}" in
-        claude) exec claude -p "${t}" ;;
-        codex)  exec codex exec "${t}" ;;
-        pi)     exec pi -p "${t}" ;;
+        claude) cmd=(claude -p "${t}") ;;
+        codex)  cmd=(codex exec "${t}") ;;
+        pi)     cmd=(pi -p "${t}") ;;
         # `opencode run` is the documented non-interactive form. VERIFIED to
         # propagate a failing exit status (research R5), which FR-005 requires.
-        opencode) exec opencode run "${t}" ;;
+        opencode) cmd=(opencode run "${t}") ;;
         *) die "headless mode: unknown agent '${a}' (choose claude|codex|pi|opencode)" ;;
     esac
+    # NOT `exec`, and the run record is the whole reason. `exec` replaced this
+    # entrypoint with the agent, which left NOTHING to complete the record when
+    # the agent exited (T013) and NOTHING to trap SIGTERM (T014) — a stopped run
+    # was indistinguishable from a vanished one. The exit status is therefore
+    # propagated by hand below, and a test pins that the container still exits
+    # with the agent's code (004 FR-002).
+    trap headless_shutdown TERM INT
+    # `<&0` is load-bearing. Bash redirects an ASYNCHRONOUS command's stdin from
+    # /dev/null when job control is off, so without it the agent would read EOF
+    # where `exec` handed it the container's stdin — a behaviour change nobody
+    # asked for, hidden inside a change about record-keeping.
+    "${cmd[@]}" <&0 &
+    AGENT_PID=$!
+    # `|| rc=$?` and not a bare `wait`: under `set -e` a failing agent would end
+    # this script immediately, before the exit trap could record WHY it failed.
+    wait "${AGENT_PID}" || rc=$?
+    exit "${rc}"
 }
 
 if [[ "${AGENT_CONTAINER_MODE}" == "headless" ]]; then
@@ -488,8 +1185,8 @@ if [[ "${AGENT_CONTAINER_MODE}" == "headless" ]]; then
     # `compose logs` and the result is the container exit code (research R5).
     log "headless mode: running agent '${AGENT_CONTAINER_AGENT:-claude}' as the container workload"
     run_headless_agent "${AGENT_CONTAINER_AGENT:-claude}"
-    # run_headless_agent execs; the lines below are unreachable in headless mode.
-    die "headless agent failed to exec"
+    # run_headless_agent always exits, by its own `exit` or by its trap's.
+    die "headless agent did not run"
 fi
 
 # --- 4. sshd (interactive mode) ---------------------------------------------
@@ -578,13 +1275,22 @@ fi
 # lets bash's trap fire promptly (a foreground `exec tail` would not).
 
 shutdown() {
+    RUNS_SIGNALLED=1
     log "shutdown signal received, stopping tmux and sshd"
+    # The record goes FIRST (Feature 016 T014). SIGTERM opens the runtime's stop
+    # grace period and SIGKILL closes it; `tmux kill-server` is the one unbounded
+    # step in this handler, and a record written after it is a record that may
+    # never be written at all (research R5). Nothing below can fail the run —
+    # this handler exits 0 regardless, exactly as it did before.
+    runs_safely runs_complete ""
     tmux kill-server 2>/dev/null || true
     # sshd runs as dev (rootless); dev can signal its own process — no sudo.
     pkill -TERM -x sshd 2>/dev/null || true
     exit 0
 }
 
+# Supersedes runs_signal_stop, which covered the setup window before tmux and
+# sshd existed to be stopped.
 trap shutdown TERM INT
 
 tail -f /dev/null &

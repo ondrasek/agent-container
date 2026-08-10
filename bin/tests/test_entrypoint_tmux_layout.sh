@@ -89,6 +89,10 @@ run_entrypoint() {
         export HOME="${HOMEDIR}" AGENT_CONTAINER_HOME="${HOMEDIR}"
         export AGENT_CONTAINER_REAL_TMUX="${REAL_TMUX}" AGENT_CONTAINER_TMUX_SOCKET="${SOCK}"
         export AGENT_CONTAINER_SSHD="${STUB}/sshd" AGENT_CONTAINER_INJECT_DIR="${SB}/inject"
+        # Feature 016: keep the run record inside the sandbox. This suite does not
+        # unset AGENT_CONTAINER_AGENT, so a developer who happens to have it
+        # exported would otherwise have their real /var/lib written from a test.
+        export AGENT_CONTAINER_RUNS_DIR="${SB}/runs"
         export PATH="${STUB}:${PATH}"
         unset AGENT_CONTAINER_TMUX_WINDOWS
         case "${mode}" in

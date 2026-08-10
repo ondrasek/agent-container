@@ -386,7 +386,7 @@ def test_fresh_teardown_targets_every_volume_the_tool_creates(wiz):
     """FR-008: no orphaned storage — the purge list is exactly the created set,
     and it now includes both of opencode's."""
     created = set(wiz.per_container_volumes("acme"))
-    assert len(created) == 9
+    assert len(created) == 10  # Feature 016 appended the runs volume
     assert {"agent-container-acme-opencode", "agent-container-acme-opencode-data"} <= created
     # The pre-010 set is a strict subset: nothing was renamed or dropped (FR-014).
     assert {f"agent-container-acme-{s}" for s in _PRE_010_SUFFIXES} < created

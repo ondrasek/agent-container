@@ -427,13 +427,86 @@ def _canonical_agents(wiz) -> set[str]:
 
 
 def test_entrypoint_dispatch_matches_canonical_agent_list(wiz):
-    """FR-002: entrypoint.sh's headless dispatch covers exactly AGENTS."""
+    """FR-002: entrypoint.sh's headless dispatch covers exactly AGENTS.
+
+    Matches `<agent>) cmd=(` and no longer `<agent>) exec `. Feature 016 stopped
+    the headless path `exec`ing the agent — an `exec` leaves nothing behind to
+    complete the run's record or to trap SIGTERM — so the arms now build an argv
+    array that the entrypoint runs as a supervised child. The set the guard reads
+    is unchanged; only the line it reads it from moved.
+    """
     body = (_ROOT / "image" / "entrypoint.sh").read_text()
     block = body.split("run_headless_agent()", 1)[1].split("\n}", 1)[0]
-    arms = set(re.findall(r"^\s*([a-z][a-z0-9-]*)\)\s*exec ", block, re.M))
+    arms = set(re.findall(r"^\s*([a-z][a-z0-9-]*)\)\s*cmd=\(", block, re.M))
     assert arms == _canonical_agents(wiz), (
         f"entrypoint.sh disagrees with AGENTS: only in entrypoint={arms - _canonical_agents(wiz)}, "
         f"only in AGENTS={_canonical_agents(wiz) - arms}"
+    )
+
+
+def test_entrypoint_writes_to_the_runs_mount_path(wiz):
+    """Feature 016: the entrypoint's default runs directory IS the path the CLI
+    mounts the runs volume at.
+
+    Two independent encodings of one path — RUNS_MOUNT_PATH, which builds the
+    mount, and the entrypoint's fallback, which writes into it. Drift here is
+    silent in the worst available way: the container would write its records to
+    an ordinary directory in its own filesystem, backed by no volume, so every
+    record would vanish with the container while the run reported success and the
+    tool reported nothing pending. Nothing else in the suite compares the two.
+    """
+    body = (_ROOT / "image" / "entrypoint.sh").read_text()
+    expected = f'RUNS_DIR="${{AGENT_CONTAINER_RUNS_DIR:-{wiz.RUNS_MOUNT_PATH}}}"'
+    assert expected in body, (
+        f"entrypoint.sh does not default its runs dir to RUNS_MOUNT_PATH; expected {expected!r}"
+    )
+
+
+def _entrypoint_outcome_arms() -> set[tuple[str, str]]:
+    """The `<kind>:<outcome>` pairs entrypoint.sh will consent to write.
+
+    Read from the function definition, which precedes its only call site, so the
+    split lands on the table and not on a caller. An unparsed block yields the
+    empty set — which fails the comparison below rather than passing it, so a
+    regex that stopped matching cannot turn this check into a no-op.
+    """
+    body = (_ROOT / "image" / "entrypoint.sh").read_text()
+    block = body.split("runs_outcome_is_legal()", 1)[1].split("\n}", 1)[0]
+    arms: set[tuple[str, str]] = set()
+    for line in block.splitlines():
+        m = re.match(r"\s*([a-z:|-]+)\)\s*return 0", line)
+        if m:
+            for pat in m.group(1).split("|"):
+                kind, _, outcome = pat.partition(":")
+                arms.add((kind, outcome))
+    return arms
+
+
+def test_entrypoint_outcome_vocabulary_matches_the_canonical_one(wiz):
+    """Feature 016 C5/FR-003: the closed outcome vocabulary is encoded twice.
+
+    RUN_OUTCOMES is canonical, and the entrypoint carries its own copy because it
+    is where every CONTAINER-written record is produced — an ingested record is
+    stamped and stored verbatim, so the CLI's validator never sees one. Drift is
+    therefore not cosmetic in either direction: a kind or outcome added to
+    RUN_OUTCOMES alone would be refused by the container, silently degrading every
+    such record to `outcome: null`, while one added to the entrypoint alone would
+    put a word in the store that no reader of the vocabulary expects.
+
+    `never-started` is excluded on purpose, and against the NAMED constant rather
+    than the literal: it is the one outcome the TOOL authors (C6), for a container
+    that never ran, and a record written from inside one disproves it.
+    """
+    expected = {
+        (kind, outcome)
+        for kind, outcomes in wiz.RUN_OUTCOMES.items()
+        for outcome in outcomes
+        if outcome != wiz.RUN_OUTCOME_NEVER_STARTED
+    }
+    arms = _entrypoint_outcome_arms()
+    assert arms == expected, (
+        f"entrypoint.sh disagrees with RUN_OUTCOMES: only in entrypoint={arms - expected}, "
+        f"only in RUN_OUTCOMES={expected - arms}"
     )
 
 
@@ -581,6 +654,10 @@ IDENTITY_BASELINE = {
     "zzz-999": ("agent-container-zzz-999", 2282),
 }
 
+# Feature 016 APPENDED "runs" (the tenth). Feature 011's guarantee is that no
+# existing volume NAME or POSITION changed, not that the set can never grow — so
+# the tuple grows at the end and every pre-016 entry stays byte-identical where it
+# was. Adding a name here is deliberate work; that is the point of the pin.
 VOLUME_SUFFIXES = (
     "workspace",
     "claude",
@@ -591,6 +668,7 @@ VOLUME_SUFFIXES = (
     "shellenv",
     "tmux",
     "ssh",
+    "runs",
 )
 
 
@@ -604,7 +682,7 @@ def test_identity_is_unchanged_by_feature_011(wiz, name, expected):
 
 @pytest.mark.parametrize("name", sorted(IDENTITY_BASELINE))
 def test_volume_names_are_unchanged_by_feature_011(wiz, name):
-    """FR-010: all nine volume NAMES, in canonical order. The shell-env volume
+    """FR-010: every volume NAME, in canonical order. The shell-env volume
     is the one to watch — Feature 011 moves its MOUNT POINT, and this asserts
     that its NAME does not follow (research R3)."""
     assert wiz.per_container_volumes(name) == [
@@ -628,6 +706,9 @@ def test_only_the_shellenv_mount_path_may_change(wiz):
         "opencode-data": "/home/dev/.local/share/opencode",
         "tmux": "/home/dev/.config/tmux",
         "ssh": "/home/dev/.ssh",
+        # Feature 016. Outside /home/dev deliberately: the account of a run must
+        # not live where the subject of the account can edit it (research R2).
+        "runs": "/var/lib/agent-container/runs",
     }
     for suffix, path in fixed.items():
         assert mounts[f"agent-container-acme-{suffix}"] == path, f"{suffix} mount path moved"

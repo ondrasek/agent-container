@@ -51,6 +51,9 @@ services:
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-shellenv:/home/dev/.agent-env"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux:/home/dev/.config/tmux"
       - "agent-container-${AGENT_CONTAINER_NAME:-default}-ssh:/home/dev/.ssh"
+      # Feature 016: the pending run record. Its own volume because the workspace
+      # volume is absent in bind/ephemeral mode and shellenv is operator-writable.
+      - "agent-container-${AGENT_CONTAINER_NAME:-default}-runs:/var/lib/agent-container/runs"
     # unless-stopped: an always-on dev box should come back after a host reboot
     # or daemon restart, but stay down when the operator explicitly stops it.
     restart: unless-stopped
@@ -77,3 +80,5 @@ volumes:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-tmux"
   agent-container-${AGENT_CONTAINER_NAME:-default}-ssh:
     name: "agent-container-${AGENT_CONTAINER_NAME:-default}-ssh"
+  agent-container-${AGENT_CONTAINER_NAME:-default}-runs:
+    name: "agent-container-${AGENT_CONTAINER_NAME:-default}-runs"

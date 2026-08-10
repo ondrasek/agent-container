@@ -30,9 +30,12 @@ def test_model_has_service_build_restart_port(wiz):
 
 def test_model_declares_seven_named_volumes(wiz):
     m = wiz.build_compose_model("acme", "/repo")
-    # Top-level named volumes: exactly the nine per-container volumes.
+    # Top-level named volumes: exactly the ten per-container volumes. The count
+    # MOVED with Feature 016's runs volume, and it is pinned as a number on
+    # purpose: a set comparison alone would follow per_container_volumes wherever
+    # it went, so nothing would notice a volume silently appearing or vanishing.
     assert set(m["volumes"].keys()) == set(wiz.per_container_volumes("acme"))
-    assert len(m["volumes"]) == 9
+    assert len(m["volumes"]) == 10
     # Each volume pins its `name` so compose does NOT project-prefix it — the
     # deterministic identity contract (Constitution IV) must be the real volume name.
     for vn in wiz.per_container_volumes("acme"):
@@ -113,7 +116,7 @@ def test_compose_declares_both_opencode_volumes_at_their_native_paths(wiz):
     vols = m["services"]["agent"]["volumes"]
     assert "agent-container-acme-opencode:/home/dev/.config/opencode" in vols
     assert "agent-container-acme-opencode-data:/home/dev/.local/share/opencode" in vols
-    assert len(m["volumes"]) == 9
+    assert len(m["volumes"]) == 10  # Feature 016 appended the runs volume
     # Deterministic identity (Constitution IV): both names pin `name`.
     for v in ("agent-container-acme-opencode", "agent-container-acme-opencode-data"):
         assert m["volumes"][v] == {"name": v}
@@ -121,16 +124,18 @@ def test_compose_declares_both_opencode_volumes_at_their_native_paths(wiz):
 
 def test_non_persistent_workspace_still_declares_both_opencode_volumes(wiz):
     """The workspace volume stays conditional (Feature 004); opencode's two are
-    unconditional, so bind/ephemeral declares eight."""
+    unconditional, so bind/ephemeral declares nine (016 added runs, also
+    unconditional — a disposable run is the one whose record matters most)."""
     for kwargs in (
         {"workspace_mount": "/host/w:/workspace", "declare_workspace_volume": False},
         {"workspace_mount": None, "declare_workspace_volume": False},
     ):
         m = wiz.build_compose_model("acme", "/repo", **kwargs)
-        assert len(m["volumes"]) == 8
+        assert len(m["volumes"]) == 9
         assert wiz.volume_name("acme") not in m["volumes"]
         assert "agent-container-acme-opencode" in m["volumes"]
         assert "agent-container-acme-opencode-data" in m["volumes"]
+        assert wiz.runs_volume_name("acme") in m["volumes"]
 
 
 # --- Feature 011 US3: the shell-env mount point moves, the NAME does not -----

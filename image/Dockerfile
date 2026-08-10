@@ -191,6 +191,27 @@ RUN set -eux; \
     printf '# agent-container: login shells load ~/.profile (sources ~/.bashrc + adds ~/.local/bin to PATH)\n[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> /home/dev/.bash_profile; \
     chown dev:dev /home/dev/.bashrc /home/dev/.zshrc /home/dev/.bash_profile
 
+# --- Layer 5c: run-record volume mount point (Feature 016) ------------------
+# Mount point of the TENTH per-container volume (agent-container-<name>-runs):
+# the pending run record the entrypoint writes and the CLI later ingests.
+#
+# Created HERE for the reason stated above and enforced by the runtime: a named
+# volume whose mount point does not exist in the image is created root:root, and
+# a rootless container cannot write it — not even under a dev-owned parent. The
+# record would then be missing for exactly the detached runs this volume exists
+# to account for, and nothing would say so.
+#
+# Deliberately NOT under /home/dev. The shell-env and agent config dirs are
+# writable by anything the operator or the agent runs in the container; the
+# account of a run must not live where the subject of the account can edit it
+# (research R2). 0700 because the task text is the one record field that can
+# carry a credential (data-model §5).
+RUN set -eux; \
+    mkdir -p /var/lib/agent-container/runs; \
+    chown -R dev:dev /var/lib/agent-container; \
+    chmod 0755 /var/lib/agent-container; \
+    chmod 0700 /var/lib/agent-container/runs
+
 # --- Layer 6: entrypoint (most-frequently-changed; STUB until item C) -------
 # Two-step COPY+chmod instead of `COPY --chmod=` so the file builds under both
 # the legacy builder and BuildKit; --chmod requires BuildKit specifically.

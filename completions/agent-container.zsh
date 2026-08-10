@@ -60,6 +60,26 @@ __agent_container_names() {
     compadd -a names
 }
 
+# Feature 016: targets for `runs list|show`, read from the DURABLE store
+# ${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/runs/<host>/<env>/<id>.json.
+# A separate source from the state files on purpose — a record outlives its
+# environment, so completing from state would hide exactly the environments this
+# feature exists to answer for.
+#
+# Which of the two to offer is decided from $words and NOT from $line: this runs
+# inside a NESTED _arguments, where $line describes that nested context rather
+# than the command line the operator actually typed.
+__agent_container_runs_targets() {
+    local runs_dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/runs" f
+    local -aU names
+    if (( ${words[(I)show]} )); then
+        for f in "$runs_dir"/*/*/*.json(N); do names+=("${f:t:r}"); done
+    else
+        for f in "$runs_dir"/*/*(N/); do names+=("${f:t}"); done
+    fi
+    compadd -a names
+}
+
 _agent-container() {
     local context state state_descr line
     typeset -A opt_args
@@ -90,6 +110,7 @@ _agent-container() {
         'list:List containers (plus stale state files)'
         'attach:Attach via ssh + tmux (local state or hosts.conf)'
         'logs:Tail container logs'
+        'runs:Durable run records (list, show) — survives teardown'
         'plan:Show the plan for the declarative spec (no mutation)'
         'apply:Converge the declarative spec'
         'status:Report declarative spec drift'
@@ -176,6 +197,14 @@ _agent-container() {
                         '--egress[Read the egress boundary log, where refusals are recorded]' \
                         '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names_local'
+                    ;;
+                runs)
+                    _arguments \
+                        '1:subcommand:(list show)' \
+                        '--host[Host whose records to read]:host:' \
+                        '--changed[Only runs whose recorded paths cover PATH (list)]:path:' \
+                        '--json[Emit machine-readable JSON]' \
+                        '*:record:__agent_container_runs_targets'
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh)'

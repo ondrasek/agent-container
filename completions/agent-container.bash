@@ -60,6 +60,35 @@ __agent_container_names() {
     { __agent_container_names_local; __agent_container_names_hosts; } | LC_ALL=C sort -u
 }
 
+# Feature 016: environments that have RUN RECORDS, from the durable store
+# ${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/runs/<host>/<env>/.
+# A SEPARATE source from the state files on purpose — a record outlives its
+# environment, so `runs list` must offer names whose *.port file is long gone.
+# Completing from state would silently hide exactly the environments this feature
+# exists to answer for.
+__agent_container_runs_envs() {
+    local runs_dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/runs"
+    local d
+    [[ -d "${runs_dir}" ]] || return 0
+    for d in "${runs_dir}"/*/*/; do
+        [[ -d "${d}" ]] || continue
+        d="${d%/}"
+        printf '%s\n' "${d##*/}"
+    done | LC_ALL=C sort -u
+}
+
+# Run ids, for `runs show`. Same store, one level deeper: <run-id>.json.
+__agent_container_runs_ids() {
+    local runs_dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-container/runs"
+    local f base
+    [[ -d "${runs_dir}" ]] || return 0
+    for f in "${runs_dir}"/*/*/*.json; do
+        [[ -e "${f}" ]] || continue
+        base="${f##*/}"
+        printf '%s\n' "${base%.json}"
+    done | LC_ALL=C sort -u
+}
+
 # Append names emitted by $1 that prefix-match $cur to COMPREPLY, WITHOUT the
 # word re-expansion `compgen -W` performs (which would run command
 # substitutions embedded in a hostile name). $cur is set by the caller.
@@ -98,7 +127,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs plan apply status destroy menu context skill commands completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -200,6 +229,45 @@ _agent_container() {
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
+            ;;
+        runs)
+            # `runs list|show`. The sub-subcommand is found the same way `sub` was:
+            # the first non-option word AFTER it (`i` holds that index), so a
+            # `--host vps` sitting between them cannot be mistaken for the verb.
+            local rsub="" j
+            for (( j = i + 1; j < cword; j++ )); do
+                case "${words[j]}" in
+                    -*) ;;
+                    *) rsub="${words[j]}"; break ;;
+                esac
+            done
+            if [[ -z "${rsub}" ]]; then
+                COMPREPLY=( $(compgen -W "list show" -- "${cur}") )
+                return 0
+            fi
+            if [[ "${prev}" == "--host" || "${prev}" == "--changed" ]]; then
+                # A host name we do not complete — and a --changed PATH we must not:
+                # it is repo-relative as the RECORD saw it, and the command exists
+                # to answer when that repository is gone or was never on this
+                # machine. Completing local files would offer paths from whatever
+                # directory the operator happens to stand in.
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                # --changed is `list`-only; offering it on `show` would advertise a
+                # flag that errors out.
+                local rflags="--host --json"
+                [[ "${rsub}" == "list" ]] && rflags="${rflags} --changed"
+                COMPREPLY=( $(compgen -W "${rflags}" -- "${cur}") )
+                return 0
+            fi
+            # `show` takes a run id, `list` an environment — both from the DURABLE
+            # store, never from state files (a record outlives its environment).
+            if [[ "${rsub}" == "show" ]]; then
+                __agent_container_add_names __agent_container_runs_ids
+            else
+                __agent_container_add_names __agent_container_runs_envs
+            fi
             ;;
         completions)
             COMPREPLY=( $(compgen -W "bash zsh" -- "${cur}") )

@@ -136,6 +136,10 @@ _export_env() {
     export AGENT_CONTAINER_GIT_CAPTURE="${GITCAP}" AGENT_CONTAINER_SSHD_CAPTURE="${SSHDCAP}"
     # rootless testability hooks: substitute sshd, redirect the bind-mount dir.
     export AGENT_CONTAINER_SSHD="${STUB}/sshd" AGENT_CONTAINER_INJECT_DIR="${INJECTDIR}"
+    # Feature 016: the run-record dir, redirected out of /var/lib. This suite
+    # stays on the bare-shell path (no agent) and so writes no record today — the
+    # hook is here so that stops being an assumption the moment one is added.
+    export AGENT_CONTAINER_RUNS_DIR="${SB}/runs"
     export PATH="${STUB}:${PATH}"
     unset AGENT_CONTAINER_TMUX_WINDOWS
     [[ -n "${TEST_ENV_AUTHKEYS}" ]] && export SSH_AUTHORIZED_KEYS="${TEST_ENV_AUTHKEYS}" || unset SSH_AUTHORIZED_KEYS

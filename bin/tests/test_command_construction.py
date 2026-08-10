@@ -19,7 +19,9 @@ def capture_query(wiz, monkeypatch):
     """Replace wiz.query with a recorder returning success (used for ps/down)."""
     calls: list[list[str]] = []
 
-    def fake_query(argv):
+    def fake_query(argv, timeout=None):
+        # `timeout` is accepted because the real query takes it and host_ps_rows
+        # passes it; a fake that refused it would fail on a call path that works.
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
@@ -174,7 +176,7 @@ def test_compose_up_exec_threads_binds_into_volumes(wiz, capture_compose, monkey
     ]
     assert "/abs/host:/opt/data" in vols
     assert "agent-container-acme-workspace:/workspace" in vols
-    assert len(vols) == 9 + 1  # Feature 010: nine per-container volumes
+    assert len(vols) == 10 + 1  # ten per-container volumes (016 added runs) + the bind
 
 
 # --- bind-mount resolution (--mount) -----------------------------------------

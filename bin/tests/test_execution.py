@@ -84,9 +84,11 @@ def test_workspace_ephemeral_omits_mount_and_volume(wiz):
     svc = m["services"]["agent"]
     assert not any(v.endswith(":/workspace") for v in svc["volumes"])  # nothing at /workspace
     assert wiz.volume_name("acme") not in m["volumes"]  # workspace volume NOT declared (FR-013)
-    # The other six volumes are still mounted + declared.
+    # The other nine volumes are still mounted + declared — including runs, which is
+    # why Feature 016 gave the record its own volume: an ephemeral run declares no
+    # workspace volume, and is exactly the run whose record most needs to survive.
     assert set(m["volumes"]) == set(wiz.other_container_volumes("acme"))
-    assert len(m["volumes"]) == 8  # Feature 010: eight non-workspace volumes
+    assert len(m["volumes"]) == 9  # nine non-workspace volumes (016 added runs)
 
 
 def test_workspace_bind_mounts_local_dir_without_declaring_volume(wiz):
@@ -96,7 +98,7 @@ def test_workspace_bind_mounts_local_dir_without_declaring_volume(wiz):
     svc = m["services"]["agent"]
     assert "/host/work:/workspace" in svc["volumes"]
     assert wiz.volume_name("acme") not in m["volumes"]
-    assert len(m["volumes"]) == 8  # Feature 010: eight non-workspace volumes
+    assert len(m["volumes"]) == 9  # nine non-workspace volumes (016 added runs)
 
 
 def test_environment_threaded_into_service(wiz):

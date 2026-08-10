@@ -197,7 +197,7 @@ def test_env_reconcile_absent_matching_stopped(wiz, monkeypatch):
     spec = wiz.ExecSpec(**_spec())
     # absent — no container for the identity
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
-    assert wiz.env_reconcile(LOCAL_HOST, "acme", spec) == ("absent", "")
+    assert wiz.env_reconcile(LOCAL_HOST, "acme", spec, host_name="local") == ("absent", "")
     # running + live config matches the spec → matching
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
     monkeypatch.setattr(
@@ -205,14 +205,14 @@ def test_env_reconcile_absent_matching_stopped(wiz, monkeypatch):
         "env_live_config",
         lambda hr, n: {"mode": "interactive", "agent": "claude", "repo": None},
     )
-    assert wiz.env_reconcile(LOCAL_HOST, "acme", spec) == ("matching", "")
+    assert wiz.env_reconcile(LOCAL_HOST, "acme", spec, host_name="local") == ("matching", "")
     # present but stopped → drifted (existence-level), never touches live config
     monkeypatch.setattr(
         wiz,
         "host_container_names",
         lambda host, include_stopped=False: {cname} if include_stopped else set(),
     )
-    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec, host_name="local")
     assert state == "drifted" and "stopped" in detail
 
 
@@ -227,7 +227,7 @@ def test_env_reconcile_field_level_drift(wiz, monkeypatch):
         lambda hr, n: {"mode": "interactive", "agent": "claude", "repo": None},
     )
     spec = wiz.ExecSpec(**_spec(agent="codex"))  # declared agent changed
-    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec, host_name="local")
     assert state == "drifted" and "agent" in detail and "codex" in detail and "claude" in detail
 
 
@@ -243,12 +243,12 @@ def test_env_reconcile_repo_drift_redacts_embedded_credential(wiz, monkeypatch):
     )
     spec = wiz.ExecSpec(mode="interactive", agent="claude", workspace="persistent")
     spec.repo = "ssh://git:s3cr3t@github.com/o/r.git"
-    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    state, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec, host_name="local")
     assert state == "drifted" and "repo" in detail
     assert "s3cr3t" not in detail and "git@github.com" in detail  # password stripped, user kept
     # https token form is redacted whole-userinfo
     spec.repo = "https://x-access-token:ghp_SECRET@github.com/o/r.git"
-    _s, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec)
+    _s, detail = wiz.env_reconcile(LOCAL_HOST, "acme", spec, host_name="local")
     assert "ghp_SECRET" not in detail and "x-access-token" not in detail
 
 
@@ -258,7 +258,10 @@ def test_env_reconcile_uninspectable_is_existence_match(wiz, monkeypatch):
     cname = wiz.container_name("acme")
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: {cname})
     monkeypatch.setattr(wiz, "env_live_config", lambda hr, n: None)
-    assert wiz.env_reconcile(LOCAL_HOST, "acme", wiz.ExecSpec(**_spec())) == ("matching", "")
+    assert wiz.env_reconcile(LOCAL_HOST, "acme", wiz.ExecSpec(**_spec()), host_name="local") == (
+        "matching",
+        "",
+    )
 
 
 def test_config_drift_pure(wiz):

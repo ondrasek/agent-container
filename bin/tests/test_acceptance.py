@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,11 @@ def _cli_env(state_dir: Path) -> dict[str, str]:
     # ~/.config/agent-container (hosts.json) AND so a test can seed a
     # convention-discovered canonical config under it (US3).
     env["XDG_CONFIG_HOME"] = str(state_dir / "xdgconfig")
+    # Feature 016: the run-record store is DATA, not state. Without this the suite
+    # would write records into the developer's real ~/.local/share/agent-container
+    # and — worse — read them back, so a `runs list` assertion could pass on a
+    # record left behind by an earlier session instead of the one it just made.
+    env["XDG_DATA_HOME"] = str(state_dir / "xdgdata")
     return env
 
 
@@ -424,10 +430,10 @@ def test_env_file_injection(acc):
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
 
-def test_purge_removes_all_nine_volumes(acc):
+def test_purge_removes_all_ten_volumes(acc):
     laptop = _gen_keypair(acc.tmp / "laptop")
     acc.up("accpurge", authorized_key=[laptop.with_suffix(".pub")])
-    assert len(acc.volumes_of("accpurge")) == 9  # Feature 010: 7 -> 9
+    assert len(acc.volumes_of("accpurge")) == 10  # Feature 010: 7 -> 9; 016: -> 10 (runs)
     acc.down("accpurge", purge=True)
     assert acc.volumes_of("accpurge") == []
 
@@ -1676,16 +1682,21 @@ def test_opencode_persists_config_and_credentials_across_recreate(acc):
 def test_pre_upgrade_environment_still_starts_and_tears_down(acc):
     """US3 acceptance 1+2 / FR-009 / SC-005 — the feature's headline risk.
 
-    Simulates an environment created BEFORE this change by deleting the two new
+    Simulates an environment created BEFORE this change by deleting the new
     volumes from a live deployment, then exercises the paths an upgrading operator
     actually takes: `up` again (must still start) and `down --purge` (must tolerate
     the absence). No manual migration anywhere.
+
+    Feature 016 added `runs`, so it is deleted here too. The alternative — leaving
+    it and raising the expected count — would have quietly stopped simulating a
+    pre-upgrade environment and started simulating a 015 one, and the operator
+    upgrading FROM 015 is exactly who this test is for.
     """
     laptop = _gen_keypair(acc.tmp / "laptop")
     acc.up("acc10leg", authorized_key=[laptop.with_suffix(".pub")])
     acc.down("acc10leg")  # keep volumes, drop the container
 
-    for suffix in ("opencode", "opencode-data"):
+    for suffix in ("opencode", "opencode-data", "runs"):
         subprocess.run(
             [RUNTIME, "volume", "rm", f"agent-container-acc10leg-{suffix}"],
             capture_output=True,
@@ -2577,3 +2588,580 @@ def test_git_push_over_a_declared_ssh_endpoint_actually_pushes(acc):
         )
     finally:
         drop_servers()
+
+
+# --- Feature 016: a run leaves a record that outlives its container ----------
+# T023/T024/T025 (quickstart S2/S3/S4). The container writes the record to a
+# volume; the CLI ingests it on next contact. These are the acceptance tests the
+# rest of the feature is gated on — if a record does not survive `down --purge`,
+# nothing built on top of it matters.
+
+# The agents ship with no credentials in this suite, so a real one exits within a
+# second — which is fine for "did a record appear" and useless for "was it still
+# running when SIGKILL landed". A stand-in binary on the workspace bind gives the
+# RUN a controllable lifetime without touching any part of the mechanism under
+# test: the entrypoint still opens the record, supervises the child, traps the
+# signal and completes the record exactly as it does for a real agent.
+_FAKE_AGENT_PATH = "PATH=/workspace:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _fake_agent(acc, name: str, body: str) -> Path:
+    """A workspace directory holding an executable `claude` that runs `body`."""
+    d = acc.tmp / f"fakeagent-{name}"
+    d.mkdir(parents=True, exist_ok=True)
+    exe = d / "claude"
+    exe.write_text(f"#!/bin/sh\n# acceptance stand-in for the agent binary\n{body}\n")
+    exe.chmod(0o755)
+    return d
+
+
+def _runs(acc, name: str) -> list[dict]:
+    """`runs list <name> --json`, unwrapped from the Feature 009 envelope."""
+    r = acc.cli(["runs", "list", name, "--json"])
+    assert r.returncode == 0, f"runs list {name} failed:\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)["data"]["runs"]
+
+
+def _wait_container(name: str, predicate, timeout: int = 60) -> str:
+    """Poll the container's status with the RUNTIME directly, never through the
+    CLI: T024's whole property is that the CLI is not in contact while the run
+    ends, so a harness that polled with `agent-container status` would be the
+    contact it claims is absent."""
+    cname = f"agent-container-{name}"
+    deadline = time.monotonic() + timeout
+    status = ""
+    while time.monotonic() < deadline:
+        status = subprocess.run(
+            [RUNTIME, "ps", "-a", "--filter", f"name={cname}", "--format", "{{.Status}}"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if predicate(status):
+            return status
+        time.sleep(1)
+    raise AssertionError(f"{cname} never reached the expected state (last status: {status!r})")
+
+
+def test_a_record_survives_purge(acc):
+    """T023 / quickstart S2 (C3, FR-001, SC-001) — THE feature. A headless run's
+    record must still be retrievable after the container and all ten of its
+    volumes, the record's own volume included, are destroyed."""
+    ws = _fake_agent(acc, "purge", "exit 0")
+    acc.up(
+        "acc16srv",
+        mode="headless",
+        agent="claude",
+        task="leave a record",
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        foreground=True,
+        wait=False,
+    )
+    before = _runs(acc, "acc16srv")
+    assert len(before) == 1, f"the run left no single record to test with: {before}"
+    assert before[0]["outcome"] == "finished" and before[0]["exit_code"] == 0
+    assert before[0]["environment"] == "acc16srv"  # stamped at ingestion
+    assert before[0]["task"] == "leave a record"
+
+    acc.down("acc16srv", purge=True)
+    assert acc.volumes_of("acc16srv") == [], "purge left volumes behind; the test proves nothing"
+
+    after = _runs(acc, "acc16srv")
+    assert [r["run_id"] for r in after] == [before[0]["run_id"]], (
+        "the record did not survive `down --purge` — this is the feature, and "
+        f"nothing built on it matters until it does: {after}"
+    )
+
+
+def test_a_detached_run_is_ingested_on_next_contact(acc):
+    """T024 / quickstart S3 (SC-002a). Detached is the DEFAULT headless mode, so a
+    design that only recorded foreground runs would miss the common case. The CLI
+    returns at `up` and is not attached when the agent finishes; the record must
+    appear on the next command that touches the host."""
+    ws = _fake_agent(acc, "detached", "sleep 20; exit 0")
+    r = acc.up(
+        "acc16det",
+        mode="headless",
+        agent="claude",
+        task="detached run",
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        wait=False,  # no --foreground: `up` returns while the agent is still running
+    )
+    assert r.returncode == 0, f"detached up failed:\n{r.stderr}"
+
+    # A contact WHILE the run is in flight. The pending record it finds is
+    # byte-identical to the one a SIGKILLed run leaves behind, and the only thing
+    # separating them is that this writer is still alive — so this asserts the
+    # in-flight record is NOT declared `stopped`. Getting this wrong would make
+    # every mid-run `runs list` report a live run as killed.
+    _wait_container("acc16det", lambda s: s.startswith("Up"))
+    inflight = _runs(acc, "acc16det")
+    assert len(inflight) == 1 and inflight[0]["outcome"] is None, (
+        f"a run still in progress was given an ending: {inflight}"
+    )
+
+    # The run ends with nothing of ours connected to it. Exit 0 and `restart:
+    # on-failure` together mean the container stays down once it is down, so this
+    # is a settled state rather than a moment in a restart loop.
+    _wait_container("acc16det", lambda s: s.startswith("Exited"))
+
+    runs = _runs(acc, "acc16det")  # the first contact since the run ended
+    assert len(runs) == 1, f"the detached run was not ingested: {runs}"
+    # The SAME record, now complete: the mid-run contact must not have consumed
+    # the container's copy, or the ending it wrote at exit would have had nowhere
+    # to land and the store would keep the pending version forever.
+    assert runs[0]["run_id"] == inflight[0]["run_id"]
+    assert runs[0]["outcome"] == "finished"
+    assert runs[0]["ended_at"], "an ingested record with no ended_at was never completed"
+
+
+def test_a_killed_run_still_yields_a_record(acc):
+    """T025 / quickstart S4 (C5, SC-008). SIGKILL runs no trap, so the ONLY thing
+    that can produce a record here is the pending write the entrypoint makes at
+    start; ingestion completes it as `stopped`.
+
+    The wrong answer that looks right is NO RECORD AT ALL — an empty listing reads
+    like 'nothing to report' rather than 'every abnormal run is being lost', so
+    the emptiness is asserted against explicitly."""
+    ws = _fake_agent(acc, "killed", "exec sleep 600")
+    r = acc.up(
+        "acc16kil",
+        mode="headless",
+        agent="claude",
+        task="sleep 600",
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        wait=False,
+    )
+    assert r.returncode == 0, f"up failed:\n{r.stderr}"
+    _wait_container("acc16kil", lambda s: s.startswith("Up"))
+
+    kill = subprocess.run(
+        [RUNTIME, "kill", "agent-container-acc16kil"], capture_output=True, text=True
+    )
+    assert kill.returncode == 0, kill.stderr
+    _wait_container("acc16kil", lambda s: s.startswith("Exited"))
+
+    runs = _runs(acc, "acc16kil")
+    assert runs, (
+        "a SIGKILLed run produced NO record. SIGKILL runs no trap, so this means "
+        "the start-side pending write is missing and every abnormal run is lost."
+    )
+    assert len(runs) == 1, f"one kill, one record: {runs}"
+    assert runs[0]["outcome"] == "stopped", (
+        f"a killed run must be recorded as stopped, not left ambiguous: {runs[0]}"
+    )
+    # ended_at is deliberately unknown — nobody observed the instant the container
+    # went away — and the note says the record was reconstructed so the null reads
+    # as 'not known' rather than as a bug in the writer (data-model §7).
+    assert runs[0]["ended_at"] is None
+    assert any("reconstructed" in n for n in runs[0]["notes"]), runs[0]["notes"]
+
+
+def test_a_record_survives_purge_of_a_RUNNING_environment(acc):
+    """Quickstart S9 (C4, FR-001b) — the teardown ordering, in the shape that
+    actually broke. `compose down --volumes` kills the container and drops its
+    volume in ONE step, so a drain that merely runs 'before the removal' collects
+    the PENDING record written at start and then destroys the `stopped` one the
+    SIGTERM trap writes. Measured: that stored a null outcome forever.
+
+    T023 cannot catch this — its run has already exited by teardown time — so
+    without this test the teardown ordering is only ever exercised against a
+    container that had nothing left to say."""
+    ws = _fake_agent(acc, "live", "exec sleep 600")
+    r = acc.up(
+        "acc16liv",
+        mode="headless",
+        agent="claude",
+        task="still running at teardown",
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        wait=False,
+    )
+    assert r.returncode == 0, f"up failed:\n{r.stderr}"
+    _wait_container("acc16liv", lambda s: s.startswith("Up"))
+
+    acc.down("acc16liv", purge=True)  # torn down mid-run
+    assert acc.volumes_of("acc16liv") == []
+
+    runs = _runs(acc, "acc16liv")
+    assert len(runs) == 1, f"tearing down a running environment lost its record: {runs}"
+    assert runs[0]["outcome"] == "stopped", (
+        f"the run was recorded with an ambiguous ending (SC-002 requires zero): {runs[0]}"
+    )
+    # The container completed this one itself, inside the stop grace period — so
+    # unlike the SIGKILL case the end time IS known, and no reconstruction note.
+    assert runs[0]["ended_at"], "the pending record was stored instead of the completed one"
+    assert runs[0]["notes"] == []
+
+
+def test_five_concurrent_environments_each_leave_one_complete_record(acc):
+    """T047 / quickstart S10 (C12, FR-009, SC-006). Five environments deployed and
+    run AT THE SAME TIME must yield five complete, non-interleaved records.
+
+    One-file-per-record (research R3) is what makes this safe, so the test exists
+    to prove that construction was actually USED — a shared append-only file, or a
+    read-modify-write of one index, passes every single-run test in this suite and
+    loses or splices records only here.
+
+    Each run's task names its own environment, so a spliced record is caught by its
+    CONTENT: five records with the right count but the wrong task in one of them is
+    exactly the failure a count-only assertion would call a pass.
+
+    The overlap is structural, not timed: each thread blocks in `up --foreground`
+    for the whole of its run, so the five containers are writing their records —
+    and the five drains are ingesting into one store tree — at the same time.
+    Nothing here asserts a wall-clock overlap, because at the one-second resolution
+    of `started_at` that assertion would be flaky rather than strict.
+    """
+    names = [f"acc16n{n}" for n in range(1, 6)]
+    workspaces = {n: _fake_agent(acc, n, "exit 0") for n in names}
+
+    def launch(name: str) -> subprocess.CompletedProcess:
+        return acc.up(
+            name,
+            mode="headless",
+            agent="claude",
+            task=f"concurrent {name}",
+            workspace="bind",
+            workspace_dir=workspaces[name],
+            env_extra=[_FAKE_AGENT_PATH],
+            foreground=True,  # each thread returns when ITS run has ended
+            wait=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        results = list(pool.map(launch, names))
+    for name, r in zip(names, results, strict=True):
+        assert r.returncode == 0, f"concurrent up {name} failed:\n{r.stderr}"
+
+    for name in names:
+        runs = _runs(acc, name)
+        assert len(runs) == 1, f"{name} produced {len(runs)} record(s), not one: {runs}"
+        rec = runs[0]
+        assert rec["task"] == f"concurrent {name}", (
+            f"{name}'s record carries another run's task — the writes interleaved: {rec}"
+        )
+        assert rec["environment"] == name
+        assert rec["outcome"] == "finished" and rec["exit_code"] == 0, rec
+        assert rec["ended_at"], f"{name}'s record was never completed: {rec}"
+
+
+# The task text is the ONE operator-authored field (C13, research R9) and it is
+# recorded VERBATIM — deliberately not redacted, because a pattern-based redactor
+# that missed one value would convert the operator's caution into misplaced
+# confidence. So this string is built to break both halves of that statement: the
+# quoting/escaping it must survive intact (quotes, backslash, `$`, a newline, a
+# tab, non-ASCII), and a token-SHAPED substring a redactor would have eaten.
+_VERBATIM_TASK = (
+    'audit "the config" \\ $HOME `whoami`\n'
+    "\tsecond line — ünïcode, 100%\n"
+    "ghp_NOTAREALTOKEN000000000000000000000000"
+)
+
+
+def test_the_task_text_round_trips_verbatim(acc):
+    """T048 / quickstart S12. What comes back out of the record must be exactly
+    what went in: the record is the operator's account of what was asked for, and a
+    task that is quietly reshaped between the flag and the store is an account of a
+    run that did not happen.
+
+    The token-shaped tail is the redaction probe. FR-010/R9 say the tool does not
+    redact; if one is ever added, this fails and the operator learns that the
+    documented promise (`recorded verbatim … nothing redacts it`, `up --task`) and
+    the behaviour have parted company.
+    """
+    ws = _fake_agent(acc, "verbatim", "exit 0")
+    r = acc.up(
+        "acc16tsk",
+        mode="headless",
+        agent="claude",
+        task=_VERBATIM_TASK,
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        foreground=True,
+        wait=False,
+    )
+    assert r.returncode == 0, f"up failed:\n{r.stderr}"
+
+    runs = _runs(acc, "acc16tsk")
+    assert len(runs) == 1, runs
+    assert runs[0]["task"] == _VERBATIM_TASK, (
+        "the task did not round-trip verbatim.\n"
+        f"  sent:  {_VERBATIM_TASK!r}\n  stored: {runs[0]['task']!r}"
+    )
+    # `runs show --json` is the surface an agent reads (C2, verbatim as stored);
+    # asserting only through `runs list` would leave the two free to disagree.
+    shown = acc.cli(["runs", "show", runs[0]["run_id"], "--json"])
+    assert shown.returncode == 0, shown.stderr
+    assert json.loads(shown.stdout)["data"]["task"] == _VERBATIM_TASK
+
+
+def test_records_are_ingested_over_a_non_default_context(acc):
+    """T049 (research R10). Ingestion runs a throwaway container on the HOST and
+    streams the runs volume as a tar over the runtime's stdout — a mechanism whose
+    entire reason for existing is that the operator's machine shares no filesystem
+    with the host the container ran on.
+
+    Every other 016 test here ingests from the default local daemon, which is the
+    one path that would still work if the argv were built without the context. So
+    the remote mechanism would be untested while the suite stayed green. A
+    non-default docker context aimed at the same daemon exercises the
+    context-targeted argv without a second machine (the pattern T016a uses).
+
+    The stand-in agent exits 0 for a reason MEASURED here: the real uncredentialed
+    agent exits 1, the deployment's `restart: on-failure` policy starts it again,
+    and the environment then holds one record per attempt. Each of those IS a run
+    and the records were right — but a test asserting "the record" would be
+    asserting a race.
+
+    A bind workspace is legal here because the registered host's address is
+    localhost (`host_is_local`); only the ingestion argv is context-targeted, which
+    is exactly the part under test.
+    """
+    ctx = subprocess.run(
+        ["docker", "context", "show"], capture_output=True, text=True
+    ).stdout.strip()
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    cfg.joinpath("hosts.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default": None,
+                "hosts": {"acc16ctx": {"driver": "docker", "context": ctx, "address": "localhost"}},
+            }
+        )
+    )
+    ws = _fake_agent(acc, "context", "exit 0")
+    env_file = acc.tmp / "ctx.env"
+    env_file.write_text(
+        f"GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n{_FAKE_AGENT_PATH}\n"
+    )
+    acc.register("acc16rem")
+    up = acc.cli(
+        [
+            "up",
+            "acc16rem",
+            "--host",
+            "acc16ctx",
+            "--env-file",
+            str(env_file),
+            "--mode",
+            "headless",
+            "--agent",
+            "claude",
+            "--task",
+            "ingested over a context",
+            "--workspace",
+            "bind",
+            "--workspace-dir",
+            str(ws),
+            "--foreground",
+        ]
+    )
+    assert up.returncode == 0, f"up over a context failed:\n{up.stdout}\n{up.stderr}"
+
+    r = acc.cli(["runs", "list", "acc16rem", "--host", "acc16ctx", "--json"])
+    assert r.returncode == 0, f"runs list over a context failed:\n{r.stdout}\n{r.stderr}"
+    runs = json.loads(r.stdout)["data"]["runs"]
+    assert len(runs) == 1, f"the record never came off the volume over a context: {runs}"
+    assert runs[0]["task"] == "ingested over a context"
+    assert runs[0]["ended_at"], f"an incomplete record was ingested: {runs[0]}"
+    # `host` is stamped at ingestion by the drain that read the volume, so this
+    # names WHICH host's drain did it. Without it the assertion above would pass on
+    # a build that silently fell back to the default daemon — the very failure this
+    # test exists to exclude.
+    assert runs[0]["host"] == "acc16ctx", f"the record was ingested by another host: {runs[0]}"
+    # And it is not ALSO sitting under the default host: a complete record is
+    # cleared from the volume once stored, so a second copy would mean the drain
+    # ran twice under two names and `runs list` would double-count every run.
+    local = acc.cli(["runs", "list", "acc16rem", "--json"])
+    assert json.loads(local.stdout)["data"]["runs"] == [], (
+        "the same record is stored under the default host as well: " + local.stdout
+    )
+    # Torn down THROUGH THE HOST IT WAS DEPLOYED TO. The fixture's own teardown
+    # runs against the default host, which reaches the container (same daemon) but
+    # leaves the compose project's network behind — measured, once per run.
+    acc.cli(["down", "acc16rem", "--host", "acc16ctx", "--purge", "-y"])
+
+
+# --- T055/T056: which run changed this file, with the repository GONE ---------
+#
+# These need a run that really commits, which needs a git repository the container
+# can WRITE to. A bind workspace cannot be it: on macOS+Lima the host mount is
+# read-only and its root is uid 0 inside the container, so git refuses the
+# directory outright (measured). So the repository is built on the PERSISTENT
+# workspace volume — dev-owned, and it survives the down/up cycle each run needs.
+#
+# The stand-in agent lives on that volume too and runs the task as a shell script
+# (`claude -p "<task>"` → `$2`). The task is the only per-run channel a headless
+# run has, and these runs must each change something DIFFERENT.
+_TASK_RUNNER = '#!/bin/sh\n# acceptance stand-in: the task text IS the script\nexec sh -c "$2"\n'
+_GIT_ID = "git -c user.name=Test -c user.email=t@example.com"
+
+
+def _seed_repo_over_ssh(acc, name: str) -> None:
+    """Deploy <name> interactively, build a git repository plus the stand-in agent
+    on its persistent workspace, and stop it again (volumes kept)."""
+    key = _gen_keypair(acc.tmp / f"{name}-key")
+    port = acc.up(name, workspace="persistent", authorized_key=[key.with_suffix(".pub")])
+    script = (
+        "set -e; cd /workspace; mkdir -p src/auth docs; "
+        "echo seed > src/auth/session.py; echo seed > README.md; echo seed > docs/notes.md; "
+        f"printf '%s' '{_TASK_RUNNER}' > claude; chmod +x claude; "
+        f"git init -q -b main .; {_GIT_ID} add -A; {_GIT_ID} commit -qm seed; "
+        "git rev-parse HEAD"
+    )
+    r = _ssh(port, key, script)
+    assert r.returncode == 0, f"seeding {name} failed:\n{r.stdout}\n{r.stderr}"
+    acc.down(name)  # no --purge: the workspace and the records stay
+
+
+def _headless_run(acc, name: str, task: str) -> None:
+    """One more run against the seeded environment, then stop it again."""
+    r = acc.up(
+        name,
+        mode="headless",
+        agent="claude",
+        task=task,
+        workspace="persistent",
+        env_extra=[_FAKE_AGENT_PATH],
+        foreground=True,
+        wait=False,
+    )
+    assert r.returncode == 0, f"run '{task}' failed:\n{r.stdout}\n{r.stderr}"
+    acc.down(name)
+
+
+def _by_task(runs: list[dict]) -> dict[str, dict]:
+    return {r["task"]: r for r in runs if r.get("task")}
+
+
+_TOUCH_SESSION = f"cd /workspace && echo a >> src/auth/session.py && {_GIT_ID} commit -aqm r1 #1"
+_TOUCH_README = f"cd /workspace && echo b >> README.md && {_GIT_ID} commit -aqm r2 #2"
+_TOUCH_BOTH = (
+    f"cd /workspace && echo c >> src/auth/session.py && echo c >> docs/notes.md "
+    f"&& {_GIT_ID} commit -aqm r3 #3"
+)
+_TOUCH_NOTES = f"cd /workspace && echo d >> docs/notes.md && {_GIT_ID} commit -aqm r4 #4"
+_TOUCH_NOTHING = "true #5"
+
+
+def test_changed_answers_from_records_alone_with_the_repository_destroyed(acc):
+    """T055 / quickstart S13 (C16, SC-007). With N >= 5 runs recorded, `--changed`
+    must name exactly the runs that touched the file, newest-first — and give the
+    SAME answer after the repository is destroyed.
+
+    The second half is the point. The paths are captured when each run ENDS
+    (research R11), so the answer needs no clone, no SHA resolution and no history
+    that still contains those commits. A build that resolved SHAs at query time
+    passes the first half and fails exactly when the record is most valuable: the
+    environment is gone and the record is all that is left.
+
+    The seeding session is asserted to come back UNCERTAIN rather than as a
+    confident 'no': it started on an empty workspace and created the repository, so
+    its changed-path list is knowingly incomplete. A build that reported it as a
+    clean no would be answering SC-007 with a confident wrong answer.
+    """
+    _seed_repo_over_ssh(acc, "acc16chg")
+    for task in (_TOUCH_SESSION, _TOUCH_README, _TOUCH_BOTH, _TOUCH_NOTES, _TOUCH_NOTHING):
+        _headless_run(acc, "acc16chg", task)
+
+    all_runs = _runs(acc, "acc16chg")
+    assert len(all_runs) == 6, f"expected the session plus five runs, got: {all_runs}"
+    by_task = _by_task(all_runs)
+    assert set(by_task) == {
+        _TOUCH_SESSION,
+        _TOUCH_README,
+        _TOUCH_BOTH,
+        _TOUCH_NOTES,
+        _TOUCH_NOTHING,
+    }, sorted(by_task)
+
+    def changed(path: str) -> dict:
+        r = acc.cli(["runs", "list", "acc16chg", "--changed", path, "--json"])
+        assert r.returncode == 0, f"--changed {path} failed:\n{r.stdout}\n{r.stderr}"
+        return json.loads(r.stdout)["data"]
+
+    before = changed("src/auth/session.py")
+    assert [x["run_id"] for x in before["runs"]] == [
+        by_task[_TOUCH_BOTH]["run_id"],
+        by_task[_TOUCH_SESSION]["run_id"],
+    ], f"wrong runs, or wrong order (newest first): {before['runs']}"
+    # The run that committed nothing is a CONFIDENT no — its path list was captured
+    # and is empty, which is knowledge, not silence.
+    assert by_task[_TOUCH_NOTHING]["run_id"] not in [
+        x["run_id"] for x in before["runs"] + before["uncertain"]
+    ], before
+    # The seeding session cannot be ruled out. Its verdict names the shape of the
+    # gap ("the list was truncated") and its own record carries the reason the
+    # capture set that flag — the two are deliberately separate: the query knows
+    # only that the list is incomplete, and the run knows why.
+    seed = [r for r in all_runs if r["kind"] == "interactive"]
+    assert len(seed) == 1, f"expected exactly one interactive session record: {all_runs}"
+    assert seed[0]["run_id"] in {x["run_id"] for x in before["uncertain"]}, (
+        f"the session that CREATED the repository was ruled out: {before['uncertain']}"
+    )
+    assert any("held no repository" in n for n in seed[0]["notes"]), seed[0]["notes"]
+
+    acc.down("acc16chg", purge=True)
+    assert acc.volumes_of("acc16chg") == [], "the workspace survived the purge; nothing is proven"
+
+    after = changed("src/auth/session.py")
+    assert [x["run_id"] for x in after["runs"]] == [x["run_id"] for x in before["runs"]], (
+        "the answer changed once the repository was destroyed — the paths are being "
+        f"resolved at query time, not read from the records:\n{before}\n{after}"
+    )
+    # A DIFFERENT path, to prove the query discriminates rather than returning
+    # whatever it has: two other runs touched this one, and the assertion names
+    # both of them rather than merely checking the result is non-empty.
+    assert [x["run_id"] for x in changed("docs/notes.md")["runs"]] == [
+        by_task[_TOUCH_NOTES]["run_id"],
+        by_task[_TOUCH_BOTH]["run_id"],
+    ]
+    assert [x["run_id"] for x in changed("src/auth")["runs"]] == [
+        x["run_id"] for x in after["runs"]
+    ], "a directory must answer for the files under it"
+
+
+def test_a_commit_that_can_no_longer_be_resolved_still_reads(acc):
+    """T056 (spec edge case, analyze finding G3). Every commit id in the store is
+    unresolvable the moment the environment is gone — there is no repository left
+    on the operator's machine to resolve it against, and `runs show` never opens
+    one.
+
+    So the requirement is that the record degrades to what it still knows: the ids
+    are shown as the ids they are, the changed paths still answer, and nothing
+    crashes or quietly drops the field. A renderer that tried to look a commit up
+    would fail here on every record it has ever stored.
+    """
+    _seed_repo_over_ssh(acc, "acc16sha")
+    _headless_run(acc, "acc16sha", _TOUCH_SESSION)
+
+    run = _by_task(_runs(acc, "acc16sha"))[_TOUCH_SESSION]
+    commits = run["repository"]["commits"]
+    assert len(commits) == 1, f"one commit was made, one must be recorded: {run['repository']}"
+    sha = commits[0]
+
+    acc.down("acc16sha", purge=True)
+    assert acc.volumes_of("acc16sha") == []
+
+    shown = acc.cli(["runs", "show", run["run_id"]])
+    assert shown.returncode == 0, (
+        f"showing a record whose repository is gone failed:\n{shown.stderr}"
+    )
+    assert sha in shown.stdout, f"the commit id was dropped rather than shown:\n{shown.stdout}"
+    assert "src/auth/session.py" in shown.stdout, f"the changed path was dropped:\n{shown.stdout}"
+    # The record is a summary that points at the logs; it must not have grown a
+    # commit MESSAGE it could only have got by resolving the id (C15).
+    assert "not the logs" in shown.stdout
+    still = acc.cli(["runs", "list", "acc16sha", "--changed", "src/auth/session.py", "--json"])
+    assert still.returncode == 0, still.stderr
+    assert [x["run_id"] for x in json.loads(still.stdout)["data"]["runs"]] == [run["run_id"]]

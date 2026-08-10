@@ -17,7 +17,7 @@ One agent execution **or** one interactive session. Written by the container, in
 | `ended_at` | string \| null | null only for a record that is still pending |
 | `outcome` | string | from the closed set for `kind` (§2) |
 | `exit_code` | int \| null | headless only; null for interactive and for `never-started` |
-| `repository` | object \| null | §3. Null when the workspace holds no repository — a real state, not an error |
+| `repository` | object \| null | §3. Null means **NOT CAPTURED** — a `never-started` record (C6), or a run whose baseline was never taken. A workspace that holds no repository is captured, as `state: "no-repository"` (C7) — an empty object here would read as "changed nothing", which is a confident answer nobody measured |
 | `usage` | object | §4. Always present; `reported: false` when the agent said nothing |
 | `notes` | array[string] | tool-generated diagnostics, e.g. a record that could not be written cleanly (FR-008) |
 

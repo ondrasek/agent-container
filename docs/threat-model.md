@@ -41,6 +41,7 @@ can do.
 | Workspace source | `/workspace` volume | disclosure; malicious commits pushed under the operator's identity |
 | Prompt context | in flight to the provider | source disclosure to a provider nobody chose |
 | The declarative spec | host-side `.agent-container/` | the agent re-governing its own constraints |
+| Run records | `$XDG_DATA_HOME/agent-container/runs/` (`0600`); pending on the `-runs` volume | disclosure of what ran where, against which repository — and of any credential the operator typed into a `--task` (T15) |
 | The egress boundary itself | `egress` sidecar: netfilter rules, `CAP_NET_ADMIN`, squid + unbound | unconstrained egress for every container in the environment, and no name resolution at all |
 | The host | — | everything |
 
@@ -49,7 +50,12 @@ can do.
 1. **Operator machine → container host** — SSH / docker context. Build contexts and injected
    material cross it, possibly over the network to a remote daemon.
 2. **Host → container** — compose `configs`, volumes, environment. The credential-injection
-   boundary.
+   boundary. **Feature 016 made it two-way.** Every other flow across 1 and 2 runs outward from the
+   operator: material is injected, and what the container produces goes to a git remote (boundary 4)
+   or to logs nobody stores. A run record runs the other way — the container authors a file, and the
+   tool ingests it into a **durable store on the operator's machine**. So the container is now an
+   input to something the operator keeps, and everything ingestion accepts is data the untrusted
+   side wrote (T16).
 3. **Container → network** — the egress boundary (Feature 012). **Phase B moved this boundary out of
    the agent container.** The agent joins the egress sidecar's *network* namespace holding an empty
    capability set; the rules that govern it are installed by a container it does not share a
@@ -80,6 +86,10 @@ asserts no credential value reaches any generated artifact (compose model, proxy
 
 **Residual, accepted**: an on-volume `auth.json` written by *operator-interactive login* is exempt
 by design — it is the operator's own session, and the agent can read it.
+
+**Residual, and the sentinel does not reach it**: a **run record** is a generated artifact the
+sentinel deliberately does not cover, because one of its fields is operator free text and FR-002
+requires it. That exemption is bounded by a closed field set rather than by a filter — see T15.
 
 ### T2 — Secrets leaking through the build context
 
@@ -262,6 +272,67 @@ and **every name lookup in the environment depends on it**.
 - **What the agent gains from the arrangement**: reachability of the sidecar's listening ports over
   loopback. Nothing more — the namespace is shared for networking only.
 
+### T15 — The task text is recorded verbatim, and it is the one field a credential can arrive in
+
+**Newly introduced by Feature 016. Accepted as a NAMED, BOUNDED exposure — stated, not filtered.**
+A run record keeps the task the operator gave (FR-002), and a task is free text an operator types,
+so it can contain a credential. No other field is a place the tool would put one: `repository` is
+SHAs and paths read out of git, `usage` is refused unless it is numbers under identifier-shaped
+keys, and every remaining field is composed by the tool or the entrypoint from what it already
+knew.
+
+**The bound is a table, not a filter.** `RECORD_FIELD_PROVENANCE` in `bin/agent-container` maps
+every field to `tool` · `git` · `agent` · `operator` and has **exactly one `operator` row**. That
+closure is the whole of the no-credentials claim, which is why a test asserts the table itself:
+add a second free-text field and the claim becomes false while every other test still passes.
+
+**What that closure is, exactly.** It is a statement about which fields *exist* and where the tool
+*puts* values in them. Ingestion checks the field set of a record the container wrote and warns
+about anything undeclared; it does not re-derive the values, which are the container's word — so
+the claim is "the tool writes a credential into no field but `task`", not "no byte of a stored
+record can be a credential regardless of what ran inside" (T16).
+
+**Pattern redaction was rejected, for the reason this document catalogues under T12.** A redactor
+that misses one value converts an operator's caution into misplaced confidence — a check that
+passes while the thing it names is broken — and its existence licenses exactly the habit the
+warning exists to discourage. Saying *the task is recorded verbatim; do not put a credential in
+one* is weaker protection and strictly better information. The rule is stated in
+[`docs/observability.md`](observability.md) and where a task is given.
+
+**Where a task text ends up.** Durably in `$XDG_DATA_HOME/agent-container/runs/` on the operator's
+machine, written `0600`; in transit on the `-runs` volume, where the host operator and the agent
+itself can both read it — the same exposure as anything on a volume, and the reason the durable
+store is not one. Ingestion warns when a stored record carries a field the build does not declare,
+because the claim above covers only the fields it does.
+
+### T16 — A run record is an account of a run, not evidence against the agent
+
+**Newly introduced by Feature 016. Accepted, and the limit is stated rather than implied.** The
+pending record lives at `/var/lib/agent-container/runs` on a volume owned `dev:dev` (`0700`) — and
+the agent runs as `dev`. It is out of `/home/dev`, so no ordinary shell or agent-config write
+touches it by accident, but **that is separation from accident, not from intent**: a process
+running as the agent can rewrite or delete its own pending record before the tool ever sees it.
+
+**What that does and does not undermine.** Against a crash, a SIGKILL, a failed agent or an
+operator's own hand, the record is exactly what it claims — which is every case the feature was
+built for. Against a *hostile* agent, the values inside a well-formed record are the container's
+word, so a record must never be read as proof that a run did or did not push, change a file, or
+touch a repository.
+
+**Ingestion distrusts the boundary even where it must trust the content.** The drain is the only
+door records enter the store by that the tool did not compose itself, so member names from the
+tarball are **refused rather than repaired** (a directory component, a `..`, or a name that is not
+a run id), oversized members are skipped, a record whose `schema` is not this build's is left on
+the volume rather than misread, and nothing the parser distrusted is ever handed to the clear step
+that removes files. `host` and `environment` are stamped by the **tool**, keyed off the volume it
+drained — so a forged record cannot claim to belong to another environment or another host.
+
+**Not closed by permissions.** Making the directory unwritable by the agent means a second uid
+inside the container writing the record, which is a setuid helper or a privileged process in the
+one place this project has none (Constitution II, T7). That trade — real privilege inside the
+untrusted container, to harden a summary against an adversary who by then already holds the
+credentials and the push — is not worth making, so the limit is documented instead.
+
 ## 6. Risk summary
 
 | # | Threat | Posture | Owner |
@@ -276,6 +347,8 @@ and **every name lookup in the environment depends on it**.
 | T11 | Parallel-container collision | **Mitigated** | Constitution IV |
 | T12 | Silent control failure | **Partial** — process, not guarantee | all |
 | T14 | Enforcement sidecar: surface + dependency | **Accepted** — new in Phase B | 012 |
+| T15 | Task text recorded verbatim | **Accepted** — bounded by a closed field set | 016 |
+| T16 | A record is an account, not evidence | **Accepted** — agent-writable in transit | 016 |
 | T13 | Declared name ≠ declared address | **Not mitigated** — inherent to splicing | 012 |
 | T6 | Exfiltration via git push | **Not mitigated** — inherent | — |
 | T9 | Agent CLI supply chain | **Not mitigated** | — |
@@ -297,6 +370,11 @@ and **every name lookup in the environment depends on it**.
   agent↔sidecar traffic loopback, unfiltered by construction. Putting a sidecar inside is a decision
   to let untrusted code drive it.
 - **`auth.json` from interactive login is readable by the agent.**
+- **A task is recorded exactly as it was typed** (T15). The tool does not redact it, because a
+  redactor that misses one value is worse than none. Do not put a credential in a task.
+- **A run record is the container's account of itself** (T16). It is trustworthy against crashes
+  and kills — the cases it exists for — and it is not evidence against an agent that chose to edit
+  it before the tool drained the volume.
 
 ## 8. Maintenance
 
@@ -311,5 +389,5 @@ Update the row, and the affected threat, in the same change that ships the featu
 | 013 doctor / preflight | ⬜ | |
 | 014 host inventory | ⬜ | |
 | 015 kill switch | ⬜ | expected: T4, T6 |
-| 016 run observability | ⬜ | expected: T12 |
+| 016 run observability | ✅ | **new: T15** (task text recorded verbatim, bounded by a closed field set), **T16** (a record is the container's account, agent-writable in transit); T1 restated — a record is a generated artifact the no-credential sentinel deliberately does not cover; §3 new asset (run records); §4 boundary 2 is now two-way — the container is an input to a store the operator keeps |
 | 017 control plane | ⬜ | **introduces a new trust boundary** — re-run §4 |

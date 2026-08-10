@@ -14,37 +14,37 @@ later phase is decoration.
 
 ## Phase 1: Setup
 
-- [ ] T001 Create `/var/lib/agent-container/runs` in `image/Dockerfile`, **dev-owned** — a
+- [x] T001 Create `/var/lib/agent-container/runs` in `image/Dockerfile`, **dev-owned** — a
       runtime-created mount point is `root:root` and rootless cannot write it even under a
       dev-owned parent (CLAUDE.md invariant, research R2)
-- [ ] T002 Add `runs_volume_name()` and wire the tenth volume into `per_container_volumes`,
+- [x] T002 Add `runs_volume_name()` and wire the tenth volume into `per_container_volumes`,
       `other_container_volumes` and the compose model in `bin/agent-container`
-- [ ] T003 Update the exact-equality doctests on `per_container_volumes` / `other_container_volumes`
+- [x] T003 Update the exact-equality doctests on `per_container_volumes` / `other_container_volumes`
       — they pin nine names and will fail; that failure is the contract noticing, not a nuisance
-- [ ] T004 [P] Add the sixth location to `docs/layout.md` (research R1). Feature 011 declares that
+- [x] T004 [P] Add the sixth location to `docs/layout.md` (research R1). Feature 011 declares that
       file the one map, so the row belongs there and not in this feature's docs
 
 ---
 
 ## Phase 2: Foundational — blocking prerequisites for every story
 
-- [ ] T005 `runs_store_dir(host, environment)` resolving `$XDG_DATA_HOME/agent-container/runs/...`
+- [x] T005 `runs_store_dir(host, environment)` resolving `$XDG_DATA_HOME/agent-container/runs/...`
       with the `~/.local/share` fallback, in `bin/agent-container`
-- [ ] T006 Atomic write helper: serialise to a temporary name in the target directory, then
+- [x] T006 Atomic write helper: serialise to a temporary name in the target directory, then
       `os.replace`. **Takes a directory as a parameter and knows nothing about run records** — this
       is the machinery FR-011a says Feature 014 adopts (research R3)
-- [ ] T007 [P] Directory listing helper with the same neutrality, newest-first
-- [ ] T008 Record construction with the schema of data-model §1, **refusing an illegal
+- [x] T007 [P] Directory listing helper with the same neutrality, newest-first
+- [x] T008 Record construction with the schema of data-model §1, **refusing an illegal
       kind/outcome pair at construction** (C5) — a rule kept by convention becomes prose the first
       time a kind is added, and then SC-002 cannot be measured
-- [ ] T009 [P] Unit tests for T008: every legal pair accepted; `interactive`+`finished` and
+- [x] T009 [P] Unit tests for T008: every legal pair accepted; `interactive`+`finished` and
       `interactive`+`failed` refused; a proof-it-can-fail case that neuters the check and asserts
       the guard then fails
-- [ ] T010 **THE MIGRATION (research R2, and the T118/T129d lesson).** Detect an environment
+- [x] T010 **THE MIGRATION (research R2, and the T118/T129d lesson).** Detect an environment
       deployed with nine volumes, announce the recreation, and handle it in **both directions** —
       T129d proved the reverse path is the one that gets forgotten. Name, port and all nine existing
       volumes are unchanged, so the identity check passes while the shape differs
-- [ ] T011 [P] Test T010 both ways: adopting the tenth volume, and rolling back to nine
+- [x] T011 [P] Test T010 both ways: adopting the tenth volume, and rolling back to nine
 
 ---
 
@@ -53,36 +53,36 @@ later phase is decoration.
 **Goal**: every run leaves a durable record that outlives its container.
 **Independent test**: run headlessly, tear down completely, record still retrievable and accurate.
 
-- [ ] T012 [US1] Capture start state in `image/entrypoint.sh` and write the **pending** record to
+- [x] T012 [US1] Capture start state in `image/entrypoint.sh` and write the **pending** record to
       the runs volume. Written at START, not only at exit: SIGKILL runs no trap, and the pending
       file is the only reason a killed run is recoverable at all (data-model §7, SC-008)
-- [ ] T013 [US1] Exit path in `image/entrypoint.sh`: complete the record, atomically rename.
+- [x] T013 [US1] Exit path in `image/entrypoint.sh`: complete the record, atomically rename.
       **Must not alter the run's own exit status** (FR-008, C11) — the exit path must not become a
       new way for a successful run to report failure
-- [ ] T014 [US1] SIGTERM trap → `outcome: stopped`, completing and exiting **within the runtime's
+- [x] T014 [US1] SIGTERM trap → `outcome: stopped`, completing and exiting **within the runtime's
       stop grace period**, or the record is lost to the SIGKILL that follows (research R5)
-- [ ] T015 [US1] Ingestion: `docker run --rm -v <runs-volume>:/mnt … tar cf - -C /mnt .` streamed
+- [x] T015 [US1] Ingestion: `docker run --rm -v <runs-volume>:/mnt … tar cf - -C /mnt .` streamed
       to stdout (research R10). Belongs with the `driver_*` argv builders — it needs the **runtime**,
       not the filesystem, because the operator's machine shares no filesystem with a remote host
-- [ ] T016 [US1] Drain-on-contact: any command that talks to a host ingests that host's pending
+- [x] T016 [US1] Drain-on-contact: any command that talks to a host ingests that host's pending
       records first, stamping `host` at ingestion (the container does not reliably know what the
       operator calls its host)
-- [ ] T017 [US1] **Teardown drains BEFORE removing volumes** (FR-001b, C4). Ordering is the
+- [x] T017 [US1] **Teardown drains BEFORE removing volumes** (FR-001b, C4). Ordering is the
       property: a drain after removal is not a late drain, it is no drain
-- [ ] T018 [P] [US1] Test T017 by **swapping the order and asserting the test fails** — otherwise
+- [x] T018 [P] [US1] Test T017 by **swapping the order and asserting the test fails** — otherwise
       it passes for a build where the drain does nothing
-- [ ] T019 [US1] `never-started` authored by the CLI (C6, research R5) — nothing inside the
+- [x] T019 [US1] `never-started` authored by the CLI (C6, research R5) — nothing inside the
       container existed to report, so this is the one record the tool writes directly
-- [ ] T020 [US1] `runs list [<environment>] [--json]` (C1), newest-first, with a plain line rather
+- [x] T020 [US1] `runs list [<environment>] [--json]` (C1), newest-first, with a plain line rather
       than an empty screen when there are none
-- [ ] T021 [US1] `runs show <run-id> [--json]` (C2)
-- [ ] T022 [P] [US1] Completions for `runs list` / `runs show` in both shells, plus the assertion
+- [x] T021 [US1] `runs show <run-id> [--json]` (C2)
+- [x] T022 [P] [US1] Completions for `runs list` / `runs show` in both shells, plus the assertion
       in `test_completions.sh` — the completions' command list is pinned to the CLI's
-- [ ] T023 [US1] **Acceptance: S2 — a record survives `down --purge`** (C3, SC-001). This is the
+- [x] T023 [US1] **Acceptance: S2 — a record survives `down --purge`** (C3, SC-001). This is the
       feature. Land it before Phase 4 and stop if it fails
-- [ ] T024 [US1] Acceptance: S3 — a **detached** run is ingested on next contact, with the CLI
+- [x] T024 [US1] Acceptance: S3 — a **detached** run is ingested on next contact, with the CLI
       never attached when the run ended (SC-002a). This is the case the whole design is shaped for
-- [ ] T025 [US1] Acceptance: S4 — a `docker kill`ed run still yields a record marked `stopped`
+- [x] T025 [US1] Acceptance: S4 — a `docker kill`ed run still yields a record marked `stopped`
       (SC-008). **A wrong answer that looks right is no record at all**: SIGKILL runs no trap, so
       this passes only if T012's start-side write exists
 
@@ -93,22 +93,29 @@ later phase is decoration.
 **Goal**: link a run to what it changed and whether it pushed.
 **Independent test**: an agent commits and pushes; the record names the commit and confirms the push.
 
-- [ ] T026 [US2] Capture `HEAD`, branch and upstream position at start and exit in
+- [x] T026 [US2] Capture `HEAD`, branch and upstream position at start and exit in
       `image/entrypoint.sh`; derive `commits` and `pushed` (FR-004a). **No agent involvement** — the
       run that most needs a record is the one where the agent crashed
-- [ ] T027 [US2] Populate `repository.state` from the measured cases (research R4): `ok`,
+- [x] T027 [US2] Populate `repository.state` from the measured cases (research R4): `ok`,
       `no-repository`, `no-upstream`, `detached`, `unreadable`. Each is a **record, not an error** —
       an `ephemeral` workspace with no clone is the common case for a throwaway run
-- [ ] T028 [P] [US2] Unit tests per state, asserting the **true exit codes measured in R4**
+- [x] T028 [P] [US2] Unit tests per state, asserting the **true exit codes measured in R4**
       (`@{u}` → 128, `symbolic-ref -q` → 1, outside a repo → 128), read **unpiped**
-- [ ] T029 [US2] `pushed: null` when there is no upstream — **never `false`** (C8). `false` means
+- [x] T029 [US2] `pushed: null` when there is no upstream — **never `false`** (C8). `false` means
       "committed and did not push", the failure Constitution I exists to prevent; conflating it
       with "could not tell" makes the loudest signal in the feature unreliable
-- [ ] T030 [US2] Make commit-without-push **loud** in both human and `--json` output (FR-005, C8)
-- [ ] T031 [P] [US2] Acceptance: S5 — a run that commits without pushing is identifiable, and a
-      run with no upstream reports `null` rather than `false` (SC-003)
-- [ ] T032 [P] [US2] Acceptance: S6 — an `ephemeral` workspace with no clone yields
-      `state: no-repository`, not a crash and not a null record
+- [x] T030 [US2] Make commit-without-push **loud** in both human and `--json` output (FR-005, C8)
+- [~] T031 [P] [US2] Acceptance: S5 — a run that commits without pushing is identifiable, and a
+      run with no upstream reports `null` rather than `false` (SC-003).
+      **GAP: no acceptance test exists.** Both halves were verified BY HAND against real
+      containers during T050 (a committing run flagged `!! push` / `pushed: false`, and a
+      repository with no upstream reporting `pushed: null` with no alarm), and both are
+      unit-covered in `bin/tests/test_repository_effect.py` — but nothing in
+      `bin/tests/test_acceptance.py` exercises it, so a regression is caught by no automated tier
+- [~] T032 [P] [US2] Acceptance: S6 — an `ephemeral` workspace with no clone yields
+      `state: no-repository`, not a crash and not a null record.
+      **GAP: no acceptance test exists.** Verified BY HAND during T050 (an ephemeral-workspace
+      headless run recorded `state: no-repository`), and unit-covered; same exposure as T031
 
 ---
 
@@ -116,14 +123,14 @@ later phase is decoration.
 
 **Goal**: capture usage where the agent reports it; say *unknown* where it does not.
 
-- [ ] T033 [US3] `usage` per data-model §4: `{"reported": false}` by default, agent's own units and
+- [x] T033 [US3] `usage` per data-model §4: `{"reported": false}` by default, agent's own units and
       the agent's name when reported
-- [ ] T034 [US3] Per-agent extraction for the agents that report anything — and **nothing invented
+- [x] T034 [US3] Per-agent extraction for the agents that report anything — and **nothing invented
       for those that do not**
-- [ ] T035 [P] [US3] Render `unknown` as the word in human output and as `reported: false` in JSON
+- [x] T035 [P] [US3] Render `unknown` as the word in human output and as `reported: false` in JSON
       — **never `0`** (C9, SC-004). A false zero silently understates every total it enters
-- [ ] T036 [US3] Aggregation stating `unknown_components` rather than excluding them (FR-007)
-- [ ] T037 [P] [US3] Test that usage is **not normalised across agents** (FR-015, C10) — no
+- [x] T036 [US3] Aggregation stating `unknown_components` rather than excluding them (FR-007)
+- [x] T037 [P] [US3] Test that usage is **not normalised across agents** (FR-015, C10) — no
       cross-agent total is offered, and `units` keeps the agent's own keys
 
 ---
@@ -134,22 +141,22 @@ Added after `/speckit-analyze` found SC-007 with **zero** implementing tasks (fi
 design decision (research R11) settles it and also resolves the rewritten-history edge case (G3):
 **capture the paths at exit, do not resolve the SHAs at query time.**
 
-- [ ] T051 [US2] Capture changed paths at exit in `image/entrypoint.sh`
+- [x] T051 [US2] Capture changed paths at exit in `image/entrypoint.sh`
       (`git diff --name-only <start_head>..<end_head>`) into `repository.paths` (data-model §3).
       Captured at WRITE time, so the answer needs no repository months later and survives a rebase
       — query-time resolution fails exactly when the record is most valuable (research R11)
-- [ ] T052 [US2] Cap the path list and set `paths_truncated`. **Never a silent cap**: a truncated
+- [x] T052 [US2] Cap the path list and set `paths_truncated`. **Never a silent cap**: a truncated
       list that looks complete answers SC-007 with a confident *"no run changed that file"* when one
       did — the defect shape this project keeps finding
-- [ ] T053 [US2] `runs list --changed <path>` (C16), reading **stored records only** — no
+- [x] T053 [US2] `runs list --changed <path>` (C16), reading **stored records only** — no
       repository access, so it works on another machine and against rewritten history
-- [ ] T054 [P] [US2] A candidate record with `paths_truncated: true` that does not match MUST be
+- [x] T054 [P] [US2] A candidate record with `paths_truncated: true` that does not match MUST be
       reported as **uncertain**, not silently omitted (C16). Test both: a match, and an uncertain
       non-match
-- [ ] T055 [US2] Acceptance S13: with **N ≥ 5** runs, `--changed` returns exactly the runs that
+- [x] T055 [US2] Acceptance S13: with **N ≥ 5** runs, `--changed` returns exactly the runs that
       touched the file (SC-007) — and still does with the repository **deleted**, which is what
       proves the capture-at-write-time property rather than assuming it
-- [ ] T056 [P] [US2] A commit SHA that no longer resolves degrades gracefully (spec edge case,
+- [x] T056 [P] [US2] A commit SHA that no longer resolves degrades gracefully (spec edge case,
       finding G3): `paths` still answers, and `commits` is rendered as unresolvable rather than
       dropped or crashing
 
@@ -157,47 +164,61 @@ design decision (research R11) settles it and also resolves the rewritten-histor
 
 ## Phase 6: The honest edges
 
-- [ ] T038 A record write that fails **surfaces without failing the run** (FR-008, C11) — as a
+- [x] T038 A record write that fails **surfaces without failing the run** (FR-008, C11) — as a
       `notes` entry when a record exists, as a tool warning when it does not
-- [ ] T039 [P] Concurrency: N environments produce N complete, non-interleaved records (FR-009,
+- [x] T039 [P] Concurrency: N environments produce N complete, non-interleaved records (FR-009,
       C12). Guaranteed by construction via one-file-per-record (R3), so the test exists to prove
-      the construction was actually used
-- [ ] T040 Retention: prune by age and count at ingestion, with documented defaults (FR-011, C14)
-- [ ] T041 [P] Test that pruning is bounded and that the documented default is the enforced one —
+      the construction was actually used.
+      Discharged by T047's five REAL concurrent environments — there is no separate unit-level
+      test, because a unit test with one writer cannot exercise the property this task names
+- [x] T040 Retention: prune by age and count at ingestion, with documented defaults (FR-011, C14)
+- [x] T041 [P] Test that pruning is bounded and that the documented default is the enforced one —
       a documented number the code does not use is the recurring defect of this repo
-- [ ] T057 **Records lost to an out-of-band volume removal must be VISIBLE** (spec edge case,
+- [x] T057 **Records lost to an out-of-band volume removal must be VISIBLE** (spec edge case,
       finding G2). T017 drains on tool teardown, but `docker volume rm` behind the tool's back
       loses pending records silently. Detect the gap — a known environment whose runs volume has
       vanished with records never ingested — and say so
-- [ ] T058 [P] **Test that the record's field set is CLOSED** (finding U1, SC-005): every field
+- [x] T058 [P] **Test that the record's field set is CLOSED** (finding U1, SC-005): every field
       except `task` is tool- or git-derived. The 100%-no-credentials claim rests entirely on that
       closure, and nothing currently asserts it — a new free-text field could be added and SC-005
       would still "pass"
-- [ ] T042 Interactive sessions recorded as a distinct kind with the interactive vocabulary and the
-      same repository capture (FR-013); acceptance S8 asserts an ended session is never `finished`
+- [x] T042 Interactive sessions recorded as a distinct kind with the interactive vocabulary and the
+      same repository capture (FR-013); acceptance S8 asserts an ended session is never `finished`.
+      The vocabulary is enforced at the write (`runs_outcome_is_legal`) and measured by hand in
+      T050. **S8's own script cannot produce the value it predicts**: detaching does not end a
+      session, and even `tmux kill-server` does not end the container — the entrypoint waits on
+      `tail -f /dev/null`, so an operator-driven session ends via SIGTERM as `stopped`. `ended` is
+      reachable (measured: killing that `tail` yields `ended` plus a note naming the status) but it
+      is the ABNORMAL-exit outcome, not the ordinary end of a session. See T050's note
 
 ---
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T043 [P] `docs/observability.md` — what a record is, what it is **not** (C15, FR-014), where
+- [x] T043 [P] `docs/observability.md` — what a record is, what it is **not** (C15, FR-014), where
       records live, retention, and the task-text rule
-- [ ] T044 **Reconcile `docs/threat-model.md`** for the task-text exposure (research R9,
+- [x] T044 **Reconcile `docs/threat-model.md`** for the task-text exposure (research R9,
       Constitution III + the Development Workflow clause). Every other field is tool- or git-derived,
       which is what makes this bounded and statable rather than open-ended
-- [ ] T045 [P] State the task-text rule **where a task is given**, not only in docs — the operator
+- [x] T045 [P] State the task-text rule **where a task is given**, not only in docs — the operator
       types the task there, and that is where the warning is read
-- [ ] T046 [P] Update `docs/layout.md` cross-references and `CLAUDE.md`'s one-line invariant;
+- [x] T046 [P] Update `docs/layout.md` cross-references and `CLAUDE.md`'s one-line invariant;
       re-measure CLAUDE.md against its 2000-token budget and **prune before adding**
-- [ ] T047 Acceptance: S10 — five concurrent environments each yield exactly one complete record
-- [ ] T048 Acceptance: S12 — the task text round-trips verbatim, confirming no accidental redaction
+- [x] T047 Acceptance: S10 — five concurrent environments each yield exactly one complete record
+- [x] T048 Acceptance: S12 — the task text round-trips verbatim, confirming no accidental redaction
       crept in and that the recorded field is the one documented
-- [ ] T049 **Ingestion exercised against a REMOTE context** (research R10). A test that only runs
+- [x] T049 **Ingestion exercised against a REMOTE context** (research R10). A test that only runs
       locally passes while the remote path — the entire reason the tar-over-stdout mechanism exists
       — is never executed
-- [ ] T050 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier with **no `-k`
+- [x] T050 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S12 by hand. A `-k` pattern matching nothing is
-      indistinguishable from one whose tests all passed
+      indistinguishable from one whose tests all passed.
+      Gate exit 0; acceptance 67 passed / 2 skipped (both Hetzner, billable, no `HCLOUD_TOKEN`),
+      no `-k`. S5–S13 executed by hand against real containers; S8's script does not produce the
+      value it predicts (see T042). Two defects found and fixed here: the gate's own
+      `TOOL_HINTS` lookup never fired (`local a=$1 b=${T[$a]}` expands before it binds, so every
+      failure since the table was written lost its hint), and `bin/tests/test_entrypoint_repository.sh`
+      was a suite the gate never ran
 
 ---
 
