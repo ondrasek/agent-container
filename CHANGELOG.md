@@ -2,6 +2,35 @@
 
 <!-- version list -->
 
+## v0.22.0 (2026-08-10)
+
+### Bug Fixes
+
+- **observability**: Open the run record before anything slow, and stop the test demanding one
+  before the run starts ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`78357e5`](https://github.com/ondrasek/agent-container/commit/78357e57375f3b597979984ab44e049b1b755dd7))
+
+### Documentation
+
+- **specs**: Generate tasks for Feature 016
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`58ca540`](https://github.com/ondrasek/agent-container/commit/58ca540196f0acfcfb24b32e917d8eb5df2cc6a8))
+
+- **specs**: Record HOW ingestion reads the volume
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`8bddd06`](https://github.com/ondrasek/agent-container/commit/8bddd0675d5251536e49672e2dc8562f17bc73ca))
+
+- **specs**: Resolve every analyze finding for Feature 016
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`88c4607`](https://github.com/ondrasek/agent-container/commit/88c46073f2ee852337ad8752e49d7c6fe12d75d1))
+
+### Features
+
+- **observability**: Give every run a durable record that outlives its container
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`7a92d2b`](https://github.com/ondrasek/agent-container/commit/7a92d2b2431a1c32924ebf07a49ea2571d69a234))
+
+
 ## v0.21.1 (2026-08-09)
 
 ### Bug Fixes
