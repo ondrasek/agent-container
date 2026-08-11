@@ -230,7 +230,13 @@ captured and the second is explicitly *unknown* rather than zero.
   **zero** losses under a concurrency test.
 - **SC-007**: An operator can identify which of N runs changed a given file — verified for
   N ≥ 5.
-- **SC-008**: A killed run still produces a record marked as such — **100%**.
+- **SC-008**: A killed run **that had begun** produces a record marked as such — **100%**. A
+  container killed *before its entrypoint runs* has no run to record: the runtime publishes `Up` the
+  instant the container process is created, and the pending record lands up to ~0.6s later (measured
+  — of which 0.08-0.35s is the shell reading the script). That window cannot be closed by any
+  ordering, because the container is killable before this tool's first line executes; it is stated in
+  `docs/observability.md` instead. The qualifier is what makes this criterion measurable — unqualified
+  it asks for a record of something that never started.
 
 ## Assumptions
 
