@@ -158,9 +158,13 @@ discrepancies are reported distinctly.
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T039 State FR-014's authority split in `docs/orchestration.md`: **live state is authoritative
-      for "what is running", the record for "what we created"** (C15). Without it the first
-      disagreement is resolved by whoever reads the code that day, and both mistakes are bad
+- [ ] T039 State FR-014's **THREE-way** authority split in `docs/orchestration.md` (C15): the live
+      daemon for *what is running now*; local port state (`<state>/<host>/*.port`) for the **port
+      number** and per-host enumeration, dying with its host; this record for *what we ever created*.
+      Say that the purposes do not overlap, and that a disagreement between port state and the record
+      is **information, not a conflict** — it means a host's state was cleared while the record kept
+      its entries, which is FR-003 working. Without this the first disagreement is resolved by whoever
+      reads the code that day, and both possible mistakes are bad
 - [ ] T040 [P] `docs/inventory.md` — what an entry is, the four outcomes, why `unknown` is computed
       rather than stored, retention, and that this feature **deletes nothing** (015's job)
 - [ ] T041 [P] **Reconcile `docs/threat-model.md`** — the record names hosts and environments, and

@@ -127,8 +127,7 @@ and a container created outside the tool never being claimed.
 ```text
 bin/agent-container       entry construction, the mutation hooks, reconciliation, `inventory` cmd
 docs/layout.md            the inventory as a THIRD sibling of runs/ and egress/ (decision 1)
-docs/orchestration.md     FR-014's authority split: live state for "what runs", record for
-                          "what we created"
+docs/orchestration.md     FR-014's THREE-way authority split: live / port state / record
 docs/threat-model.md      reconcile — the record names hosts and environments (Constitution)
 bin/tests/                hermetic construction/classification; acceptance for survival + fail-closed
 ```
@@ -144,8 +143,14 @@ bin/tests/                hermetic construction/classification; acceptance for s
    `host-gone`. Conflating them makes reconciliation lie.
 5. **`unrecorded` is not a claim** (FR-007). Reporting a container we did not create is the
    opposite of claiming it, and the wording must not drift into ownership.
-6. **Live state is authoritative for the present; the record for what we created** (FR-014), stated
-   in `docs/orchestration.md` rather than left to be inferred.
+6. **THREE memories, three purposes, no overlap** (FR-014), stated in `docs/orchestration.md`
+   rather than left to be inferred: the live daemon answers *what is running now*; local port state
+   (`<state>/<host>/*.port`) owns the **port number** and per-host enumeration and dies with its
+   host; this record answers *what we ever created* and outlives everything. Port state is never
+   consulted about history and this record never about the present, so a disagreement between those
+   two is **information rather than a conflict** — it means a host's state was cleared while the
+   record kept its entries, which is FR-003 working. Found by analyze finding G1: FR-014 originally
+   named only two of the three, and the spec's own port-state edge case had no answer.
 
 ## Phasing
 

@@ -47,8 +47,9 @@ created: what, where, when, and what became of it.
   a retention rule.
 - Q: Where does the inventory live, given Feature 011 places derived host state under
   `<state>/<host>/`? → A: **Not there.** The inventory must survive a host's removal (FR-003),
-  and a per-host directory is deleted with the host. It needs its own location, not scoped to any
-  host — a **sixth** location in the Feature 011 vocabulary.
+  and a per-host directory is deleted with the host. It needs a place of its own, not scoped to any
+  host. *(Amended after Feature 016 shipped: this was recorded as needing a **sixth location**, and
+  016 then created that location — so it is a **new tenant** in it. See FR-002.)*
 
 ### Session 2026-07-29 (second pass)
 
@@ -221,8 +222,21 @@ whether its host is one the tool provisioned.
   expected; a shared store is not, because their retention needs are opposite.
 - **FR-013**: If the record is absent or unreadable, the tool MUST degrade to today's live-only
   behaviour rather than fail.
-- **FR-014**: Where the record and live state disagree, which is authoritative for which purpose
-  MUST be defined and documented.
+- **FR-014**: Where any two of the tool's three memories disagree, which is authoritative for which
+  purpose MUST be defined and documented. There are **three**, not two, and the edge case below about
+  local port state is why this requirement names them all:
+
+  | Source | Authoritative for | Lifetime |
+  |---|---|---|
+  | the live daemon | what is running **now** | instant |
+  | local port state (`<state>/<host>/*.port`) | the **port number**, and per-host enumeration | dies with its host |
+  | this record | what the tool **ever created** | indefinite |
+
+  The purposes do not overlap: port state is never consulted about history, this record is never
+  consulted about the present, and nothing but port state decides a port (Constitution IV).
+  A disagreement between port state and this record is therefore **information, not a conflict** — it
+  means a host's state was cleared while the record kept its entries, which is exactly what FR-003
+  asks for.
 - **FR-015**: Each deployment MUST create a **new entry with its own generated identifier**; host
   and name are attributes, not the key. Recreating an environment with a previously-used name
   therefore yields an additional entry and cannot overwrite the earlier one — the guarantee holds
