@@ -41,7 +41,17 @@ consumer of a proven path, not a bet.
 **Retention is where the two must not touch.** 016 prunes by age and count (90 days / 500), because
 a run's value decays once its commits are ordinary history. The inventory is the **opposite**: its
 value *is* the entry you forgot six months ago, so FR-012 forbids age-based pruning as a default and
-asks only for a large backstop cap. Sharing a retention policy would give one of them the wrong one —
+asks only for a large backstop cap.
+
+**The cap is 5000 entries, count only, with no time dimension at all.** Named here rather than left
+as "a large cap", because FR-012 requires the bound to exist and T035 checks that the *documented*
+number is the *enforced* one — which is unanswerable while no number is written down. 5000 is roughly
+an order of magnitude past the spec's own estimate that years of heavy use is hundreds of rows, which
+is what makes it a backstop rather than tidying. **No age criterion exists at any level**: the
+entries most worth having are the oldest forgotten ones, so a time dimension would delete the
+feature's whole value first.
+
+Sharing a retention policy would give one of them the wrong one —
 which is exactly the reason FR-012a forbids a shared store while permitting shared machinery.
 
 ### 3. Entries are MUTATED; run records are not

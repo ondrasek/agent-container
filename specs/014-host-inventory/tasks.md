@@ -139,9 +139,10 @@ discrepancies are reported distinctly.
 - [ ] T033 Concurrency: N concurrent deployments produce N complete entries (FR-009, C11, SC-007).
       Guaranteed by shape — separate entries are separate files — so the test exists to prove the
       shape was actually used
-- [ ] T034 The backstop cap (FR-012, C14): a deliberately large count cap, **no age-based pruning**.
-      Age-pruning deletes the oldest forgotten entries first, which are the ones this feature exists
-      to surface
+- [ ] T034 The backstop cap (FR-012, C14): **5000 entries, count only**. Age-pruning deletes the
+      oldest forgotten entries first, which are the ones this feature exists to surface — so there is
+      **no time-based criterion at any level**, and the code must not grow one later as an obvious
+      improvement (finding U1)
 - [ ] T035 [P] Test that the documented cap is the **enforced** one, and that age is NOT a pruning
       criterion — a documented number the code does not use is this project's recurring defect
 - [ ] T036 **An absent store changes nothing** (FR-013, C13, SC-008). Every read tolerates a missing
