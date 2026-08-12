@@ -17,15 +17,16 @@ is the whole scope; acting on the result is the kill switch's job (015).
 
 ## The decisions this plan settles first
 
-### 1. NOT a seventh location — a sibling inside the sixth
+### 1. A third tenant in the existing durable location — settled, and the spec now says so too
 
-The spec asks for "a **sixth** location in the Feature 011 vocabulary". That was true when it was
-written. **Feature 016 got there first**: `docs/layout.md` now carries
-`$XDG_DATA_HOME/agent-container/runs/` and `.../egress/` as durable user data.
+`~/.local/share/agent-container/inventory/` (`$XDG_DATA_HOME/agent-container/inventory/`).
 
-So the inventory is `$XDG_DATA_HOME/agent-container/inventory/` — a **third sibling in the existing
-sixth location**, not a new one. That *is* the "shared placement" FR-012a anticipated, and saying so
-keeps `docs/layout.md` from growing a row it does not need.
+The spec originally called for "a **sixth** location in the Feature 011 vocabulary", which was true
+when written — **Feature 016 got there first**, and that location now holds `runs/` (016) and
+`egress/` (012 US3). FR-002 has been amended to say **tenant** rather than location, so plan and spec
+no longer disagree about the single most important decision in the feature (analyze finding C1). That
+sharing *is* the "shared placement" FR-012a anticipated: one directory to back up or move, while
+schema and retention stay separate.
 
 **But NOT scoped per host.** `runs/` and `egress/` are `<host>/<environment>/`. FR-003 requires the
 inventory to survive the host's removal, and a per-host directory dies with its host — the very

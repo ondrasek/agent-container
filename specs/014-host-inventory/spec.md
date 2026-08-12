@@ -175,8 +175,19 @@ whether its host is one the tool provisioned.
 - **FR-002**: The record MUST live at **user level**, on the operator's machine, independent of
   any project and of any host. It MUST NOT live under the per-host state directory
   (`<state>/<host>/`), which is removed with its host — that would delete exactly the entries
-  FR-003 requires be kept. This is a **new location** in the Feature 011 vocabulary and must be
-  named there.
+  FR-003 requires be kept. Concretely: **`~/.local/share/agent-container/inventory/`**
+  (`$XDG_DATA_HOME/agent-container/inventory/`).
+
+  This is a **new tenant** in the durable-user-data location Feature 016 established, not a new
+  location — when this spec was written that location did not exist, and it now holds `runs/`
+  (Feature 016) and `egress/` (Feature 012 US3). Sharing the parent is exactly the "shared
+  placement" FR-012a permits: one directory to back up or move, while schema and retention stay
+  separate. `docs/layout.md` must name the tenant.
+
+  **Flat, not `<host>/<environment>/` like its two siblings.** Their layout would defeat FR-003 —
+  a per-host directory is deleted with its host — so `host` is an *attribute* of the entry. The
+  layouts differ because the lifetimes do, and `docs/layout.md` must say so, or a later reader will
+  "fix" the inconsistency.
 - **FR-003**: The record MUST survive the container's removal, the host's removal from the
   registry, and the host's deprovisioning.
 - **FR-004**: The tool MUST record the **outcome** of an environment from this closed set:
