@@ -14,6 +14,11 @@ import subprocess
 
 import pytest
 
+# Feature 018: a pinned key for tests that attach. Any valid ed25519 public key
+# works — nothing here verifies against a real container.
+TEST_HOST_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+
+
 LOCAL_HOST = {"driver": "podman", "context": "", "address": "localhost"}
 REMOTE_HOST = {"driver": "docker", "context": "vps", "address": "vps.example.com"}
 
@@ -361,6 +366,10 @@ def test_probe_session_unreachable(wiz, monkeypatch):
 def test_cli_attach_dies_on_dead_session(wiz, monkeypatch):
     # FR-008: a dead session is reported, never a silent empty attach.
     wiz.write_state("local", "acme", 2206)
+    # Feature 018: attach verifies, so these tests must start from a PINNED
+    # environment — they exercise handover/window/probe, not the unpinned path
+    # (which test_shell_integration.py owns).
+    wiz.pin_host_key("local", "localhost", 2206, TEST_HOST_PUBKEY)
     monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "dead")
     monkeypatch.setattr(wiz.os, "execvp", lambda *a: pytest.fail("must not exec on a dead session"))
     with pytest.raises(wiz.Fatal, match="nothing running"):
@@ -370,6 +379,10 @@ def test_cli_attach_dies_on_dead_session(wiz, monkeypatch):
 def test_cli_attach_proceeds_when_unreachable(wiz, monkeypatch):
     # An 'unreachable' probe must not block — the real attach surfaces the error.
     wiz.write_state("local", "acme", 2206)
+    # Feature 018: attach verifies, so these tests must start from a PINNED
+    # environment — they exercise handover/window/probe, not the unpinned path
+    # (which test_shell_integration.py owns).
+    wiz.pin_host_key("local", "localhost", 2206, TEST_HOST_PUBKEY)
     monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "unreachable")
     execs: list = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append(file))

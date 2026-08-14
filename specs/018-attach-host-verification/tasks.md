@@ -112,11 +112,11 @@ accepting cannot detect, and ask. The temptation is one "handle the host key" he
 argument; T022b says no, because the unconditional refusal is one refactor away from becoming a
 question.
 
-- [ ] T018 [US1] Call T007/T010 from **`compose_up_exec`**, after `write_state(...)` and
+- [X] T018 [US1] Call T007/T010 from **`compose_up_exec`**, after `write_state(...)` and
       `driver_reachable_address(...)` and before the "attach with:" log — the one choke point every
       deploy path passes through. Feature 012's `resolve_egress_declaration` records why: `do_up`
       serves `up` and `apply`, but `do_redeploy` and the wizard call `compose_up_exec` directly
-- [ ] T019 [US1] **Capture on every deploy, unconditionally** (research R4, C1). This is what makes
+- [X] T019 [US1] **Capture on every deploy, unconditionally** (research R4, C1). This is what makes
       FR-007 free: the pin is by construction whatever the tool last saw, so a mismatch means the key
       changed *without* a deploy. **Do not add change-attribution state** — the whole point is that
       there is nothing to attribute
@@ -136,25 +136,25 @@ question.
 - [ ] T022 [US1] Acceptance test: `down --purge` then `up` re-pins **silently** — the entry changed
       and no mismatch warning appears (C4, SC-004, S3). Paired deliberately with T020: the two
       directions must not collapse into each other, and a bug in either looks like the other working
-- [ ] T022a [US1] **The unpinned prompt** (FR-013, FR-016, C13, S12): when the environment has no entry,
+- [X] T022a [US1] **The unpinned prompt** (FR-013, FR-016, C13, S12): when the environment has no entry,
       `attach` warns, shows the key's **fingerprint**, states that accepting **cannot detect a container
       that was replaced**, and asks. Yes → capture, pin, connect. No → refuse. **Never silent, and never
       worded as verification** — research R8 explains why capture-at-attach is a trust decision and not
       a check, and the wording is the only place the operator learns that
-- [ ] T022b [US1] **A mismatch never prompts** (FR-014, C14, SC-010) — refuse unconditionally, terminal
+- [X] T022b [US1] **A mismatch never prompts** (FR-014, C14, SC-010) — refuse unconditionally, terminal
       or not. Implement as a separate branch from T022a, not a shared "ask the operator" helper with a
       flag: one code path that sometimes asks is one refactor away from asking here too
-- [ ] T022c [US1] No terminal / non-interactive → **refuse, never an assumed yes** (FR-015, SC-011). An
+- [X] T022c [US1] No terminal / non-interactive → **refuse, never an assumed yes** (FR-015, SC-011). An
       operator may pre-accept explicitly on the command line; that acceptance must be **as loud in the
       output as the prompt would have been**, and needs a long flag (the project's short/long rule)
-- [ ] T022d [US1] `attach --print` / `--ssh-config` **never prompt** (FR-017) — they connect to nothing.
+- [X] T022d [US1] `attach --print` / `--ssh-config` **never prompt** (FR-017) — they connect to nothing.
       With no entry they state that, and state that the emitted command will refuse. Otherwise
       `--print` hands over an argv that fails for a reason the output never mentioned
-- [ ] T022e [US1] [P] Tests for T022a–T022d (SC-009): declining refuses and writes nothing; accepting pins
+- [X] T022e [US1] [P] Tests for T022a–T022d (SC-009): declining refuses and writes nothing; accepting pins
       exactly one line; the prompt text contains the fingerprint **and** the cannot-detect-replacement
       sentence (assert on the *text* — an exit code cannot tell an honest prompt from a silent capture);
       a mismatch never prompts; stdin-closed refuses; `--print` with no entry says so
-- [ ] T022f [US1] [P] Prove the honesty check can fail: soften the prompt wording to drop the
+- [X] T022f [US1] [P] Prove the honesty check can fail: soften the prompt wording to drop the
       cannot-detect clause and assert T022e then fails. Without this, the wording assertion is a
       guard nobody has seen refuse anything
 

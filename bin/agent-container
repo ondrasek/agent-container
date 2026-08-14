@@ -1305,12 +1305,18 @@ def capture_host_pubkey(host_rec: dict, name: str, timeout: float = CAPTURE_TIME
     capture and a successful one are indistinguishable by exit code, and a blank
     line in a known_hosts file reads exactly like a pin that worked.
     """
-    argv = driver_runtime_argv(host_rec) + [
-        "exec",
-        container_name(name),
-        "cat",
-        CONTAINER_HOSTKEY_PUB,
-    ]
+    base = driver_runtime_argv(host_rec)
+    cname = container_name(name)
+    # POLL ONLY WHEN THERE IS SOMETHING TO WAIT FOR. "The key is not written yet" is
+    # worth waiting out; "there is no container" and "the daemon does not answer" are
+    # not, and retrying those for the full window makes every failed deploy — and
+    # every attach against a stopped environment — pay the timeout for nothing.
+    # Asked as a question rather than matched against the runtime's error text: the
+    # wording differs between podman and docker, and a message that changes turns a
+    # fast path back into a slow one silently.
+    if not runtime_container_exists(base, cname):
+        return None
+    argv = base + ["exec", cname, "cat", CONTAINER_HOSTKEY_PUB]
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -1322,6 +1328,35 @@ def capture_host_pubkey(host_rec: dict, name: str, timeout: float = CAPTURE_TIME
         if time.monotonic() >= deadline:
             return None
         time.sleep(CAPTURE_POLL_INTERVAL)
+
+
+def capture_and_pin(
+    host_name: str, host_rec: dict, name: str, address: str, port: str | int
+) -> str | None:
+    """Capture the container's host public key and pin it. Returns the key, or None.
+
+    A capture failure MUST NOT fail the deploy (FR-008): a container that is running
+    perfectly should not be torn down because the tool could not read one file from
+    it. But it must not be SILENT either, because "attach is unverified" is the one
+    thing the operator cannot infer from a successful deploy — so the warning says
+    exactly that, and names the recovery.
+
+    Nothing is written on failure. Not a blank line, not an empty entry: a blank line
+    in a known_hosts file reads exactly like a pin that worked, and the whole failure
+    mode Feature 018 guards against is a check that passes while the thing it names
+    is broken.
+    """
+    key = capture_host_pubkey(host_rec, name)
+    if key is None:
+        warn(
+            f"{name}: could not read the container's host key within "
+            f"{CAPTURE_TIMEOUT:g}s, so nothing was pinned — ATTACH WILL BE "
+            f"UNVERIFIED and will ask before connecting. Re-run the deploy to pin it."
+        )
+        return None
+    pin_host_key(host_name, address, port, key)
+    log(f"pinned host key for {name} ({pubkey_fingerprint(key)})")
+    return key
 
 
 @contextlib.contextmanager
@@ -6301,6 +6336,16 @@ def compose_up_exec(
         die(f"compose {'redeploy' if redeploy else 'up'} failed (exit {rc})")
     write_state(host_name, name, port)
     addr = driver_reachable_address(host_rec)
+    # Feature 018: capture and pin, HERE — the one choke point every deploy path
+    # passes through, for the reason resolve_egress_declaration records above.
+    #
+    # UNCONDITIONALLY, on EVERY deploy, and that is what makes FR-007 free rather
+    # than stateful: the pin becomes by construction whatever the tool last saw, so
+    # a mismatch at attach time means the key changed WITHOUT a deploy — i.e. not by
+    # us — and refusing is correct with nothing to attribute. `--purge` + recreate
+    # re-pins because the recreate IS a deploy. Do not add change-attribution state
+    # here; there is nothing to attribute.
+    capture_and_pin(host_name, host_rec, name, addr, port)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     verb = "redeployed" if redeploy else "started"
     log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
@@ -8035,6 +8080,84 @@ def print_shell(text: str) -> None:
     sys.stdout.flush()
 
 
+def ensure_pinned_or_ask(name: str, host: str, port: str, *, trust_unpinned: bool = False) -> None:
+    """Feature 018's ABSENT branch, and only the absent branch.
+
+    Three states, three answers, and merging them is the one refactor that would
+    delete this feature:
+
+      matches  -> ssh connects. Nothing to do here.
+      DIFFERS  -> ssh REFUSES, unconditionally, because we set
+                  StrictHostKeyChecking=yes. It is deliberately not our decision:
+                  a mismatch contradicts a claim the tool made itself, and a
+                  prompt there would let the one unconditional refusal in the
+                  feature be clicked through (FR-014).
+      ABSENT   -> this function. Warn, show the fingerprint, say what accepting
+                  does NOT detect, and ask (FR-013/FR-016).
+
+    Why asking is honest and capturing silently would not be: a pin is a WITNESS,
+    and its value comes from being OLDER than what it checks. At deploy time the
+    tool knows the container is the one it just created. Here it does not — the
+    runtime can only say "the container currently called <name>", never "the
+    container you created" — so an attacker who replaced the container would have
+    their own key captured and then verified against themselves. That is
+    trust-on-first-use through a different door, and the operator is the only one
+    who can weigh it. Hence the fingerprint: a prompt with nothing to compare
+    against is theatre (research R8).
+    """
+    if pinned_host_key(host, port) is not None:
+        return
+    try:
+        host_name, host_rec = resolve_deploy_host(DEFAULT_HOST)
+        key = capture_host_pubkey(host_rec, name, timeout=CAPTURE_POLL_INTERVAL)
+    except Fatal:
+        key = None
+    if key is None:
+        die(
+            f"no pinned host key for {name} at [{host}]:{port}, and the container's "
+            f"key could not be read to offer one. Deploy it (agent-container "
+            f"redeploy {name}) to pin, or place the entry from the machine that "
+            f"deployed it (agent-container list --json)."
+        )
+    warn(
+        f"NOTHING IS PINNED for {name} at [{host}]:{port}. The container offers "
+        f"{pubkey_fingerprint(key)}.\n"
+        f"Accepting is a TRUST DECISION, not a check: it CANNOT DETECT A CONTAINER "
+        f"THAT WAS REPLACED, because the key would then be the replacement's own. "
+        f"Compare the fingerprint against another source first — or take the entry "
+        f"from the machine that deployed this environment (agent-container list "
+        f"--json), which predates what it checks and this does not."
+    )
+    if trust_unpinned:
+        # As loud as the prompt would have been (FR-015): an operator who pre-accepts
+        # on the command line must not end up better informed than one who was asked.
+        warn(f"--trust-unpinned given: accepting {pubkey_fingerprint(key)} without asking")
+    elif not sys.stdin.isatty():
+        die(
+            f"nothing pinned for {name} and no terminal to ask on — refusing rather "
+            f"than assuming yes. Re-run interactively, or pass --trust-unpinned to "
+            f"accept {pubkey_fingerprint(key)} deliberately."
+        )
+    elif not questionary.confirm(
+        f"trust {pubkey_fingerprint(key)} for {name}?", default=False
+    ).ask():
+        die(f"refused: nothing pinned for {name} and the offered key was not accepted")
+    pin_host_key(host_name, host, port, key)
+    log(f"pinned {pubkey_fingerprint(key)} for {name} — future attaches verify against it")
+
+
+def warn_if_unpinned_for_emitted_command(name: str, host: str, port: str) -> None:
+    """FR-017: `--print` and `--ssh-config` emit a command and connect to NOTHING,
+    so they must never prompt — but they must not hand over an argv that will fail
+    for a reason the output never mentioned."""
+    if pinned_host_key(host, port) is None:
+        warn(
+            f"nothing is pinned for {name} at [{host}]:{port}, so the command above "
+            f"will REFUSE to connect. Deploy to pin it, or attach once interactively "
+            f"to be asked."
+        )
+
+
 def attach_shell_action(user: str, host: str, port: str, window: str | None = None) -> ShellAction:
     """The attach command as a ShellAction — the SINGLE source the print path
     renders and the execute path runs (FR-010 parity). Only connection coordinates."""
@@ -8184,6 +8307,7 @@ def cli_attach(
     print_mode: bool = False,
     ssh_config: bool = False,
     shell: str = "posix",
+    trust_unpinned: bool = False,
 ) -> None:
     # Validate the window BEFORE resolving/building the command (it is embedded
     # in the remote shell string).
@@ -8198,10 +8322,16 @@ def cli_attach(
     # printed command is the SAME argv the execute path runs (FR-010 parity).
     if ssh_config:
         print_shell(ssh_config_stanza(name, user, host, port))
+        warn_if_unpinned_for_emitted_command(name, host, port)
         return
     if print_mode:
         print_shell(render_action(attach_shell_action(user, host, port, window), shell))
+        warn_if_unpinned_for_emitted_command(name, host, port)
         return
+    # Feature 018: the ABSENT branch, before any connection attempt. A mismatch is
+    # not handled here — ssh refuses it unconditionally (FR-014), and keeping the two
+    # in separate places is what stops the refusal becoming a question.
+    ensure_pinned_or_ask(name, host, port, trust_unpinned=trust_unpinned)
     # Dead-session probe (FR-008): never present a silent empty attach. If ssh can
     # reach the container but the tmux session 'main' is gone (agent/session ended),
     # report it clearly instead of dropping into an empty shell. An 'unreachable'
@@ -12366,6 +12496,14 @@ def attach(
     shell: str = typer.Option(
         "posix", "--shell", help="Dialect for --print output: posix (default), fish, or pwsh."
     ),
+    trust_unpinned: bool = typer.Option(
+        False,
+        "--trust-unpinned",
+        help="Accept the container's host key WITHOUT being asked when nothing is "
+        "pinned. A trust decision, not a check: it cannot detect a container that "
+        "was replaced. Prefer pinning by deploying, or copy the entry from the "
+        "machine that deployed (agent-container list --json).",
+    ),
 ) -> None:
     """ssh + tmux attach to container NAME (local state file or hosts.conf).
 
@@ -12376,7 +12514,7 @@ def attach(
     if print_cmd and ssh_config:
         raise typer.BadParameter("--print and --ssh-config are mutually exclusive")
     mode = "local" if local else ("remote" if remote else "auto")
-    cli_attach(name, mode, user, host, window, print_cmd, ssh_config, shell)
+    cli_attach(name, mode, user, host, window, print_cmd, ssh_config, shell, trust_unpinned)
 
 
 @app.command()

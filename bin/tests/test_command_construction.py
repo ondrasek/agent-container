@@ -13,6 +13,10 @@ import subprocess
 
 import pytest
 
+# Feature 018: a pinned key for tests that attach. Any valid ed25519 public key
+# works — nothing here verifies against a real container.
+TEST_HOST_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+
 
 @pytest.fixture
 def capture_query(wiz, monkeypatch):
@@ -418,6 +422,10 @@ def test_verification_never_points_at_the_operators_own_known_hosts(wiz):
 
 def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
     wiz.write_state("local", "acme", 2206)
+    # Feature 018: attach verifies, so these tests must start from a PINNED
+    # environment — they exercise handover/window/probe, not the unpinned path
+    # (which test_shell_integration.py owns).
+    wiz.pin_host_key("local", "localhost", 2206, TEST_HOST_PUBKEY)
     monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")  # FR-008 probe
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
@@ -471,6 +479,10 @@ def test_ssh_argv_without_window_is_unchanged(wiz):
 
 def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
     wiz.write_state("local", "acme", 2206)
+    # Feature 018: attach verifies, so these tests must start from a PINNED
+    # environment — they exercise handover/window/probe, not the unpinned path
+    # (which test_shell_integration.py owns).
+    wiz.pin_host_key("local", "localhost", 2206, TEST_HOST_PUBKEY)
     monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")  # FR-008 probe
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))

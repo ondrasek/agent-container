@@ -277,3 +277,139 @@ def test_eval_surfaces_do_not_accept_json(wiz):
 
 def test_no_json_exclusion_set_documents_the_eval_surfaces(wiz):
     assert {"host env", "completions", "attach"} <= set(wiz.NO_JSON_COMMANDS)
+
+
+# --- Feature 018: the three states of a pinned host key ----------------------
+# matches -> connect · DIFFERS -> ssh refuses unconditionally · ABSENT -> ask.
+# The tests below assert on the WORDING as well as the outcome, because an exit
+# code cannot tell an honest prompt from a silent capture.
+
+KEY_A = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+
+
+def _pin(wiz, port=2206, key=KEY_A):
+    wiz.pin_host_key("local", "localhost", port, key)
+
+
+def test_attach_with_a_pinned_key_does_not_ask(wiz, monkeypatch, capsys):
+    wiz.write_state("local", "acme", 2206)
+    _pin(wiz)
+    monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")
+    monkeypatch.setattr(wiz.os, "execvp", lambda *a: None)
+    monkeypatch.setattr(
+        wiz.questionary, "confirm", lambda *a, **k: pytest.fail("asked with a key pinned")
+    )
+    wiz.cli_attach("acme", "local", None, None)
+    err = capsys.readouterr().err
+    assert "NOTHING IS PINNED" not in err
+
+
+def test_attach_with_nothing_pinned_asks_and_says_what_it_cannot_detect(wiz, monkeypatch, capsys):
+    """FR-013/FR-016/SC-009. The wording is the ONLY place the operator learns that
+    accepting is a trust decision rather than a verification, so it is asserted."""
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "capture_host_pubkey", lambda *a, **k: KEY_A)
+    monkeypatch.setattr(wiz.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")
+    monkeypatch.setattr(wiz.os, "execvp", lambda *a: None)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        wiz.questionary,
+        "confirm",
+        lambda msg, **k: asked.append(msg) or type("A", (), {"ask": lambda self: True})(),
+    )
+    wiz.cli_attach("acme", "local", None, None)
+    err = capsys.readouterr().err
+
+    assert asked, "nothing was pinned and the operator was never asked"
+    assert "NOTHING IS PINNED" in err
+    assert "CANNOT DETECT A CONTAINER THAT WAS REPLACED" in err
+    assert wiz.pubkey_fingerprint(KEY_A) in err  # something to compare against
+    assert wiz.pubkey_fingerprint(KEY_A) in asked[0]
+    # Accepting pins, so the next attach is verified rather than asked again.
+    assert wiz.pinned_host_key("localhost", "2206") == KEY_A
+
+
+def test_declining_refuses_and_pins_nothing(wiz, monkeypatch):
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "capture_host_pubkey", lambda *a, **k: KEY_A)
+    monkeypatch.setattr(wiz.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        wiz.questionary, "confirm", lambda *a, **k: type("A", (), {"ask": lambda self: False})()
+    )
+    with pytest.raises(wiz.Fatal, match="not accepted"):
+        wiz.cli_attach("acme", "local", None, None)
+    assert wiz.pinned_host_key("localhost", "2206") is None
+
+
+def test_no_terminal_refuses_rather_than_assuming_yes(wiz, monkeypatch):
+    """FR-015/SC-011: an unattended invocation cannot consent, and an assumed yes
+    would be a silent capture with extra steps."""
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "capture_host_pubkey", lambda *a, **k: KEY_A)
+    monkeypatch.setattr(wiz.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(
+        wiz.questionary, "confirm", lambda *a, **k: pytest.fail("prompted with no terminal")
+    )
+    with pytest.raises(wiz.Fatal, match="no terminal to ask on"):
+        wiz.cli_attach("acme", "local", None, None)
+    assert wiz.pinned_host_key("localhost", "2206") is None
+
+
+def test_trust_unpinned_is_as_loud_as_the_prompt_would_have_been(wiz, monkeypatch, capsys):
+    """FR-015: pre-accepting on the command line must not leave the operator LESS
+    informed than being asked would have."""
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "capture_host_pubkey", lambda *a, **k: KEY_A)
+    monkeypatch.setattr(wiz.sys.stdin, "isatty", lambda: False)  # still works unattended
+    monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")
+    monkeypatch.setattr(wiz.os, "execvp", lambda *a: None)
+    wiz.cli_attach("acme", "local", None, None, trust_unpinned=True)
+    err = capsys.readouterr().err
+    assert "CANNOT DETECT A CONTAINER THAT WAS REPLACED" in err
+    assert wiz.pubkey_fingerprint(KEY_A) in err
+    assert wiz.pinned_host_key("localhost", "2206") == KEY_A
+
+
+def test_the_honesty_wording_check_can_fail(wiz, monkeypatch, capsys):
+    """T022f. Soften the warning to drop the cannot-detect clause and the assertion
+    above stops holding — proof that a wording guard nobody has watched fire is not
+    a guard."""
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "capture_host_pubkey", lambda *a, **k: KEY_A)
+    monkeypatch.setattr(wiz.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(wiz, "probe_session", lambda *a, **k: "alive")
+    monkeypatch.setattr(wiz.os, "execvp", lambda *a: None)
+    real_warn = wiz.warn
+    monkeypatch.setattr(
+        wiz, "warn", lambda msg, **k: real_warn(msg.replace("CANNOT DETECT", "may not detect"), **k)
+    )
+    wiz.cli_attach("acme", "local", None, None, trust_unpinned=True)
+    assert "CANNOT DETECT A CONTAINER THAT WAS REPLACED" not in capsys.readouterr().err
+
+
+def test_unreadable_key_and_nothing_pinned_refuses_and_names_the_recovery(wiz, monkeypatch):
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(wiz, "capture_host_pubkey", lambda *a, **k: None)
+    with pytest.raises(wiz.Fatal, match="could not be read"):
+        wiz.cli_attach("acme", "local", None, None)
+
+
+def test_print_and_ssh_config_never_prompt_but_say_the_command_will_refuse(
+    wiz, monkeypatch, capsys
+):
+    """FR-017: they emit a command and connect to nothing, so a prompt is wrong —
+    but handing over an argv that fails for an unmentioned reason is worse."""
+    wiz.write_state("local", "acme", 2206)
+    monkeypatch.setattr(
+        wiz.questionary, "confirm", lambda *a, **k: pytest.fail("--print must never prompt")
+    )
+    wiz.cli_attach("acme", "local", None, None, print_mode=True, shell="posix")
+    out = capsys.readouterr()
+    assert out.out.startswith("ssh dev@localhost")  # still eval-safe: only the command on stdout
+    assert "will REFUSE to connect" in out.err
+
+    _pin(wiz)
+    wiz.cli_attach("acme", "local", None, None, ssh_config=True)
+    out = capsys.readouterr()
+    assert "will REFUSE" not in out.err  # pinned: no warning

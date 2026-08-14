@@ -36,6 +36,17 @@ def _no_drain(*_args, **_kwargs) -> list[str]:
     return []
 
 
+def _no_capture(*_args, **_kwargs) -> None:
+    """Stand-in for Feature 018's capture_host_pubkey — see `load_wiz`.
+
+    Returns None, which the callers must already handle: "nothing captured" is a
+    first-class outcome (a deploy warns and continues; an attach with nothing pinned
+    refuses or asks). A fake that returned a key would make every deploy test assert
+    a pin it never really made.
+    """
+    return None
+
+
 @pytest.fixture
 def load_wiz(monkeypatch, tmp_path):
     """Factory that loads a fresh, env-isolated instance of the script.
@@ -98,6 +109,17 @@ def load_wiz(monkeypatch, tmp_path):
         # this from quietly becoming a suite-wide way of never testing it.
         module.real_drain_host_records = module.drain_host_records
         module.drain_host_records = _no_drain
+        # Feature 018: the same hazard, one feature later. Capture reads the host
+        # public key THROUGH THE RUNTIME on every deploy, and every attach with
+        # nothing pinned tries once more — so a hermetic test would either talk to a
+        # real daemon or spend the poll window waiting for one that is not there.
+        #
+        # Neutralised the same way, and kept beside itself under a second name so the
+        # files that own capture (test_pure_logic.py, test_shell_integration.py) put
+        # the real one back explicitly. Suite-wide stubbing is only safe while
+        # SOMETHING still exercises the real thing.
+        module.real_capture_host_pubkey = module.capture_host_pubkey
+        module.capture_host_pubkey = _no_capture
         created.append(mod_name)
         return module
 

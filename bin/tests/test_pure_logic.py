@@ -1227,9 +1227,20 @@ def test_without_the_lock_a_concurrent_deploy_LOSES_an_entry(wiz, monkeypatch):
     assert wiz.pinned_host_key("localhost", 2208) == OTHER_KEY
 
 
-def test_capture_returning_nothing_is_a_value_not_an_empty_string(wiz, monkeypatch):
+@pytest.fixture
+def real_capture(wiz, monkeypatch):
+    """Put the REAL capture back (conftest neuters it suite-wide). Without this the
+    tests below would assert against the stub, which is the failure mode the
+    conftest comment warns about."""
+    monkeypatch.setattr(wiz, "capture_host_pubkey", wiz.real_capture_host_pubkey)
+    return wiz
+
+
+def test_capture_returning_nothing_is_a_value_not_an_empty_string(real_capture, monkeypatch):
+    wiz = real_capture
     """T009: the timeout path must hand back None. An empty string would format
     into a blank known_hosts line, which reads exactly like a successful pin."""
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *a, **kw: True)
     monkeypatch.setattr(
         wiz, "query", lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, "", "no such file")
     )
@@ -1237,7 +1248,9 @@ def test_capture_returning_nothing_is_a_value_not_an_empty_string(wiz, monkeypat
     assert wiz.capture_host_pubkey({"driver": "docker", "context": ""}, "acme", timeout=0) is None
 
 
-def test_capture_rejects_a_private_key_the_container_somehow_offers(wiz, monkeypatch):
+def test_capture_rejects_a_private_key_the_container_somehow_offers(real_capture, monkeypatch):
+    wiz = real_capture
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *a, **kw: True)
     monkeypatch.setattr(
         wiz,
         "query",
@@ -1249,16 +1262,18 @@ def test_capture_rejects_a_private_key_the_container_somehow_offers(wiz, monkeyp
     assert wiz.capture_host_pubkey({"driver": "docker", "context": ""}, "acme", timeout=0) is None
 
 
-def test_capture_reads_through_the_runtime_never_ssh_keyscan(wiz, monkeypatch):
+def test_capture_reads_through_the_runtime_never_ssh_keyscan(real_capture, monkeypatch):
     """FR-003: the channel IS the security argument. Asking the endpoint being
     authenticated to state its own identity is trust-on-first-use with extra steps,
     so the captured value must come from the runtime's argv."""
     seen: list[list[str]] = []
 
-    def fake_query(argv, **kw):
+    def fake_query(argv, **kw):  # noqa: ANN001
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, ED25519_KEY + "\n", "")
 
+    wiz = real_capture
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *a, **kw: True)
     monkeypatch.setattr(wiz, "query", fake_query)
     got = wiz.capture_host_pubkey({"driver": "podman", "context": ""}, "acme")
     assert got == ED25519_KEY
