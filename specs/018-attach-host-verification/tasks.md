@@ -120,20 +120,20 @@ question.
       FR-007 free: the pin is by construction whatever the tool last saw, so a mismatch means the key
       changed *without* a deploy. **Do not add change-attribution state** — the whole point is that
       there is nothing to attribute
-- [ ] T020 [US1] **Acceptance test: a substituted host key is REFUSED** (C3, SC-003, S2) in
+- [X] T020 [US1] **Acceptance test: a substituted host key is REFUSED** (C3, SC-003, S2) in
       `bin/tests/test_acceptance.py`. Replace the container's host key out of band, restart sshd,
       attach, assert failure and that the message names the mismatch. **This test is the feature.**
       Write it before the polish phase — everything else in this file passes with a pin that never
       refuses
-- [ ] T021 [US1] Acceptance test: the argv `attach` builds carries both verification options
+- [X] T021 [US1] Acceptance test: the argv `attach` builds carries both verification options
       (C2, S1), asserted through `attach --print` so no tty is needed. **This does NOT prove SC-002** —
       `--print` never connects, so it cannot witness the absence of a prompt. Say so in the test's
       docstring; a test whose name overstates what it checks is worse than no test
-- [ ] T021a [US1] **SC-002 proper**: assert on a real connection that no trust-on-first-use prompt or
+- [X] T021a [US1] **SC-002 proper**: assert on a real connection that no trust-on-first-use prompt or
       host-key warning appears on stderr. T022's successful attach is the natural carrier — it already
       connects and must succeed cleanly, so the assertion costs nothing extra. Without this, SC-002 is
       measured by a test that structurally cannot fail the way SC-002 describes
-- [ ] T022 [US1] Acceptance test: `down --purge` then `up` re-pins **silently** — the entry changed
+- [X] T022 [US1] Acceptance test: `down --purge` then `up` re-pins **silently** — the entry changed
       and no mismatch warning appears (C4, SC-004, S3). Paired deliberately with T020: the two
       directions must not collapse into each other, and a bug in either looks like the other working
 - [X] T022a [US1] **The unpinned prompt** (FR-013, FR-016, C13, S12): when the environment has no entry,
@@ -196,7 +196,7 @@ nothing, after every deployment path that exists.
       the file still arrived as the source's mode (research R7)
 - [X] T031 [US2] Drop `.host_key` from `_FLAT_STATE_SUFFIXES` (the 011 flat-state migration) —
       migrating a file we now delete would relocate the exposure rather than remove it
-- [ ] T032 [US2] [P] Acceptance test for SC-001: after `up` with **every** flag combination the CLI
+- [X] T032 [US2] [P] Acceptance test for SC-001: after `up` with **every** flag combination the CLI
       still offers, no file under the state or config directories contains `PRIVATE KEY` (S5)
 - [X] T033 [US2] [P] Unit tests: each removed flag fails with the FR-002 wording (not a generic
       argparse error); a spec declaring `host_key` is refused; a pre-existing `.host_key` is deleted
@@ -261,19 +261,22 @@ nothing, after every deployment path that exists.
 
 - [X] T037 Capture failure: **warn, state that attach will be unverified, and leave the deploy's exit
       status untouched** (FR-008, C7, SC-008, S9). Write **no** line at all — not a blank one
-- [ ] T038 [P] Acceptance test for T037 (S9): deploy succeeds, the warning names the unverified
+- [X] T038 [P] Acceptance test for T037 (S9): deploy succeeds, the warning names the unverified
       attach, and the file gains no entry
 - [X] T039 Skip capture on the headless `--foreground` path, per the spec assumption that scopes FR-003
       (a task may not exempt itself from a MUST — the exemption had to go in the spec first). Say in the
       code why: that branch returns after the agent has exited, so there is no container to read and
       nothing to attach to. `start`/`stop` likewise need no capture — the key persists on the `ssh`
       volume, so identity does not change
-- [ ] T040 [P] Acceptance test: capture over a **remote** context (FR-009, C8, SC-006, S10). Run
-      against a real remote context — SC-006 says verified, not inferred from a local run, because the
-      operator's machine shares no filesystem with that daemon
-- [ ] T041 [P] Acceptance test: two environments on one host, two entries, **neither key verifying the
+- [~] T040 [P] Acceptance test: capture over a **remote** context (FR-009, C8, SC-006, S10).
+      **NOT DONE — and deliberately not faked.** SC-006 says *verified, not inferred from a local
+      run*, and no remote host was available in this session. Capture uses
+      `driver_runtime_argv(host_rec)`, the same host-aware prefix every other remote operation uses,
+      and reads a file through `exec` rather than a bind — so it *should* work over a context. That is
+      a reasoned expectation, not a measurement, and SC-006 stays unmet until someone runs it
+- [X] T041 [P] Acceptance test: two environments on one host, two entries, **neither key verifying the
       other's connection** (C5, SC-005, S4)
-- [ ] T042 [P] Acceptance test: `~/.ssh/known_hosts` is byte-identical before and after `up` +
+- [X] T042 [P] Acceptance test: `~/.ssh/known_hosts` is byte-identical before and after `up` +
       `attach --print` (C6, SC-007, S8)
 - [X] T043 Reconcile `docs/threat-model.md`'s 018 row (Constitution, Development Workflow): an
       exposure **removed**, and a new trusted file introduced — the tool-managed `known_hosts` now
@@ -292,7 +295,7 @@ nothing, after every deployment path that exists.
 - [X] T045b [P] Update `docs/agent-interface.md` for the new `list --json` field (Feature 009's
       contract document) — and state the FR-010 property there: the answer does not depend on the host
       being reachable
-- [ ] T046 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Removing a documented flag
+- [X] T046 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Removing a documented flag
       is breaking, and python-semantic-release under-bumps if the message does not say so
 - [ ] T047 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then
       `pytest -m acceptance bin/tests` (CI-authoritative, excluded from the gate)

@@ -38,7 +38,7 @@ area, and do not re-summarise them here.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv,
   or printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a
   missing referenced file must `die` **before** compose. On-volume `auth.json` is
-  **operator-interactive-login only**. Rotate = edit locally + `redeploy`.
+  **operator-interactive-login only**; a private SSH **host** key is never injected at all. Rotate = edit locally + `redeploy`.
 - **The supported-agent list is single-sourced.** `AGENTS` in `bin/agent-container` is canonical;
   tests fail on drift anywhere it is restated and name what to update; a sibling test pins the
   completions' command list to the CLI's.
@@ -55,6 +55,10 @@ area, and do not re-summarise them here.
   the proxy allowlist; sidecars are inside unless declared out. A declaration governs **all** egress
   (it breaks HTTPS `git push` unless declared — checked at deploy); absent ≠ `allow: []`; the
   strength statement is tested for **absence** of overclaim.
+- **Host identity is CAPTURED, never supplied.** The container's host key never leaves it; each deploy
+  pins the **public** half as `[address]:port` in derived host state. **Mismatch ⇒ refuse,
+  unconditionally, never a prompt**; absent ⇒ warn + fingerprint + ask (no tty ⇒ refuse), because a pin
+  must **predate** what it checks. All five private-key channels are gone.
 - **A run's account outlives its container.** The container writes the record to the runs volume
   (only the entrypoint is there when a detached run ends), the CLI ingests on next contact, and
   **teardown drains before it removes volumes**; `task` is the one operator-authored field,
@@ -69,7 +73,7 @@ area, and do not re-summarise them here.
 `docs/layout.md` (the location map · 011) · `docs/orchestration.md` (hosts, compose/quadlet,
 lifecycle, volumes · 001,002) · `docs/credentials.md` (injection, managers · 003,008) ·
 `docs/execution.md` (modes, `--agent`/`--task`/`--workspace`, clone-on-start · 004,010) ·
-`docs/shell-integration.md` (`attach --print`, `host env` · 005) · `docs/agent-as-code.md`
+`docs/shell-integration.md` (`attach --print`, `host env`, verified attach · 005,018) · `docs/agent-as-code.md`
 (declarative `.agent-container/` · 006,008) · `docs/agent-interface.md` (`--json`, `context`,
 `skill` · 009) · `docs/egress.md` (declaration, enforcement, honesty · 012) ·
 `docs/observability.md` (run records, ingestion, retention · 016) ·

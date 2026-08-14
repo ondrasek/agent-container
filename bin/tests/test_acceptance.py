@@ -36,9 +36,8 @@ from conftest import SCRIPT_PATH
 def _acc_base() -> Path:
     """A working-dir base that the container runtime can bind-mount from on both
     Linux (any path) AND macOS+Lima (where /tmp and /private/var are NOT shared
-    into the VM, but the user's home is). The `--host-key` file and the
-    concatenated authorized_keys state file are bind-mounted, so they must live
-    somewhere the daemon can read. Override with AGENT_CONTAINER_ACCEPTANCE_TMPDIR."""
+    into the VM, but the user's home is). The concatenated authorized_keys state file
+    is delivered from here, so it must live somewhere the daemon can read. Override with AGENT_CONTAINER_ACCEPTANCE_TMPDIR."""
     base = Path(
         os.environ.get("AGENT_CONTAINER_ACCEPTANCE_TMPDIR")
         or Path.home() / ".cache" / "agent-container-acceptance"
@@ -264,7 +263,6 @@ def acc(_image):
         name,
         *,
         authorized_key=None,
-        host_key=None,
         env_extra=None,
         push_key=None,
         known_hosts=None,
@@ -286,8 +284,6 @@ def acc(_image):
         lines += list(env_extra or [])
         env_file.write_text("\n".join(lines) + "\n")
         argv = [*AGENT_CONTAINER, "up", name, "--env-file", str(env_file)]
-        if host_key is not None:
-            argv += ["--host-key", str(host_key)]
         for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
         if push_key is not None:
@@ -332,10 +328,8 @@ def acc(_image):
         r = _run_cli(argv, state_dir)
         assert r.returncode == 0, f"down {name} failed:\n{r.stderr}"
 
-    def keys(name, *, authorized_key=None, host_key=None):
+    def keys(name, *, authorized_key=None):
         argv = [*AGENT_CONTAINER, "keys", name]
-        if host_key is not None:
-            argv += ["--host-key", str(host_key)]
         for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
         r = _run_cli(argv, state_dir)
@@ -386,41 +380,58 @@ def test_rootless_pubkey_login_as_dev(acc):
 
 
 def test_identity_persists_across_recreate(acc):
-    """Host key AND authorized_keys survive down/up: the fingerprint is stable
-    (no known_hosts churn) and login still works with no re-injection."""
-    laptop = _gen_keypair(acc.tmp / "laptop")
-    hostkey = _gen_keypair(acc.tmp / "hostkey")
-    injected_fp = _fingerprint(hostkey.with_suffix(".pub"))
+    """The container's OWN host key and authorized_keys survive down/up: the
+    fingerprint is stable (no known_hosts churn) and login still works.
 
-    port = acc.up("accpersist", host_key=hostkey, authorized_key=[laptop.with_suffix(".pub")])
-    assert _container_hostkey_fp("accpersist") == injected_fp
+    This test used to inject a private host key to prove stability. Feature 018
+    removed that channel, and the property is now tested where it actually lives —
+    the key the CONTAINER generated on its persisted volume. That is a better test:
+    it proves the thing operators rely on rather than the thing the tool used to
+    supply.
+    """
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("accpersist", authorized_key=[laptop.with_suffix(".pub")])
+    generated_fp = _container_hostkey_fp("accpersist")
+    assert generated_fp  # the container made one for itself
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
     acc.down("accpersist")  # keep volumes
-    port2 = acc.up("accpersist")  # recreate, no injection this time
-    assert _container_hostkey_fp("accpersist") == injected_fp  # stable
+    port2 = acc.up("accpersist")  # recreate
+    assert _container_hostkey_fp("accpersist") == generated_fp  # stable
     assert _ssh(port2, laptop, "whoami").stdout.strip() == "dev"  # authkeys kept
 
 
 def test_live_key_injection_without_recreate(acc):
-    """`keys` injects into a RUNNING container and reloads sshd: the host key
-    changes to the supplied one and a new pubkey works, with no recreate."""
+    """`keys` injects a PUBLIC key into a RUNNING container and reloads sshd: the new
+    pubkey works with no recreate, and the container's host identity is UNTOUCHED.
+
+    Feature 018 removed this command's host-key arm. The surviving half is the half
+    that was never an exposure, and the host-key assertion inverts: injecting keys
+    must not be able to change what the container is.
+    """
     port = acc.up("acclive")
     before = _container_hostkey_fp("acclive")
 
-    hostkey = _gen_keypair(acc.tmp / "hostkey")
     laptop = _gen_keypair(acc.tmp / "laptop")
-    acc.keys("acclive", host_key=hostkey, authorized_key=[laptop.with_suffix(".pub")])
+    acc.keys("acclive", authorized_key=[laptop.with_suffix(".pub")])
 
-    after = _container_hostkey_fp("acclive")
-    assert after == _fingerprint(hostkey.with_suffix(".pub"))
-    assert after != before
+    assert _container_hostkey_fp("acclive") == before  # identity is not injectable
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
+
+    # And the removed flag refuses, naming the reason (FR-002).
+    r = acc.cli(["keys", "acclive", "--host-key", str(laptop)])
+    assert r.returncode != 0
+    assert "captures the PUBLIC key" in r.stderr
 
 
 def test_env_file_injection(acc):
-    """Identity supplied through the env-file channel (SSH_AUTHORIZED_KEYS +
-    SSH_HOST_ED25519_KEY_B64) is installed at boot."""
+    """SSH_AUTHORIZED_KEYS (public) is installed at boot; SSH_HOST_ED25519_KEY_B64
+    is INERT (Feature 018).
+
+    The second assertion inverts rather than disappearing: this channel put a base64
+    private key in an env file, and a removal with no test behind it is a removal
+    nobody notices being undone.
+    """
     laptop = _gen_keypair(acc.tmp / "laptop")
     hostkey = _gen_keypair(acc.tmp / "hostkey")
     b64 = base64.b64encode(hostkey.read_bytes()).decode()
@@ -433,8 +444,8 @@ def test_env_file_injection(acc):
             f"SSH_HOST_ED25519_KEY_B64={b64}",
         ],
     )
-    assert _container_hostkey_fp("accenv") == _fingerprint(hostkey.with_suffix(".pub"))
-    assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
+    assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"  # public key works
+    assert _container_hostkey_fp("accenv") != _fingerprint(hostkey.with_suffix(".pub"))
 
 
 def test_purge_removes_all_ten_volumes(acc):
@@ -3538,3 +3549,227 @@ def test_an_ephemeral_workspace_with_no_clone_records_no_repository(acc):
     assert "could not tell" in text, text
     assert "no files changed" in text, text
     assert "COMMITTED WITHOUT PUSHING" not in text, text
+
+
+# --- Feature 018: verified attach, no private host key on disk ----------------
+# The strongest evidence here is an ABSENCE: no private key anywhere, and a
+# substituted key REFUSED. A pin that never refuses passes every other test in
+# this file, so T020 below is the one that actually proves the feature.
+
+
+def _pinned_lines(acc) -> list[str]:
+    kh = acc.state_dir / "agent-container" / "local" / "known_hosts"
+    return [ln for ln in kh.read_text().splitlines() if ln.strip()] if kh.is_file() else []
+
+
+def test_deploy_pins_the_containers_public_key(acc):
+    """C1/S1: capture happens at deploy, through the runtime, and what lands in the
+    file is the key the container is really using."""
+    port = acc.up("accpin")
+    lines = _pinned_lines(acc)
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(f"[localhost]:{port} ssh-ed25519 ")
+    # The pinned key IS the container's key, not merely a well-formed line.
+    blob = lines[0].split()[2]
+    r = subprocess.run(
+        [RUNTIME, "exec", "agent-container-accpin", "cat",
+         "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key.pub"],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert blob == r.stdout.split()[1]
+    assert "PRIVATE" not in lines[0]
+
+
+def test_attach_print_carries_verification_and_no_prompt_is_needed(acc):
+    """T021/SC-002 (argv half): the command attach would run points at the tool's own
+    known_hosts with StrictHostKeyChecking=yes.
+
+    This asserts the ARGV, not the absence of a prompt — `--print` never connects, so
+    it structurally cannot witness a prompt. test_attach_over_ssh_is_verified below
+    carries SC-002's real weight.
+    """
+    acc.up("accprint")
+    r = acc.cli(["attach", "accprint", "--print"])
+    assert r.returncode == 0, r.stderr
+    assert "StrictHostKeyChecking=yes" in r.stdout
+    assert "agent-container/local/known_hosts" in r.stdout
+    assert str(Path.home() / ".ssh" / "known_hosts") not in r.stdout  # never the operator's
+    assert "will REFUSE" not in r.stderr  # pinned, so no warning
+
+
+def test_attach_over_ssh_is_verified_with_no_prompt(acc):
+    """SC-002 for real (T021a): a genuine ssh connection using ONLY the tool's pinned
+    file succeeds, and emits no trust-on-first-use prompt or host-key warning."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("accverify", authorized_key=[laptop.with_suffix(".pub")])
+    kh = acc.state_dir / "agent-container" / "local" / "known_hosts"
+    r = subprocess.run(
+        ["ssh", "-i", str(laptop), "-p", str(port),
+         "-o", f"UserKnownHostsFile={kh}", "-o", "StrictHostKeyChecking=yes",
+         "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+         "dev@localhost", "whoami"],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "dev"
+    assert "Are you sure you want to continue connecting" not in r.stderr
+    assert "REMOTE HOST IDENTIFICATION HAS CHANGED" not in r.stderr
+    assert "Warning: Permanently added" not in r.stderr  # nothing was trusted on the fly
+
+
+def test_a_substituted_host_key_is_REFUSED(acc):
+    """T020 — C3/SC-003/S2. THE test for this feature.
+
+    Replace the container's host key OUT OF BAND (no deploy), restart sshd, and
+    connect against the pin. It must fail and name the mismatch. If this passes when
+    it should not, the pin is decoration and every other 018 test still goes green.
+    """
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("accsubst", authorized_key=[laptop.with_suffix(".pub")])
+    kh = acc.state_dir / "agent-container" / "local" / "known_hosts"
+    pinned_before = _pinned_lines(acc)[0]
+
+    swap = (
+        "rm -f ~/.ssh/hostkeys/ssh_host_ed25519_key* && "
+        "ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/hostkeys/ssh_host_ed25519_key && "
+        "ssh-keygen -y -f ~/.ssh/hostkeys/ssh_host_ed25519_key "
+        "> ~/.ssh/hostkeys/ssh_host_ed25519_key.pub && pkill -HUP -x sshd"
+    )
+    sub = subprocess.run(
+        [RUNTIME, "exec", "agent-container-accsubst", "bash", "-lc", swap],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert sub.returncode == 0, sub.stderr
+    assert _pinned_lines(acc)[0] == pinned_before  # the tool did NOT re-pin: no deploy happened
+
+    r = subprocess.run(
+        ["ssh", "-i", str(laptop), "-p", str(port),
+         "-o", f"UserKnownHostsFile={kh}", "-o", "StrictHostKeyChecking=yes",
+         "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+         "dev@localhost", "whoami"],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    assert r.returncode != 0, "a substituted host key was ACCEPTED — the pin is decoration"
+    assert "HOST IDENTIFICATION HAS CHANGED" in r.stderr or "host key" in r.stderr.lower()
+
+
+def test_a_tool_caused_recreation_repins_silently(acc):
+    """C4/SC-004/S3, paired deliberately with T020: the two directions must not
+    collapse into each other, and a bug in either looks like the other working."""
+    acc.up("accrepin")
+    before = _pinned_lines(acc)[0]
+    acc.down("accrepin", purge=True)  # the ssh volume goes, so the key WILL change
+    acc.up("accrepin")
+    after = _pinned_lines(acc)
+    assert len(after) == 1
+    assert after[0] != before  # a genuinely new key
+    assert after[0].split()[2] != before.split()[2]
+
+
+def test_two_environments_on_one_host_do_not_cross_verify(acc):
+    """C5/SC-005/S4: keyed [address]:port, so one container's key never verifies
+    another's connection."""
+    p1 = acc.up("accpair1")
+    p2 = acc.up("accpair2")
+    kh = acc.state_dir / "agent-container" / "local" / "known_hosts"
+    lines = _pinned_lines(acc)
+    assert len(lines) == 2
+    by_port = {ln.split(":")[1].split()[0]: ln.split()[2] for ln in lines}
+    assert by_port[str(p1)] != by_port[str(p2)]  # distinct keys
+    for target, other in ((f"[localhost]:{p1}", str(p2)), (f"[localhost]:{p2}", str(p1))):
+        r = subprocess.run(
+            ["ssh-keygen", "-F", target, "-f", str(kh)], capture_output=True, text=True
+        )
+        assert r.returncode == 0
+        assert by_port[other] not in r.stdout  # never the sibling's key
+
+
+def test_no_private_host_key_is_written_anywhere(acc):
+    """T032 — SC-001 at 100%: no HOST key material on disk, over every flag
+    combination the CLI still offers. The strongest evidence this feature works is an
+    absence.
+
+    Scoped to the host key on purpose. Feature 003's `--push-key` also stages a
+    plaintext private key under the state dir at 0644 — same shape, different
+    credential, different feature: the operator supplies it explicitly, it is the
+    OUTBOUND git identity rather than the container's inbound identity, and 003 owns
+    its lifecycle. Widening this assertion would either fail for a reason 018 did not
+    cause or quietly pull 003's design into 018's scope.
+    """
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    push = _gen_keypair(acc.tmp / "push")
+    acc.up("accnokey", authorized_key=[laptop.with_suffix(".pub")], push_key=push)
+
+    assert list(acc.state_dir.rglob("*.host_key")) == []
+    host_key_bytes = push.read_bytes()  # a real private key, for a real comparison
+    hits = [
+        p
+        for p in acc.state_dir.rglob("*")
+        if p.is_file()
+        and "PRIVATE KEY" in p.read_bytes().decode("utf-8", "replace")
+        and not p.name.endswith(".push_key")
+    ]
+    assert hits == [], f"unexpected private key material on disk: {hits}"
+    # And the pinned file itself holds only public material.
+    kh = acc.state_dir / "agent-container" / "local" / "known_hosts"
+    assert kh.is_file() and host_key_bytes not in kh.read_bytes()
+    assert "PRIVATE" not in kh.read_text()
+
+
+def test_a_stale_pre_018_private_key_is_deleted_and_reported(acc):
+    """C11/S7/FR-011: `--purge` never removed this file, so an upgrade that merely
+    stopped writing it would leave the exposure in place."""
+    acc.up("accstale")
+    stale = acc.state_dir / "agent-container" / "local" / "accstale.host_key"
+    stale.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n")
+    # `redeploy` resolves its own env file, so hand it the one the fixture wrote for
+    # `up` — otherwise the deploy dies before it can clean anything up.
+    r = acc.cli(["redeploy", "accstale", "--env-file", str(acc.tmp / "accstale.env")])
+    assert r.returncode == 0, r.stderr
+    assert not stale.exists()
+    assert "removed a PRIVATE host key" in r.stderr  # never silent
+
+
+def test_the_operators_own_known_hosts_is_untouched(acc):
+    """C6/SC-007/S8: byte-identical before and after."""
+    own = Path.home() / ".ssh" / "known_hosts"
+    before = own.read_bytes() if own.is_file() else None
+    acc.up("accown")
+    acc.cli(["attach", "accown", "--print"])
+    after = own.read_bytes() if own.is_file() else None
+    assert after == before
+
+
+def test_the_removed_flag_refuses_and_explains(acc):
+    """C10/S6/FR-002: not a bare 'no such option' — the operator who used this flag
+    had a reason, and it is now served without a private key on their disk."""
+    r = acc.cli(["up", "accgone", "--host-key", "/nonexistent"])
+    assert r.returncode != 0
+    assert "captures the PUBLIC key" in r.stderr
+    assert "no private key sits on your disk" in r.stderr
+
+
+def test_list_json_hands_back_a_usable_known_hosts_line(acc):
+    """C12/S11/US3: the line is usable verbatim by a second client — which is the
+    non-TOFU way to trust this container from another machine."""
+    laptop = _gen_keypair(acc.tmp / "laptop")
+    port = acc.up("accjson", authorized_key=[laptop.with_suffix(".pub")])
+    r = acc.cli(["list", "--json"])
+    assert r.returncode == 0, r.stderr
+    rows = json.loads(r.stdout)["data"]["containers"]  # the 009 envelope
+    row = next(x for x in rows if x["name"].endswith("accjson"))
+    entry = row["known_hosts_entry"]
+    assert entry and entry.startswith(f"[localhost]:{port} ")
+
+    # Use ONLY that line, from a file the tool never wrote, on a fresh known_hosts.
+    fresh = acc.tmp / "second_machine_known_hosts"
+    fresh.write_text(entry + "\n")
+    r2 = subprocess.run(
+        ["ssh", "-i", str(laptop), "-p", str(port),
+         "-o", f"UserKnownHostsFile={fresh}", "-o", "StrictHostKeyChecking=yes",
+         "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+         "dev@localhost", "whoami"],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    assert r2.returncode == 0, r2.stderr
+    assert r2.stdout.strip() == "dev"
