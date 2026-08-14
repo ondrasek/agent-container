@@ -17,10 +17,11 @@ record does not outlive the host, there is nothing to compare and every later ph
 
 - [ ] T001 `inventory_store_dir()` in `bin/agent-container` resolving
       `$XDG_DATA_HOME/agent-container/inventory/` with the `~/.local/share` fallback — **flat, no
-      `<host>/` component** (research R2). A per-host directory is deleted with its host, which would
+      `<host>/` component** (FR-002, research R2). A per-host directory is deleted with its host, which would
       destroy exactly the entries FR-003 exists to keep
 - [ ] T002 [P] Add the inventory as a **third tenant row** under the existing durable location in
-      `docs/layout.md`, beside `runs/` and `egress/` (research R1) — not a new location; Feature 016
+      `docs/layout.md`, beside `runs/` and `egress/` (FR-002 — which requires it be named there;
+      research R1) — not a new location; Feature 016
       already established that one, and FR-012a calls this shared placement
 - [ ] T003 [P] Note in `docs/layout.md` **why this one is flat** while its two siblings are
       `<host>/<environment>/` — the difference is load-bearing and a future reader will otherwise
@@ -125,12 +126,14 @@ discrepancies are reported distinctly.
 
 **Goal**: see how long each environment has existed, and whether its host was tool-provisioned.
 
-- [ ] T030 [US3] Render age from `created_at` so it is **evident without arithmetic** (US3 scenario
-      1) — a timestamp an operator has to subtract from today is not the answer they asked for
-- [ ] T031 [P] [US3] Show `host_provisioned` so a tool-created host is distinguishable from a
-      registered one (US3 scenario 2)
-- [ ] T032 [P] [US3] Test both renderings, including an entry whose host has since gone — the age
-      still answers, because the host reference is retained (FR-003)
+- [ ] T030 [US3] Render age from `created_at` so it is **evident without arithmetic** (SC-009) — a
+      timestamp an operator has to subtract from today is not the answer they asked for
+- [ ] T031 [P] [US3] Show `host_provisioned` so a tool-created host is distinguishable from a merely
+      registered one (SC-009), read from the **entry**, not from the live host record
+- [ ] T032 [P] [US3] Test both renderings for an entry **whose host is gone** (SC-009's trailing
+      clause, the one that can actually fail). The host reference is retained (FR-003), so age must
+      still answer — and a rendering that reaches for the live host to derive either value breaks
+      exactly where this feature is most useful
 
 ---
 

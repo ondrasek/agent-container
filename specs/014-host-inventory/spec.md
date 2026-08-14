@@ -272,6 +272,14 @@ whether its host is one the tool provisioned.
   concurrency test.
 - **SC-008**: With the record absent, every existing command behaves exactly as before — **zero**
   regressions.
+- **SC-009**: For every entry the operator can see **how long it has existed** and **whether its host
+  was tool-provisioned**, without computing either — **100%** of entries, *including entries whose
+  host is gone*. The trailing clause is the one that can fail: the host reference is retained
+  (FR-003), so age must still answer after the host does not exist, and a rendering that reaches for
+  the live host to derive either value breaks exactly where this feature is most useful. Added after
+  `/speckit-analyze` found US3 to be the only story with no measurable outcome (finding G2) — an
+  unmeasured story is the one that quietly ships half-working, because its tasks pass and no
+  criterion is failing.
 
 ## Assumptions
 
