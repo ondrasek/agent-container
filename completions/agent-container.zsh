@@ -162,7 +162,6 @@ _agent-container() {
                         '--host[Deploy to this registered host]:host:' \
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
-                        '--host-key[Inject an ed25519 private host key]:file:_files' \
                         '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
                         '*:container:__agent_container_names'
                     ;;
@@ -178,7 +177,6 @@ _agent-container() {
                     ;;
                 keys)
                     _arguments \
-                        '--host-key[Inject an ed25519 private host key]:file:_files' \
                         '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
                         '*:container:__agent_container_names_local'
                     ;;

@@ -47,5 +47,5 @@ Exit code is 0 on PASS, non-zero on FAIL. On failure the script dumps `agent-con
 ## What it does NOT verify
 
 - **Parallel-container safety (item E core AC).** Smoke test launches a single instance. Run `agent-container up alpha && agent-container up bravo && agent-container list` separately to confirm.
-- **Attach UX (item F).** The smoke test uses `exec` rather than `ssh` to avoid host-key trust setup. Verify attach manually: `agent-container attach smoketest` (or `agent-container attach --local smoketest`) while a container is running.
+- **Attach UX (item F).** The smoke test uses `exec` rather than `ssh`, so it never exercises host-key verification. Verify attach manually: `agent-container attach smoketest` (or `agent-container attach --local smoketest`) while a container is running. Since Feature 018 attach is **verified** against the key the deploy pinned — if it warns that nothing is pinned and asks, the capture did not happen, which is itself the finding.
 - **Real image size.** `agent-container build` does not print the resulting size. After a successful run inspect manually: `docker images localhost/agent-container:latest` (or `podman images …`).

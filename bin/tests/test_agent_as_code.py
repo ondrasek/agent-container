@@ -864,7 +864,10 @@ def test_ssh_target_credential_routes_to_ssh_channel(wiz, tmp_path, monkeypatch)
     creds = [{"name": "git-push", "source": "env", "var": "PUSHKEY", "target": "push_key"}]
     configs, env_file, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert configs == [] and env_file is None  # NOT the apikey/env channels
-    assert ssh.push_key is not None and ssh.host_key is None and ssh.authorized_keys == []
+    # `host_key` was a third SSH target until Feature 018 removed it; a spec that
+    # declares one is now refused outright rather than silently dropped.
+    assert ssh.push_key is not None and ssh.authorized_keys == []
+    assert not hasattr(ssh, "host_key")
     body = ssh.push_key.read_text()
     assert "BEGIN OPENSSH" in body and body.endswith("\n")  # multi-line kept, newline ensured
     import stat

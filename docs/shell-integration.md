@@ -33,6 +33,32 @@ Emits a `Host <name>` block (HostName / User / Port / `RequestTTY yes` /
 `RemoteCommand tmux attach -t main`) so you connect by alias later — no hand-editing
 of addresses/ports/users.
 
+## Attach is verified (Feature 018)
+
+Both the printed command and the stanza carry `UserKnownHostsFile` (the tool's own
+file, never yours) and `StrictHostKeyChecking=yes`. Three outcomes:
+
+| State | What happens |
+|---|---|
+| the pinned key **matches** | connects, no prompt |
+| the key **differs** | `ssh` **refuses**. Never a prompt — a mismatch contradicts a claim the tool made itself |
+| **nothing pinned** | warns, prints the fingerprint, says accepting **cannot detect a container that was replaced**, and asks |
+
+A refusal means the container's identity changed **without a deploy**. Every deploy
+re-pins, so `down --purge` + `up` is silent; a mismatch is not something the tool did.
+Check whether you expected a rebuild before accepting anything.
+
+**Nothing pinned** happens on a second machine (the pin lives on the one that
+deployed), or if you deleted the state dir. The better fix is `agent-container list
+--json`, which gives you the `known_hosts` line from the machine that deployed —
+that entry **predates** what it checks, where accepting at the prompt does not.
+`--trust-unpinned` accepts without asking, for unattended use, and says exactly as much
+as the prompt would have.
+
+`--print` and `--ssh-config` never prompt — they connect to nothing — but they do warn
+when nothing is pinned, so you are not handed a command that refuses for a reason the
+output never mentioned.
+
 ## Target a host with your own docker/podman — `host env`
 
 ```bash

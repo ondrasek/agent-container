@@ -621,44 +621,38 @@ def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
 # --- SSH injection: staging (compose secrets/configs) + keys subcommand ------
 
 
-def test_stage_ssh_injection_writes_local_files(wiz, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
-    hk = tmp_path / "hostkey"
-    hk.write_text("PRIVATE")
+def test_stage_ssh_injection_writes_local_files(wiz, tmp_path):
     p1 = tmp_path / "a.pub"
     p1.write_text("ssh-ed25519 AAAAA a\n")
     p2 = tmp_path / "b.pub"
     p2.write_text("ssh-ed25519 BBBBB b")  # no trailing newline -> normalized
-    hk_file, ak_file = wiz.stage_ssh_injection("local", "acme", hk, [p1, p2])
-    assert hk_file == wiz.host_state_dir("local") / "acme.host_key"
-    assert hk_file.read_text() == "PRIVATE"
+    ak_file = wiz.stage_ssh_injection("local", "acme", [p1, p2])
     assert ak_file.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
-    # BOTH files are 0644: compose exposes the source mode into the container,
-    # where dev (uid 1000 != host uid) must read them — a 0600 key crash-loops
-    # the entrypoint on a uid-mismatched host (e.g. CI). The per-host state dir is
-    # 0700 for host-side protection.
-    assert (hk_file.stat().st_mode & 0o777) == 0o644
+    # 0644: compose exposes the source mode into the container, where dev
+    # (uid 1000 != host uid) must read it. Public keys, so 0644 costs nothing —
+    # and Feature 018 removed the private key that used to be staged the same way,
+    # BECAUSE it could not be staged any more tightly than this.
     assert (ak_file.stat().st_mode & 0o777) == 0o644
     assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
 
 
 def test_stage_ssh_injection_none_when_absent(wiz):
-    hk_file, ak_file = wiz.stage_ssh_injection("local", "acme", None, [])
-    assert hk_file is None and ak_file is None
+    assert wiz.stage_ssh_injection("local", "acme", []) is None
 
 
-def test_stage_ssh_injection_rejects_missing_files(wiz, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
-    with pytest.raises(wiz.Fatal, match="--host-key"):
-        wiz.stage_ssh_injection("local", "acme", tmp_path / "nope", [])
+def test_stage_ssh_injection_rejects_missing_files(wiz, tmp_path):
     with pytest.raises(wiz.Fatal, match="--authorized-key"):
-        wiz.stage_ssh_injection("local", "acme", None, [tmp_path / "nope.pub"])
+        wiz.stage_ssh_injection("local", "acme", [tmp_path / "nope.pub"])
 
 
 def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
-    """The private host key and pubkeys go via stdin, never argv (so they can't
-    leak through the process table), and land in the running container by exec."""
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+    """Public keys go via stdin, never argv (so they cannot leak through the process
+    table), and land in the running container by exec.
+
+    Feature 018 removed this path's private-host-key arm — `keys --host-key` used to
+    install a PRIVATE key into a live container. What remains is public material, and
+    the stdin discipline is kept anyway: it costs nothing and the habit is the point.
+    """
     calls: list[tuple[list[str], object]] = []
 
     def fake_run(argv, **kw):
@@ -666,20 +660,15 @@ def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(wiz.subprocess, "run", fake_run)
-    hk = tmp_path / "hk"
-    hk.write_bytes(b"SECRETKEYBYTES")
     pub = tmp_path / "p.pub"
     pub.write_bytes(b"ssh-ed25519 PUBPUB u")
 
-    wiz.inject_keys("podman", "acme", hk, [pub])
-
-    hk_argv, hk_input = calls[0]
-    assert hk_input == b"SECRETKEYBYTES"
-    assert hk_argv[:4] == ["podman", "exec", "-i", "agent-container-acme"]
-    assert all(b"SECRETKEYBYTES" not in a.encode() for a in hk_argv)
-    ak_argv, ak_input = calls[1]
+    wiz.inject_keys("podman", "acme", [pub])
+    ak_argv, ak_input = calls[0]
     assert ak_input == b"ssh-ed25519 PUBPUB u"
     assert ak_argv[:4] == ["podman", "exec", "-i", "agent-container-acme"]
+    # The material is on stdin, never on argv, where the process table would show it.
+    assert all(b"PUBPUB" not in a.encode() for a in ak_argv)
 
 
 # --- driver argv builders (Feature 001) --------------------------------------

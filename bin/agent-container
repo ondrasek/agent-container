@@ -567,7 +567,6 @@ def resolve_bind_mount(spec: str) -> str:
 
 # Container-side paths the entrypoint reads injected SSH material from (bind
 # mounts). Kept in sync with INJECT_DIR in entrypoint.sh.
-INJECT_HOST_KEY_PATH = "/run/agent-container/ssh_host_ed25519_key"
 INJECT_AUTHORIZED_KEYS_PATH = "/run/agent-container/authorized_keys"
 # Feature 003 — outbound push credential + model/API keys + canonical config,
 # delivered EPHEMERALLY: these targets live under /run (a compose config, not a
@@ -681,57 +680,9 @@ def validate_private_key(path: Path) -> None:
     )
     if r.returncode != 0:
         die(
-            f"--host-key: {path} is not a valid, unencrypted OpenSSH private key "
+            f"{path} is not a valid, unencrypted OpenSSH private key "
             f"({r.stderr.strip() or 'ssh-keygen validation failed'})"
         )
-
-
-def resolve_ssh_injection(
-    name: str, host_key: Path | None, authorized_keys: list[Path]
-) -> list[str]:
-    """Resolve `up --host-key/--authorized-key` into read-only '-v' bind specs.
-
-    The entrypoint installs whatever appears at the container-side inject paths
-    onto the persisted ~/.ssh volume at boot. Both the host key and the
-    concatenated authorized_keys are staged as per-container files under
-    STATE_DIR and bind-mounted from there, so the bind survives a container
-    restart (a temp file would vanish and leave an empty mount).
-
-    The staged files are mode 0644 on purpose: the entrypoint reads them as the
-    unprivileged `dev` user, whose uid need NOT equal the host uid that ran `up`
-    (it does not on CI runners / any host with a different login uid). Docker has
-    no bind-mount chown (unlike podman's `:U`), so an 0600 file owned by the host
-    user is unreadable inside the container — the read fails and, under the
-    entrypoint's `set -e`, crash-loops sshd. 0644 is safe: STATE_DIR is locked to
-    0700 so no other HOST user can traverse to these files, while the container
-    reads each file inode directly through the mount (host dir perms don't gate
-    it). authorized_keys are public regardless; the host key stays dir-protected.
-    """
-    specs: list[str] = []
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_DIR.chmod(0o700)
-    if host_key is not None:
-        hk = host_key.expanduser()
-        if not hk.is_file():
-            die(f"--host-key: {host_key} does not exist or is not a file")
-        validate_private_key(hk)
-        hk_file = STATE_DIR / f"{name}.host_key"
-        hk_file.write_bytes(hk.read_bytes())
-        hk_file.chmod(0o644)
-        specs.append(f"{hk_file}:{INJECT_HOST_KEY_PATH}:ro")
-    if authorized_keys:
-        blob = ""
-        for p in authorized_keys:
-            pk = p.expanduser()
-            if not pk.is_file():
-                die(f"--authorized-key: {p} does not exist or is not a file")
-            text = pk.read_text()
-            blob += text if text.endswith("\n") else text + "\n"
-        ak_file = STATE_DIR / f"{name}.authorized_keys"
-        ak_file.write_text(blob)
-        ak_file.chmod(0o644)
-        specs.append(f"{ak_file}:{INJECT_AUTHORIZED_KEYS_PATH}:ro")
-    return specs
 
 
 def port_for_name(name: str) -> int:
@@ -1093,6 +1044,12 @@ def compose_file_path(host: str, name: str) -> Path:
 # leaves theirs byte-identical (SC-007).
 
 
+# `attach` resolves a local target to this address unless overridden, and a deploy
+# pins under driver_reachable_address(), which is the same string for the implicit
+# local host. Named once so the two sides cannot drift apart silently.
+ADDRESS_FOR_LOCAL_ROWS = "localhost"
+
+
 def known_hosts_path(host: str) -> Path:
     """The tool-owned known_hosts for one registered host. One file per host,
     holding one line per environment (data-model §2)."""
@@ -1330,6 +1287,52 @@ def capture_host_pubkey(host_rec: dict, name: str, timeout: float = CAPTURE_TIME
         time.sleep(CAPTURE_POLL_INTERVAL)
 
 
+def refuse_removed_host_key(flag_source: str) -> None:
+    """FR-002: every channel that supplied a PRIVATE host key is removed, and using
+    one must SAY WHY rather than produce a bare "no such option".
+
+    An operator who used `--host-key` had a reason — a stable SSH identity across
+    recreations so `known_hosts` stopped complaining. That reason is now served
+    without the cost: the container generates its own key on a persisted volume, the
+    tool captures the PUBLIC half at every deploy, and attach verifies against it.
+    Saying so is the difference between a removal and a regression.
+    """
+    die(
+        f"{flag_source}: removed. A private host key is never supplied to, staged for "
+        f"or written by this tool (Feature 018). The container generates its own on "
+        f"its persisted ssh volume; the tool captures the PUBLIC key at every deploy "
+        f"and `attach` verifies against it. Identity survives recreation as before — "
+        f"and no private key sits on your disk. Drop the flag."
+    )
+
+
+def remove_stale_staged_host_key(host: str, name: str) -> None:
+    """Delete a private host key staged by a pre-018 version, and SAY SO (FR-011).
+
+    `--purge` never removed this file, so a release that merely stopped WRITING it
+    would leave the exposure sitting on every machine that ever used the flag —
+    which is the whole thing Feature 018 exists to remove.
+
+    Loud rather than quiet: an operator should learn that a plaintext private key
+    left their disk. A silent deletion is indistinguishable from never having had
+    one, and they may have copies elsewhere worth revoking.
+    """
+    stale = host_state_dir(host) / f"{name}.host_key"
+    if not stale.exists():
+        return
+    try:
+        stale.unlink()
+    except OSError as e:
+        warn(f"could not remove the stale private host key at {stale} ({e}) — delete it yourself")
+        return
+    warn(
+        f"removed a PRIVATE host key staged by an older version: {stale}. It was "
+        f"mode 0644 and `--purge` never deleted it. The container now generates its "
+        f"own key and keeps it; nothing private is stored here any more. If that key "
+        f"exists anywhere else, treat it as exposed."
+    )
+
+
 def capture_and_pin(
     host_name: str, host_rec: dict, name: str, address: str, port: str | int
 ) -> str | None:
@@ -1382,7 +1385,9 @@ def deployment_lock(host: str, name: str):
 
 # Flat state artifacts written before per-host namespacing existed. Migrated into
 # STATE_DIR/local/ on first host-aware access.
-_FLAT_STATE_SUFFIXES = (".port", ".host_key", ".authorized_keys")
+# `.host_key` was here until Feature 018 removed private-host-key injection:
+# migrating a file we now DELETE would relocate the exposure rather than remove it.
+_FLAT_STATE_SUFFIXES = (".port", ".authorized_keys")
 
 
 def migrate_flat_state() -> None:
@@ -3650,7 +3655,6 @@ _WORKSPACE_DEFAULT = object()  # sentinel: "use the default persistent workspace
 def build_compose_model(
     name: str,
     build_context: Path | str,
-    host_key_file: Path | None = None,
     authorized_keys_file: Path | None = None,
     env_file: Path | list[Path] | None = None,
     extra_mounts: list[str] | None = None,
@@ -3665,7 +3669,7 @@ def build_compose_model(
     egress_ports_body: str | None = None,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
-    strings, reads nothing. host_key_file/authorized_keys_file are LOCAL staged
+    strings, reads nothing. authorized_keys_file is a LOCAL staged
     files referenced via compose secrets/configs (never inlined). env_file is
     read client-side by compose and merged into the service environment;
     extra_mounts are already-resolved '<abs-host>:<container>' bind specs.
@@ -3761,9 +3765,6 @@ def build_compose_model(
     # secret-vs-config choice is a portability-forced compose mechanism detail).
     svc_configs: list[dict] = []
     model_configs: dict = {}
-    if host_key_file is not None:
-        svc_configs.append({"source": "ssh_host_key", "target": INJECT_HOST_KEY_PATH})
-        model_configs["ssh_host_key"] = {"file": str(host_key_file)}
     if authorized_keys_file is not None:
         svc_configs.append({"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH})
         model_configs["ssh_authorized_keys"] = {"file": str(authorized_keys_file)}
@@ -5734,35 +5735,26 @@ def _egress_sort_key(event: dict) -> tuple[str, str, str, str]:
     )
 
 
-def stage_ssh_injection(
-    host: str, name: str, host_key: Path | None, authorized_keys: list[Path]
-) -> tuple[Path | None, Path | None]:
-    """Stage injected SSH material as LOCAL files under the per-host state dir,
-    returning (host_key_file, authorized_keys_file) for the compose model to
-    reference as configs (transfers over a remote context; a bind resolves empty
-    on a remote host).
+def stage_ssh_injection(host: str, name: str, authorized_keys: list[Path]) -> Path | None:
+    """Stage the injected authorized_keys as a LOCAL file under the per-host state
+    dir, returned for the compose model to reference as a config (transfers over a
+    remote context; a bind resolves empty on a remote host).
 
-    Both files are staged **0644**: compose exposes the source file's mode into
-    the container, where the unprivileged `dev` user reads it — and dev's uid
-    (1000) need NOT equal the host uid that ran `up` (it does not on CI runners),
-    so a 0600 file is unreadable inside the container and crash-loops the
-    entrypoint. 0644 is safe because the per-host state dir is locked to 0700, so
-    no other HOST user can traverse to the files, while the container reads each
-    inode through the mount. (This mirrors the original bind-mount rationale;
-    staging 0600 here was a regression that broke on ubuntu docker.)"""
+    Staged **0644**: compose exposes the source file's mode into the container,
+    where the unprivileged `dev` user reads it — and dev's uid (1000) need NOT equal
+    the host uid that ran `up` (it does not on CI runners), so a 0600 file is
+    unreadable inside the container and crash-loops the entrypoint.
+
+    Feature 018 removed the private-host-key arm of this function. The mode above is
+    also WHY it had to be removed rather than tightened: a private key here could not
+    have been staged 0600 without breaking the container that reads it, and `mode:`
+    on the config reference was measured to be ignored in favour of the source's
+    mode. Public keys are fine at 0644 — they are public.
+    """
     d = host_state_dir(host)
     d.mkdir(parents=True, exist_ok=True)
-    d.chmod(0o700)  # host-side protection for the 0644 key files
-    hk_file: Path | None = None
+    d.chmod(0o700)
     ak_file: Path | None = None
-    if host_key is not None:
-        hk = host_key.expanduser()
-        if not hk.is_file():
-            die(f"--host-key: {host_key} does not exist or is not a file")
-        validate_private_key(hk)
-        hk_file = d / f"{name}.host_key"
-        hk_file.write_bytes(hk.read_bytes())
-        hk_file.chmod(0o644)
     if authorized_keys:
         blob = ""
         for p in authorized_keys:
@@ -5774,7 +5766,7 @@ def stage_ssh_injection(
         ak_file = d / f"{name}.authorized_keys"
         ak_file.write_text(blob)
         ak_file.chmod(0o644)
-    return hk_file, ak_file
+    return ak_file
 
 
 def stage_push_injection(
@@ -6111,7 +6103,6 @@ def compose_up_exec(
     name: str,
     env_file: Path | list[Path],
     mounts: list[str],
-    host_key: Path | None,
     authorized_keys: list[Path],
     redeploy: bool = False,
     push_key: Path | None = None,
@@ -6147,7 +6138,7 @@ def compose_up_exec(
         # ran this pre-check at all).
         log(f"port {port} is busy; waiting for it to be released…")
         wait_port_released(port)
-    hk_file, ak_file = stage_ssh_injection(host_name, name, host_key, authorized_keys)
+    ak_file = stage_ssh_injection(host_name, name, authorized_keys)
     injected = stage_push_injection(host_name, name, push_key, known_hosts)  # US1, ephemeral
     # US2 (T012): convention-discovered model/API key files, staged ephemerally to
     # INJECT_APIKEY_DIR/<provider> (H1/FR-012). Automatic — no flags; env/.env still works.
@@ -6261,7 +6252,6 @@ def compose_up_exec(
     model = build_compose_model(
         name,
         build_ctx,
-        hk_file,
         ak_file,
         env_file,
         mounts,
@@ -6346,6 +6336,8 @@ def compose_up_exec(
     # re-pins because the recreate IS a deploy. Do not add change-attribution state
     # here; there is nothing to attribute.
     capture_and_pin(host_name, host_rec, name, addr, port)
+    # FR-011: an upgrade must not leave a pre-018 private key behind.
+    remove_stale_staged_host_key(host_name, name)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     verb = "redeployed" if redeploy else "started"
     log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
@@ -6357,7 +6349,6 @@ def do_up(
     host: str | None = None,
     env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
-    host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
     push_key: Path | None = None,
     known_hosts: Path | None = None,
@@ -6432,7 +6423,6 @@ def do_up(
                 name,
                 env_file,
                 resolved_mounts,
-                host_key,
                 authorized_keys or [],
                 push_key=push_key,
                 known_hosts=known_hosts,
@@ -6553,33 +6543,17 @@ CONTAINER_HOSTKEY = "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key"
 CONTAINER_AUTHKEYS = "/home/dev/.ssh/authorized_keys"
 
 
-def inject_keys(rt: str, name: str, host_key: Path | None, authorized_keys: list[Path]) -> None:
-    """Inject an SSH host key and/or authorized_keys into a RUNNING container,
-    onto the persisted ~/.ssh volume, without recreating it. The host key is
-    copied in and installed (then sshd is HUP-reloaded); public keys are
-    streamed over stdin (never on argv) and merged with dedup. Rootless: every
-    in-container step runs as the dev user, no sudo."""
+def inject_keys(rt: str, name: str, authorized_keys: list[Path]) -> None:
+    """Inject authorized_keys into a RUNNING container, onto the persisted ~/.ssh
+    volume, without recreating it. Public keys are streamed over stdin (never on
+    argv) and merged with dedup. Rootless: every in-container step runs as the dev
+    user, no sudo.
+
+    Feature 018 removed this function's host-key arm, which installed a PRIVATE key
+    into a live container. Public keys stay: they are not the exposure, and the
+    container's own host identity is now captured rather than supplied.
+    """
     cname = container_name(name)
-    if host_key is not None:
-        hk = host_key.expanduser()
-        if not hk.is_file():
-            die(f"--host-key: {host_key} does not exist or is not a file")
-        validate_private_key(hk)
-        # Stream the key over stdin (not `cp`): `cp` lands it owned by the host
-        # uid, unreadable by the rootless `dev` user. Writing via `cat` inside
-        # the container gives dev ownership, and the key never touches argv.
-        install_sh = (
-            f"umask 077; mkdir -p /home/dev/.ssh/hostkeys; "
-            f"cat > {CONTAINER_HOSTKEY}; chmod 600 {CONTAINER_HOSTKEY}; "
-            f"ssh-keygen -y -f {CONTAINER_HOSTKEY} > {CONTAINER_HOSTKEY}.pub && "
-            f"pkill -HUP -x sshd"
-        )
-        r = subprocess.run(
-            [rt, "exec", "-i", cname, "bash", "-lc", install_sh], input=hk.read_bytes()
-        )
-        if r.returncode != 0:
-            die(f"failed to install host key in {cname}")
-        log(f"installed host key into {cname} and reloaded sshd")
     for p in authorized_keys:
         pk = p.expanduser()
         if not pk.is_file():
@@ -6597,15 +6571,15 @@ def inject_keys(rt: str, name: str, host_key: Path | None, authorized_keys: list
         log(f"injected authorized key {pk.name} into {cname}")
 
 
-def cli_keys(name: str, host_key: Path | None, authorized_keys: list[Path]) -> None:
+def cli_keys(name: str, authorized_keys: list[Path]) -> None:
     validate_name(name)
-    if host_key is None and not authorized_keys:
-        die("keys: nothing to inject — pass --host-key and/or --authorized-key")
+    if not authorized_keys:
+        die("keys: nothing to inject — pass --authorized-key")
     rt = detect_runtime()
     cname = container_name(name)
     if not container_running(rt, cname):
         die(f"container {cname} is not running. Start it first: agent-container up {name}")
-    inject_keys(rt, name, host_key, authorized_keys)
+    inject_keys(rt, name, authorized_keys)
 
 
 def cli_down(name: str, purge: bool, yes: bool, host: str | None = None) -> None:
@@ -6688,7 +6662,6 @@ def do_redeploy(
     host: str | None = None,
     env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
-    host_key: Path | None = None,
     authorized_keys: list[Path] | None = None,
     push_key: Path | None = None,
     known_hosts: Path | None = None,
@@ -6724,7 +6697,6 @@ def do_redeploy(
                 name,
                 env_file,
                 resolved_mounts,
-                host_key,
                 authorized_keys or [],
                 redeploy=True,
                 push_key=push_key,
@@ -6881,12 +6853,41 @@ def gather_rows(rt: str, local_only: bool = False) -> list[dict[str, object]]:
     return rows
 
 
+def row_known_hosts_entry(row: dict[str, object]) -> str | None:
+    """The pinned `known_hosts` line for a `list` row, or None (FR-010, US3).
+
+    Read from LOCAL state, never the daemon — so it still answers for a stopped
+    environment or an unreachable host, which is exactly when an operator needs it:
+    recovering verified access to something they cannot reach. Making this depend on
+    reachability would fail precisely in the case it exists for.
+
+    `None` rather than `""`: a JSON consumer can tell "never captured" from a captured
+    value, where an empty string reads as a key that happens to be blank.
+
+    THIS IS THE NON-TOFU PATH FOR A SECOND MACHINE. An entry copied from the machine
+    that deployed predates what it checks; a key accepted at attach's prompt does not
+    (research R8). It is the better answer whenever it is available.
+    """
+    addr = ADDRESS_FOR_LOCAL_ROWS if row.get("host") == DEFAULT_HOST else str(row.get("host") or "")
+    port = row.get("port")
+    if not addr or not port or port == "?":
+        return None
+    key = pinned_host_key(addr, str(port))
+    return None if key is None else known_hosts_entry(addr, str(port), key)
+
+
 def do_list(as_json: bool, local_only: bool = False) -> None:
     migrate_flat_state()
     rt = detect_runtime()
     rows = gather_rows(rt, local_only)
     if as_json:
-        emit_json({"containers": rows})
+        emit_json(
+            {
+                "containers": [
+                    row | {"known_hosts_entry": row_known_hosts_entry(row)} for row in rows
+                ]
+            }
+        )
         return
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     for col in ("NAME", "HOST", "PORT", "IMAGE", "STATUS", "UPTIME"):
@@ -8506,7 +8507,7 @@ def wiz_up(rt: str) -> None:
         return
     # Compose build + up (port pre-check + actionable abort inside).
     with deployment_lock(DEFAULT_HOST, name):
-        compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, None, [])
+        compose_up_exec(DEFAULT_HOST, host_rec, name, env_file, mounts, [])
     hint(f"agent-container up {name}" + (f" --mount {mount_dir}" if mounts else ""))
 
 
@@ -8665,19 +8666,15 @@ def wiz_keys(rt: str) -> None:
     sel = questionary.select("inject SSH keys into", choices=[_short(r[0]) for r in rows]).ask()
     if sel is None:
         return
-    hk = questionary.text("host key path (unencrypted ed25519 private key; blank to skip)").ask()
+    # No host-key prompt: Feature 018 removed private-host-key injection, and the
+    # container's own identity is captured at deploy rather than supplied here.
     ak = questionary.text("authorized public key path (blank to skip)").ask()
-    host_key = Path(hk).expanduser() if hk else None
     authorized = [Path(ak).expanduser()] if ak else []
-    if host_key is None and not authorized:
+    if not authorized:
         log("nothing to inject")
         return
-    inject_keys(rt, sel, host_key, authorized)
-    hint(
-        f"agent-container keys {sel}"
-        + (f" --host-key {hk}" if hk else "")
-        + (f" --authorized-key {ak}" if ak else "")
-    )
+    inject_keys(rt, sel, authorized)
+    hint(f"agent-container keys {sel}" + (f" --authorized-key {ak}" if ak else ""))
 
 
 # --- Feature 007: state-aware guided wizard ----------------------------------
@@ -9205,7 +9202,10 @@ CRED_PROVIDER = {
 # is routed to a Feature 003 ssh-injection channel (multi-line keys the env-file
 # channel refuses) instead of an env var — outbound git push identity, inbound sshd
 # host identity, or an inbound authorized key. Absent → today's apikey/env routing.
-CRED_SSH_TARGETS = ("push_key", "host_key", "authorized_key")
+# `host_key` was a target here until Feature 018: a declared PRIVATE host key is
+# now REFUSED rather than dropped, because silently ignoring it would leave an
+# operator believing their key is in use.
+CRED_SSH_TARGETS = ("push_key", "authorized_key")
 # US4 declarative host provisioning: a `host:` table's provider discriminator + the
 # keys forwarded to the Feature 001 provisioner (provision_host's actual args).
 PROVISION_PROVIDERS = ("hetzner",)
@@ -9345,6 +9345,12 @@ def validate_credential(cred: object, where: str) -> None:
         if not all(isinstance(a, str) for a in argv):
             die(f"{where}: source=command 'argv' must contain only strings")
     tgt = cred.get("target")
+    # REFUSED, not merely absent from the set (FR-002): a spec that declares a
+    # private host key must be told the channel is gone. The generic "not one of"
+    # message below would read as a typo, and an operator would go looking for the
+    # right spelling of something that no longer exists.
+    if tgt == "host_key":
+        refuse_removed_host_key(f"{where}: target=host_key")
     if tgt is not None and tgt not in CRED_SSH_TARGETS:
         die(f"{where}: target={tgt!r} is not one of {{{', '.join(CRED_SSH_TARGETS)}}}")
     allowed = {"name", "source", "target", *detail}
@@ -11585,7 +11591,6 @@ class SshCreds:
     persisted inbound sshd identity, authorized_keys accumulate inbound principals."""
 
     push_key: Path | None = None
-    host_key: Path | None = None
     authorized_keys: list[Path] = field(default_factory=list)
 
 
@@ -11593,7 +11598,7 @@ def stage_declared_credentials(
     host_name: str, name: str, creds: list[dict] | None, root: Path, base_env_file: Path | None
 ) -> tuple[list[tuple[str, Path, str]], Path | None, SshCreds]:
     """Resolve the declared credentials and deliver them: an explicit SSH **target**
-    (push_key/host_key/authorized_key) → a 0600 staged file threaded into the 003
+    (push_key/authorized_key) → a 0600 staged file threaded into the 003
     ssh-injection channels (multi-line keys the env-file rejects, T012a); **provider
     API keys** (by name) via the 003 file-first apikey channel (a config →
     INJECT_APIKEY_DIR/<provider>, never even the env); **everything else** as env vars
@@ -11623,8 +11628,6 @@ def stage_declared_credentials(
             f.chmod(0o600)
             if target == "push_key":
                 ssh.push_key = f
-            elif target == "host_key":
-                ssh.host_key = f
             else:
                 ssh.authorized_keys.append(f)
             continue
@@ -11769,7 +11772,6 @@ def do_aac_apply(
                 spec=spec,
                 extra_injected_configs=aac,
                 push_key=ssh.push_key,
-                host_key=ssh.host_key,
                 authorized_keys=ssh.authorized_keys,
             )
             done.append(name)
@@ -11936,9 +11938,8 @@ def up(
     host_key: Path | None = typer.Option(
         None,
         "--host-key",
-        help="Inject an OpenSSH ed25519 PRIVATE host key so the container adopts "
-        "a known SSH identity (persisted on the ~/.ssh volume). Must be "
-        "unencrypted.",
+        hidden=True,
+        help="REMOVED (Feature 018). Host identity is captured, not supplied.",
     ),
     authorized_key: list[Path] = typer.Option(
         None,
@@ -12015,6 +12016,8 @@ def up(
     Default: an interactive claude session on a persistent workspace (attach with
     `agent-container attach NAME`). Use --mode headless for a one-shot job."""
     set_json_mode(as_json)
+    if host_key is not None:
+        refuse_removed_host_key("up --host-key")
     for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
         if not _ef.is_file():
             raise typer.BadParameter(f"--env-file {_ef} does not exist")
@@ -12032,7 +12035,6 @@ def up(
         host,
         env_file,
         mount or [],
-        host_key,
         authorized_key or [],
         push_key,
         known_hosts,
@@ -12055,8 +12057,8 @@ def keys(
     host_key: Path | None = typer.Option(
         None,
         "--host-key",
-        help="Install an unencrypted ed25519 PRIVATE host key into the running "
-        "container and reload sshd (persists on the ~/.ssh volume).",
+        hidden=True,
+        help="REMOVED (Feature 018). Host identity is captured, not supplied.",
     ),
     authorized_key: list[Path] = typer.Option(
         None,
@@ -12068,7 +12070,9 @@ def keys(
 ) -> None:
     """Inject SSH host key / authorized keys into a RUNNING container (no recreate)."""
     set_json_mode(as_json)
-    cli_keys(name, host_key, authorized_key or [])
+    if host_key is not None:
+        refuse_removed_host_key("keys --host-key")
+    cli_keys(name, authorized_key or [])
     emit_action("keys", name=name)
 
 
@@ -12131,7 +12135,10 @@ def redeploy(
         None, "--mount", help="Bind-mount a host dir (repeatable), as for `up`."
     ),
     host_key: Path | None = typer.Option(
-        None, "--host-key", help="Inject an ed25519 PRIVATE host key (as for `up`)."
+        None,
+        "--host-key",
+        hidden=True,
+        help="REMOVED (Feature 018). Host identity is captured, not supplied.",
     ),
     authorized_key: list[Path] = typer.Option(
         None, "--authorized-key", help="Inject an SSH public key (repeatable)."
@@ -12168,6 +12175,8 @@ def redeploy(
     Deliberately non-idempotent: always rebuilds + recreates, even with no change.
     May change mode/agent/workspace/repo."""
     set_json_mode(as_json)
+    if host_key is not None:
+        refuse_removed_host_key("redeploy --host-key")
     for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
         if not _ef.is_file():
             raise typer.BadParameter(f"--env-file {_ef} does not exist")
@@ -12185,7 +12194,6 @@ def redeploy(
         host,
         env_file,
         mount or [],
-        host_key,
         authorized_key or [],
         push_key,
         known_hosts,

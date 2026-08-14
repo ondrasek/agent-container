@@ -157,12 +157,17 @@ Multi-line values, and values with characters an env-file parser would mangle
 env delivery — deliver those as a provider API key (file channel), or, for an SSH key,
 give the credential an explicit **`target`** (below).
 
-**SSH-key credentials** — a credential with `target: push_key | host_key |
+**SSH-key credentials** — a credential with `target: push_key |
 authorized_key` is routed to the Feature 003 ssh-injection channels instead of an env
 var (the multi-line delivery the env-file rejects): `push_key` → the outbound git push
-identity (`--push-key`, ephemeral `/run`), `host_key` → the inbound sshd host identity
-(`--host-key`, persisted to the `~/.ssh` volume), `authorized_key` → an inbound
-principal (`--authorized-key`, accumulates). The resolved key stays in memory then a
+identity (`--push-key`, ephemeral `/run`), `authorized_key` → an inbound principal
+(`--authorized-key`, accumulates).
+
+`target: host_key` was a third option until Feature 018 removed private-host-key
+injection. A spec that declares it is now **refused with an explanation**, not silently
+dropped — silently dropping it would leave you believing your key is in use. The
+container generates its own host key and the tool captures the public half; there is
+nothing to supply. The resolved key stays in memory then a
 0600 staged file; it never touches the project, logs, argv, or registry. A
 passphrase-protected private key is (correctly) refused for `push_key` — store the
 unencrypted key in a manager and fetch it, rather than decrypting a committed file.

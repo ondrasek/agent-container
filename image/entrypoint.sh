@@ -771,27 +771,24 @@ HOSTKEY="${HOSTKEY_DIR}/ssh_host_ed25519_key"
 mkdir -p "${HOSTKEY_DIR}"
 chmod 0700 "${SSH_DIR}" "${HOSTKEY_DIR}"
 
-# Host-key source precedence (highest first). A container adopts an operator-
-# supplied identity if given, else keeps its persisted one, else generates:
-#   1. bind-mounted file at /run/agent-container/ssh_host_ed25519_key (`up --host-key`)
-#   2. SSH_HOST_ED25519_KEY_B64 env var (base64 of the private key; env-file channel)
-#   3. already-persisted key on the ~/.ssh volume
-#   4. freshly generated ed25519 key
-if [[ -f "${INJECT_DIR}/ssh_host_ed25519_key" ]]; then
-    log "installing bind-mounted SSH host key"
-    install -m 0600 "${INJECT_DIR}/ssh_host_ed25519_key" "${HOSTKEY}"
-elif [[ -n "${SSH_HOST_ED25519_KEY_B64:-}" ]]; then
-    log "installing SSH host key from SSH_HOST_ED25519_KEY_B64"
-    printf '%s' "${SSH_HOST_ED25519_KEY_B64}" | base64 -d > "${HOSTKEY}"
-    chmod 0600 "${HOSTKEY}"
-elif [[ ! -f "${HOSTKEY}" ]]; then
+# The container's host key is created HERE and NEVER LEAVES (Feature 018, FR-001):
+# it keeps the persisted one, else generates a fresh ed25519.
+#
+# Two injection branches used to precede these — a bind-mounted private key from
+# `up --host-key`, and SSH_HOST_ED25519_KEY_B64 from the env-file channel. Both are
+# removed: they put a plaintext private key on the operator's disk and bought
+# nothing, because nothing verified against it. The tool now captures the PUBLIC
+# half below and pins it, which is what verification actually needs.
+if [[ ! -f "${HOSTKEY}" ]]; then
     log "generating SSH host key (ed25519) at ${HOSTKEY}"
     ssh-keygen -q -t ed25519 -f "${HOSTKEY}" -N ''
 else
     log "SSH host key already present, skipping generation"
 fi
-# Validate the key and (re)derive its public half. A bad injected key fails fast
-# here rather than as an opaque sshd startup error.
+# Validate the key and (re)derive its public half. A corrupt key fails fast here
+# rather than as an opaque sshd startup error — and the .pub is what the tool reads
+# back through the runtime to pin (Feature 018), so it is derived on EVERY boot and
+# left world-readable deliberately. Nothing secret is in it.
 if ! ssh-keygen -y -f "${HOSTKEY}" > "${HOSTKEY}.pub" 2>/dev/null; then
     die "SSH host key at ${HOSTKEY} is missing or invalid"
 fi

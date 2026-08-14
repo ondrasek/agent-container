@@ -86,23 +86,24 @@ def test_build_compose_model_emits_injected_configs(wiz, tmp_path):
     assert model["configs"]["push_key"] == {"file": str(push)}
 
 
-def test_push_key_distinct_from_host_key(wiz, tmp_path):
-    """SC-008: the inbound host key and the outbound push key are two distinct
-    credentials at two distinct targets — never conflated."""
-    hk = tmp_path / "hk"
-    hk.write_bytes(b"HOSTKEY")
+def test_push_key_is_its_own_channel(wiz, tmp_path):
+    """SC-008: the OUTBOUND push key has its own target and its own lifecycle.
+
+    This test paired it against an inbound private host key until Feature 018 removed
+    that channel. The half that survives is the half that was always true and still
+    matters: push_key is the ephemeral outbound git identity, delivered under /run,
+    and nothing else shares its target. The two directions are not symmetric —
+    inbound identity is now CAPTURED, not supplied.
+    """
     push = tmp_path / "acme.push_key"
     push.write_bytes(b"PUSHKEY")
     model = wiz.build_compose_model(
         "acme", tmp_path / "repo",
-        host_key_file=hk,
         injected_configs=[("push_key", push, wiz.INJECT_PUSH_KEY_PATH)],
     )  # fmt: skip
     targets = {c["source"]: c["target"] for c in model["services"]["agent"]["configs"]}
-    assert targets["ssh_host_key"] == wiz.INJECT_HOST_KEY_PATH
-    assert targets["push_key"] == wiz.INJECT_PUSH_KEY_PATH
-    assert targets["ssh_host_key"] != targets["push_key"]  # distinct
-    assert model["configs"]["ssh_host_key"]["file"] != model["configs"]["push_key"]["file"]
+    assert targets == {"push_key": wiz.INJECT_PUSH_KEY_PATH}
+    assert model["configs"]["push_key"]["file"] == str(push)
 
 
 def test_no_secret_value_inlined_in_compose_model(wiz, tmp_path):
@@ -458,14 +459,19 @@ def test_missing_known_hosts_dies_before_any_compose_call(wiz, monkeypatch, tmp_
     assert tripped == []
 
 
-def test_missing_host_key_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
-    """The inbound host-key material shares the same all-staging-before-compose
-    guard — a missing --host-key aborts before any compose call, too."""
+def test_the_host_key_flag_is_refused_before_any_compose_call(wiz, monkeypatch, tmp_path):
+    """Feature 018 (FR-002): `--host-key` no longer stages anything — it REFUSES, and
+    says host identity is captured rather than supplied.
+
+    This test used to prove a MISSING --host-key aborted before compose. The
+    all-staging-before-compose guarantee it was protecting still holds for every
+    remaining channel; what changed is that this particular channel cannot be reached
+    at all. The refusal must name the reason, not just fail: an operator who used the
+    flag had a reason, and it is now served without a private key on their disk.
+    """
     tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
-    with pytest.raises(wiz.Fatal, match="--host-key"):
-        wiz.compose_up_exec(
-            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], tmp_path / "nope", [],
-        )  # fmt: skip
+    with pytest.raises(wiz.Fatal, match="captures the PUBLIC key"):
+        wiz.refuse_removed_host_key("up --host-key")
     assert tripped == []
 
 
@@ -778,3 +784,82 @@ def test_no_credential_value_reaches_any_generated_artifact(wiz, tmp_path, monke
     for blob in artifacts:
         assert sentinel not in blob, "a credential value reached a generated artifact"
         assert "ACC_SENTINEL_VAR" not in blob, "even the variable NAME need not travel"
+
+
+# --- Feature 018: no private host key, through ANY channel -------------------
+# FR-001/FR-002/SC-001. There were FIVE channels, and the failure mode is one
+# surviving: a 95% removal is indistinguishable from a complete one by every other
+# test in this suite, so each is named.
+
+
+@pytest.mark.parametrize("source", ["up --host-key", "keys --host-key", "redeploy --host-key"])
+def test_each_removed_flag_explains_itself_rather_than_erroring(wiz, source):
+    """A bare 'no such option' would be a regression, not a removal: the operator
+    who used this flag had a reason, and it is now served without a private key on
+    their disk. The message has to say so."""
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.refuse_removed_host_key(source)
+    msg = str(e.value)
+    assert "captures the PUBLIC key" in msg
+    assert "no private key sits on your disk" in msg
+    assert source in msg
+
+
+def test_a_declared_host_key_target_is_refused_not_ignored(wiz):
+    """FR-002: silently dropping a declared `host_key` would leave an operator
+    believing their key is in use — the worst of the three outcomes."""
+    assert "host_key" not in wiz.CRED_SSH_TARGETS
+    with pytest.raises(wiz.Fatal, match="captures the PUBLIC key"):
+        wiz.validate_credential(
+            {"name": "HK", "source": "file", "path": "/k", "target": "host_key"},
+            "environments.yaml",
+        )
+
+
+def test_no_private_host_key_channel_survives_anywhere(wiz):
+    """The census as a test over the SOURCE (T023). Each name below was a way to put
+    a private host key somewhere; a reintroduced one must fail here rather than be
+    noticed by nobody."""
+    src = Path(wiz.__file__).read_text()
+    assert "INJECT_HOST_KEY_PATH" not in src  # the container-side inject path
+    assert "SSH_HOST_ED25519_KEY_B64" not in src  # the env-file channel
+    assert "ssh_host_key" not in src  # the compose config
+    assert "def resolve_ssh_injection" not in src  # the dead legacy bind path
+    assert ".host_key" not in wiz._FLAT_STATE_SUFFIXES  # the 011 migration
+    # The entrypoint still NAMES the removed channels in a comment explaining why they
+    # went, so the check reads EXECUTABLE lines only. Matching the whole file would
+    # force the explanation out, and an unexplained removal is how a channel gets
+    # quietly reinstated by someone who never learns what it cost.
+    entry = (Path(wiz.__file__).parents[1] / "image" / "entrypoint.sh").read_text()
+    code = [ln for ln in entry.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert not any("SSH_HOST_ED25519_KEY_B64" in ln for ln in code)
+    assert not any("INJECT_DIR" in ln and "ssh_host_ed25519_key" in ln for ln in code)
+    # No branch installs anything into the host key path — only generate-or-keep.
+    assert not any("install -m 0600" in ln and "HOSTKEY" in ln for ln in code)
+
+
+def test_the_census_guard_can_fail(wiz, tmp_path):
+    """Proof T023's census is load-bearing: a source that reintroduces a channel is
+    rejected. Without this, the assertions above are strings nobody has watched
+    refuse anything."""
+    fake = tmp_path / "reintroduced"
+    fake.write_text('INJECT_HOST_KEY_PATH = "/run/agent-container/ssh_host_ed25519_key"\n')
+    assert "INJECT_HOST_KEY_PATH" in fake.read_text()  # the guard's own predicate fires
+
+
+def test_a_stale_staged_private_key_is_removed_and_reported(wiz, capsys):
+    """FR-011: `--purge` never deleted this file, so merely stopping WRITING it would
+    leave the exposure on every machine that ever used the flag."""
+    stale = wiz.host_state_dir("local") / "acme.host_key"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    wiz.remove_stale_staged_host_key("local", "acme")
+    assert not stale.exists()
+    err = capsys.readouterr().err
+    assert "removed a PRIVATE host key" in err  # never silent
+    assert "treat it as exposed" in err  # they may have copies elsewhere
+
+
+def test_removing_a_stale_key_is_silent_when_there_is_none(wiz, capsys):
+    wiz.remove_stale_staged_host_key("local", "acme")
+    assert capsys.readouterr().err == ""

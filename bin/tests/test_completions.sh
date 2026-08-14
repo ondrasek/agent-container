@@ -173,14 +173,17 @@ test_tool() {
     assert_has "${tool}:attach-flag" "--remote" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "build" "--"
     assert_has "${tool}:build-flag" "--context" "${COMPREPLY[@]}"
-    # SSH-injection flags on up + the keys subcommand.
+    # SSH-injection flags on up + the keys subcommand. Feature 018 REMOVED
+    # --host-key, so the assertion inverts rather than disappearing: a completion
+    # that offers a flag the CLI refuses is worse than no completion at all, and
+    # deleting the check would leave nothing watching for its return.
     run_comp "${func}" "${tool}" "up" "--"
-    assert_has "${tool}:up-hostkey"  "--host-key"       "${COMPREPLY[@]}"
+    assert_lacks "${tool}:up-no-hostkey" "--host-key"  "${COMPREPLY[@]}"
     assert_has "${tool}:up-authkey"  "--authorized-key" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" ""
     assert_has "${tool}:subcmd-keys" "keys" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "keys" "--"
-    assert_has "${tool}:keys-flag"   "--host-key"       "${COMPREPLY[@]}"
+    assert_lacks "${tool}:keys-no-hostkey" "--host-key" "${COMPREPLY[@]}"
     assert_has "${tool}:keys-flag"   "--authorized-key" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "keys" ""
     assert_has "${tool}:keys-name"   "acme" "${COMPREPLY[@]}"     # local running names

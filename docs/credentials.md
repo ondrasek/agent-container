@@ -144,15 +144,41 @@ Nothing SSH-related is baked into the image. Three injection channels feed the
 
 | Channel | What it takes | When it applies |
 |---------|---------------|-----------------|
-| **Env-file** | `SSH_AUTHORIZED_KEYS` (newline-separated public keys), `SSH_HOST_ED25519_KEY_B64` (base64 of an unencrypted ed25519 **private** host key) | At boot, from the same `.env` / `EnvironmentFile=` channel as the other credentials — the natural fit for the Quadlet path. |
-| **`up --host-key FILE --authorized-key FILE`** | file paths (repeatable `--authorized-key`) | Bind-mounted read-only; installed at boot before sshd starts. |
-| **`agent-container keys <name> --host-key FILE --authorized-key FILE`** | file paths | Injected into an **already-running** container (no recreate); sshd is reloaded in place. Secrets are streamed over stdin, never on argv. |
+| **Env-file** | `SSH_AUTHORIZED_KEYS` (newline-separated public keys) | At boot, from the same `.env` / `EnvironmentFile=` channel as the other credentials — the natural fit for the Quadlet path. |
+| **`up --authorized-key FILE`** | file paths (repeatable) | Delivered read-only; installed at boot before sshd starts. |
+| **`agent-container keys <name> --authorized-key FILE`** | file paths | Injected into an **already-running** container (no recreate); sshd is reloaded in place. Streamed over stdin, never on argv. |
 
-**Host-key precedence** (highest first): `up --host-key` bind-mount >
-`SSH_HOST_ED25519_KEY_B64` env > the already-persisted key on the volume > a
-freshly generated ed25519 key. Only the last two are auto-created; an
-injected or persisted key is left untouched. **`authorized_keys`** is a
-deduped union of the persisted file plus every injected source.
+Every channel above carries **public** keys only.
+
+### The host key is captured, not supplied (Feature 018)
+
+The container **generates its own** ed25519 host key on the persisted `~/.ssh`
+volume and it **never leaves**. Identity is therefore stable across `down`/`up`
+exactly as before — only `down --purge` changes it.
+
+At every deploy the tool reads the **public** half through the container runtime and
+pins it in `$XDG_STATE_HOME/agent-container/<host>/known_hosts`; `attach` verifies
+against that file and **refuses** a mismatch.
+
+**Three channels were REMOVED**, as a breaking change:
+
+| Removed | Why |
+|---|---|
+| `up --host-key` | staged a plaintext **private** key at mode 0644 under the state dir, which `--purge` did not delete |
+| `keys --host-key` | installed a **private** key into a live container |
+| `SSH_HOST_ED25519_KEY_B64` | put a base64 **private** key in an env file |
+| `target: host_key` in `.agent-container/` | the declarative form of the same thing — now **refused**, not ignored |
+
+All of them cost a private key on your disk and bought **nothing**, because nothing
+verified against it: their only realised effect was a stable identity, which
+in-container generation already provides. Using one now fails with a message saying
+so. An upgrade **deletes** any `<state>/<host>/<name>.host_key` left behind and tells
+you it did — treat that key as exposed if copies exist elsewhere.
+
+The mode was not fixable in place, which is why removal was the answer: compose
+exposes the source file's mode into the container, `dev`'s uid need not match the host
+uid that ran `up`, and `mode:` on a config reference was measured to be **ignored** in
+favour of the source's mode. A 0600 staged key simply crash-looped the entrypoint.
 
 ### Security notes
 

@@ -166,50 +166,50 @@ question.
 **Independent test**: S5 — `grep -rl 'PRIVATE KEY'` over the state and config directories finds
 nothing, after every deployment path that exists.
 
-- [ ] T023 [US2] **THE INJECTION CENSUS — the highest-risk task in this feature.** Enumerate every
+- [X] T023 [US2] **THE INJECTION CENSUS — the highest-risk task in this feature.** Enumerate every
       path that can put a private host key anywhere, and express the census as a **test over the
       source**, not a comment. Known today: `up --host-key`; `keys --host-key` (`inject_keys`, into a
       running container over stdin); `redeploy --host-key`; `SSH_HOST_ED25519_KEY_B64`
       (`image/entrypoint.sh`); and the `host_key` target in `CRED_SSH_TARGETS` (declarative
       `.agent-container/`). The failure mode is **one channel surviving** — SC-001 says 100%, and a
       95% removal looks identical to a complete one from every other test here
-- [ ] T024 [US2] [P] Prove T023's census guard can fail: reintroduce a fake private-host-key channel
+- [X] T024 [US2] [P] Prove T023's census guard can fail: reintroduce a fake private-host-key channel
       and assert the guard rejects it
-- [ ] T025 [US2] Remove `--host-key` from `up`, `keys` and `redeploy` in `bin/agent-container`, and
+- [X] T025 [US2] Remove `--host-key` from `up`, `keys` and `redeploy` in `bin/agent-container`, and
       make each **fail with a message saying host identity is captured, not supplied** (FR-002, C10).
       A bare "unrecognized argument" fails this task: an operator who used the flag deserves to learn
       where it went and why
-- [ ] T026 [US2] Delete the staging: the `host_key` arm of `stage_ssh_injection`, the `ssh_host_key`
+- [X] T026 [US2] Delete the staging: the `host_key` arm of `stage_ssh_injection`, the `ssh_host_key`
       compose config, `INJECT_HOST_KEY_PATH`, and the `host_key` parameter threaded through
       `compose_up_exec` / `do_up` / `do_redeploy`
-- [ ] T027 [US2] Delete `inject_keys`'s host-key arm (the `exec`-and-install-into-a-running-container
+- [X] T027 [US2] Delete `inject_keys`'s host-key arm (the `exec`-and-install-into-a-running-container
       path). `keys --authorized-key` stays — public keys are not the exposure
-- [ ] T028 [US2] Remove `host_key` from `CRED_SSH_TARGETS` and from `stage_declared_credentials`, and
+- [X] T028 [US2] Remove `host_key` from `CRED_SSH_TARGETS` and from `stage_declared_credentials`, and
       **refuse a spec that declares it** with the FR-002 message. Silently ignoring a declared
       `host_key` would leave an operator believing their key is in use
-- [ ] T029 [US2] Delete the injected-key branches from `image/entrypoint.sh` — **both** the
+- [X] T029 [US2] Delete the injected-key branches from `image/entrypoint.sh` — **both** the
       bind-mounted file and `SSH_HOST_ED25519_KEY_B64` — leaving generate-or-keep. The `.pub`
       derivation and its `chmod 0644` stay exactly as they are; capture depends on them (research R1)
-- [ ] T030 [US2] Delete any stale `<state>/<host>/<name>.host_key` on deploy and **say so** (FR-011,
+- [X] T030 [US2] Delete any stale `<state>/<host>/<name>.host_key` on deploy and **say so** (FR-011,
       C11, S7). Not silent: an operator should learn that a plaintext private key left their disk.
       Note the mode was not fixable in place — measured, with a 0600 source and `mode: 0400` declared,
       the file still arrived as the source's mode (research R7)
-- [ ] T031 [US2] Drop `.host_key` from `_FLAT_STATE_SUFFIXES` (the 011 flat-state migration) —
+- [X] T031 [US2] Drop `.host_key` from `_FLAT_STATE_SUFFIXES` (the 011 flat-state migration) —
       migrating a file we now delete would relocate the exposure rather than remove it
 - [ ] T032 [US2] [P] Acceptance test for SC-001: after `up` with **every** flag combination the CLI
       still offers, no file under the state or config directories contains `PRIVATE KEY` (S5)
-- [ ] T033 [US2] [P] Unit tests: each removed flag fails with the FR-002 wording (not a generic
+- [X] T033 [US2] [P] Unit tests: each removed flag fails with the FR-002 wording (not a generic
       argparse error); a spec declaring `host_key` is refused; a pre-existing `.host_key` is deleted
       and the deletion reported
-- [ ] T033a [US2] **`completions/agent-container.bash` and `.zsh`** — drop `--host-key` from the `up`
+- [X] T033a [US2] **`completions/agent-container.bash` and `.zsh`** — drop `--host-key` from the `up`
       and `keys` completions (four sites: bash 182, 187, 203, 208; zsh 165, 181). Completions that
       offer a flag the CLI rejects are a worse experience than no completion, and a test pins the
       completions to the CLI
-- [ ] T033b [US2] **`bin/tests/test_completions.sh:178,183` currently ASSERTS `--host-key` is offered**
+- [X] T033b [US2] **`bin/tests/test_completions.sh:178,183` currently ASSERTS `--host-key` is offered**
       for both `up` and `keys`. Change those assertions to assert **absence**. This is the one place in
       the feature where a green test *requires* the thing being removed — leaving it is a red build, and
       deleting it is not permitted (never weaken a gate; the assertion inverts)
-- [ ] T033c [US2] Update the **existing** tests that pin the old shape — 8 files, ~35 references. The
+- [X] T033c [US2] Update the **existing** tests that pin the old shape — 8 files, ~35 references. The
       rule that makes this its own task: a changed contract is exactly when a pre-existing test still
       pins the old one, so each must be re-pointed rather than removed:
       · `test_compose.py:55,81` (`ssh_host_key` config mapping) → assert the config is **absent**
@@ -223,12 +223,12 @@ nothing, after every deployment path that exists.
       that still exists, or the fixture documents a thing that does not
       · `test_entrypoint.sh:80,313` — the **generate** path stays and must keep passing; only the
       inject path goes
-- [ ] T033d [US2] `test_acceptance.py` specifically: `:395` proves identity **persists across
+- [X] T033d [US2] `test_acceptance.py` specifically: `:395` proves identity **persists across
       `down`/`up`** by injecting a key. The property is still worth testing and is now *better* — assert
       that the **container-generated** key survives, which is what actually matters. `:413`
       (`keys --host-key` live injection) becomes an assertion that it is refused. `:267,289,335,337`
       are the harness's own `host_key` plumbing; `:39` and `:1011` are comments that go stale
-- [ ] T033e [US2] [P] `test_shell_integration.py:145` pins the **exact** ssh-config stanza, which T016
+- [X] T033e [US2] [P] `test_shell_integration.py:145` pins the **exact** ssh-config stanza, which T016
       changes. Update it to expect the two verification lines — and note the coupling in T016 so the
       next person to touch the stanza knows a test spells it out
 
@@ -239,31 +239,31 @@ nothing, after every deployment path that exists.
 **Goal**: the operator can obtain a `known_hosts` line for an environment and use it on another client.
 **Independent test**: S11 — the line from the machine-readable interface verifies a second client.
 
-- [ ] T034 [US3] Add the captured entry to `list --json` rows in `bin/agent-container` (FR-010, C12) —
+- [X] T034 [US3] Add the captured entry to `list --json` rows in `bin/agent-container` (FR-010, C12) —
       the **existing** per-environment machine-readable interface, read from local state with no
       daemon call. No new command, and no new column in the human table.
       **This is also the non-TOFU path for a second machine** (research R8): an entry copied from the
       machine that deployed predates what it checks, where a capture accepted at T022a's prompt does
       not. Say so where the operator will read it, or they will take the easier, weaker route
-- [ ] T035 [US3] When no key was captured, emit an explicit "not captured" rather than an empty
+- [X] T035 [US3] When no key was captured, emit an explicit "not captured" rather than an empty
       string or a missing key (C12, US3 scenario 2). A silent empty result is indistinguishable from a
       captured key that happens to be blank
-- [ ] T035a [US3] The entry must be readable **without the environment's host being reachable**
+- [X] T035a [US3] The entry must be readable **without the environment's host being reachable**
       (FR-010, revised). `list --json` builds rows from the daemon, so a stopped environment or an
       unreachable host could yield no row at all — and then "never a silent empty result" fails exactly
       when the operator most needs the key: recovering access to something they cannot reach
-- [ ] T036 [US3] [P] Test in `bin/tests/test_agent_interface.py`: a captured environment yields a
+- [X] T036 [US3] [P] Test in `bin/tests/test_agent_interface.py`: a captured environment yields a
       parseable `known_hosts` line; an uncaptured one yields the explicit statement
 
 ---
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] T037 Capture failure: **warn, state that attach will be unverified, and leave the deploy's exit
+- [X] T037 Capture failure: **warn, state that attach will be unverified, and leave the deploy's exit
       status untouched** (FR-008, C7, SC-008, S9). Write **no** line at all — not a blank one
 - [ ] T038 [P] Acceptance test for T037 (S9): deploy succeeds, the warning names the unverified
       attach, and the file gains no entry
-- [ ] T039 Skip capture on the headless `--foreground` path, per the spec assumption that scopes FR-003
+- [X] T039 Skip capture on the headless `--foreground` path, per the spec assumption that scopes FR-003
       (a task may not exempt itself from a MUST — the exemption had to go in the spec first). Say in the
       code why: that branch returns after the agent has exited, so there is no container to read and
       nothing to attach to. `start`/`stop` likewise need no capture — the key persists on the `ssh`
@@ -275,21 +275,21 @@ nothing, after every deployment path that exists.
       other's connection** (C5, SC-005, S4)
 - [ ] T042 [P] Acceptance test: `~/.ssh/known_hosts` is byte-identical before and after `up` +
       `attach --print` (C6, SC-007, S8)
-- [ ] T043 Reconcile `docs/threat-model.md`'s 018 row (Constitution, Development Workflow): an
+- [X] T043 Reconcile `docs/threat-model.md`'s 018 row (Constitution, Development Workflow): an
       exposure **removed**, and a new trusted file introduced — the tool-managed `known_hosts` now
       decides whether an attach is trusted, so name what an attacker who can write it gains
-- [ ] T044 [P] Update `docs/credentials.md`: remove `--host-key` and `SSH_HOST_ED25519_KEY_B64` from
+- [X] T044 [P] Update `docs/credentials.md`: remove `--host-key` and `SSH_HOST_ED25519_KEY_B64` from
       the credential channels table and the precedence sentence, and state that host identity is
       **captured, not supplied**
-- [ ] T045 [P] Update `docs/shell-integration.md`: `attach` is verified; what a refusal means and what
+- [X] T045 [P] Update `docs/shell-integration.md`: `attach` is verified; what a refusal means and what
       to do about it; **what the absent-pin prompt is and is not** (a trust decision, not a check — it
       cannot detect a replaced container); and that the `--ssh-config` stanza carries the same
       verification (T016)
-- [ ] T045a [P] Update `docs/orchestration.md`, `docs/smoke-test.md`, `docs/agent-as-code.md` and
+- [X] T045a [P] Update `docs/orchestration.md`, `docs/smoke-test.md`, `docs/agent-as-code.md` and
       `README.md` — all four mention the removed flag or the declarative `host_key` target. Constitution
       Development Workflow: *"stale spec or docs are defects"*, and a smoke test that tells the operator
       to pass a removed flag fails in front of them
-- [ ] T045b [P] Update `docs/agent-interface.md` for the new `list --json` field (Feature 009's
+- [X] T045b [P] Update `docs/agent-interface.md` for the new `list --json` field (Feature 009's
       contract document) — and state the FR-010 property there: the answer does not depend on the host
       being reachable
 - [ ] T046 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Removing a documented flag

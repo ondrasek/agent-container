@@ -52,6 +52,16 @@ check_eq() {  # check_eq <label> <expected> <actual>
         note "  actual:   [$3]"
     fi
 }
+check_ne() {  # check_ne <label> <unwanted> <actual>
+    if [[ "$2" != "$3" ]]; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        note "FAIL: $1"
+        note "  must NOT equal: [$2]"
+    fi
+}
+perm() { stat -f '%OLp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 ok()  { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); note "FAIL: $1"; }
 
@@ -277,26 +287,35 @@ run_entrypoint __unset__
 check_eq "ssh: host key persists across runs" "${GEN_FP}" "$(fp "${HK}.pub")"
 if log_has 'already present, skipping'; then ok; else bad "ssh: persist log fires"; fi
 
-# A known ed25519 keypair for the injection cases.
+# A known ed25519 keypair, used to prove the removed channels are INERT.
 KNOWN="${SB}/known_hostkey"
 ssh-keygen -q -t ed25519 -f "${KNOWN}" -N '' <<<y >/dev/null 2>&1
 KNOWN_FP="$(fp "${KNOWN}.pub")"
 
-# 7c. env(B64) install: the given private key becomes the host identity.
+# 7c/7d. Feature 018 REMOVED both private-host-key injection channels. The
+# assertions invert rather than disappearing: offering the key must now change
+# NOTHING. A deleted test would leave nobody watching for the channel's return, and
+# these two put a plaintext private key on the operator's disk.
 reset_session; reset_ssh
+run_entrypoint __unset__
+GEN2_FP="$(fp "${HK}.pub")"          # whatever this container generated for itself
+reset_session
 TEST_ENV_HKB64="$(base64 < "${KNOWN}" | tr -d '\n')"
-run_entrypoint __unset__
-check_eq "ssh: SSH_HOST_ED25519_KEY_B64 installs the given key" "${KNOWN_FP}" "$(fp "${HK}.pub")"
-if log_has 'from SSH_HOST_ED25519_KEY_B64'; then ok; else bad "ssh: env-B64 install log fires"; fi
-
-# 7d. bind-mount takes precedence over env(B64).
-reset_session; reset_ssh
 cp "${KNOWN}" "${INJECTDIR}/ssh_host_ed25519_key"
-OTHER="${SB}/other_hostkey"; ssh-keygen -q -t ed25519 -f "${OTHER}" -N '' <<<y >/dev/null 2>&1
-TEST_ENV_HKB64="$(base64 < "${OTHER}" | tr -d '\n')"   # must be IGNORED: bind-mount wins
 run_entrypoint __unset__
-check_eq "ssh: bind-mounted host key wins over env" "${KNOWN_FP}" "$(fp "${HK}.pub")"
-if log_has 'installing bind-mounted SSH host key'; then ok; else bad "ssh: bind-mount install log fires"; fi
+check_eq "ssh: SSH_HOST_ED25519_KEY_B64 is IGNORED (018)" "${GEN2_FP}" "$(fp "${HK}.pub")"
+check_ne "ssh: the offered key never becomes the identity (018)" "${KNOWN_FP}" "$(fp "${HK}.pub")"
+if log_has 'from SSH_HOST_ED25519_KEY_B64'; then bad "ssh: env-B64 channel still installs"; else ok; fi
+if log_has 'installing bind-mounted SSH host key'; then bad "ssh: bind-mount channel still installs"; else ok; fi
+rm -f "${INJECTDIR}/ssh_host_ed25519_key"
+TEST_ENV_HKB64=""
+
+# 7d2. The PUBLIC half is derived on every boot and world-readable: that file is what
+# the tool reads back through the runtime to pin (Feature 018). If it stops being
+# written, capture silently stops working and every attach falls to the prompt.
+if [[ -f "${HK}.pub" ]]; then ok; else bad "ssh: the .pub the tool captures exists"; fi
+check_eq "ssh: the .pub is world-readable for capture" "644" "$(perm "${HK}.pub")"
+check_eq "ssh: the PRIVATE key stays 0600" "600" "$(perm "${HK}")"
 
 # 7e. authorized_keys: deduped union of the persisted file + the env source.
 reset_session; reset_ssh

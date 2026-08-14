@@ -35,6 +35,31 @@ Every command accepts `--json` and then emits **one** JSON object on **stdout**:
 or consumed as a stream**, so wrapping it would break `eval $(…)`; `menu` is the interactive
 wizard. This set is asserted by the test suite, so a new command cannot silently opt out.
 
+## `list --json`: the pinned host key travels with the row
+
+Each container row carries **`known_hosts_entry`** — the `known_hosts`-format line the
+tool pinned for that environment, or **`null`** when nothing was captured:
+
+```json
+{"containers": [
+  {"name": "agent-container-acme", "host": "local", "port": 2206,
+   "known_hosts_entry": "[localhost]:2206 ssh-ed25519 AAAAC3Nz..."}
+]}
+```
+
+`null`, never `""` — a JSON consumer must be able to tell *never captured* from a
+captured value.
+
+**Read from local state, never the daemon.** So it still answers for a stopped
+environment or an unreachable host, which is exactly when it is needed: recovering
+verified access to something you cannot reach. A field that required reachability would
+fail in the one case it exists for.
+
+**This is the right way to trust a container from a second machine.** Copy the line
+from the machine that deployed. That entry **predates** what it checks; a key accepted
+at `attach`'s prompt does not, because at that moment the runtime can only say *"the
+container currently called X"* — never *"the container you created"*.
+
 ## Failures
 
 Branch on **`code`**, never on `message` (whose wording may change):

@@ -497,3 +497,38 @@ def test_json_exposes_the_builtin_default_provider(wiz):
     assert _row(wiz, None, agent="opencode")["builtin_default_provider"] == "big-pickle"
     assert _row(wiz, None, agent="claude")["builtin_default_provider"] is None
     assert _row(wiz, None, agent="claude")["honours_proxy"] is True
+
+
+# --- Feature 018: the captured key on the machine-readable surface -----------
+
+_KEY_018 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+
+
+def test_list_json_carries_the_pinned_known_hosts_line(wiz, monkeypatch):
+    """FR-010/US3: a `known_hosts`-format line the operator can place on another
+    client verbatim."""
+    wiz.pin_host_key("local", "localhost", 2206, _KEY_018)
+    row = {"name": "agent-container-acme", "host": "local", "port": 2206}
+    assert wiz.row_known_hosts_entry(row) == f"[localhost]:2206 {_KEY_018}"
+
+
+def test_uncaptured_is_None_not_an_empty_string(wiz):
+    """A silent empty result is indistinguishable from a captured key that happens to
+    be blank; None says 'never captured'."""
+    assert wiz.row_known_hosts_entry({"name": "x", "host": "local", "port": 2299}) is None
+    assert wiz.row_known_hosts_entry({"name": "x", "host": "local", "port": "?"}) is None
+
+
+def test_the_entry_does_not_depend_on_the_host_being_reachable(wiz, monkeypatch):
+    """FR-010, revised: `list` builds rows from the daemon, but this field must answer
+    from LOCAL state — an unreachable host is exactly when the operator needs the key,
+    to recover verified access to something they cannot reach."""
+    wiz.pin_host_key("local", "localhost", 2206, _KEY_018)
+
+    def explode(*_a, **_kw):
+        raise AssertionError("consulted the runtime for a value that is stored locally")
+
+    monkeypatch.setattr(wiz, "query", explode)
+    monkeypatch.setattr(wiz, "detect_runtime", explode)
+    row = {"name": "agent-container-acme", "host": "local", "port": 2206, "status": "unreachable"}
+    assert wiz.row_known_hosts_entry(row) == f"[localhost]:2206 {_KEY_018}"

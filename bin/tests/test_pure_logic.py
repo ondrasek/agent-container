@@ -378,13 +378,17 @@ def test_per_host_state_paths(wiz):
 def test_migrate_flat_state_relocates_into_local(wiz):
     wiz.STATE_DIR.mkdir(parents=True, exist_ok=True)
     (wiz.STATE_DIR / "acme.port").write_text("2206\n")
-    (wiz.STATE_DIR / "acme.host_key").write_bytes(b"KEY")
+    (wiz.STATE_DIR / "acme.host_key").write_bytes(b"KEY")  # pre-018 leftover
     (wiz.STATE_DIR / "acme.authorized_keys").write_text("pub")
     wiz.migrate_flat_state()
     local = wiz.host_state_dir("local")
     assert (local / "acme.port").read_text() == "2206\n"
-    assert (local / "acme.host_key").read_bytes() == b"KEY"
     assert (local / "acme.authorized_keys").read_text() == "pub"
+    # `.host_key` is deliberately NOT migrated (Feature 018): relocating a private
+    # key we now delete would move the exposure rather than remove it. It stays where
+    # it is until a deploy removes it and says so.
+    assert not (local / "acme.host_key").exists()
+    assert (wiz.STATE_DIR / "acme.host_key").exists()
     # Flat originals are gone (moved, not copied).
     assert not (wiz.STATE_DIR / "acme.port").exists()
 

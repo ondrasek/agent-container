@@ -130,37 +130,40 @@ host key — now lives on the per-container `-ssh` volume (mounted at
 it survives every recreate (no more `REMOTE HOST IDENTIFICATION HAS CHANGED`
 churn, since the host key is stable too). Pick whichever injection path fits:
 
-**At launch — `up --authorized-key` (and optionally `--host-key`):**
+**At launch — `up --authorized-key`:**
 
 ```bash
 agent-container up acme --authorized-key ~/.ssh/id_ed25519.pub
-# fixed host identity too (repeatable --authorized-key):
-agent-container up acme --host-key ~/.config/agent-container/acme_host_ed25519_key \
-                        --authorized-key ~/.ssh/id_ed25519.pub
 ```
 
-The files are bind-mounted read-only and installed onto the `~/.ssh` volume by
-the entrypoint before sshd starts.
+The file is delivered read-only and installed onto the `~/.ssh` volume by the
+entrypoint before sshd starts.
 
 **Into an already-running container — `agent-container keys`:**
 
 ```bash
 agent-container keys acme --authorized-key ~/.ssh/id_ed25519.pub
-agent-container keys acme --host-key ~/.config/agent-container/acme_host_ed25519_key
 ```
 
 No recreate: the key is streamed over stdin (never on argv), merged with dedup,
 and sshd is reloaded in place.
 
-**Via the `.env` file:** set `SSH_AUTHORIZED_KEYS` (newline-separated public
-keys) and/or `SSH_HOST_ED25519_KEY_B64` (base64 of an unencrypted ed25519
-**private** host key); the entrypoint installs them at boot. This is the natural
-fit for the Quadlet path, whose credentials already flow through the env-file.
+**Via the `.env` file:** set `SSH_AUTHORIZED_KEYS` (newline-separated public keys);
+the entrypoint installs them at boot. This is the natural fit for the Quadlet path,
+whose credentials already flow through the env-file.
 
-The host key is ed25519-only, and its boot precedence is
-`up --host-key` bind-mount > env `SSH_HOST_ED25519_KEY_B64` > already-persisted
-key > freshly generated. `authorized_keys` are a deduped union of the persisted
-file plus every injected source.
+`authorized_keys` are a deduped union of the persisted file plus every injected
+source.
+
+**The host key is captured, never supplied.** The container generates its own
+ed25519 host key on the `-ssh` volume and it never leaves. Every deploy reads the
+**public** half through the runtime and pins it under
+`$XDG_STATE_HOME/agent-container/<host>/known_hosts`; `attach` verifies against it and
+refuses a mismatch. When nothing is pinned yet, attach warns, shows the fingerprint,
+says plainly that accepting **cannot detect a container that was replaced**, and asks.
+
+`--host-key`, `keys --host-key` and `SSH_HOST_ED25519_KEY_B64` were **removed** — they
+put a plaintext private key on your disk and verified nothing.
 
 <details>
 <summary>Fallback: copy a key in by hand</summary>
@@ -826,7 +829,7 @@ The image itself enforces none of this — that's item C's entrypoint and item E
 
 1. **Debug override.** If the operator passes arguments (`docker run image bash`), the entrypoint `exec`s them and the rest of the flow is skipped.
 2. **Env-var validation.** Required vars must be set and non-empty; missing ones cause an immediate non-zero exit with a message naming the offender. Values are **never logged**.
-3. **SSH host key + authorized_keys (rootless).** The host key is an ed25519 key under `~/.ssh/hostkeys` — dev-owned, on the persisted `-ssh` volume — so a container keeps a **stable** identity across `down`/`up` while different containers differ. Boot precedence: a bind-mounted key (`up --host-key`) > `SSH_HOST_ED25519_KEY_B64` (env) > the already-persisted key > a freshly generated one; only the last two are auto-created, an injected/persisted key is left untouched. `authorized_keys` is assembled as a deduped union of the persisted file plus any injected source (`up --authorized-key`, `SSH_AUTHORIZED_KEYS`). No root or `sudo` is involved.
+3. **SSH host key + authorized_keys (rootless).** The host key is an ed25519 key under `~/.ssh/hostkeys` — dev-owned, on the persisted `-ssh` volume — so a container keeps a **stable** identity across `down`/`up` while different containers differ. It is **generated in the container and never leaves**: the entrypoint keeps the persisted key or creates one, and derives the world-readable `.pub` the tool captures at deploy to pin (Feature 018). `authorized_keys` is assembled as a deduped union of the persisted file plus any injected source (`up --authorized-key`, `SSH_AUTHORIZED_KEYS`). No root or `sudo` is involved.
 4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig` and **scoped to `https://github.com`** (`credential.https://github.com.helper`) so the token is never handed to any other host; the token itself is never written to disk in the container.
 5. **sshd.** Started in the background as the `dev` user (rootless — no `sudo`), daemonized (not `-D`). Listens on the unprivileged port **2222** inside the container, using the host key + pidfile under the dev-owned `~/.ssh` volume; the orchestration layer maps this to the operator-facing host port (the hashed `2200 +` value, unchanged).
 6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `AGENT_CONTAINER_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `AGENT_CONTAINER_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `agent-container attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.

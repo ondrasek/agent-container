@@ -194,7 +194,7 @@ namespace and the port owner above are decided). Use it if you want to drive com
 
 ## SSH identity is persisted per container
 
-SSH **host key** and the operator's **`~/.ssh/authorized_keys`** live on the `-ssh` named volume (mounted at `~/.ssh`), so they **survive recreation** (`down`/`up`, Quadlet/compose recreate). A container keeps a **stable SSH identity** across its own recreations (no `known_hosts` churn), while different containers get distinct keys. Because the container is rootless, the host key is dev-owned under `~/.ssh/hostkeys/` rather than root-owned `/etc/ssh`. See the credentials guide for the three injection paths (`.env` vars, `up --host-key/--authorized-key`, and the `keys` subcommand). Only `down --purge` drops the identity along with the other volumes.
+SSH **host key** and the operator's **`~/.ssh/authorized_keys`** live on the `-ssh` named volume (mounted at `~/.ssh`), so they **survive recreation** (`down`/`up`, Quadlet/compose recreate). A container keeps a **stable SSH identity** across its own recreations (no `known_hosts` churn), while different containers get distinct keys. Because the container is rootless, the host key is dev-owned under `~/.ssh/hostkeys/` rather than root-owned `/etc/ssh`. The host key is **generated in the container and never leaves** (Feature 018); the tool captures its PUBLIC half at every deploy and pins it, and `attach` verifies against that. See the credentials guide for the `authorized_keys` injection paths (`.env` vars, `up --authorized-key`, the `keys` subcommand) — all public material. Only `down --purge` drops the identity along with the other volumes.
 
 ## Constraints satisfied
 

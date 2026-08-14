@@ -179,12 +179,12 @@ _agent_container() {
                 _agent_container_filedir d       # --mount takes a directory
                 return 0
             fi
-            if [[ "${prev}" == "--env-file" || "${prev}" == "--host-key" || "${prev}" == "--authorized-key" ]]; then
+            if [[ "${prev}" == "--env-file" || "${prev}" == "--authorized-key" ]]; then
                 _agent_container_filedir          # these take a file path
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --mount --env-file --host-key --authorized-key --agent --mode --workspace" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --mount --env-file --authorized-key --agent --mode --workspace" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names       # arbitrary name; union is fine
@@ -200,12 +200,12 @@ _agent_container() {
             fi
             ;;
         keys)
-            if [[ "${prev}" == "--host-key" || "${prev}" == "--authorized-key" ]]; then
+            if [[ "${prev}" == "--authorized-key" ]]; then
                 _agent_container_filedir          # both take a file path
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host-key --authorized-key" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--authorized-key" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # running container; local only

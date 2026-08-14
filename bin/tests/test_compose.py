@@ -52,17 +52,22 @@ def test_no_injection_means_no_secrets_or_configs(wiz):
     assert "configs" not in m["services"]["agent"]
 
 
-def test_host_key_maps_to_config(wiz, tmp_path):
-    # Delivered as a compose `config` (not `secret`): a secret with an absolute
-    # target crash-loops the container on some docker engines; configs are portable.
-    hk = tmp_path / "acme.host_key"
-    hk.write_text("PRIVATE-KEY-MATERIAL")
-    m = wiz.build_compose_model("acme", "/repo", host_key_file=hk)
-    assert "secrets" not in m  # never uses compose secrets
-    assert m["configs"]["ssh_host_key"]["file"] == str(hk)
-    assert {"source": "ssh_host_key", "target": wiz.INJECT_HOST_KEY_PATH} in m["services"]["agent"][
-        "configs"
-    ]
+def test_the_model_can_no_longer_carry_a_private_host_key(wiz):
+    """Feature 018 (FR-001/FR-002): the `ssh_host_key` config is GONE, and the model
+    cannot be asked to deliver one.
+
+    The assertion inverts rather than disappearing. A removal that leaves no test
+    behind is a removal nobody notices being undone — and this particular channel put
+    a plaintext private key on the operator's disk at mode 0644.
+    """
+    m = wiz.build_compose_model("acme", "/repo")
+    assert "secrets" not in m  # never used compose secrets, and still does not
+    assert "ssh_host_key" not in m.get("configs", {})
+    assert not any(
+        c.get("source") == "ssh_host_key" for c in m["services"]["agent"].get("configs", [])
+    )
+    with pytest.raises(TypeError):  # the parameter itself is gone
+        wiz.build_compose_model("acme", "/repo", host_key_file="/anything")
 
 
 def test_authorized_keys_maps_to_config(wiz, tmp_path):
@@ -77,15 +82,14 @@ def test_authorized_keys_maps_to_config(wiz, tmp_path):
 
 
 def test_no_secret_material_inline(wiz, tmp_path):
-    # The private key material must never appear anywhere in the serialized model.
-    hk = tmp_path / "acme.host_key"
-    secret = "TOP-SECRET-PRIVATE-KEY-BYTES"
-    hk.write_text(secret)
+    # No credential VALUE may appear in the serialized model — only `file:` refs.
+    secret = "TOP-SECRET-CREDENTIAL-BYTES"
     ak = tmp_path / "acme.authorized_keys"
-    ak.write_text("ssh-ed25519 AAAA... user@host")
-    m = wiz.build_compose_model("acme", "/repo", host_key_file=hk, authorized_keys_file=ak)
+    ak.write_text(secret)  # stand-in for any staged material
+    m = wiz.build_compose_model("acme", "/repo", authorized_keys_file=ak)
     blob = json.dumps(m)
     assert secret not in blob  # only the path is referenced, not the contents
+    assert str(ak) in blob
 
 
 def test_output_is_valid_json_and_deterministic(wiz, tmp_path):
