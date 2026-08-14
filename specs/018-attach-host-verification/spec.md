@@ -116,8 +116,9 @@ anywhere under the operator's state or config directories contains private key m
 
 1. **Given** any environment created by any path, **When** the operator inspects the state directory,
    **Then** no private host key file exists.
-2. **Given** an operator who passes the removed `--host-key` flag, **When** they run the command,
-   **Then** it fails with a message explaining that host identity is now captured, not supplied.
+2. **Given** an operator who uses **any** of the five removed channels — the flag on `up`, `keys` or
+   `redeploy`, the env-file variable, or a declared `host_key` — **When** they run the command, **Then**
+   it fails with a message explaining that host identity is now captured, not supplied.
 3. **Given** an upgrade from a version that staged one, **When** the operator next deploys, **Then**
    the stale private key file is removed rather than left behind.
 
@@ -180,8 +181,18 @@ only that entry connects verified.
 
 - **FR-001**: The tool MUST NOT generate, store, stage or inject a private SSH host key. The
   container's host key MUST be created inside the container and MUST NOT leave it.
-- **FR-002**: `--host-key` MUST be removed. Passing it MUST fail with a message stating that host
-  identity is captured rather than supplied, and why.
+- **FR-002**: **Every** channel that supplies a private host key MUST be removed — there are **five**,
+  not one, and naming only the flag would leave four ways to do exactly what FR-001 forbids:
+  1. `up --host-key`,
+  2. `keys --host-key` (which installs one into a **running** container),
+  3. `redeploy --host-key`,
+  4. the `SSH_HOST_ED25519_KEY_B64` env-file variable, and
+  5. the declarative `host_key` credential target in a project's `.agent-container/` spec.
+
+  Using any of them MUST fail with a message stating that host identity is captured rather than
+  supplied, and why. A declared `host_key` MUST be **refused**, never ignored — silently dropping it
+  would leave an operator believing their key is in use. **Removing (4) and (5) are two further
+  breaking changes** beyond the flag, since both are documented interfaces.
 - **FR-003**: On deploy the tool MUST capture the container's host **public** key **through the
   container runtime**, not by querying the SSH endpoint. Reading it from the endpoint being
   authenticated is not verification.
@@ -199,7 +210,10 @@ only that entry connects verified.
 - **FR-009**: Capture MUST work over a **remote** context, where the operator's machine shares no
   filesystem with the daemon.
 - **FR-010**: The operator MUST be able to obtain a captured key as a `known_hosts`-format line
-  (US3), through the existing machine-readable interface.
+  (US3), through the existing machine-readable interface. This MUST NOT depend on the environment's
+  host being reachable: the answer comes from what was captured, so an unreachable or stopped
+  environment still yields its entry — or an explicit statement that none exists, never a silent
+  absence.
 - **FR-011**: An upgrade MUST remove any private host key file staged by an earlier version, and MUST
   say that it did.
 - **FR-012**: No private key material may be written anywhere on the operator's machine by this
@@ -217,11 +231,17 @@ only that entry connects verified.
   another source before answering. A prompt with nothing to compare is a formality.
 - **FR-017**: `attach --print` and `--ssh-config` MUST NOT prompt — they emit a command and connect to
   nothing. When no key is pinned they MUST say so, and say that the emitted command will refuse.
+- **FR-018**: Environments on the same host share one pinned file, so **deployments that run
+  concurrently MUST preserve each other's entries.** Losing one is worse than it sounds: the loser's
+  next attach finds nothing pinned and falls through to FR-013's prompt, so a concurrency bug
+  degrades verification into a question the operator will answer yes to.
 
 ### Key Entities *(include if feature involves data)*
 
-- **Captured host identity**: the container's host public key, the address and port it answers on, and
-  when it was captured.
+- **Captured host identity**: the container's host **public** key, and the address and port it answers
+  on. Nothing more — the entry is a standard `known_hosts` line, which has no field for a capture
+  timestamp, and the standard format is load-bearing because `ssh` itself must read the file. An earlier
+  draft listed "when it was captured"; there is nowhere to put it and nothing that consumes it.
 - **Tool-managed `known_hosts`**: the file `attach` verifies against, owned by the tool and never the
   operator's own.
 
@@ -250,6 +270,8 @@ only that entry connects verified.
   present.
 - **SC-011**: A non-interactive `attach` against an unpinned environment refuses — **zero** assumed
   yeses.
+- **SC-012**: Two environments deploying concurrently on one host both end up pinned — **zero** lost
+  entries.
 
 ## Assumptions
 
@@ -264,12 +286,22 @@ only that entry connects verified.
 - **Foreknowledge of identity is not needed.** It would matter only for a machine that never talks to
   the daemon; a single-operator tool does not have that case, and serving it would mean reinstating
   private-key injection.
-- **Removing a flag is a breaking change** and is treated as one (Constitution VII).
+- **Removing a flag is a breaking change** and is treated as one (Constitution VII). So is removing the
+  env-file variable and the declarative credential target (FR-002).
+- **"On deploy" excludes a headless foreground run.** That path returns only once the agent has exited,
+  so there is no running container to read a key from and nothing to attach to afterwards. FR-003's
+  capture does not apply to it — stated here rather than left as an unexplained gap in the code, which
+  is how an omission becomes a bug.
+- **`start` and `stop` need no capture.** The host key lives on the persisted `ssh` volume, so stopping
+  and starting a container does not change its identity and the existing entry stays correct. Only a
+  path that can *replace* the key — a deploy, or `--purge` then recreate — needs to re-capture.
 
 ## Out of Scope
 
 - Changing how the container generates its host key.
-- Managing the operator's own `~/.ssh/known_hosts`.
+- Managing the operator's own `~/.ssh/known_hosts` — or any other file they own. The tool **emits** text
+  (an ssh-config stanza, a `known_hosts` line) for the operator to place where they choose; it never
+  writes into their files. Emitting is in scope, writing is not.
 - Verifying anything other than the container's SSH host identity — the outbound push credential and
   its `known_hosts` (Feature 003) are a different direction and unaffected.
 - Certificate authorities or signed host certificates.

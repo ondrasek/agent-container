@@ -135,21 +135,38 @@ context.
 | **I. Ephemerality** | **PASS** — the pinned file is disposable and re-derivable from the running container; nothing of value is trapped |
 | **II. Least Privilege, Immutable Runtime** | **PASS** — no new capability. The entrypoint *loses* a branch (injected-key install) |
 | **III. Least Exposure** | **PASS, and this is the point.** A plaintext private key at 0644 that survived `--purge` stops being written. The tool holds only public keys |
-| **IV. Deterministic Identity** | **PASS, and slightly strengthened** — identity becomes *verified* rather than assumed. No name, port or volume changes |
+| **IV. Deterministic Identity** | **PASS, with a tension worth naming.** Identity becomes *verified* rather than assumed, and no name, port or volume changes. But the principle prefers *derived* over *stored* precisely to avoid desynchronisation — and a host key **cannot** be derived, so this feature stores one. What makes it acceptable is that the stored copy is **re-capturable from the container at any time**, so a divergence is recoverable rather than orphaning; and that a divergence is exactly the signal the feature exists to surface, not a failure of it. Claiming a clean pass here would be overstating |
 | **V. Durable Spec** | **PASS** — clarified in one session; the four questions were settled before writing |
 | **VI. Least Dependencies** | **PASS** — nothing new |
 | **VII. Continuous Deployment** | **`feat!` — BREAKING.** `--host-key` is removed. The commit must say so or semantic-release under-bumps |
 
 ## Project Structure
 
+Corrected after reading the tree for `tasks.md`: the first draft of this list named one flag and two
+documents. The actual surface is **five injection channels, two completion scripts, six documents and
+eight test files** — the gap was found by grepping rather than by recalling, which is the only way it
+would have been found.
+
 ```text
-bin/agent-container       capture, the tool-owned known_hosts, attach's verification argv,
-                          removal of --host-key and its staging, stale-file cleanup
-image/entrypoint.sh       delete the injected-host-key branch and INJECT_HOST_KEY_PATH
-docs/shell-integration.md attach is now verified; what a refusal means
-docs/credentials.md       remove --host-key; state that host identity is captured, not supplied
+bin/agent-container       capture, the tool-owned known_hosts, the host-scoped write lock, the three
+                          argv builders (ssh_argv, ssh_probe_argv, ssh_config_stanza), the absent-pin
+                          prompt, removal of --host-key from up/keys/redeploy, stage_ssh_injection's
+                          host_key arm, inject_keys' host-key arm, INJECT_HOST_KEY_PATH,
+                          CRED_SSH_TARGETS' host_key target, .host_key in _FLAT_STATE_SUFFIXES,
+                          stale-file cleanup, the list --json field
+image/entrypoint.sh       delete BOTH injected-key branches — the bind-mounted file AND
+                          SSH_HOST_ED25519_KEY_B64. Keep the .pub derivation and its chmod 0644:
+                          capture depends on them
+completions/*.bash|zsh    drop --host-key from `up` and `keys` (a test asserts it is offered today)
+docs/credentials.md       remove --host-key and SSH_HOST_ED25519_KEY_B64 from the channel table and
+                          the precedence sentence
+docs/shell-integration.md attach is verified; what a refusal means; the --ssh-config stanza too
+docs/agent-interface.md   the new list --json field
+docs/orchestration.md     · docs/smoke-test.md · docs/agent-as-code.md · README.md — all mention the
+                          removed flag or target
 docs/threat-model.md      reconcile — an exposure removed, a new trusted file introduced
-bin/tests/                hermetic formatting/keying/argv; acceptance for verify, refuse, re-pin, remote
+bin/tests/                new hermetic + acceptance coverage, AND updating eight existing files whose
+                          assertions pin the old shape (test_completions.sh actively requires the flag)
 ```
 
 ## Design decisions carried into tasks

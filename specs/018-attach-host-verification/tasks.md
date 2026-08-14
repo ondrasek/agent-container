@@ -10,18 +10,22 @@
 **The ordering rule for this feature**: T020 — **prove a substituted key is refused** — comes before
 any polish. A pin that never refuses is decoration, and it passes every other test in this file.
 
-**Two things the plan under-counted, found while reading the tree for these tasks:**
+**The removal surface is much larger than "delete a flag", and grepping found it where recall did not.**
+FR-002 now names all five injection channels; the rest is mechanical but easy to leave half-done:
 
-1. **Private host key injection is FIVE channels, not one.** `plan.md` names `--host-key`; the tree
-   has `up --host-key`, `keys --host-key` (into a *running* container), `redeploy --host-key`, the
-   `SSH_HOST_ED25519_KEY_B64` env-file channel (`image/entrypoint.sh`, documented in
-   `docs/credentials.md`), and the declarative `host_key` target in `CRED_SSH_TARGETS`. FR-001 —
-   *"MUST NOT … inject a private SSH host key"* — covers all five; FR-002 names only the flag. **T023
-   is a census with a test, not a checklist**, because the failure mode is one channel surviving and
-   nothing looking wrong.
-2. **One `known_hosts` per host is a shared-file write, and `deployment_lock` is per `(host, name)`.**
-   Two environments on one host can deploy concurrently, each rewriting the same file — a lost
-   update, and the loser attaches unverified. T012 owns this.
+| Surface | Reality | Tasks |
+|---|---|---|
+| Injection channels | **five**: `up`/`keys`/`redeploy --host-key`, `SSH_HOST_ED25519_KEY_B64`, declarative `host_key` | T023–T029 |
+| Completion scripts | 2 files, 6 sites | T033a |
+| Existing tests | **8 files, ~35 references** — and `test_completions.sh` *asserts the flag is offered* | T033b–T033e |
+| Documents | **6**: credentials, shell-integration, agent-interface, orchestration, smoke-test, agent-as-code (+ README) | T044, T045, T045a, T045b |
+
+**T033b is the sharp edge**: a currently-green test *requires* `--host-key` to exist. Removing the flag
+turns it red, and the fix is to **invert the assertion**, never to delete it.
+
+**And one shared-file hazard**: `deployment_lock` is per `(host, name)`, but the pinned file is per
+**host**. A lost write means the loser's next attach finds nothing pinned and falls through to FR-013's
+prompt — verification silently degraded into a question. T012/T013 (FR-018, SC-012).
 
 ---
 
@@ -70,13 +74,15 @@ any polish. A pin that never refuses is decoration, and it passes every other te
 - [ ] T011 Write via the existing `atomic_write_*` primitive (temp + `os.replace`), not an in-place
       rewrite — a partial write here leaves the file `ssh` reads corrupt for **every** environment on
       the host, not just the one being deployed
-- [ ] T012 **Serialise the shared-file write.** `deployment_lock` is per `(host, name)`, so two
+- [ ] T012 **Serialise the shared-file write** (FR-018). `deployment_lock` is per `(host, name)`, so two
       environments deploying concurrently on one host both read-modify-write this file and one update
-      is lost — the loser then attaches unverified, silently. Add a **host-scoped** lock (or an
-      equivalent compare-and-retry) around T010's read-modify-write
-- [ ] T013 [P] Unit test for T012: two interleaved writes for different environments on one host, both
-      entries present afterwards. Written as an interleaving, not two sequential calls — sequential
-      calls pass with no locking at all
+      is lost. Add a **host-scoped** lock (or an equivalent compare-and-retry) around T010's
+      read-modify-write. **Why this is not a tidiness concern**: the loser's next attach finds nothing
+      pinned and falls through to FR-013's prompt — so a lost write silently degrades verification into
+      a question the operator will answer yes to
+- [ ] T013 [P] Unit test for T012 (SC-012): two interleaved writes for different environments on one
+      host, both entries present afterwards. Written as an interleaving, not two sequential calls —
+      sequential calls pass with no locking at all
 - [ ] T014 Thread `UserKnownHostsFile=<T001 path>` and `StrictHostKeyChecking=yes` into **`ssh_argv`**
       (FR-004, C2, research R6). One place: `attach --print`, the execute path (`os.execvp`) and
       `wizard_handover` all build from `ssh_argv`, so putting the options anywhere else creates a path
@@ -87,7 +93,8 @@ any polish. A pin that never refuses is decoration, and it passes every other te
       verifications that can disagree about the same container
 - [ ] T016 Add `UserKnownHostsFile` and `StrictHostKeyChecking yes` to **`ssh_config_stanza`**.
       Without them `attach --ssh-config` emits a stanza whose `ssh <name>` is unverified — a documented
-      path out of the feature, and the operator would have no way to know
+      path out of the feature, and the operator would have no way to know. **`test_shell_integration.py:145`
+      pins the stanza line-by-line**; T033e updates it
 - [ ] T017 [P] Tests in `bin/tests/test_command_construction.py` asserting **all three** builders
       carry both options, and that `attach --print` is still byte-for-byte the executed argv (the
       existing FR-010 parity property, which T014 must not break)
@@ -118,9 +125,14 @@ question.
       attach, assert failure and that the message names the mismatch. **This test is the feature.**
       Write it before the polish phase — everything else in this file passes with a pin that never
       refuses
-- [ ] T021 [US1] Acceptance test: attach to an unmodified environment is verified with **no**
-      trust-on-first-use prompt (C2, SC-002, S1), asserted through `attach --print` so no tty is
-      needed and the options are checked directly rather than inferred from a connection that worked
+- [ ] T021 [US1] Acceptance test: the argv `attach` builds carries both verification options
+      (C2, S1), asserted through `attach --print` so no tty is needed. **This does NOT prove SC-002** —
+      `--print` never connects, so it cannot witness the absence of a prompt. Say so in the test's
+      docstring; a test whose name overstates what it checks is worse than no test
+- [ ] T021a [US1] **SC-002 proper**: assert on a real connection that no trust-on-first-use prompt or
+      host-key warning appears on stderr. T022's successful attach is the natural carrier — it already
+      connects and must succeed cleanly, so the assertion costs nothing extra. Without this, SC-002 is
+      measured by a test that structurally cannot fail the way SC-002 describes
 - [ ] T022 [US1] Acceptance test: `down --purge` then `up` re-pins **silently** — the entry changed
       and no mismatch warning appears (C4, SC-004, S3). Paired deliberately with T020: the two
       directions must not collapse into each other, and a bug in either looks like the other working
@@ -138,7 +150,7 @@ question.
 - [ ] T022d [US1] `attach --print` / `--ssh-config` **never prompt** (FR-017) — they connect to nothing.
       With no entry they state that, and state that the emitted command will refuse. Otherwise
       `--print` hands over an argv that fails for a reason the output never mentioned
-- [ ] T022e [US1] [P] Tests for T022a–T022d: declining refuses and writes nothing; accepting pins
+- [ ] T022e [US1] [P] Tests for T022a–T022d (SC-009): declining refuses and writes nothing; accepting pins
       exactly one line; the prompt text contains the fingerprint **and** the cannot-detect-replacement
       sentence (assert on the *text* — an exit code cannot tell an honest prompt from a silent capture);
       a mismatch never prompts; stdin-closed refuses; `--print` with no entry says so
@@ -189,6 +201,36 @@ nothing, after every deployment path that exists.
 - [ ] T033 [US2] [P] Unit tests: each removed flag fails with the FR-002 wording (not a generic
       argparse error); a spec declaring `host_key` is refused; a pre-existing `.host_key` is deleted
       and the deletion reported
+- [ ] T033a [US2] **`completions/agent-container.bash` and `.zsh`** — drop `--host-key` from the `up`
+      and `keys` completions (four sites: bash 182, 187, 203, 208; zsh 165, 181). Completions that
+      offer a flag the CLI rejects are a worse experience than no completion, and a test pins the
+      completions to the CLI
+- [ ] T033b [US2] **`bin/tests/test_completions.sh:178,183` currently ASSERTS `--host-key` is offered**
+      for both `up` and `keys`. Change those assertions to assert **absence**. This is the one place in
+      the feature where a green test *requires* the thing being removed — leaving it is a red build, and
+      deleting it is not permitted (never weaken a gate; the assertion inverts)
+- [ ] T033c [US2] Update the **existing** tests that pin the old shape — 8 files, ~35 references. The
+      rule that makes this its own task: a changed contract is exactly when a pre-existing test still
+      pins the old one, so each must be re-pointed rather than removed:
+      · `test_compose.py:55,81` (`ssh_host_key` config mapping) → assert the config is **absent**
+      · `test_credentialing.py:89` (`push_key` distinct from `host_key`) → keep the **push_key** half,
+      which is a different feature and still true; `:461` (missing `--host-key` dies before compose)
+      → becomes the FR-002 refusal
+      · `test_command_construction.py:570,589` (staged path, staging refusal)
+      · `test_agent_as_code.py:867` (`ssh.host_key is None`) → the field is gone
+      · `test_pure_logic.py:377` (flat-state migration of `.host_key`) → follows T031
+      · `test_run_ingestion.py:477` (a `.host_key` fixture used as "a file we ignore") → pick a suffix
+      that still exists, or the fixture documents a thing that does not
+      · `test_entrypoint.sh:80,313` — the **generate** path stays and must keep passing; only the
+      inject path goes
+- [ ] T033d [US2] `test_acceptance.py` specifically: `:395` proves identity **persists across
+      `down`/`up`** by injecting a key. The property is still worth testing and is now *better* — assert
+      that the **container-generated** key survives, which is what actually matters. `:413`
+      (`keys --host-key` live injection) becomes an assertion that it is refused. `:267,289,335,337`
+      are the harness's own `host_key` plumbing; `:39` and `:1011` are comments that go stale
+- [ ] T033e [US2] [P] `test_shell_integration.py:145` pins the **exact** ssh-config stanza, which T016
+      changes. Update it to expect the two verification lines — and note the coupling in T016 so the
+      next person to touch the stanza knows a test spells it out
 
 ---
 
@@ -206,6 +248,10 @@ nothing, after every deployment path that exists.
 - [ ] T035 [US3] When no key was captured, emit an explicit "not captured" rather than an empty
       string or a missing key (C12, US3 scenario 2). A silent empty result is indistinguishable from a
       captured key that happens to be blank
+- [ ] T035a [US3] The entry must be readable **without the environment's host being reachable**
+      (FR-010, revised). `list --json` builds rows from the daemon, so a stopped environment or an
+      unreachable host could yield no row at all — and then "never a silent empty result" fails exactly
+      when the operator most needs the key: recovering access to something they cannot reach
 - [ ] T036 [US3] [P] Test in `bin/tests/test_agent_interface.py`: a captured environment yields a
       parseable `known_hosts` line; an uncaptured one yields the explicit statement
 
@@ -217,9 +263,11 @@ nothing, after every deployment path that exists.
       status untouched** (FR-008, C7, SC-008, S9). Write **no** line at all — not a blank one
 - [ ] T038 [P] Acceptance test for T037 (S9): deploy succeeds, the warning names the unverified
       attach, and the file gains no entry
-- [ ] T039 Skip capture on the headless `--foreground` path, and say in the code why: that branch
-      returns after the agent has exited, so there is no container to read and nothing to attach to.
-      Recorded rather than left as an unexplained absence, which is how a gap becomes a bug
+- [ ] T039 Skip capture on the headless `--foreground` path, per the spec assumption that scopes FR-003
+      (a task may not exempt itself from a MUST — the exemption had to go in the spec first). Say in the
+      code why: that branch returns after the agent has exited, so there is no container to read and
+      nothing to attach to. `start`/`stop` likewise need no capture — the key persists on the `ssh`
+      volume, so identity does not change
 - [ ] T040 [P] Acceptance test: capture over a **remote** context (FR-009, C8, SC-006, S10). Run
       against a real remote context — SC-006 says verified, not inferred from a local run, because the
       operator's machine shares no filesystem with that daemon
@@ -234,7 +282,16 @@ nothing, after every deployment path that exists.
       the credential channels table and the precedence sentence, and state that host identity is
       **captured, not supplied**
 - [ ] T045 [P] Update `docs/shell-integration.md`: `attach` is verified; what a refusal means and what
-      to do about it; and that the `--ssh-config` stanza carries the same verification (T016)
+      to do about it; **what the absent-pin prompt is and is not** (a trust decision, not a check — it
+      cannot detect a replaced container); and that the `--ssh-config` stanza carries the same
+      verification (T016)
+- [ ] T045a [P] Update `docs/orchestration.md`, `docs/smoke-test.md`, `docs/agent-as-code.md` and
+      `README.md` — all four mention the removed flag or the declarative `host_key` target. Constitution
+      Development Workflow: *"stale spec or docs are defects"*, and a smoke test that tells the operator
+      to pass a removed flag fails in front of them
+- [ ] T045b [P] Update `docs/agent-interface.md` for the new `list --json` field (Feature 009's
+      contract document) — and state the FR-010 property there: the answer does not depend on the host
+      being reachable
 - [ ] T046 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Removing a documented flag
       is breaking, and python-semantic-release under-bumps if the message does not say so
 - [ ] T047 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then
@@ -249,7 +306,7 @@ Phase 1 (T001–T002)
    └─> Phase 2 (T003–T017)          formatting, capture, the shared-file write, the argv builders
           ├─> Phase 3 US1 (T018–T022f)  capture at deploy + verify + REFUSE + the absent-pin prompt
           │      └─> T020 gates Phase 6
-          └─> Phase 4 US2 (T023–T033)   independent of US1; may run in parallel
+          └─> Phase 4 US2 (T023–T033e)  independent of US1; may run in parallel
                  └─> Phase 5 US3 (T034–T036)   needs a captured entry to expose
                         └─> Phase 6 (T037–T047)
 ```
