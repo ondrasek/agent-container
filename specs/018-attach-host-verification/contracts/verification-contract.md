@@ -66,3 +66,20 @@ their disk.
 The operator can obtain a `known_hosts`-format line for a running environment through the existing
 machine-readable interface (FR-010, US3), or a clear statement that none was captured — never a silent
 empty result.
+
+**This is also the non-TOFU answer for a second machine** — an entry copied from the machine that
+deployed predates what it checks, where a fresh capture there would not (research R8). Preferred over
+C13 whenever it is available.
+
+## C13 — An unpinned attach asks, and says what accepting does not detect
+
+With no entry for the environment, `attach` warns, shows the key's **fingerprint**, states that
+accepting **cannot detect a container that was replaced**, and asks (FR-013, FR-016). Yes → capture,
+pin, connect. No → refuse. **Never a silent capture, and never described as verification** (SC-009).
+
+## C14 — A mismatch never prompts, and no answer means no
+
+A mismatch is refused unconditionally, with or without a terminal (FR-014, SC-010). Where no answer can
+be obtained, an unpinned attach refuses rather than assuming yes (FR-015, SC-011). `--print` and
+`--ssh-config` never prompt; with nothing pinned they say so, and say the emitted command will refuse
+(FR-017).

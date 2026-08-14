@@ -148,6 +148,40 @@ agent-container ... --json | ...   # the machine-readable interface (FR-010)
 **Expect**: a `known_hosts`-format line for a running environment, usable verbatim on another client;
 and for an environment with no capture, an explicit statement of that — never a silent empty result.
 
+## S12 — An unpinned attach ASKS, and says what accepting misses (C13, SC-009)
+
+```sh
+agent-container up --name ask-demo
+: > "$KH"                                  # simulate a lost pin
+agent-container attach --name ask-demo     # interactively
+```
+
+**Expect**: a warning, the key's **fingerprint**, an explicit statement that accepting **cannot detect a
+container that was replaced**, and a question. Answering no refuses; answering yes captures, pins and
+connects. Then confirm the pin appeared:
+
+```sh
+grep -c . "$KH"     # one line
+```
+
+**Fails if** the tool captured without asking, or if the message calls this verification. Both look like
+success from the exit code, which is why this scenario asserts on the *text*.
+
+## S13 — No terminal means no, and a mismatch never asks (C14, SC-010, SC-011)
+
+```sh
+: > "$KH"
+agent-container attach --name ask-demo < /dev/null | cat; echo "exit=$?"
+```
+
+**Expect**: non-zero, no capture, no prompt — an unattended invocation cannot consent, so an assumed
+yes would be a silent capture with extra steps.
+
+Then re-run S2 (substituted key) **with a terminal attached**:
+
+**Expect**: refusal with **no question asked**. A prompt here would let the one unconditional refusal in
+the feature be clicked through.
+
 ---
 
 ## What "done" looks like

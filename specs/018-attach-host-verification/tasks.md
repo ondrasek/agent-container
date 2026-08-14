@@ -99,6 +99,12 @@ any polish. A pin that never refuses is decoration, and it passes every other te
 **Goal**: `attach` verifies against a key captured over the runtime, and refuses a changed identity.
 **Independent test**: S1 (verified attach, no prompt) then S2 (substituted key → refused).
 
+**Three states, three answers, and they must not be merged** (research R8): **matches** → connect;
+**differs** → refuse, unconditionally, no prompt; **absent** → warn, show the fingerprint, say what
+accepting cannot detect, and ask. The temptation is one "handle the host key" helper with a mode
+argument; T022b says no, because the unconditional refusal is one refactor away from becoming a
+question.
+
 - [ ] T018 [US1] Call T007/T010 from **`compose_up_exec`**, after `write_state(...)` and
       `driver_reachable_address(...)` and before the "attach with:" log — the one choke point every
       deploy path passes through. Feature 012's `resolve_egress_declaration` records why: `do_up`
@@ -118,6 +124,27 @@ any polish. A pin that never refuses is decoration, and it passes every other te
 - [ ] T022 [US1] Acceptance test: `down --purge` then `up` re-pins **silently** — the entry changed
       and no mismatch warning appears (C4, SC-004, S3). Paired deliberately with T020: the two
       directions must not collapse into each other, and a bug in either looks like the other working
+- [ ] T022a [US1] **The unpinned prompt** (FR-013, FR-016, C13, S12): when the environment has no entry,
+      `attach` warns, shows the key's **fingerprint**, states that accepting **cannot detect a container
+      that was replaced**, and asks. Yes → capture, pin, connect. No → refuse. **Never silent, and never
+      worded as verification** — research R8 explains why capture-at-attach is a trust decision and not
+      a check, and the wording is the only place the operator learns that
+- [ ] T022b [US1] **A mismatch never prompts** (FR-014, C14, SC-010) — refuse unconditionally, terminal
+      or not. Implement as a separate branch from T022a, not a shared "ask the operator" helper with a
+      flag: one code path that sometimes asks is one refactor away from asking here too
+- [ ] T022c [US1] No terminal / non-interactive → **refuse, never an assumed yes** (FR-015, SC-011). An
+      operator may pre-accept explicitly on the command line; that acceptance must be **as loud in the
+      output as the prompt would have been**, and needs a long flag (the project's short/long rule)
+- [ ] T022d [US1] `attach --print` / `--ssh-config` **never prompt** (FR-017) — they connect to nothing.
+      With no entry they state that, and state that the emitted command will refuse. Otherwise
+      `--print` hands over an argv that fails for a reason the output never mentioned
+- [ ] T022e [US1] [P] Tests for T022a–T022d: declining refuses and writes nothing; accepting pins
+      exactly one line; the prompt text contains the fingerprint **and** the cannot-detect-replacement
+      sentence (assert on the *text* — an exit code cannot tell an honest prompt from a silent capture);
+      a mismatch never prompts; stdin-closed refuses; `--print` with no entry says so
+- [ ] T022f [US1] [P] Prove the honesty check can fail: soften the prompt wording to drop the
+      cannot-detect clause and assert T022e then fails. Without this, the wording assertion is a
+      guard nobody has seen refuse anything
 
 ---
 
@@ -172,7 +199,10 @@ nothing, after every deployment path that exists.
 
 - [ ] T034 [US3] Add the captured entry to `list --json` rows in `bin/agent-container` (FR-010, C12) —
       the **existing** per-environment machine-readable interface, read from local state with no
-      daemon call. No new command, and no new column in the human table
+      daemon call. No new command, and no new column in the human table.
+      **This is also the non-TOFU path for a second machine** (research R8): an entry copied from the
+      machine that deployed predates what it checks, where a capture accepted at T022a's prompt does
+      not. Say so where the operator will read it, or they will take the easier, weaker route
 - [ ] T035 [US3] When no key was captured, emit an explicit "not captured" rather than an empty
       string or a missing key (C12, US3 scenario 2). A silent empty result is indistinguishable from a
       captured key that happens to be blank
@@ -217,7 +247,7 @@ nothing, after every deployment path that exists.
 ```text
 Phase 1 (T001–T002)
    └─> Phase 2 (T003–T017)          formatting, capture, the shared-file write, the argv builders
-          ├─> Phase 3 US1 (T018–T022)   capture at deploy + verify + REFUSE
+          ├─> Phase 3 US1 (T018–T022f)  capture at deploy + verify + REFUSE + the absent-pin prompt
           │      └─> T020 gates Phase 6
           └─> Phase 4 US2 (T023–T033)   independent of US1; may run in parallel
                  └─> Phase 5 US3 (T034–T036)   needs a captured entry to expose

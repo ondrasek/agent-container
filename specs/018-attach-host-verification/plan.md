@@ -72,6 +72,33 @@ So capture polls for the file with a bound, and on timeout **warns and says atta
 (FR-008) rather than pinning an empty value or failing the deploy. A test must assert the empty case
 is refused, because "pinned nothing" and "pinned correctly" are indistinguishable from the exit code.
 
+### 4a. An ABSENT pin asks; a MISMATCH never does — and the reason is not symmetry
+
+Correcting an error in the first draft of this plan, which had `attach` simply refuse when nothing is
+pinned. Two separate things were wrong with that.
+
+**First, capture-at-attach is not a verification, so it must not be silent.** A pin is a witness, and its
+value comes from being **older than what it checks**. At deploy the tool knows the container is the one
+it just created; at attach the runtime can only say *"the container currently called X"*. An attacker who
+replaced the container would have their own key captured and then checked against themselves. So
+FR-003's "the runtime is a trusted channel" licenses preferring the runtime over `ssh-keyscan` **at
+deploy time** — it does not license capturing at attach time. Research R8 has the table.
+
+**Second, refusing outright is disproportionate.** The only re-pin path would be `redeploy`, which runs
+`--force-recreate` — it destroys the container and kills the operator's running agent. A deleted cache
+file would cost a working session, against Constitution I.
+
+So: **warn, show the fingerprint, say what accepting cannot detect, and ask** (FR-013/FR-016). A trust
+decision the operator makes knowingly, never one the tool makes quietly. No terminal → refuse (FR-015);
+an assumed yes is a silent capture with extra steps.
+
+**And a mismatch is unconditional** (FR-014). Absent has no prior claim to contradict; a mismatch
+contradicts one the tool made itself. Making both prompt would let the second be clicked through, which
+deletes the feature.
+
+**US3 is the preferred escape**, not the prompt: an entry copied from the deploying machine has real
+provenance.
+
 ### 5. `ssh-keyscan` is forbidden, and that is a requirement not a preference
 
 FR-003 names the channel. The runtime is an independent, already-trusted path — the operator controls
@@ -156,5 +183,6 @@ untouched, and the threat-model reconciliation.
 | Deviation | Why needed | Rejected alternative |
 |---|---|---|
 | A tool-owned `known_hosts` | FR-006 forbids touching the operator's | writing into `~/.ssh/known_hosts` — silently editing a file the operator owns |
+| A prompt on an absent pin, but never on a mismatch | the two are different situations (decision 4a); refusing on absent costs a running agent, prompting on mismatch lets the warning be clicked through | silent capture-if-absent — cannot detect a replaced container yet *looks* like verification, which is worse than an obvious absence |
 | Polling for the `.pub` at capture | it does not exist when the container reports `Up` (016, measured) | capturing immediately — pins nothing, and "pinned nothing" is indistinguishable from success |
 | Removing a documented flag | it delivers no verified benefit and costs a 0644 private key that survives `--purge` | keeping it — the whole exposure this feature exists to remove |

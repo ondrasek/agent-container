@@ -49,10 +49,23 @@ before and after any tool operation.
 
 ```text
 deploy (any path)  -> capture the .pub through the runtime; write/replace this environment's line
-attach             -> ssh -o UserKnownHostsFile=<file> -o StrictHostKeyChecking=yes ...
+attach, pinned     -> ssh -o UserKnownHostsFile=<file> -o StrictHostKeyChecking=yes ...
+attach, NO entry   -> warn + show fingerprint + ASK; yes -> capture, pin, connect; no -> refuse
+                      no terminal -> refuse (never an assumed yes)
+attach, MISMATCH   -> refuse, unconditionally, never a prompt
 down / host rm     -> the line may remain; it is re-derived, so staleness costs nothing
 capture fails      -> no line written, WARN that attach is unverified, deploy still succeeds
 ```
+
+**Absent and mismatched are different states with different answers**, and the difference is not a
+matter of degree (FR-013/FR-014). An absent entry has no prior claim to contradict, so asking is
+honest. A mismatch contradicts a claim the tool made itself, so asking would let a warning be clicked
+through — the one place this feature must be unconditional.
+
+**A capture at attach time is a trust decision, not a verification**, and the prompt must say so: it
+cannot detect a container that was *replaced*, because the pin would then be the replacement's own key
+(research R8). This is why FR-016 requires a fingerprint in the prompt — the operator's comparison
+against another source is the only real check available at that moment.
 
 **Capture happens on EVERY deploy, and that is what makes FR-007 free** (research R4). The pinned
 entry is by construction whatever the tool last saw, so a mismatch at attach means the key changed

@@ -136,6 +136,55 @@ operator's agent/config (unverifiable from here, and FR-006 says the tool owns i
 
 ---
 
+## R8 — A pin must PREDATE what it checks, so an absent pin is a question, not a capture
+
+**Decision**: nothing pinned → **warn, state what accepting cannot detect, ask** (FR-013). A
+**mismatch** never prompts (FR-014). No terminal → refuse (FR-015).
+
+**Rationale — and this is the argument the whole design rests on.** The obvious move when the pin is
+missing is "just fetch the key through the runtime and connect; FR-003 already says the runtime is a
+trusted channel." That reasoning is **wrong**, and it is wrong in a way that reads as correct, which is
+why it is written down here.
+
+A pin is a **witness**. Its entire value comes from being **older than the event it testifies about**. A
+witness created at the moment of the event witnesses nothing. Consider an attacker who destroys the
+container and starts their own under the same name:
+
+| | Captured at deploy | Captured at attach |
+|---|---|---|
+| The pin holds | **our** container's public key, from when we created it | **their** container's public key, fetched just now |
+| `ssh` compares it against | their endpoint's key | their endpoint's key |
+| Outcome | **mismatch → refused** | **match → connected** |
+
+At deploy time the tool knows the container is the one it just created — the provenance comes from the
+*act of deploying*, not from the channel. At attach time the runtime can only answer *"the container
+currently called X"*, never *"the container you created"*. So the guarantee evaporates, and
+capture-at-use is trust-on-first-use through a different door — with the attacker who replaced the
+container owning what is behind that door too.
+
+**So FR-003's "the runtime is a trusted channel" does NOT license capture-at-attach.** It licenses
+preferring the runtime over `ssh-keyscan` *at deploy time*, which is a different claim. Conflating the
+two is the mistake this entry exists to prevent.
+
+**Which leaves a real usability problem, and it is not solved by weakening verification.** Refusing
+outright makes `redeploy` the only re-pin path, and `redeploy` runs `--force-recreate` — it destroys the
+container and kills the operator's running agent. A deleted cache file would cost a working session,
+against Constitution I's whole point.
+
+The resolution is to stop dressing a trust decision as a verification: **ask**, and say plainly what
+accepting does not detect. The operator takes a known risk knowingly; the tool does not pretend. Hence
+FR-016's fingerprint — a prompt with nothing to compare against is theatre — and FR-015's refusal where
+no answer can be obtained, because an assumed yes is a silent capture with extra steps.
+
+**Rejected**: silent capture-if-absent (the analysis above — it cannot detect a replaced container, and
+it *looks* like verification, which is worse than being obviously absent); refuse-always (destroys a
+running session over a deletable cache file); prompting on a **mismatch** too (a mismatch contradicts a
+claim the tool made itself, and a prompt would let a warning be clicked through — this is the one place
+the feature must be unconditional); defaulting to yes when there is no terminal (an unattended
+invocation cannot consent).
+
+---
+
 ## R7 — Removal is part of the feature, and the stale file must be deleted
 
 **Decision**: remove the `--host-key` flag, its staging, the entrypoint's injected-key branch, and

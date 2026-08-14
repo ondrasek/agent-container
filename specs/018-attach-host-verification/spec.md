@@ -57,6 +57,21 @@ delete the private-key injection.**
   asks the untrusted party.
 - Q: What happens to `--host-key`? → A: **Removed**, as a breaking change. It delivers no verified
   benefit and its cost is a private key at 0644 on the operator's disk that `--purge` does not remove.
+- Q: Does capturing the key at attach time verify anything? → A: **No, and this is the load-bearing
+  distinction.** A pin is a witness, and its value comes entirely from being **older than the thing it
+  checks**. At deploy time the tool knows the container is the one it just created; at attach time the
+  runtime can only say *"the container currently called X"*, never *"the container you created"*. So an
+  attacker who replaced the container would have their own key captured and then verified against
+  themselves. Capture-at-use is trust-on-first-use through a different door — and the attacker who
+  replaced the container owns what is behind that door too.
+- Q: So what happens when nothing is pinned? → A: **Warn, say what accepting cannot detect, and ask.**
+  Capture on an explicit yes. It is a trust decision the operator makes knowingly — not a verification
+  the tool performs and not something it does silently. Refusing outright was rejected: the only
+  re-pin path would be `redeploy`, which `--force-recreate`s the container and kills the operator's
+  running agent, so a deleted cache file would cost a working session.
+- Q: Does a **mismatch** ever prompt? → A: **Never.** Absent and changed are different situations with
+  different answers: absent has no prior claim to contradict, a mismatch contradicts one the tool
+  made itself. Turning a mismatch into a prompt would delete the feature.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -77,8 +92,9 @@ container's host key and attach again (refused, and the message says why).
    verified against a captured key and no trust-on-first-use prompt appears.
 2. **Given** an environment whose host key has changed, **When** the operator attaches, **Then** the
    connection is **refused** with a message naming the mismatch.
-3. **Given** the captured key is absent, **When** the operator attaches, **Then** the tool captures
-   it first rather than falling back to unverified connection.
+3. **Given** no key is pinned for the environment, **When** the operator attaches, **Then** the tool
+   **warns that it cannot verify what it is about to connect to, states what accepting does not
+   detect, and asks** — capturing and pinning only on an explicit yes, and refusing on a no.
 4. **Given** a recreated environment with a legitimately new host key, **When** the operator
    attaches, **Then** the tool recognises its own recreation and re-pins rather than presenting a
    scary mismatch it caused itself.
@@ -115,6 +131,11 @@ so it can be placed on another machine or in a configuration they manage.
 **Why this priority**: the operator's stated reason for capture — *"we need to capture the host public
 key for injection elsewhere"* — but it is additive, and US1 already pins for the local case.
 
+**And it is the only non-TOFU answer for a second machine.** An entry copied from the machine that
+deployed descends from the deploy, so it predates what it checks; a fresh capture on the second machine
+does not. That makes US3 the *preferred* path whenever FR-013's prompt would otherwise appear — a
+detail worth stating, because the prompt is easier and weaker.
+
 **Independent Test**: obtain the entry for a running environment and confirm a second client using
 only that entry connects verified.
 
@@ -141,6 +162,13 @@ only that entry connects verified.
   port — the tool must not silently rewrite the operator's file.
 - **Capture fails** (daemon unreachable mid-`up`) — must not fail the deploy, but must not silently
   leave attach unverified either.
+- **Nothing pinned, and no terminal to ask** (a script, a pipe, an agent-driven invocation) — must
+  refuse rather than assume yes.
+- **Nothing pinned because the operator is on a second machine** — the prompt is the fallback, not the
+  intended path: US3 gives them the entry from the machine that deployed, and that pin has real
+  provenance where a fresh capture does not.
+- **A pinned entry the operator wants to inspect before answering** — the prompt must show a
+  fingerprint, or there is nothing to compare it against and the question is theatre.
 - **An operator who genuinely wants foreknowledge** of the identity — must be told plainly that it is
   no longer supported and why.
 - **A pre-existing staged private key** from an older version — must be removed, and its removal
@@ -176,6 +204,19 @@ only that entry connects verified.
   say that it did.
 - **FR-012**: No private key material may be written anywhere on the operator's machine by this
   feature (Constitution III).
+- **FR-013**: When **no key is pinned** for an environment, `attach` MUST warn, MUST state that
+  accepting is a trust decision that **cannot detect a container that was replaced**, and MUST ask
+  before proceeding. On an explicit yes it captures (FR-003) and pins; on a no it refuses. It MUST NOT
+  capture silently, and MUST NOT present this as verification.
+- **FR-014**: A **mismatch** MUST NOT prompt, ever (FR-004). Absent and changed are different
+  situations: absent has no prior claim to contradict; a mismatch contradicts one the tool made itself.
+- **FR-015**: Where no answer can be obtained — no terminal, or a non-interactive invocation — the
+  tool MUST refuse rather than assume yes. An operator MAY pre-accept explicitly on the command line,
+  which MUST be as loud in the output as the prompt would have been.
+- **FR-016**: The prompt MUST show the key's fingerprint, so the operator can compare it against
+  another source before answering. A prompt with nothing to compare is a formality.
+- **FR-017**: `attach --print` and `--ssh-config` MUST NOT prompt — they emit a command and connect to
+  nothing. When no key is pinned they MUST say so, and say that the emitted command will refuse.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -203,6 +244,12 @@ only that entry connects verified.
   operation — **100%**.
 - **SC-008**: A capture failure leaves a deploy successful and an explicit statement that attach is
   unverified — **zero** silently unverified attaches.
+- **SC-009**: An unpinned environment never connects without an explicit answer — **zero** silent
+  captures, and **zero** captures presented as verification.
+- **SC-010**: A mismatch is refused without a prompt in **100%** of cases, whether or not a terminal is
+  present.
+- **SC-011**: A non-interactive `attach` against an unpinned environment refuses — **zero** assumed
+  yeses.
 
 ## Assumptions
 
