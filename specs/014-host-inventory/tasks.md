@@ -169,7 +169,13 @@ discrepancies are reported distinctly.
       its entries, which is FR-003 working. Without this the first disagreement is resolved by whoever
       reads the code that day, and both possible mistakes are bad
 - [ ] T040 [P] `docs/inventory.md` — what an entry is, the four outcomes, why `unknown` is computed
-      rather than stored, retention, and that this feature **deletes nothing** (015's job)
+      rather than stored, retention, and that this feature **deletes nothing** (015's job).
+      **Must state that the inventory begins at install and is not backfilled**: an empty inventory
+      otherwise reads as "nothing exists" rather than "nothing recorded yet", and pre-install
+      environments reconciling as `unrecorded` reads as a bug rather than as the accurate answer it
+      is. Say why backfilling was rejected — `*.port` is a census of ports allocated and not
+      released, so reconstructed entries would describe gone environments with an undeterminable
+      outcome, and a fabricated entry is worse than an absent one in the store a kill switch reads
 - [ ] T041 [P] **Reconcile `docs/threat-model.md`** — the record names hosts and environments, and
       the Constitution's Development Workflow clause makes this MUST for any feature altering what is
       persisted. Read the existing structure first: structural guards in `bin/tests/` parse that file

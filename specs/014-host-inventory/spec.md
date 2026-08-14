@@ -290,6 +290,18 @@ whether its host is one the tool provisioned.
   several projects to one host; the question *"what have I got running"* is about the operator,
   not the project — and it must survive deleting the project.
 - **Recording is a side effect of acting**, not a separate step an operator can forget.
+- **The inventory begins at install, and is not backfilled.** Entries are minted only at creation
+  (FR-015), so environments created before this feature existed are not in it and will reconcile as
+  `unrecorded`. That is **accurate rather than a defect** — they genuinely are not in the record, and
+  `unrecorded` says exactly that without claiming ownership either way (FR-007). The gap is a
+  one-time tail that shrinks with every subsequent deployment.
+
+  Backfilling from local port state was considered and **rejected**: `<state>/<host>/*.port` is a
+  census of *ports allocated and not released*, not of environments that exist — a container removed
+  outside the tool leaves its port file behind. Reconstructed entries would therefore describe
+  environments that are gone, with an outcome that cannot be determined: not `removed` (the tool did
+  not record removing them) and not honestly `active`. **A fabricated entry is worse than an absent
+  one**, especially in the store a kill switch reads.
 - **This feature does not delete anything.** It remembers, compares and reports; acting on the
   result is the kill switch's job.
 - Retention is bounded but generous — this is for a machine used for years, and the interesting
