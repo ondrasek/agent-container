@@ -246,7 +246,12 @@ def test_threat_model_guard_fails_on_an_undocumented_feature(wiz, fake_root):
     A feature directory with no maintenance row is the mechanical half of the
     failure the constitution's 2.2.0 clause targets.
     """
-    (fake_root / "specs" / "018-brand-new-feature").mkdir(parents=True)
+    # 999, NOT the next real number. This read `018-brand-new-feature` and broke the
+    # day Feature 018 was specified: a real 018 row appeared, the guard correctly
+    # stopped firing, and the proof-it-can-fail test failed for the one reason that
+    # is not a defect. A can-fail fixture must name something that CANNOT become
+    # real, or it has an expiry date nobody wrote down.
+    (fake_root / "specs" / "999-brand-new-feature").mkdir(parents=True)
     with pytest.raises(AssertionError, match="no maintenance row"):
         tpl.test_threat_model_names_every_feature(wiz)
 
