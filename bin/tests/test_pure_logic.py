@@ -6,7 +6,11 @@ the shell completions read the same state files, so do not 'fix' them casually.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1071,3 +1075,193 @@ def test_the_boundary_resolver_binds_loopback_only(wiz):
     assert "access-control: 0.0.0.0/0 allow" not in code, (
         "a blanket allow re-opens what the loopback bind closes if the bind ever widens"
     )
+
+
+# --- Feature 018: the tool-owned known_hosts --------------------------------
+# The entry FORMAT is tested against `ssh-keygen -F`, not against our own
+# formatter's opinion of it. FR-005 is a claim about what ssh will match, so a
+# test that only compares strings would pass while the property it names is
+# broken — exactly the shape this project keeps finding.
+
+ED25519_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+OTHER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther00000000000000000000000000000000="
+
+
+def test_known_hosts_entry_uses_the_bracket_port_form(wiz):
+    entry = wiz.known_hosts_entry("127.0.0.1", 2222, ED25519_KEY + " root@box")
+    assert entry.startswith("[127.0.0.1]:2222 ssh-ed25519 ")
+    # The trailing comment is dropped: it is not part of what ssh matches, and
+    # carrying a container's hostname into the operator's file is noise.
+    assert entry.endswith(ED25519_KEY.split()[1])
+
+
+@pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="ssh-keygen not on PATH")
+def test_bracket_port_keying_is_what_ssh_actually_matches(wiz, tmp_path):
+    """FR-005/SC-005 as ssh sees it: same address, different port must NOT match.
+
+    Measured rather than asserted about our own string, because the bare-host form
+    ('127.0.0.1 ssh-ed25519 …') would cross-match and let one container's key
+    verify another container's connection — silently.
+    """
+    kh = tmp_path / "known_hosts"
+    kh.write_text(wiz.known_hosts_entry("127.0.0.1", 2222, ED25519_KEY) + "\n")
+
+    def found(target: str) -> bool:
+        return (
+            subprocess.run(
+                ["ssh-keygen", "-F", target, "-f", str(kh)],
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+
+    assert found("[127.0.0.1]:2222")
+    assert not found("[127.0.0.1]:2223")  # a sibling container on the same host
+    assert not found("127.0.0.1")  # the bare form must not match either
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   \n\t ",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+        "ssh-ed25519",  # type with no key
+        "ssh-ed25519 short",  # body too short to be a key
+        "ssh-ed25519 has spaces in!! body",
+        "not-a-key-type AAAAC3NzaC1lZDI1NTE5AAAAIExample000000000000000000000000000000=",
+        ED25519_KEY + "\n" + OTHER_KEY,  # two keys is not one key
+    ],
+)
+def test_valid_host_pubkey_refuses_everything_that_is_not_one_public_key(wiz, text):
+    assert wiz.valid_host_pubkey(text) is None
+
+
+def test_valid_host_pubkey_accepts_and_normalises(wiz):
+    assert wiz.valid_host_pubkey(f"  {ED25519_KEY} root@box \n") == ED25519_KEY
+
+
+def test_the_private_key_tripwire_can_fail(wiz, monkeypatch):
+    """Proof the PRIVATE KEY guard is load-bearing: neuter it and the corpus above
+    stops being refused. Without this, the tripwire is a line nobody has watched
+    fire."""
+    src = "-----BEGIN OPENSSH PRIVATE KEY-----"
+    assert wiz.valid_host_pubkey(src) is None  # guarded
+
+    def unguarded(text: str) -> str | None:
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        return lines[0] if lines else None  # the check removed
+
+    monkeypatch.setattr(wiz, "valid_host_pubkey", unguarded)
+    assert wiz.valid_host_pubkey(src) is not None  # the guard was what refused it
+
+
+def test_pin_replaces_only_its_own_entry(wiz):
+    wiz.pin_host_key("local", "localhost", 2206, ED25519_KEY)
+    wiz.pin_host_key("local", "localhost", 2207, OTHER_KEY)
+    wiz.pin_host_key("local", "localhost", 2206, OTHER_KEY)  # re-pin the first
+    lines = wiz.known_hosts_path("local").read_text().splitlines()
+    assert len(lines) == 2
+    assert wiz.pinned_host_key("localhost", 2206) == OTHER_KEY
+    assert wiz.pinned_host_key("localhost", 2207) == OTHER_KEY
+    assert wiz.pinned_host_key("localhost", 2208) is None
+
+
+def test_pinned_file_is_not_world_writable_and_holds_no_private_material(wiz):
+    p = wiz.pin_host_key("local", "localhost", 2206, ED25519_KEY)
+    assert oct(p.stat().st_mode)[-3:] == "644"
+    assert "PRIVATE KEY" not in p.read_text()
+
+
+def test_the_host_scoped_lock_actually_excludes(wiz):
+    """FR-018: two deploys on ONE host share this file, while `deployment_lock` is
+    per (host, name) and would let them interleave.
+
+    Asserts mutual exclusion directly rather than racing two threads: a timing race
+    that happens not to interleave still passes, which would make this a test that
+    silently stops testing anything. flock conflicts between separate open file
+    descriptions even inside one process, so a non-blocking attempt is a faithful
+    stand-in for the second deploy.
+    """
+    lock_file = wiz.host_state_dir("local") / "known_hosts.lock"
+    with wiz.known_hosts_lock("local"):
+        with lock_file.open("w") as other:
+            with pytest.raises(OSError):
+                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # Released: the same attempt now succeeds. Without this half, the assertion
+    # above would also pass against a lock that never unlocked.
+    with lock_file.open("w") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(other.fileno(), fcntl.LOCK_UN)
+
+
+def test_without_the_lock_a_concurrent_deploy_LOSES_an_entry(wiz, monkeypatch):
+    """SC-012's failure mode, demonstrated — the proof that the lock is
+    load-bearing rather than decorative.
+
+    The interleave is forced deterministically (another write lands between this
+    one's read and its replace) with the lock stubbed out. An entry vanishes. That
+    matters more than it looks: the loser's next attach finds nothing pinned and
+    falls through to the FR-013 prompt, so a lost write silently degrades
+    verification into a question the operator will answer yes to.
+    """
+    monkeypatch.setattr(wiz, "known_hosts_lock", contextlib.nullcontext)
+    wiz.pin_host_key("local", "localhost", 2207, OTHER_KEY)  # seed
+
+    real_read = Path.read_text
+    fired: list[int] = []
+
+    def racing_read(self, *a, **kw):
+        text = real_read(self, *a, **kw)
+        if self.name == "known_hosts" and not fired:
+            fired.append(1)
+            wiz.pin_host_key("local", "localhost", 2206, ED25519_KEY)  # the other deploy
+        return text
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    wiz.pin_host_key("local", "localhost", 2208, OTHER_KEY)
+    monkeypatch.undo()
+
+    assert fired, "the interleave never happened — this test proved nothing"
+    assert wiz.pinned_host_key("localhost", 2206) is None  # clobbered by the racer
+    assert wiz.pinned_host_key("localhost", 2208) == OTHER_KEY
+
+
+def test_capture_returning_nothing_is_a_value_not_an_empty_string(wiz, monkeypatch):
+    """T009: the timeout path must hand back None. An empty string would format
+    into a blank known_hosts line, which reads exactly like a successful pin."""
+    monkeypatch.setattr(
+        wiz, "query", lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, "", "no such file")
+    )
+    monkeypatch.setattr(wiz.time, "sleep", lambda _s: None)
+    assert wiz.capture_host_pubkey({"driver": "docker", "context": ""}, "acme", timeout=0) is None
+
+
+def test_capture_rejects_a_private_key_the_container_somehow_offers(wiz, monkeypatch):
+    monkeypatch.setattr(
+        wiz,
+        "query",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            a[0], 0, "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n", ""
+        ),
+    )
+    monkeypatch.setattr(wiz.time, "sleep", lambda _s: None)
+    assert wiz.capture_host_pubkey({"driver": "docker", "context": ""}, "acme", timeout=0) is None
+
+
+def test_capture_reads_through_the_runtime_never_ssh_keyscan(wiz, monkeypatch):
+    """FR-003: the channel IS the security argument. Asking the endpoint being
+    authenticated to state its own identity is trust-on-first-use with extra steps,
+    so the captured value must come from the runtime's argv."""
+    seen: list[list[str]] = []
+
+    def fake_query(argv, **kw):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, ED25519_KEY + "\n", "")
+
+    monkeypatch.setattr(wiz, "query", fake_query)
+    got = wiz.capture_host_pubkey({"driver": "podman", "context": ""}, "acme")
+    assert got == ED25519_KEY
+    assert seen[0][0] == "podman"
+    assert "exec" in seen[0] and wiz.CONTAINER_HOSTKEY_PUB in seen[0]
+    assert not any("keyscan" in part for argv in seen for part in argv)

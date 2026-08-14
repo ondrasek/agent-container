@@ -360,11 +360,16 @@ def test_down_without_purge_preserves_volumes(wiz, capture_query, monkeypatch):
 
 
 def test_ssh_argv_is_the_canonical_attach_command(wiz):
+    # Feature 018: the argv now carries verification. Asserted in full rather than
+    # by prefix, because a missing -o here is an attach that connects unverified and
+    # looks exactly like one that does not.
+    opts = wiz.verification_opts()
     assert wiz.ssh_argv("dev", "localhost", 2206) == [
         "ssh",
         "dev@localhost",
         "-p",
         "2206",
+        *opts,
         "-t",
         "tmux",
         "attach",
@@ -376,12 +381,39 @@ def test_ssh_argv_is_the_canonical_attach_command(wiz):
         "dev@vps.example.com",
         "-p",
         "2299",
+        *opts,
         "-t",
         "tmux",
         "attach",
         "-t",
         "main",
     ]
+
+
+def test_every_ssh_builder_carries_verification(wiz):
+    """T017/FR-004. THREE builders reach the same endpoint, and each is a separate
+    way out of the feature if it forgets: the attach argv, the dead-session probe
+    (which on a different known_hosts would give two verifications that disagree),
+    and the ssh-config stanza an operator pastes into their own config.
+    """
+    argv = wiz.ssh_argv("dev", "localhost", 2206)
+    probe = wiz.ssh_probe_argv("dev", "localhost", 2206, "true")
+    stanza = wiz.ssh_config_stanza("acme", "dev", "localhost", "2206")
+    for got in (argv, probe):
+        assert "StrictHostKeyChecking=yes" in got
+        assert any(a.startswith("UserKnownHostsFile=") for a in got)
+        # accept-new silently trusts an unpinned host — the behaviour 018 replaces.
+        assert not any("accept-new" in a for a in got)
+    assert "    StrictHostKeyChecking yes" in stanza
+    assert "    UserKnownHostsFile " in stanza
+    assert "accept-new" not in stanza
+
+
+def test_verification_never_points_at_the_operators_own_known_hosts(wiz):
+    """FR-006/SC-007: the tool manages its own file and never the operator's."""
+    opts = " ".join(wiz.verification_opts())
+    assert str(wiz.STATE_DIR) in opts
+    assert "/.ssh/known_hosts" not in opts
 
 
 def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
@@ -391,7 +423,21 @@ def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
     monkeypatch.setattr(wiz.os, "execvp", lambda file, argv: execs.append((file, list(argv))))
     wiz.cli_attach("acme", "local", None, None)
     assert execs == [
-        ("ssh", ["ssh", "dev@localhost", "-p", "2206", "-t", "tmux", "attach", "-t", "main"]),
+        (
+            "ssh",
+            [
+                "ssh",
+                "dev@localhost",
+                "-p",
+                "2206",
+                *wiz.verification_opts(),
+                "-t",
+                "tmux",
+                "attach",
+                "-t",
+                "main",
+            ],
+        ),
     ]
 
 
@@ -399,10 +445,13 @@ def test_cli_attach_execs_ssh_with_full_handover(wiz, monkeypatch):
 
 
 def test_ssh_argv_with_window_selects_then_attaches_single_arg(wiz):
+    opts = wiz.verification_opts()
     argv = wiz.ssh_argv("dev", "localhost", 2206, "agents")
-    assert argv[:5] == ["ssh", "dev@localhost", "-p", "2206", "-t"]
-    assert argv[5:] == ["tmux select-window -t main:agents 2>/dev/null; exec tmux attach -t main"]
-    assert len(argv) == 6
+    assert argv[: 5 + len(opts)] == ["ssh", "dev@localhost", "-p", "2206", *opts, "-t"]
+    assert argv[5 + len(opts) :] == [
+        "tmux select-window -t main:agents 2>/dev/null; exec tmux attach -t main"
+    ]
+    assert len(argv) == 6 + len(opts)
 
 
 def test_ssh_argv_without_window_is_unchanged(wiz):
@@ -411,6 +460,7 @@ def test_ssh_argv_without_window_is_unchanged(wiz):
         "dev@localhost",
         "-p",
         "2206",
+        *wiz.verification_opts(),
         "-t",
         "tmux",
         "attach",
@@ -433,6 +483,7 @@ def test_cli_attach_window_execs_compound_remote_command(wiz, monkeypatch):
                 "dev@localhost",
                 "-p",
                 "2206",
+                *wiz.verification_opts(),
                 "-t",
                 "tmux select-window -t main:edit 2>/dev/null; exec tmux attach -t main",
             ],

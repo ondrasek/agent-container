@@ -133,7 +133,11 @@ def test_cli_attach_print_emits_only_the_command(wiz, capsys):
     wiz.write_state("local", "acme", 2206)
     wiz.cli_attach("acme", "local", None, None, print_mode=True, shell="posix")
     out = capsys.readouterr()
-    assert out.out == "ssh dev@localhost -p 2206 -t tmux attach -t main\n"  # only the command
+    # Feature 018: the printed command carries verification, and MUST stay identical
+    # to what the execute path runs (FR-010 parity — one ShellAction, two renderers).
+    expected = wiz.render_action(wiz.attach_shell_action("dev", "localhost", "2206"), "posix")
+    assert "StrictHostKeyChecking=yes" in expected  # the parity is worth nothing if empty
+    assert out.out == expected  # only the command, byte-for-byte (render_action ends in \n)
 
 
 def test_cli_attach_print_unknown_target_empty_stdout_nonzero(wiz, capsys):
@@ -146,11 +150,16 @@ def test_cli_attach_ssh_config_stanza(wiz, capsys):
     wiz.write_state("local", "acme", 2206)
     wiz.cli_attach("acme", "local", None, None, ssh_config=True)
     out = capsys.readouterr().out
+    files = wiz.known_hosts_option_value()
     assert out.splitlines() == [
         "Host acme",
         "    HostName localhost",
         "    User dev",
         "    Port 2206",
+        # Feature 018: without these two, `ssh acme` from the operator's own config
+        # would connect UNVERIFIED — a documented path straight out of the feature.
+        f"    UserKnownHostsFile {files}",
+        "    StrictHostKeyChecking yes",
         "    RequestTTY yes",
         "    RemoteCommand tmux attach -t main",
     ]

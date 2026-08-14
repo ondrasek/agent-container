@@ -31,11 +31,11 @@ prompt — verification silently degraded into a question. T012/T013 (FR-018, SC
 
 ## Phase 1: Setup
 
-- [ ] T001 `container_known_hosts_path(host)` in `bin/agent-container` returning
+- [X] T001 `known_hosts_path(host)` in `bin/agent-container` returning
       `host_state_dir(host) / "known_hosts"` — beside `<name>.port`, using the **existing**
       `host_state_dir` helper (FR-006, research R2, data-model §2). Derived host state, not
       `$XDG_DATA_HOME`: it is re-capturable, so "safe to delete" is true of it
-- [ ] T002 [P] State in `docs/layout.md` that derived host state now also holds a tool-owned
+- [X] T002 [P] State in `docs/layout.md` that derived host state now also holds a tool-owned
       `known_hosts` — **no new location row**, since this is a new file in an existing category
       (research R2). Note *why* it is not beside `runs/`, `egress/` and 014's `inventory/`: those must
       outlive their host, this must die with it
@@ -44,58 +44,58 @@ prompt — verification silently degraded into a question. T012/T013 (FR-018, SC
 
 ## Phase 2: Foundational — blocking prerequisites for every story
 
-- [ ] T003 `known_hosts_entry(address, port, pubkey)` in `bin/agent-container` formatting one
+- [X] T003 `known_hosts_entry(address, port, pubkey)` in `bin/agent-container` formatting one
       `[<address>]:<port> <type> <key>` line (data-model §1, FR-005). **The bracket-port form is
       load-bearing and measured** (research R3) — the bare-host form cross-matches, which is exactly
       the defect FR-005 names
-- [ ] T004 [P] Unit tests in `bin/tests/test_pure_logic.py` for T003: the bracket form is produced;
+- [X] T004 [P] Unit tests in `bin/tests/test_pure_logic.py` for T003: the bracket form is produced;
       and — asserting the *property*, not the string — that a file holding `[127.0.0.1]:2222` is found
       by `ssh-keygen -F '[127.0.0.1]:2222'` and **not** by `[127.0.0.1]:2223` or bare `127.0.0.1`.
       Test the behaviour `ssh` will rely on, not our formatter's opinion of it
-- [ ] T005 `validate_host_pubkey(text)` — accept only a single well-formed OpenSSH public key line;
+- [X] T005 `valid_host_pubkey(text)` — return the single well-formed OpenSSH public key line, else None;
       **reject empty, whitespace-only, multi-line, and anything containing `PRIVATE KEY`** (C7, C9).
       The last is a tripwire, not paranoia: it is the one string that must never reach this file
-- [ ] T006 [P] Unit tests for T005, including a proof-it-can-fail case that neuters the check and
+- [X] T006 [P] Unit tests for T005, including a proof-it-can-fail case that neuters the check and
       asserts the guard then rejects a valid-looking input
-- [ ] T007 `capture_host_pubkey(rt, host_rec, name)` — read
+- [X] T007 `capture_host_pubkey(rt, host_rec, name)` — read
       `~/.ssh/hostkeys/ssh_host_ed25519_key.pub` from the container **through the runtime**
       (`<runtime> exec … cat`), never `ssh-keyscan` (FR-003, C1, research R7's rejected list). The
       entrypoint already writes that file at 0644, so **nothing in `image/` changes** (research R1)
-- [ ] T008 Give T007 a **bounded poll**, modelled on Feature 016's `RUNS_PROBE_TIMEOUT`: the file does
+- [X] T008 Give T007 a **bounded poll**, modelled on Feature 016's `RUNS_PROBE_TIMEOUT`: the file does
       not exist when the container reports `Up` (016 measured `Up` preceding the entrypoint's first
       write by 0.27–0.57 s; key generation is later still — research R5). A fixed sleep is a bet that
       loses under load
-- [ ] T009 [P] Unit test that T008's timeout path returns "nothing captured" rather than an empty
+- [X] T009 [P] Unit test that T008's timeout path returns "nothing captured" rather than an empty
       string, an exception, or a partial value — the three shapes that would each become a written
       blank line downstream
-- [ ] T010 `read_pinned_entry(host, name)` / `write_pinned_entry(host, name, entry)` — one line per
+- [X] T010 `pinned_host_key(address, port)` / `pin_host_key(host, address, port, key)` — one line per
       environment in the host's file, replacing that environment's line and **leaving every other
       line byte-identical** (data-model §3)
-- [ ] T011 Write via the existing `atomic_write_*` primitive (temp + `os.replace`), not an in-place
+- [X] T011 Write via the existing `atomic_write_*` primitive (temp + `os.replace`), not an in-place
       rewrite — a partial write here leaves the file `ssh` reads corrupt for **every** environment on
       the host, not just the one being deployed
-- [ ] T012 **Serialise the shared-file write** (FR-018). `deployment_lock` is per `(host, name)`, so two
+- [X] T012 **Serialise the shared-file write** (FR-018). `deployment_lock` is per `(host, name)`, so two
       environments deploying concurrently on one host both read-modify-write this file and one update
       is lost. Add a **host-scoped** lock (or an equivalent compare-and-retry) around T010's
       read-modify-write. **Why this is not a tidiness concern**: the loser's next attach finds nothing
       pinned and falls through to FR-013's prompt — so a lost write silently degrades verification into
       a question the operator will answer yes to
-- [ ] T013 [P] Unit test for T012 (SC-012): two interleaved writes for different environments on one
+- [X] T013 [P] Unit test for T012 (SC-012): two interleaved writes for different environments on one
       host, both entries present afterwards. Written as an interleaving, not two sequential calls —
       sequential calls pass with no locking at all
-- [ ] T014 Thread `UserKnownHostsFile=<T001 path>` and `StrictHostKeyChecking=yes` into **`ssh_argv`**
+- [X] T014 Thread `UserKnownHostsFile=<T001 path>` and `StrictHostKeyChecking=yes` into **`ssh_argv`**
       (FR-004, C2, research R6). One place: `attach --print`, the execute path (`os.execvp`) and
       `wizard_handover` all build from `ssh_argv`, so putting the options anywhere else creates a path
       that connects unverified. **Not `accept-new`** — that silently trusts an unpinned host, which is
       today's behaviour and the thing being replaced
-- [ ] T015 Add the same two options to **`ssh_probe_argv`** (the dead-session probe). It is a second
+- [X] T015 Add the same two options to **`ssh_probe_argv`** (the dead-session probe). It is a second
       ssh invocation to the same endpoint; leaving it on the operator's default `known_hosts` gives two
       verifications that can disagree about the same container
-- [ ] T016 Add `UserKnownHostsFile` and `StrictHostKeyChecking yes` to **`ssh_config_stanza`**.
+- [X] T016 Add `UserKnownHostsFile` and `StrictHostKeyChecking yes` to **`ssh_config_stanza`**.
       Without them `attach --ssh-config` emits a stanza whose `ssh <name>` is unverified — a documented
       path out of the feature, and the operator would have no way to know. **`test_shell_integration.py:145`
       pins the stanza line-by-line**; T033e updates it
-- [ ] T017 [P] Tests in `bin/tests/test_command_construction.py` asserting **all three** builders
+- [X] T017 [P] Tests in `bin/tests/test_command_construction.py` asserting **all three** builders
       carry both options, and that `attach --print` is still byte-for-byte the executed argv (the
       existing FR-010 parity property, which T014 must not break)
 

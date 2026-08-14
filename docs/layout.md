@@ -99,6 +99,33 @@ A bare `./.env` in your project root is **not** read — it belongs to whoever p
 (Compose, direnv, a framework). If one is present and no agent-container env file resolves, the
 tool refuses rather than deploying without it.
 
+## The pinned host key IS derived host state — and that is the exact inverse of a run record
+
+`$XDG_STATE_HOME/agent-container/<host>/known_hosts` — the tool-owned file `attach` verifies
+against (Feature 018). One file per host, one line per environment, keyed `[address]:port`.
+
+**No new location.** It belongs in *derived host state* because *computed; safe to delete* is
+literally true of it: delete it and the next deploy re-captures the container's public key through
+the runtime. It is also correctly per-host — when a host goes, its containers go, so its pins are
+meaningless.
+
+Read this next to the run records below, because the two answer the same *shaped* question with
+opposite lifetimes:
+
+| | Pinned host key | Run record / egress event / inventory entry |
+|---|---|---|
+| Answers | *is this the container I created?* | *what did we ever create / run?* |
+| Tense | present — worthless once the container is gone | past — most valuable long after |
+| Recomputable | **yes**, from the running container | **no**, the run has ended |
+| So it lives in | derived host state | durable data |
+
+That is why the same argument lands in different places, and why "make them consistent" would be
+a regression in either direction.
+
+**Never the operator's `~/.ssh/known_hosts`.** The tool manages its own file and leaves the
+operator's byte-identical. It *emits* text for them to place (an `ssh` config stanza, a
+`known_hosts` line); it never writes into files they own.
+
 ## Run records are observations — not state, not configuration
 
 `$XDG_DATA_HOME/agent-container/runs/<host>/<environment>/<run-id>.json` — one JSON file per agent

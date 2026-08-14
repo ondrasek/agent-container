@@ -28,6 +28,7 @@
 # literally (no expansion), with a one-time warning.
 
 import atexit
+import base64
 import calendar
 import contextlib
 import fcntl
@@ -1079,6 +1080,248 @@ def state_file_for(host: str, name: str) -> Path:
 
 def compose_file_path(host: str, name: str) -> Path:
     return host_state_dir(host) / f"{name}.compose.yaml"
+
+
+# --- Feature 018: the tool-owned known_hosts ---------------------------------
+# DERIVED HOST STATE, beside <name>.port, and that placement is a claim: "safe to
+# delete" is TRUE of this file, because a deploy re-captures it from the running
+# container. Deliberately NOT under DATA_DIR with the run records (016), the egress
+# events (012) and the inventory (014) — those must OUTLIVE their host; this must
+# die with it. Same shaped question, opposite lifetime, so opposite location.
+#
+# NEVER the operator's ~/.ssh/known_hosts (FR-006): the tool owns its own file and
+# leaves theirs byte-identical (SC-007).
+
+
+def known_hosts_path(host: str) -> Path:
+    """The tool-owned known_hosts for one registered host. One file per host,
+    holding one line per environment (data-model §2)."""
+    return host_state_dir(host) / "known_hosts"
+
+
+def known_hosts_files() -> list[Path]:
+    """Every tool-owned known_hosts that exists, for ssh to VERIFY against.
+
+    Attach must read across hosts while a deploy writes to exactly one. The
+    asymmetry is not sloppiness: a deploy knows its registered host, but
+    `resolve_attach_target` may resolve an endpoint through hosts.conf, which
+    carries no registry host name. Handing ssh every file costs nothing, because
+    the ENTRY KEY — `[address]:port` — is what discriminates (FR-005), not the
+    directory. Two environments cannot collide unless they genuinely share an
+    address and a port, in which case they are the same endpoint.
+
+    ssh only ever READS these (StrictHostKeyChecking=yes never appends), so a
+    multi-file list has no write-ordering surprise.
+    """
+    if not STATE_DIR.is_dir():
+        return []
+    return sorted(p for p in STATE_DIR.glob("*/known_hosts") if p.is_file())
+
+
+def known_hosts_entry(address: str, port: str | int, pubkey: str) -> str:
+    """One `known_hosts` line: `[<address>]:<port> <type> <key>` (data-model §1).
+
+    THE BRACKET-PORT FORM IS LOAD-BEARING AND WAS MEASURED (research R3), because
+    FR-005 rests on it: against a file holding `[127.0.0.1]:2222`, `ssh-keygen -F`
+    finds `[127.0.0.1]:2222` and does NOT match `[127.0.0.1]:2223` or the bare
+    `127.0.0.1`. Writing the bare-host form instead would let one container's key
+    verify another container's connection — silently, on a tool whose whole premise
+    is several containers on one host.
+
+    >>> known_hosts_entry("localhost", 2206, "ssh-ed25519 AAAAC3 comment")
+    '[localhost]:2206 ssh-ed25519 AAAAC3'
+    """
+    parts = pubkey.split()
+    return f"[{address}]:{port} {parts[0]} {parts[1]}"
+
+
+_PUBKEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-", "sk-ssh-", "ssh-dss")
+
+
+def valid_host_pubkey(text: str) -> str | None:
+    """The single OpenSSH PUBLIC key line in `text`, or None.
+
+    Refuses empty, whitespace-only, multi-line and malformed input — and refuses
+    anything containing PRIVATE KEY. That last check is a tripwire rather than
+    paranoia: private material is the one thing that must never reach this file
+    (FR-001/FR-012), and a tripwire that never fires costs nothing.
+
+    Returning None rather than raising is the point: "captured nothing" must be a
+    VALUE the caller has to handle, not an exception it can forget to catch and not
+    an empty string that formats into a blank entry. A blank line in a known_hosts
+    file reads exactly like a successful pin (research R5).
+
+    >>> k = "AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+    >>> valid_host_pubkey(f"ssh-ed25519 {k} root@box")
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000='
+    >>> valid_host_pubkey("") is None
+    True
+    >>> valid_host_pubkey("-----BEGIN OPENSSH PRIVATE KEY-----") is None
+    True
+    >>> valid_host_pubkey("ssh-ed25519 tooshort") is None
+    True
+    >>> valid_host_pubkey(f"ssh-ed25519 {k}\\nssh-ed25519 {k}") is None
+    True
+    """
+    if not text or "PRIVATE KEY" in text:
+        return None
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if len(lines) != 1:
+        return None
+    parts = lines[0].split()
+    if len(parts) < 2 or not parts[0].startswith(_PUBKEY_TYPES):
+        return None
+    # The key body is base64; reject a "type garbage" line that would otherwise
+    # be pinned and then never match anything sshd presents.
+    if not re.fullmatch(r"[A-Za-z0-9+/=]{32,}", parts[1]):
+        return None
+    return f"{parts[0]} {parts[1]}"
+
+
+def pubkey_fingerprint(pubkey: str) -> str:
+    """The SHA256 fingerprint of a public key line, for the operator to compare
+    against another source (FR-016). A prompt with nothing to compare is theatre.
+
+    Computed here rather than shelled out to `ssh-keygen -lf`: it is a hash of the
+    base64 blob, needs no temp file, and cannot fail for a key we already
+    validated.
+
+    >>> k = "AAAAC3NzaC1lZDI1NTE5AAAAIExample0000000000000000000000000000000="
+    >>> pubkey_fingerprint(f"ssh-ed25519 {k}")
+    'SHA256:YX6ibcFhJB3k4cdmvU01qDxJxL1Za/DtGfVn63R0y/0'
+    """
+    blob = base64.b64decode(pubkey.split()[1] + "===")
+    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    return f"SHA256:{digest}"
+
+
+@contextlib.contextmanager
+def known_hosts_lock(host: str):
+    """Serialise read-modify-write of ONE host's known_hosts (FR-018).
+
+    `deployment_lock` is per (host, name), but this file is per HOST: two
+    environments deploying concurrently on one host would each read, modify and
+    replace it, and one entry would be lost. That is not a cosmetic race — the
+    loser's next attach finds nothing pinned and falls through to the FR-013
+    prompt, so a lost write silently DEGRADES VERIFICATION INTO A QUESTION the
+    operator will answer yes to.
+
+    Blocking, unlike `deployment_lock`: the contending writers here are two
+    unrelated deploys that both legitimately need the file, and failing one of
+    them over a sub-millisecond write would be worse than waiting for it.
+    """
+    d = host_state_dir(host)
+    d.mkdir(parents=True, exist_ok=True)
+    f = (d / "known_hosts.lock").open("w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+
+def _entry_key(line: str) -> str:
+    return line.split(None, 1)[0] if line.split() else ""
+
+
+def pin_host_key(host: str, address: str, port: str | int, pubkey: str) -> Path:
+    """Write this environment's entry, replacing any previous one for the same
+    `[address]:port` and leaving every OTHER line byte-identical.
+
+    Atomic (temp + os.replace in the same directory): a partial write here leaves
+    the file ssh reads corrupt for EVERY environment on the host, not just the one
+    being deployed.
+
+    0644 rather than 0600: it holds public keys only, and ssh reads it as the
+    invoking user anyway. Nothing here is a secret — that is the whole point of
+    Feature 018.
+    """
+    entry = known_hosts_entry(address, port, pubkey)
+    key = _entry_key(entry)
+    path = known_hosts_path(host)
+    # Own the directory rather than inheriting it from the lock's side effect: a
+    # write whose target directory exists only because something else happened to
+    # create it is a write that breaks the moment that something changes.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with known_hosts_lock(host):
+        existing = path.read_text().splitlines() if path.is_file() else []
+        kept = [ln for ln in existing if ln.strip() and _entry_key(ln) != key]
+        body = "\n".join([*kept, entry]) + "\n"
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".known_hosts.", suffix=".tmp")
+        tmp_path = Path(tmp)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(body)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp_path, 0o644)
+            os.replace(tmp_path, path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    return path
+
+
+def pinned_host_key(address: str, port: str | int) -> str | None:
+    """The pinned public key for `[address]:port` across every tool-owned file,
+    or None. Reads local state only — NEVER the daemon, so the answer survives an
+    unreachable host, which is exactly when an operator needs it (FR-010)."""
+    key = f"[{address}]:{port}"
+    for path in known_hosts_files():
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            if _entry_key(ln) == key:
+                return ln.split(None, 1)[1].strip()
+    return None
+
+
+# The container's PUBLIC host key, which the entrypoint already writes beside the
+# private one and chmods 0644 — so capture needs NO image change (research R1).
+CONTAINER_HOSTKEY_PUB = "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key.pub"
+# The file does not exist the instant the container reports Up: Feature 016
+# MEASURED the runtime publishing Up before the entrypoint executes a line, with
+# its first write landing 0.27-0.57s later, and host-key generation later still.
+# So capture POLLS. A fixed sleep is a bet that loses under load — widening it
+# widens the race rather than closing it (research R5).
+CAPTURE_TIMEOUT = 30.0
+CAPTURE_POLL_INTERVAL = 0.5
+
+
+def capture_host_pubkey(host_rec: dict, name: str, timeout: float = CAPTURE_TIMEOUT) -> str | None:
+    """The container's host PUBLIC key, read THROUGH THE RUNTIME (FR-003).
+
+    Never `ssh-keyscan`, and that is a requirement rather than a preference: asking
+    the endpoint you are authenticating to state its own identity is
+    trust-on-first-use wearing a hat. The runtime is the daemon that CREATED this
+    container, so at deploy time it can vouch for provenance the endpoint cannot.
+
+    Returns None on timeout, on an unreachable daemon, or on anything that is not a
+    single well-formed public key. NONE IS A VALUE THE CALLER MUST HANDLE: an empty
+    capture and a successful one are indistinguishable by exit code, and a blank
+    line in a known_hosts file reads exactly like a pin that worked.
+    """
+    argv = driver_runtime_argv(host_rec) + [
+        "exec",
+        container_name(name),
+        "cat",
+        CONTAINER_HOSTKEY_PUB,
+    ]
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            r = query(argv, timeout=RUNS_PROBE_TIMEOUT)
+        except OSError, subprocess.SubprocessError:
+            return None
+        if r.returncode == 0 and (key := valid_host_pubkey(r.stdout)):
+            return key
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(CAPTURE_POLL_INTERVAL)
 
 
 @contextlib.contextmanager
@@ -7554,12 +7797,52 @@ def _render_egress_events(environment: str | None, events: list[dict]) -> None:
         )
 
 
+def verification_opts() -> list[str]:
+    """The `-o` pair that makes an attach VERIFIED (FR-004, Feature 018).
+
+    ONE definition, consumed by every builder below, because a path that omits it
+    connects unverified and looks identical to one that does not. `ssh_argv` (the
+    print/execute/wizard paths), `ssh_probe_argv` (the dead-session probe — a second
+    invocation to the same endpoint, which on a different known_hosts would give two
+    verifications that can disagree) and `ssh_config_stanza` all draw from here.
+
+    `StrictHostKeyChecking=yes`, NOT `accept-new`: accept-new silently trusts a host
+    that is not yet pinned, which is precisely the behaviour Feature 018 replaces.
+    Since a deploy pins, an unpinned host at attach time is itself worth stopping on
+    — the caller decides whether to ask (FR-013) or refuse, and ssh must not decide
+    for us by quietly accepting.
+
+    """
+    return [
+        "-o",
+        f"UserKnownHostsFile={known_hosts_option_value()}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+    ]
+
+
+def known_hosts_option_value() -> str:
+    """The `UserKnownHostsFile` value: the tool-owned files, ssh-config quoted.
+
+    ssh splits this value on whitespace, so a path containing a space (a HOME with
+    one, which is ordinary on macOS) would silently become two bogus paths — and a
+    bogus path is an EMPTY known_hosts, i.e. every attach unpinned. Quoted only when
+    it must be: `attach --print` hands this to a human, and wrapping the ordinary
+    single-file case in quotes it does not need makes the printed command harder to
+    read for no gain.
+    """
+    files = known_hosts_files() or [known_hosts_path(DEFAULT_HOST)]
+    if len(files) == 1 and not any(c.isspace() for c in str(files[0])):
+        return str(files[0])
+    return " ".join(f'"{p}"' for p in files)
+
+
 def ssh_argv(user: str, host: str, port: str | int, window: str | None = None) -> list[str]:
     # The one true attach command; argv list, never a shell string. Without a
     # window the argv is unchanged (agent-container parity). With one, the remote
     # command is a SINGLE compound string that selects the window (tolerating
     # its absence) THEN attaches — select-window works on a detached session.
-    base = ["ssh", f"{user}@{host}", "-p", str(port), "-t"]
+    base = ["ssh", f"{user}@{host}", "-p", str(port), *verification_opts(), "-t"]
     if window:
         return base + [f"tmux select-window -t main:{window} 2>/dev/null; exec tmux attach -t main"]
     return base + ["tmux", "attach", "-t", "main"]
@@ -7573,6 +7856,10 @@ def ssh_probe_argv(user: str, host: str, port: str | int, remote_cmd: str) -> li
         f"{user}@{host}",
         "-p",
         str(port),
+        # Same verification as the real attach (Feature 018): this probe reaches the
+        # SAME endpoint, so leaving it on the operator's default known_hosts would
+        # give two verifications of one container that can disagree.
+        *verification_opts(),
         "-o",
         "BatchMode=yes",
         "-o",
@@ -7756,12 +8043,24 @@ def attach_shell_action(user: str, host: str, port: str, window: str | None = No
 
 def ssh_config_stanza(name: str, user: str, host: str, port: str) -> str:
     """A `~/.ssh/config` `Host` block reproducing attach via `ssh <name>` (FR-007).
-    All fields are resolved/validated coordinates — no secret, no injection."""
+    All fields are resolved/validated coordinates — no secret, no injection.
+
+    Carries the same verification as `attach` (Feature 018). Without it, this stanza
+    would be a DOCUMENTED path out of the feature: `ssh <name>` from the operator's
+    own config would connect unverified, and nothing in the output would say so.
+
+    NOTE: `bin/tests/test_shell_integration.py` pins this stanza line by line, so a
+    change here is a change there — deliberately, since the emitted text is a
+    contract an operator pastes into a file the tool never writes.
+    """
+    files = known_hosts_option_value()
     return (
         f"Host {name}\n"
         f"    HostName {host}\n"
         f"    User {user}\n"
         f"    Port {port}\n"
+        f"    UserKnownHostsFile {files}\n"
+        f"    StrictHostKeyChecking yes\n"
         f"    RequestTTY yes\n"
         f"    RemoteCommand tmux attach -t main\n"
     )
