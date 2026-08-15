@@ -203,3 +203,22 @@ SSH **host key** and the operator's **`~/.ssh/authorized_keys`** live on the `-s
 - **Parallel-safe** — `agent-container up alpha` and `agent-container up bravo` run side by side with distinct names, ports, and volumes.
 - **No baked secrets** — `.env` is read at run time, not at build time.
 - **Rootless** — no `sudo` or root inside the container; sshd runs as the `dev` user on port 2222. Podman also runs rootless under the operator's user on the host. The one capability any deployment holds — `NET_ADMIN`, for programming the [egress boundary](egress.md) — sits on the sidecar, which runs no untrusted code; the agent container's capability set is empty with a declaration and without one alike.
+
+## Three memories, three purposes, no overlap
+
+The tool now keeps three separate answers, and confusing them is how both possible mistakes get made:
+
+| Memory | Answers | Lives | Dies |
+|---|---|---|---|
+| the **live daemon** | *what is running right now* | on the host | with the container |
+| **local port state** `<state>/<host>/*.port` | the **port number**, and per-host enumeration | derived host state | with its host |
+| the **inventory** (Feature 014) | *what did we ever create* | durable data | never (count-capped only) |
+
+**Port state is never consulted about history, and the inventory never about the present.** So a
+disagreement between them is **information, not a conflict**: it means a host's state directory was
+cleared while the record kept its entries — which is FR-003 working exactly as intended, not a bug to
+reconcile away.
+
+The live daemon is authoritative for *now* and nothing else. `inventory reconcile` is the only place
+the three are compared, and it is deliberately **fail-closed**: a host that cannot be reached yields
+`unknown`, never `missing`, because invisible is indistinguishable from gone.

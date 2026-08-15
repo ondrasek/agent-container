@@ -3782,3 +3782,84 @@ def test_list_json_hands_back_a_usable_known_hosts_line(acc):
     )  # fmt: skip
     assert r2.returncode == 0, r2.stderr
     assert r2.stdout.strip() == "dev"
+
+
+# --- Feature 014: the durable inventory --------------------------------------
+# The gate below (T018) comes first deliberately. If an entry does NOT outlive its
+# host, reconciliation has nothing to compare against and every later phase is
+# decoration — so it is worth failing loudly here rather than subtly later.
+
+
+def _inventory(acc) -> list[dict]:
+    r = acc.cli(["inventory", "list", "--json"])
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["data"]["entries"]
+
+
+def test_an_inventory_entry_outlives_the_container_and_the_state_dir(acc):
+    """T018 — C3/FR-003/SC-002. THE GATE for Feature 014.
+
+    The entry must survive the container being purged AND the host's derived state
+    directory being deleted. If this fails, the most likely cause is the store having
+    been placed under `<state>/<host>/` or scoped per host in the durable location —
+    which would destroy exactly the entries the feature exists to keep.
+    """
+    acc.up("accinv1")
+    entries = _inventory(acc)
+    mine = [e for e in entries if e["name"] == "accinv1"]
+    assert len(mine) == 1 and mine[0]["outcome"] == "active"
+
+    acc.down("accinv1", purge=True)
+    assert [e for e in _inventory(acc) if e["name"] == "accinv1"][0]["outcome"] == "removed"
+
+    # Now delete the derived host state entirely — the ".port" files, the compose
+    # files, the pinned known_hosts. The record is DATA and must not live there.
+    shutil.rmtree(acc.state_dir / "agent-container", ignore_errors=True)
+    survivors = [e for e in _inventory(acc) if e["name"] == "accinv1"]
+    assert len(survivors) == 1, "the entry died with the host's state directory"
+    assert survivors[0]["outcome"] == "removed"
+    assert survivors[0]["host"] == "local"  # host is an ATTRIBUTE, still readable
+
+
+def test_redeploy_records_too(acc):
+    """T019 — C2/SC-001: a hook in the wrong place records some deploys and not
+    others, and the gap is invisible because everything else works."""
+    acc.up("accinv2")
+    assert len([e for e in _inventory(acc) if e["name"] == "accinv2"]) == 1
+    r = acc.cli(["redeploy", "accinv2", "--env-file", str(acc.tmp / "accinv2.env")])
+    assert r.returncode == 0, r.stderr
+    assert len([e for e in _inventory(acc) if e["name"] == "accinv2"]) == 2
+
+
+def test_a_reused_name_yields_two_entries_and_leaves_the_first_intact(acc):
+    """T020 — C5/SC-003a. THE WRONG ANSWER THAT LOOKS RIGHT IS 1: it would mean name
+    is the key and every recreation silently erases history."""
+    acc.up("accinv3")
+    first = [e for e in _inventory(acc) if e["name"] == "accinv3"][0]
+    acc.down("accinv3", purge=True)
+    acc.up("accinv3")
+
+    mine = [e for e in _inventory(acc) if e["name"] == "accinv3"]
+    assert len(mine) == 2, "a reused name overwrote its own history"
+    by_id = {e["entry_id"]: e for e in mine}
+    assert by_id[first["entry_id"]]["outcome"] == "removed"  # untouched by the recreate
+    assert sum(1 for e in mine if e["outcome"] == "active") == 1
+
+
+def test_the_inventory_holds_no_free_text_field(acc):
+    """FR-010: every field is tool-generated, so there is nowhere for a credential to
+    arrive. Verified against a REAL deployment, not just the constructor."""
+    acc.up("accinv4", task="a task string that must not be stored anywhere here")
+    entry = [e for e in _inventory(acc) if e["name"] == "accinv4"][0]
+    assert "a task string" not in json.dumps(entry)
+    assert set(entry) == {
+        "schema",
+        "entry_id",
+        "name",
+        "host",
+        "host_provisioned",
+        "created_at",
+        "outcome",
+        "outcome_at",
+        "notes",
+    }

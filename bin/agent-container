@@ -1553,6 +1553,32 @@ def validate_inventory_outcome(outcome: str) -> str:
     return outcome
 
 
+def prune_inventory() -> int:
+    """Enforce the backstop cap. Returns how many entries were removed.
+
+    COUNT ONLY, and there is deliberately no age criterion at any level (FR-012).
+    Age-pruning would delete the oldest forgotten entries first — which are exactly
+    the ones this feature exists to surface. A future "obvious improvement" that adds
+    a max-age here would quietly invert the feature's purpose, so a test asserts no
+    such constant exists.
+
+    5000 is a backstop against runaway growth, not tidying: the spec's own estimate
+    is that years of heavy use is hundreds of rows.
+    """
+    paths = list_stored_records(inventory_store_dir())  # newest first
+    doomed = paths[INVENTORY_MAX_ENTRIES:]
+    for p in doomed:
+        with contextlib.suppress(OSError):
+            p.unlink()
+    if doomed:
+        warn(
+            f"inventory: pruned {len(doomed)} entr{'y' if len(doomed) == 1 else 'ies'} "
+            f"over the {INVENTORY_MAX_ENTRIES} backstop. Said out loud rather than done "
+            f"quietly — this store's whole value is the entry you forgot."
+        )
+    return len(doomed)
+
+
 def write_inventory_entry(entry: dict) -> Path:
     """Persist one entry, using Feature 016's `atomic_write_json` (FR-012a).
 
@@ -1567,6 +1593,165 @@ def write_inventory_entry(entry: dict) -> Path:
     """
     validate_inventory_outcome(entry["outcome"])
     return atomic_write_json(inventory_store_dir(), f"{entry['entry_id']}.json", entry)
+
+
+# Computed, never stored (data-model §3). `unknown` lives ONLY here: putting it in
+# the file would make the record permanently lie about a host that comes back.
+INVENTORY_CLASSIFICATIONS = ("agreeing", "missing", "unrecorded", "unknown")
+
+
+def reconcile_inventory() -> list[dict]:
+    """Compare the record against what each host reports (FR-005).
+
+    Every entry lands in EXACTLY ONE of the four classifications, and one of them —
+    `unknown` — exists because of Feature 002's fail-closed rule: an unreachable host
+    must never yield `missing`. Invisible is indistinguishable from gone, and a
+    reconciliation that guessed would send an operator hunting for a container that
+    is sitting safely on a host they cannot currently reach.
+
+    `unrecorded` is an OBSERVATION, not a claim (FR-007). The tool recognises its own
+    containers by a naming convention an operator can imitate, so a prefix match is
+    evidence of a NAME and nothing more. Every string this function produces is
+    worded accordingly.
+    """
+    entries = [e for e in read_inventory_entries() if e.get("outcome") == "active"]
+    hosts = registry_hosts(load_registry()) or {DEFAULT_HOST: implicit_local_host()}
+    hosts.setdefault(DEFAULT_HOST, implicit_local_host())
+
+    live: dict[str, set[str] | None] = {}  # host -> names, or None when unreachable
+    # str() rather than the raw field: an entry whose `host` is missing or malformed
+    # must still be classified (as `unknown`, since no such host can be reached)
+    # rather than crash the reconciliation and take every other entry with it.
+    named = {str(e.get("host") or "") for e in entries} | set(hosts)
+    for host_name in sorted(named - {""}):
+        rec = hosts.get(host_name)
+        if rec is None:
+            # The entry names a host the registry no longer has. Not reachable, and
+            # not a lie either — FR-003 keeps the reference precisely so this reads
+            # as "cannot check" rather than "never existed".
+            live[host_name] = None
+            continue
+        try:
+            live[host_name] = {r[0] for r in host_ps_rows(rec, include_stopped=True)}
+        except Fatal, SystemExit, subprocess.SubprocessError, OSError:
+            live[host_name] = None
+
+    out: list[dict] = []
+    for e in entries:
+        names = live.get(e.get("host"))
+        if names is None:
+            state = "unknown"
+        elif container_name(e.get("name", "")) in names:
+            state = "agreeing"
+        else:
+            state = "missing"
+        out.append({"classification": state, "entry": e})
+
+    # Containers on a host that match the tool's naming but have no active entry.
+    recorded = {(e.get("host"), container_name(e.get("name", ""))) for e in entries}
+    for host_name, names in live.items():
+        for cname in sorted(names or ()):
+            if (host_name, cname) not in recorded:
+                out.append(
+                    {
+                        "classification": "unrecorded",
+                        "host": host_name,
+                        "container": cname,
+                        # Wording matters here and is asserted by a test: naming is a
+                        # convention, so this is what we SAW, never what we own.
+                        "note": (
+                            "matches this tool's container naming convention but has no "
+                            "inventory entry; the convention can be imitated, so this is "
+                            "an observation and not a claim of ownership"
+                        ),
+                    }
+                )
+    return out
+
+
+def do_inventory_reconcile(as_json: bool) -> None:
+    """Report the differences (C6). Only THIS path may record `vanished`."""
+    rows = reconcile_inventory()
+    # `vanished` is written ONLY here (data-model §5): reconciliation is the one path
+    # that has seen a REACHABLE host report the container absent. Anywhere else would
+    # be recording an inference as a fact.
+    for row in rows:
+        if row["classification"] == "missing":
+            e = row["entry"]
+            set_inventory_outcome(e["name"], e["host"], "vanished")
+    if as_json:
+        emit_json({"reconciliation": rows})
+        return
+    if not rows:
+        log("nothing to reconcile: no active entries recorded")
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("STATE", "NAME", "HOST", "DETAIL"):
+        table.add_column(col)
+    for row in rows:
+        if row["classification"] == "unrecorded":
+            table.add_row("unrecorded", row["container"], row["host"], row["note"])
+        else:
+            e = row["entry"]
+            detail = {
+                "agreeing": "present, as recorded",
+                "missing": "recorded, host reachable, container absent — marked vanished",
+                "unknown": "host unreachable — NOT reported missing; invisible is not gone",
+            }[row["classification"]]
+            table.add_row(row["classification"], e.get("name", "?"), e.get("host", "?"), detail)
+    console.print(table)
+
+
+def inventory_disagreement_hint() -> str | None:
+    """One line for `list` when record and reality disagree (FR-005a).
+
+    `list` already queries every host, so the comparison is nearly free — and a
+    discrepancy an operator must already suspect in order to look for is one nobody
+    finds. Deliberately does NOT print the classification: that is `reconcile`'s job,
+    and duplicating it here would give two answers that can drift.
+    """
+    try:
+        rows = [r for r in reconcile_inventory() if r["classification"] != "agreeing"]
+    except Exception:  # noqa: BLE001 — a hint must never break `list` (FR-013)
+        return None
+    if not rows:
+        return None
+    return (
+        f"{len(rows)} inventory discrepanc{'y' if len(rows) == 1 else 'ies'} "
+        f"(run: agent-container inventory reconcile)"
+    )
+
+
+def inventory_age(created_at: str, now: float | None = None) -> str:
+    """How long this environment has existed, in words (SC-009).
+
+    Rendered rather than left as a timestamp because the question US3 asks is "what
+    is this costing me to leave running", and a date the operator has to subtract
+    from today is not the answer they asked for.
+
+    Computed from the ENTRY's own `created_at`, never from the live host — the
+    environments this matters most for are the ones whose host is gone, and a
+    rendering that reached for the host would break exactly there.
+
+    >>> inventory_age("2026-08-01T00:00:00Z", now=1785542490)
+    '1m'
+    >>> inventory_age("2026-08-01T00:00:00Z", now=1785549600)
+    '2h'
+    >>> inventory_age("2026-08-01T00:00:00Z", now=1785801600)
+    '3d'
+    >>> inventory_age("not a timestamp")
+    'unknown'
+    """
+    try:
+        started = calendar.timegm(time.strptime(created_at, TIME_FORMAT))
+    except ValueError, TypeError:
+        return "unknown"
+    seconds = max(0, int((now if now is not None else time.time()) - started))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
 
 
 def do_inventory_list(as_json: bool) -> None:
@@ -1586,14 +1771,16 @@ def do_inventory_list(as_json: bool) -> None:
         log("no environments recorded yet (the inventory begins at install; it is not backfilled)")
         return
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
-    for col in ("NAME", "HOST", "CREATED", "OUTCOME", "HOST-PROVISIONED"):
+    for col in ("NAME", "HOST", "AGE", "OUTCOME", "HOST-PROVISIONED"):
         table.add_column(col)
     for e in entries:
         table.add_row(
             str(e.get("name", "?")),
             str(e.get("host", "?")),
-            str(e.get("created_at", "?")),
+            inventory_age(str(e.get("created_at", ""))),
             str(e.get("outcome", "?")),
+            # From the ENTRY, not the live host record: the host may be gone, and
+            # that is exactly when an operator asks who created it.
             "yes" if e.get("host_provisioned") else "no",
         )
     console.print(table)
@@ -1664,6 +1851,7 @@ def record_inventory_creation(name: str, host: str, host_provisioned: bool) -> N
     """
     try:
         write_inventory_entry(build_inventory_entry(name, host, host_provisioned))
+        prune_inventory()
     except (OSError, Fatal) as e:
         warn(
             f"{name}: could not record this deployment in the inventory ({e}). The "
@@ -7148,6 +7336,8 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
             }
         )
         return
+    if hint := inventory_disagreement_hint():
+        warn(hint)  # FR-005a: one line, no classification — that is reconcile's job
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     for col in ("NAME", "HOST", "PORT", "IMAGE", "STATUS", "UPTIME"):
         table.add_column(col)
@@ -12618,6 +12808,15 @@ inventory_app = typer.Typer(
     ),
 )
 app.add_typer(inventory_app, name="inventory")
+
+
+@inventory_app.command("reconcile")
+def inventory_reconcile(
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Compare the record against what each host reports."""
+    set_json_mode(as_json)
+    do_inventory_reconcile(as_json)
 
 
 @inventory_app.command("list")

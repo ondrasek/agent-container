@@ -31,34 +31,32 @@ area, and do not re-summarise them here.
   "project directory". Config is two levels, project winning, same filename both; **plaintext
   credentials are user-level only** (repo holds a locator, never a value). Context **is** `image/`.
   Shell env at `~/.agent-env`. **Pre-011 layouts are refused, not ignored.**
-- **Run mechanism is compose** (Compose v2), generated and run **on the target host** — context
-  and injected files travel to that daemon. A **host bind fails over a remote context** — and
-  `configs: {file:}` **is** a bind (measured); only `configs: {content:}` is API-delivered. Inline
-  non-secret injected material; the 001/003 lesson.
+- **Run mechanism is compose** (v2), generated and run **on the target host**. A host bind fails over
+  a remote context, and `configs: {file:}` **is** a bind (measured); only `{content:}` is
+  API-delivered. Inline non-secret injected material; the 001/003 lesson.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv,
   or printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a
   missing referenced file must `die` **before** compose. On-volume `auth.json` is
   **operator-interactive-login only**; a private SSH **host** key is never injected at all. Rotate = edit locally + `redeploy`.
-- **The supported-agent list is single-sourced.** `AGENTS` in `bin/agent-container` is canonical;
-  tests fail on drift anywhere it is restated and name what to update; a sibling test pins the
-  completions' command list to the CLI's.
-- **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates
-  it `root:root` and rootless cannot write it, even under a dev-owned parent. `opencode` is the
-  only agent with two volumes (XDG splits config from credentials).
-- **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently so a
-  non-editable install works standalone — only `build` needs a checkout. **PyYAML is the one
-  third-party dep**; `yaml.safe_load` **only** — never a regex over structured formats. Justify
-  any new tool or dep against the constraints above and Constitution VI. MIT.
+- **The supported-agent list is single-sourced** (`AGENTS`); tests fail on drift and name what to
+  update. A sibling test pins the completions' command list to the CLI's.
+- **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates it
+  `root:root` and rootless cannot write it. (`opencode` alone has two volumes.)
+- **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently (only `build`
+  needs a checkout). **PyYAML is the one third-party dep**; `yaml.safe_load` **only** — never a regex
+  over structured formats. Justify any new dep against Constitution VI. MIT.
 - **Egress enforcement is packet-level and says so.** Default-deny in a netns shared with the
   **egress sidecar**, which alone holds `NET_ADMIN` (the agent holds none); squid **splices, never
   bumps** — a locally-issued CN means the boundary inverted. A declared port selects netfilter over
   the proxy allowlist; sidecars are inside unless declared out. A declaration governs **all** egress
   (it breaks HTTPS `git push` unless declared — checked at deploy); absent ≠ `allow: []`; the
   strength statement is tested for **absence** of overclaim.
-- **Host identity is CAPTURED, never supplied.** The container's host key never leaves it; each deploy
-  pins the **public** half as `[address]:port` in derived host state. **Mismatch ⇒ refuse,
-  unconditionally, never a prompt**; absent ⇒ warn + fingerprint + ask (no tty ⇒ refuse), because a pin
-  must **predate** what it checks. All five private-key channels are gone.
+- **Host identity is CAPTURED, never supplied.** Each deploy pins the container's **public** key as
+  `[address]:port` in derived host state. **Mismatch ⇒ refuse, never a prompt**; absent ⇒ warn +
+  fingerprint + ask (no tty ⇒ refuse) — a pin must **predate** what it checks.
+- **The inventory remembers what we CREATED; it never deletes.** Durable but **flat** (an entry
+  outlives its host). Capped by count (5000), **never age**. `unknown` is a *reconciliation result*,
+  never stored; an unreachable host is `unknown`, **never** `missing`. Not backfilled.
 - **A run's account outlives its container.** The container writes the record to the runs volume
   (only the entrypoint is there when a detached run ends), the CLI ingests on next contact, and
   **teardown drains before it removes volumes**; `task` is the one operator-authored field,
@@ -76,7 +74,7 @@ lifecycle, volumes · 001,002) · `docs/credentials.md` (injection, managers · 
 `docs/shell-integration.md` (`attach --print`, `host env`, verified attach · 005,018) · `docs/agent-as-code.md`
 (declarative `.agent-container/` · 006,008) · `docs/agent-interface.md` (`--json`, `context`,
 `skill` · 009) · `docs/egress.md` (declaration, enforcement, honesty · 012) ·
-`docs/observability.md` (run records, ingestion, retention · 016) ·
+`docs/observability.md` (016) · `docs/inventory.md` (record, reconcile, retention · 014) ·
 `docs/threat-model.md` (**reconcile every feature** — Constitution) · specs/007 (wizard).
 
 ## Architecture (keep these layers separate)

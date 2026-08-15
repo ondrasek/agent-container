@@ -229,3 +229,243 @@ def test_the_census_guard_can_fail(wiz):
     i = fake.index("\ndef compose_up_exec(")
     j = fake.index("\ndef ", i + 1)
     assert "record_inventory_creation(" not in fake[i:j]
+
+
+# --- reconciliation: computed, four classifications, fail-closed -------------
+
+
+def _reachable(wiz, monkeypatch, names):
+    monkeypatch.setattr(wiz, "host_ps_rows", lambda h, **k: [(n, "img", "Up", "1m") for n in names])
+
+
+def _unreachable(wiz, monkeypatch):
+    def boom(*_a, **_kw):
+        raise wiz.Fatal("host unreachable")
+
+    monkeypatch.setattr(wiz, "host_ps_rows", boom)
+
+
+def test_an_agreeing_entry_is_classified_agreeing(wiz, monkeypatch):
+    _entry(wiz, name="acme")
+    _reachable(wiz, monkeypatch, ["agent-container-acme"])
+    rows = wiz.reconcile_inventory()
+    assert [r["classification"] for r in rows] == ["agreeing"]
+
+
+def test_a_reachable_host_reporting_absence_is_missing(wiz, monkeypatch):
+    _entry(wiz, name="acme")
+    _reachable(wiz, monkeypatch, [])
+    assert [r["classification"] for r in wiz.reconcile_inventory()] == ["missing"]
+
+
+def test_an_unreachable_host_is_unknown_and_NEVER_missing(wiz, monkeypatch):
+    """FR-006/SC-004 — Feature 002's fail-closed rule. Invisible is
+    indistinguishable from gone, and guessing sends an operator hunting for a
+    container sitting safely on a host they cannot currently reach."""
+    _entry(wiz, name="acme")
+    _unreachable(wiz, monkeypatch)
+    got = [r["classification"] for r in wiz.reconcile_inventory()]
+    assert "missing" not in got
+    assert got == ["unknown"]
+
+
+def test_the_unreachable_test_has_a_positive_control(wiz, monkeypatch):
+    """T023's second half. Asserting only the ABSENCE of `missing` would also pass
+    for a build that classifies nothing at all, so prove the classifier does produce
+    `missing` when the host genuinely answers."""
+    _entry(wiz, name="acme")
+    _reachable(wiz, monkeypatch, [])
+    assert "missing" in [r["classification"] for r in wiz.reconcile_inventory()]
+
+
+def test_a_container_we_did_not_record_is_unrecorded_and_NOT_claimed(wiz, monkeypatch):
+    """FR-007/SC-005: `CONTAINER_PREFIX` is a naming convention an operator can
+    imitate, so a match is evidence of a NAME and nothing more."""
+    _reachable(wiz, monkeypatch, ["agent-container-stranger"])
+    rows = wiz.reconcile_inventory()
+    assert [r["classification"] for r in rows] == ["unrecorded"]
+    note = rows[0]["note"]
+    assert "observation" in note and "not a claim of ownership" in note
+    for forbidden in ("our container", "created by this tool", "we created", "belongs to"):
+        assert forbidden not in note.lower()
+
+
+def test_the_ownership_wording_check_can_fail(wiz, monkeypatch):
+    """Proof T025 is load-bearing: a note that DID claim ownership must be rejected
+    by the assertion above."""
+    claim = "our container, created by this tool"
+    assert any(f in claim.lower() for f in ("our container", "created by this tool"))
+
+
+def test_every_entry_lands_in_exactly_one_classification(wiz, monkeypatch):
+    _entry(wiz, name="a")
+    _entry(wiz, name="b")
+    _reachable(wiz, monkeypatch, ["agent-container-a", "agent-container-stranger"])
+    rows = wiz.reconcile_inventory()
+    assert len(rows) == 3  # a=agreeing, b=missing, stranger=unrecorded
+    assert all(r["classification"] in wiz.INVENTORY_CLASSIFICATIONS for r in rows)
+
+
+def test_unknown_is_computed_and_never_written_to_the_store(wiz, monkeypatch):
+    """SC-003: zero stored entries may carry `unknown`, even after a reconciliation
+    that classified one that way."""
+    _entry(wiz, name="acme")
+    _unreachable(wiz, monkeypatch)
+    wiz.do_inventory_reconcile(True)
+    assert all(e["outcome"] != "unknown" for e in wiz.read_inventory_entries())
+
+
+def test_only_reconciliation_records_vanished(wiz, monkeypatch, capsys):
+    """data-model §5: it is the one path that has SEEN a reachable host report the
+    container gone. Anywhere else would record an inference as a fact."""
+    _entry(wiz, name="acme")
+    _reachable(wiz, monkeypatch, [])
+    wiz.do_inventory_reconcile(True)
+    capsys.readouterr()
+    assert wiz.read_inventory_entries()[0]["outcome"] == "vanished"
+
+
+def test_an_unreachable_host_does_not_mark_anything_vanished(wiz, monkeypatch):
+    _entry(wiz, name="acme")
+    _unreachable(wiz, monkeypatch)
+    wiz.do_inventory_reconcile(True)
+    assert wiz.read_inventory_entries()[0]["outcome"] == "active"
+
+
+def test_the_list_hint_is_one_line_and_names_no_classification(wiz, monkeypatch):
+    """FR-005a/C9: a discrepancy an operator must already suspect in order to look
+    for is one nobody finds — but the classification is reconcile's answer, and two
+    places giving it would drift."""
+    _entry(wiz, name="acme")
+    _reachable(wiz, monkeypatch, [])
+    hint = wiz.inventory_disagreement_hint()
+    assert hint and "\n" not in hint
+    assert "inventory reconcile" in hint
+    for word in wiz.INVENTORY_CLASSIFICATIONS:
+        assert word not in hint
+
+
+def test_no_hint_when_everything_agrees(wiz, monkeypatch):
+    _entry(wiz, name="acme")
+    _reachable(wiz, monkeypatch, ["agent-container-acme"])
+    assert wiz.inventory_disagreement_hint() is None
+
+
+def test_the_hint_never_breaks_list(wiz, monkeypatch):
+    """FR-013: no command's behaviour may depend on the inventory working."""
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("store on fire")
+
+    monkeypatch.setattr(wiz, "reconcile_inventory", boom)
+    assert wiz.inventory_disagreement_hint() is None
+
+
+# --- US3: age and provenance -------------------------------------------------
+
+
+def test_age_is_rendered_not_left_as_arithmetic(wiz):
+    """SC-009: a date the operator must subtract from today is not the answer they
+    asked for."""
+    assert wiz.inventory_age("2026-08-01T00:00:00Z", now=1785549600) == "2h"
+    assert wiz.inventory_age("2026-08-01T00:00:00Z", now=1785801600) == "3d"
+
+
+def test_age_and_provenance_still_answer_when_the_host_is_GONE(wiz, monkeypatch, capsys):
+    """SC-009's trailing clause — the half that can actually fail. A rendering that
+    reached for the live host to derive either value would break exactly where this
+    feature is most useful."""
+    _entry(wiz, name="acme", host="vps1", provisioned=True)
+    wiz.set_inventory_outcome_for_host("vps1", "host-gone")
+
+    def no_hosts(*_a, **_kw):
+        raise AssertionError("consulted a host that no longer exists")
+
+    monkeypatch.setattr(wiz, "host_ps_rows", no_hosts)
+    monkeypatch.setattr(wiz, "load_registry", lambda *_a, **_kw: {"version": 1, "hosts": {}})
+    wiz.do_inventory_list(False)
+    out = capsys.readouterr().out
+    assert "vps1" in out and "host-gone" in out
+    assert "yes" in out  # host_provisioned, read from the ENTRY
+
+
+# --- the honest edges --------------------------------------------------------
+
+
+def test_concurrent_deployments_each_produce_a_complete_entry(wiz):
+    """FR-009/SC-007. Guaranteed by SHAPE — separate entries are separate files — so
+    this test exists to prove the shape was actually used rather than to exercise a
+    lock."""
+    import threading
+
+    errors: list[BaseException] = []
+
+    def make(i: int):
+        try:
+            wiz.record_inventory_creation(f"env{i}", "local", False)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=make, args=(i,)) for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errors
+    entries = wiz.read_inventory_entries()
+    assert len(entries) == 12
+    assert {e["name"] for e in entries} == {f"env{i}" for i in range(12)}
+    assert all(set(e) == set(wiz.INVENTORY_FIELDS) for e in entries)  # none half-written
+
+
+def test_the_cap_is_count_only_and_prunes_the_oldest(wiz, monkeypatch, capsys):
+    monkeypatch.setattr(wiz, "INVENTORY_MAX_ENTRIES", 5)
+    for i in range(8):
+        wiz.write_inventory_entry(wiz.build_inventory_entry(f"env{i}", "local", False))
+    assert wiz.prune_inventory() == 3
+    assert len(wiz.read_inventory_entries()) == 5
+    assert "pruned 3 entries" in capsys.readouterr().err  # never silent
+
+
+def test_there_is_no_age_based_pruning_anywhere(wiz):
+    """FR-012 / finding U1: the entries most worth having are the oldest forgotten
+    ones, so a time criterion would delete the feature's value first. Asserted over
+    the SOURCE, because the risk is a future 'obvious improvement'."""
+    src = Path(wiz.__file__).read_text()
+    i = src.index("\ndef prune_inventory(")
+    j = src.index("\ndef ", i + 1)
+    # EXECUTABLE LINES ONLY. The docstring explains at length why age-pruning is
+    # forbidden, so a whole-text scan matches its own explanation and reports a
+    # violation that does not exist — a guard reading prose instead of code, which is
+    # exactly the failure this project keeps finding.
+    body, in_doc = [], False
+    for line in src[i:j].splitlines():
+        stripped = line.strip()
+        if stripped.startswith('"""') or stripped.endswith('"""'):
+            in_doc = not in_doc
+            continue
+        if in_doc or stripped.startswith("#") or not stripped:
+            continue
+        body.append(stripped)
+    code = "\n".join(body)
+    for banned in ("MAX_AGE", "days", "created_at", "mtime", "timedelta"):
+        assert banned not in code, f"{banned} appeared in prune_inventory's CODE"
+    assert not hasattr(wiz, "INVENTORY_MAX_AGE_DAYS")
+
+
+def test_the_no_age_pruning_guard_reads_code_and_can_fail(wiz):
+    """Proof the guard above is not vacuous: a body that DOES prune by age is caught,
+    and one that merely mentions age in a comment is not."""
+    prose_only = ["def prune_inventory():", '"""Age-pruning is forbidden."""', "pass"]
+    real_violation = ["def prune_inventory():", "cutoff = time.time() - MAX_AGE_DAYS * 86400"]
+    assert not any("MAX_AGE" in ln for ln in prose_only if not ln.startswith('"""'))
+    assert any("MAX_AGE" in ln for ln in real_violation)
+
+
+def test_pruning_keeps_the_newest(wiz, monkeypatch):
+    monkeypatch.setattr(wiz, "INVENTORY_MAX_ENTRIES", 2)
+    for i in range(4):
+        wiz.write_inventory_entry(wiz.build_inventory_entry(f"env{i}", "local", False))
+    wiz.prune_inventory()
+    kept = {e["name"] for e in wiz.read_inventory_entries()}
+    assert len(kept) == 2

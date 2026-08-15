@@ -80,13 +80,13 @@ inventory accounts for all of them with an accurate state each.
       worse than the failed write
 - [X] T017 [P] [US1] Unit test T016 both ways: the deploy's exit status is untouched, AND the warning
       is emitted — asserting only the first would pass for a build that records nothing silently
-- [ ] T018 [US1] **Acceptance S3 — THE GATE.** An entry survives container removal, `host rm`, and
+- [X] T018 [US1] **Acceptance S3 — THE GATE.** An entry survives container removal, `host rm`, and
       the host's state directory being gone (C3, FR-003, SC-002). Land this before Phase 4 and stop
       if it fails: the most likely cause is the store being placed under `<state>/<host>/` or scoped
       per host in the durable location
-- [ ] T019 [US1] Acceptance S2 — `redeploy` also records (C2, SC-001). A hook in the wrong place
+- [X] T019 [US1] Acceptance S2 — `redeploy` also records (C2, SC-001). A hook in the wrong place
       records some deploys and not others, and the gap is invisible
-- [ ] T020 [P] [US1] Acceptance S4 — create/remove/create with one name yields **two** entries and
+- [X] T020 [P] [US1] Acceptance S4 — create/remove/create with one name yields **two** entries and
       the first is unchanged (C5, SC-003a). **A wrong answer that looks right is `1`**: it means name
       is the key and every recreation is erasing history
 
@@ -98,26 +98,26 @@ inventory accounts for all of them with an accurate state each.
 **Independent test**: create a container outside the tool and delete one it created; confirm both
 discrepancies are reported distinctly.
 
-- [ ] T021 [US2] `inventory reconcile [--json]` classifying every entry into exactly one of
+- [X] T021 [US2] `inventory reconcile [--json]` classifying every entry into exactly one of
       `agreeing` / `missing` / `unrecorded` / `unknown` (C6, FR-005, SC-003) — zero unclassified
-- [ ] T022 [US2] An unreachable host yields **`unknown`, never `missing`** (C7, FR-006, SC-004) —
+- [X] T022 [US2] An unreachable host yields **`unknown`, never `missing`** (C7, FR-006, SC-004) —
       Feature 002's fail-closed rule, because invisible is indistinguishable from gone
-- [ ] T023 [P] [US2] Unit test T022 with a host that cannot be reached, asserting the ABSENCE of any
+- [X] T023 [P] [US2] Unit test T022 with a host that cannot be reached, asserting the ABSENCE of any
       `missing` classification — and a positive control with a reachable host, or the test passes for
       a build that classifies nothing at all
-- [ ] T024 [US2] `unrecorded` for a container present but not in the record, and **the wording must
+- [X] T024 [US2] `unrecorded` for a container present but not in the record, and **the wording must
       not claim ownership** (C8, FR-007, SC-005). `CONTAINER_PREFIX` is a naming convention an
       operator can imitate, so a match is evidence of a name and nothing more
-- [ ] T025 [P] [US2] Test that neither human nor `--json` output describes an `unrecorded` container
+- [X] T025 [P] [US2] Test that neither human nor `--json` output describes an `unrecorded` container
       as the tool's — assert on the words, not only the classification
-- [ ] T026 [US2] Reconciliation may set `vanished` for a confirmed absence, and **only
+- [X] T026 [US2] Reconciliation may set `vanished` for a confirmed absence, and **only
       reconciliation may** (data-model §5). It is the one path that has seen a reachable host report
       the container gone; anything else would record an inference as a fact
-- [ ] T027 [US2] `list` surfaces a **one-line hint** when record and live state disagree, without
+- [X] T027 [US2] `list` surfaces a **one-line hint** when record and live state disagree, without
       performing or printing the classification (C9, FR-005a). `list` already queries every host, and
       a discrepancy an operator must already suspect is one nobody finds
-- [ ] T028 [P] [US2] Acceptance S6 — an unreachable host produces zero `missing` classifications
-- [ ] T029 [P] [US2] Acceptance S7 — a container created outside the tool is reported `unrecorded`
+- [X] T028 [P] [US2] Acceptance S6 — an unreachable host produces zero `missing` classifications
+- [X] T029 [P] [US2] Acceptance S7 — a container created outside the tool is reported `unrecorded`
       and never claimed
 
 ---
@@ -126,11 +126,11 @@ discrepancies are reported distinctly.
 
 **Goal**: see how long each environment has existed, and whether its host was tool-provisioned.
 
-- [ ] T030 [US3] Render age from `created_at` so it is **evident without arithmetic** (SC-009) — a
+- [X] T030 [US3] Render age from `created_at` so it is **evident without arithmetic** (SC-009) — a
       timestamp an operator has to subtract from today is not the answer they asked for
-- [ ] T031 [P] [US3] Show `host_provisioned` so a tool-created host is distinguishable from a merely
+- [X] T031 [P] [US3] Show `host_provisioned` so a tool-created host is distinguishable from a merely
       registered one (SC-009), read from the **entry**, not from the live host record
-- [ ] T032 [P] [US3] Test both renderings for an entry **whose host is gone** (SC-009's trailing
+- [X] T032 [P] [US3] Test both renderings for an entry **whose host is gone** (SC-009's trailing
       clause, the one that can actually fail). The host reference is retained (FR-003), so age must
       still answer — and a rendering that reaches for the live host to derive either value breaks
       exactly where this feature is most useful
@@ -139,21 +139,21 @@ discrepancies are reported distinctly.
 
 ## Phase 6: The honest edges
 
-- [ ] T033 Concurrency: N concurrent deployments produce N complete entries (FR-009, C11, SC-007).
+- [X] T033 Concurrency: N concurrent deployments produce N complete entries (FR-009, C11, SC-007).
       Guaranteed by shape — separate entries are separate files — so the test exists to prove the
       shape was actually used
-- [ ] T034 The backstop cap (FR-012, C14): **5000 entries, count only**. Age-pruning deletes the
+- [X] T034 The backstop cap (FR-012, C14): **5000 entries, count only**. Age-pruning deletes the
       oldest forgotten entries first, which are the ones this feature exists to surface — so there is
       **no time-based criterion at any level**, and the code must not grow one later as an obvious
       improvement (finding U1)
-- [ ] T035 [P] Test that the documented cap is the **enforced** one, and that age is NOT a pruning
+- [X] T035 [P] Test that the documented cap is the **enforced** one, and that age is NOT a pruning
       criterion — a documented number the code does not use is this project's recurring defect
-- [ ] T036 **An absent store changes nothing** (FR-013, C13, SC-008). Every read tolerates a missing
+- [X] T036 **An absent store changes nothing** (FR-013, C13, SC-008). Every read tolerates a missing
       store and no command's exit status depends on the inventory existing
-- [ ] T037 Verify T036 by **deleting the store and running the existing suite** (research R8) — a
+- [X] T037 Verify T036 by **deleting the store and running the existing suite** (research R8) — a
       unit test over an empty store proves the new code tolerates emptiness, not that nothing ELSE
       grew a dependency on it
-- [ ] T038 [P] Test that the entry's field set is **CLOSED** (FR-010, C12, SC-006). Unlike Feature
+- [X] T038 [P] Test that the entry's field set is **CLOSED** (FR-010, C12, SC-006). Unlike Feature
       016 there is no free-text field, so the no-credentials guarantee is structural — and that
       closure is the only thing keeping it structural
 
@@ -161,14 +161,14 @@ discrepancies are reported distinctly.
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T039 State FR-014's **THREE-way** authority split in `docs/orchestration.md` (C15): the live
+- [X] T039 State FR-014's **THREE-way** authority split in `docs/orchestration.md` (C15): the live
       daemon for *what is running now*; local port state (`<state>/<host>/*.port`) for the **port
       number** and per-host enumeration, dying with its host; this record for *what we ever created*.
       Say that the purposes do not overlap, and that a disagreement between port state and the record
       is **information, not a conflict** — it means a host's state was cleared while the record kept
       its entries, which is FR-003 working. Without this the first disagreement is resolved by whoever
       reads the code that day, and both possible mistakes are bad
-- [ ] T040 [P] `docs/inventory.md` — what an entry is, the four outcomes, why `unknown` is computed
+- [X] T040 [P] `docs/inventory.md` — what an entry is, the four outcomes, why `unknown` is computed
       rather than stored, retention, and that this feature **deletes nothing** (015's job).
       **Must state that the inventory begins at install and is not backfilled**: an empty inventory
       otherwise reads as "nothing exists" rather than "nothing recorded yet", and pre-install
@@ -176,10 +176,10 @@ discrepancies are reported distinctly.
       is. Say why backfilling was rejected — `*.port` is a census of ports allocated and not
       released, so reconstructed entries would describe gone environments with an undeterminable
       outcome, and a fabricated entry is worse than an absent one in the store a kill switch reads
-- [ ] T041 [P] **Reconcile `docs/threat-model.md`** — the record names hosts and environments, and
+- [X] T041 [P] **Reconcile `docs/threat-model.md`** — the record names hosts and environments, and
       the Constitution's Development Workflow clause makes this MUST for any feature altering what is
       persisted. Read the existing structure first: structural guards in `bin/tests/` parse that file
-- [ ] T042 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
+- [X] T042 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
       before adding**. Report the before/after number
 - [ ] T043 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S12 by hand. A `-k` pattern matching nothing is
