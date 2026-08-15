@@ -15,15 +15,15 @@ record does not outlive the host, there is nothing to compare and every later ph
 
 ## Phase 1: Setup
 
-- [ ] T001 `inventory_store_dir()` in `bin/agent-container` resolving
+- [X] T001 `inventory_store_dir()` in `bin/agent-container` resolving
       `$XDG_DATA_HOME/agent-container/inventory/` with the `~/.local/share` fallback — **flat, no
       `<host>/` component** (FR-002, research R2). A per-host directory is deleted with its host, which would
       destroy exactly the entries FR-003 exists to keep
-- [ ] T002 [P] Add the inventory as a **third tenant row** under the existing durable location in
+- [X] T002 [P] Add the inventory as a **third tenant row** under the existing durable location in
       `docs/layout.md`, beside `runs/` and `egress/` (FR-002 — which requires it be named there;
       research R1) — not a new location; Feature 016
       already established that one, and FR-012a calls this shared placement
-- [ ] T003 [P] Note in `docs/layout.md` **why this one is flat** while its two siblings are
+- [X] T003 [P] Note in `docs/layout.md` **why this one is flat** while its two siblings are
       `<host>/<environment>/` — the difference is load-bearing and a future reader will otherwise
       "fix" the inconsistency
 
@@ -31,24 +31,24 @@ record does not outlive the host, there is nothing to compare and every later ph
 
 ## Phase 2: Foundational — blocking prerequisites for every story
 
-- [ ] T004 `inventory_entry_id()` — generated per deployment, sortable, also the filename
+- [X] T004 `inventory_entry_id()` — generated per deployment, sortable, also the filename
       (FR-015, data-model §1). Host and name are **attributes**, never the key: that is what makes
       FR-015 hold by construction rather than by careful handling
-- [ ] T005 Entry construction per data-model §1, **refusing any outcome outside the four** and
+- [X] T005 Entry construction per data-model §1, **refusing any outcome outside the four** and
       refusing `unknown` specifically (FR-004, C4). Enforced at construction, as Feature 016 enforces
       its kind/outcome pairing — a rule kept by convention becomes prose the first time someone adds
       a state, and then SC-003 cannot be measured
-- [ ] T006 [P] Unit tests for T005: each of the four accepted; `unknown` refused; a
+- [X] T006 [P] Unit tests for T005: each of the four accepted; `unknown` refused; a
       proof-it-can-fail case that neuters the check and asserts the guard then fails
-- [ ] T007 Read/write the store using **016's existing** `atomic_write_json` and listing helper — do
+- [X] T007 Read/write the store using **016's existing** `atomic_write_json` and listing helper — do
       NOT add a second copy (research R3/R4, FR-012a). This is the third consumer after 012's egress
       events; a second implementation is a second thing to drift
-- [ ] T008 **THE MUTATION CENSUS (research R5) — the highest-risk task in this feature.** Enumerate
+- [X] T008 **THE MUTATION CENSUS (research R5) — the highest-risk task in this feature.** Enumerate
       every path that creates or destroys an environment and express the census as a **test over the
       source**, not a comment. Known today: `compose_up_exec` (create), `down_container` and
       `do_wipe` (removed), `host rm [--destroy]` (host-gone). The failure mode is a NEW path added
       later that records nothing — invisible, because everything else it does works correctly
-- [ ] T009 [P] Prove T008's census guard can fail: add a fake creating path that does not record and
+- [X] T009 [P] Prove T008's census guard can fail: add a fake creating path that does not record and
       assert the guard rejects it
 
 ---
@@ -60,25 +60,25 @@ host and the registry entry.
 **Independent test**: create across two hosts, remove one host, stop one container, and confirm the
 inventory accounts for all of them with an accurate state each.
 
-- [ ] T010 [US1] Create an entry in `compose_up_exec` — **not `do_up`** (FR-001, research R5). `do_up` serves
+- [X] T010 [US1] Create an entry in `compose_up_exec` — **not `do_up`** (FR-001, research R5). `do_up` serves
       `up` and `apply`, but `do_redeploy` and the wizard call `compose_up_exec` directly, so a hook in
       `do_up` silently misses them and SC-001's 100% is unreachable
-- [ ] T011 [US1] Record `host_provisioned` at creation from the host record, so US3 can later
+- [X] T011 [US1] Record `host_provisioned` at creation from the host record, so US3 can later
       distinguish a host the tool created from one merely registered
-- [ ] T012 [US1] Mark `removed` in `down_container` and `do_wipe` (FR-004) — torn down while its host
+- [X] T012 [US1] Mark `removed` in `down_container` and `do_wipe` (FR-004) — torn down while its host
       remained
-- [ ] T013 [US1] Mark `host-gone` for a host's `active` entries on `host rm`, **with and without
+- [X] T013 [US1] Mark `host-gone` for a host's `active` entries on `host rm`, **with and without
       `--destroy`** (FR-004). The outcome keys on WHAT disappeared, not who caused it, so
       deprovisioning is not a separate value
-- [ ] T014 [US1] `inventory list [--json]` (C1, FR-011 — the existing machine-readable interface), newest-first, with a plain line rather than an empty
+- [X] T014 [US1] `inventory list [--json]` (C1, FR-011 — the existing machine-readable interface), newest-first, with a plain line rather than an empty
       screen when there are none
-- [ ] T015 [P] [US1] Completions for `inventory list` in both shells plus the assertion in
+- [X] T015 [P] [US1] Completions for `inventory list` in both shells plus the assertion in
       `bin/tests/test_completions.sh` — the completions' command list is pinned to the CLI's by a
       test, so it will fail until updated
-- [ ] T016 [US1] A write failure **surfaces without failing the deploy** (FR-008, C10). An
+- [X] T016 [US1] A write failure **surfaces without failing the deploy** (FR-008, C10). An
       unrecorded environment is the blind spot this feature exists to remove, so silence here is
       worse than the failed write
-- [ ] T017 [P] [US1] Unit test T016 both ways: the deploy's exit status is untouched, AND the warning
+- [X] T017 [P] [US1] Unit test T016 both ways: the deploy's exit status is untouched, AND the warning
       is emitted — asserting only the first would pass for a build that records nothing silently
 - [ ] T018 [US1] **Acceptance S3 — THE GATE.** An entry survives container removal, `host rm`, and
       the host's state directory being gone (C3, FR-003, SC-002). Land this before Phase 4 and stop

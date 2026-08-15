@@ -126,6 +126,7 @@ _agent-container() {
         'logs:Tail container logs'
         'runs:Durable run records (list, show) — survives teardown'
         'egress:Durable record of undeclared egress — survives teardown'
+        'inventory:Durable record of every environment created — survives its host'
         'plan:Show the plan for the declarative spec (no mutation)'
         'apply:Converge the declarative spec'
         'status:Report declarative spec drift'
@@ -210,6 +211,10 @@ _agent-container() {
                         '--egress[Read the egress boundary log, where refusals are recorded]' \
                         '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names_local'
+                    ;;
+                inventory)
+                    _arguments '1:command:(list)' '--json[Emit machine-readable JSON]'
+                    return 0
                     ;;
                 runs)
                     _arguments \

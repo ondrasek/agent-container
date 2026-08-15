@@ -1437,6 +1437,241 @@ def runs_store_dir(host: str, environment: str) -> Path:
     return DATA_DIR / "runs" / host / environment
 
 
+# --- Feature 014: the durable inventory --------------------------------------
+# The THIRD tenant of the durable location, after 016's runs/ and 012's egress/,
+# and the one that is shaped differently on purpose.
+
+
+def inventory_store_dir() -> Path:
+    """Where the durable record of everything the tool created lives.
+
+    FLAT — deliberately unlike `runs/<host>/<environment>/` and `egress/<host>/…`.
+    FR-003 requires an entry to OUTLIVE its host's removal, and a per-host
+    directory is deleted with the host, destroying exactly the entries the
+    requirement exists to keep. Host is an ATTRIBUTE here, never a path component.
+
+    The two shapes differ because their lifetimes do: a run record answers "what
+    happened on this host", and dies sensibly with it; this answers "what did we
+    ever create", and must not.
+
+    >>> inventory_store_dir().parts[-2:]
+    ('agent-container', 'inventory')
+    """
+    return DATA_DIR / "inventory"
+
+
+# Closed at construction (FR-004). `unknown` is deliberately absent: it is a
+# RECONCILIATION RESULT, not a state, and storing it would make the record
+# permanently lie about a host that later comes back.
+INVENTORY_OUTCOMES = ("active", "removed", "vanished", "host-gone")
+# COUNT ONLY, and there is deliberately NO age dimension at any level (FR-012).
+# Feature 016 prunes runs by age AND count because a run's value decays once its
+# commits are ordinary history. This is the opposite: the entry most worth having
+# is the one forgotten six months ago, so a time criterion would delete the
+# feature's whole value first. 5000 is roughly an order of magnitude past the
+# spec's own estimate that years of heavy use is hundreds of rows — a backstop
+# against runaway growth, not tidying. A test binds this number to the help text.
+INVENTORY_MAX_ENTRIES = 5000
+INVENTORY_SCHEMA = 1
+# Pinned closed by a test. Unlike Feature 016 — which had to STATE its task-text
+# exposure — FR-010's guarantee here is structural: every field is tool-generated,
+# so there is nowhere for a credential to arrive. The field set IS the guarantee,
+# which is why it is a constant and not a convention.
+INVENTORY_FIELDS = (
+    "schema",
+    "entry_id",
+    "name",
+    "host",
+    "host_provisioned",
+    "created_at",
+    "outcome",
+    "outcome_at",
+    "notes",
+)
+
+
+def inventory_entry_id(name: str, when: str) -> str:
+    """A per-DEPLOYMENT id, sortable, and also the filename (FR-015).
+
+    Keyed on the deployment rather than on (host, name): a reused name yields
+    ANOTHER entry, so FR-015 holds by construction — there is no overwrite path to
+    get wrong. That is the whole reason history survives a recreate.
+
+    The random suffix separates two deployments of one name inside the same second,
+    which `redeploy` in a loop reaches easily.
+
+    >>> len(inventory_entry_id("acme", "2026-08-15T10:00:00Z").split("-"))
+    3
+    """
+    stamp = when.replace("-", "").replace(":", "").replace("Z", "").replace("T", "")
+    return f"{stamp}-{name}-{secrets.token_hex(3)}"
+
+
+def build_inventory_entry(
+    name: str, host: str, host_provisioned: bool, when: str | None = None
+) -> dict:  # noqa: FBT001
+    """A new `active` entry (data-model §1).
+
+    Outcome is validated HERE rather than trusted at the call sites, the way
+    Feature 016 enforces its kind/outcome pairing: a rule kept by convention
+    becomes prose the first time someone adds a state, and then SC-003's "zero
+    entries carrying `unknown`" cannot be measured at all.
+    """
+    # utc_now(), not a second format string: a listing sorts on this text, and two
+    # writers that disagreed about the shape would order entries by which code path
+    # created them (the reason Feature 016 made it one helper).
+    when = when or utc_now()
+    return {
+        "schema": INVENTORY_SCHEMA,
+        "entry_id": inventory_entry_id(name, when),
+        "name": name,
+        "host": host,
+        "host_provisioned": host_provisioned,
+        "created_at": when,
+        "outcome": "active",
+        "outcome_at": None,
+        "notes": [],
+    }
+
+
+def validate_inventory_outcome(outcome: str) -> str:
+    """Refuse anything outside the four, and refuse `unknown` by name (FR-004).
+
+    `unknown` gets its own message because it is the one wrong answer somebody will
+    reach for in good faith — a reconciliation that cannot reach a host has an
+    obvious place to write it, and writing it there is exactly the lie SC-003
+    forbids.
+    """
+    if outcome == "unknown":
+        die(
+            "inventory: 'unknown' is a reconciliation RESULT, never a stored outcome — "
+            "an unreachable host is not a gone one, and storing it would make the "
+            "record lie about a host that comes back."
+        )
+    if outcome not in INVENTORY_OUTCOMES:
+        die(f"inventory: outcome={outcome!r} is not one of {{{', '.join(INVENTORY_OUTCOMES)}}}")
+    return outcome
+
+
+def write_inventory_entry(entry: dict) -> Path:
+    """Persist one entry, using Feature 016's `atomic_write_json` (FR-012a).
+
+    THIRD consumer of that path, after 012's egress events — not a second copy.
+    A separate implementation would be a second thing to drift, and the property
+    being relied on (temp-in-target-dir + fsync + rename) is subtle enough that
+    two versions of it would not stay equivalent.
+
+    The write is atomic per FILE, which is what gives FR-009 its concurrency
+    guarantee for free: separate entries are separate files, and two writers to
+    the SAME entry serialise on the rename.
+    """
+    validate_inventory_outcome(entry["outcome"])
+    return atomic_write_json(inventory_store_dir(), f"{entry['entry_id']}.json", entry)
+
+
+def do_inventory_list(as_json: bool) -> None:
+    """The inventory, newest first (C1, FR-011).
+
+    Reads STORED ENTRIES ONLY — no host is contacted. That is what lets it answer
+    months later, on a machine whose registry no longer lists the host, about an
+    environment that no longer exists.
+    """
+    entries = read_inventory_entries()
+    if as_json:
+        emit_json({"entries": entries})
+        return
+    if not entries:
+        # A plain sentence, not an empty screen: nothing recorded and a broken
+        # store look identical when both print zero rows.
+        log("no environments recorded yet (the inventory begins at install; it is not backfilled)")
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("NAME", "HOST", "CREATED", "OUTCOME", "HOST-PROVISIONED"):
+        table.add_column(col)
+    for e in entries:
+        table.add_row(
+            str(e.get("name", "?")),
+            str(e.get("host", "?")),
+            str(e.get("created_at", "?")),
+            str(e.get("outcome", "?")),
+            "yes" if e.get("host_provisioned") else "no",
+        )
+    console.print(table)
+
+
+def read_inventory_entries() -> list[dict]:
+    """Every stored entry, newest first. Missing store is not an error — a fresh
+    install has simply never created anything (FR-013)."""
+    out: list[dict] = []
+    for path in list_stored_records(inventory_store_dir()):
+        rec = read_stored_record(path, kind="inventory entry")
+        if rec is not None:
+            out.append(rec)
+    return out
+
+
+def set_inventory_outcome(name: str, host: str, outcome: str, when: str | None = None) -> int:
+    """Move this host's `active` entries for `name` to `outcome`. Returns the count.
+
+    Scoped to `active` on purpose: an entry already `removed` must not be rewritten
+    when its host is later deleted, or the record would claim the host took
+    something that was already gone — and FR-004's distinction between `removed`
+    and `host-gone` is exactly what disappeared.
+    """
+    validate_inventory_outcome(outcome)
+    changed = 0
+    for entry in read_inventory_entries():
+        if entry.get("name") != name or entry.get("host") != host:
+            continue
+        if entry.get("outcome") != "active":
+            continue
+        entry["outcome"] = outcome
+        entry["outcome_at"] = when or utc_now()
+        with contextlib.suppress(OSError):
+            write_inventory_entry(entry)
+            changed += 1
+    return changed
+
+
+def set_inventory_outcome_for_host(host: str, outcome: str, when: str | None = None) -> int:
+    """Move EVERY `active` entry on `host` to `outcome`. Returns the count.
+
+    Separate from the per-environment version because host removal does not know
+    the environment names, and enumerating them from the registry would ask the
+    thing being deleted what it used to contain.
+    """
+    validate_inventory_outcome(outcome)
+    changed = 0
+    for entry in read_inventory_entries():
+        if entry.get("host") != host or entry.get("outcome") != "active":
+            continue
+        entry["outcome"] = outcome
+        entry["outcome_at"] = when or utc_now()
+        with contextlib.suppress(OSError):
+            write_inventory_entry(entry)
+            changed += 1
+    return changed
+
+
+def record_inventory_creation(name: str, host: str, host_provisioned: bool) -> None:
+    """Record a deployment (FR-001), and NEVER fail the deploy for it (FR-008).
+
+    A write failure is surfaced rather than swallowed: an unrecorded environment is
+    precisely the blind spot this feature exists to remove, so silence here would
+    reintroduce it while everything else looked healthy. But the container is
+    already running and working — tearing it down over a bookkeeping failure would
+    be a worse outcome than the missing row.
+    """
+    try:
+        write_inventory_entry(build_inventory_entry(name, host, host_provisioned))
+    except (OSError, Fatal) as e:
+        warn(
+            f"{name}: could not record this deployment in the inventory ({e}). The "
+            f"environment is running and unaffected, but it will not appear in "
+            f"`agent-container inventory list` or in reconciliation."
+        )
+
+
 def atomic_write_json(directory: Path, filename: str, payload: object) -> Path:
     """Serialise `payload` to `directory/filename` so a reader never sees a
     partial file. Returns the final path.
@@ -2511,6 +2746,15 @@ def cli_host_rm(name: str, destroy: bool, yes: bool) -> None:
     if was_default:  # never leave the default pointing at a removed host
         reg["default"] = next(iter(sorted(hosts)), None)
     save_registry(reg)
+    # Feature 014 (FR-003/FR-004): the host's ACTIVE entries become `host-gone` —
+    # with OR without --destroy, because the outcome records WHAT disappeared rather
+    # than who caused it. The entries themselves stay: they outlive the registry
+    # entry and the host's state directory, which is the whole point of the feature
+    # (an operator asking "is something still billing me on a host I removed?" has
+    # nowhere else to look).
+    gone = set_inventory_outcome_for_host(name, "host-gone")
+    if gone:
+        log(f"marked {gone} inventory entr{'y' if gone == 1 else 'ies'} host-gone for '{name}'")
     log(f"removed host '{name}'" + (" and destroyed its server" if destroy else ""))
 
 
@@ -6336,6 +6580,13 @@ def compose_up_exec(
     # re-pins because the recreate IS a deploy. Do not add change-attribution state
     # here; there is nothing to attribute.
     capture_and_pin(host_name, host_rec, name, addr, port)
+    # Feature 014 (FR-001): record the deployment HERE, for the same reason capture
+    # and the egress declaration are here — `do_up` serves `up` and `apply`, but
+    # `do_redeploy` and the wizard call `compose_up_exec` directly, so a hook in
+    # `do_up` records some deploys and not others, and SC-001's 100% is unreachable
+    # while nothing looks wrong. host_provisioned comes from the host record so US3
+    # can later tell a host the tool CREATED from one merely registered.
+    record_inventory_creation(name, host_name, bool(host_rec.get("created_by_tool")))
     # FR-011: an upgrade must not leave a pre-018 private key behind.
     remove_stale_staged_host_key(host_name, name)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
@@ -6442,6 +6693,10 @@ def down_container(
     host_name: str, host_rec: dict, name: str, purge: bool, rmi_local: bool = False
 ) -> None:
     ensure_tunnel(host_rec)
+    # Feature 014 (FR-004): torn down while its HOST remained — which is what
+    # distinguishes `removed` from `host-gone`. The outcome keys on what
+    # disappeared, not on who caused it.
+    set_inventory_outcome(name, host_name, "removed")
     cname = container_name(name)
     compose_file = compose_file_path(host_name, name)
     # STOP, THEN DRAIN, THEN REMOVE — all three, in that order, and each for its
@@ -6715,6 +6970,9 @@ def do_wipe(name: str, yes: bool, host: str | None = None) -> None:
     locally-built image. Requires explicit confirmation (destroys durable state)."""
     validate_name(name)
     host_name, host_rec = resolve_deploy_host(host)
+    # Feature 014: `wipe` is a second teardown path, and a census that only knew
+    # about `down` would leave every wiped environment recorded `active` forever.
+    # Marked after the confirmation below, not here — see the call site.
     if not yes:
         if not is_tty():
             eprint("[agent-container] refusing destructive 'wipe' without -y/--yes on a non-TTY")
@@ -6727,6 +6985,7 @@ def do_wipe(name: str, yes: bool, host: str | None = None) -> None:
         if not questionary.confirm(prompt, default=False).ask():
             log("aborted")
             return
+    set_inventory_outcome(name, host_name, "removed")  # Feature 014, FR-004
     with deployment_lock(host_name, name):
         down_container(host_name, host_rec, name, purge=True, rmi_local=True)
     log(f"wiped {container_name(name)} on {host_name}")
@@ -12347,6 +12606,29 @@ egress_cmd.__doc__ = (egress_cmd.__doc__ or "").format(
 # default). There is deliberately no `host up`/`host down` — those are container
 # operations, not host operations. Deprovisioning a host is `host rm --destroy`
 # (guarded: refused while containers remain, or for hosts the tool did not create).
+inventory_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "Durable record of every environment this tool created — what, where, when, "
+        "and what became of it. Survives the container, the host and the registry "
+        f"entry, so it can answer 'did we make this?' about something still billing "
+        f"you on a host you removed. Kept indefinitely: pruning is COUNT-only at "
+        f"{INVENTORY_MAX_ENTRIES} entries and never by age, because the entry most "
+        f"worth having is the one you forgot six months ago."
+    ),
+)
+app.add_typer(inventory_app, name="inventory")
+
+
+@inventory_app.command("list")
+def inventory_list(
+    as_json: bool = JSON_OPT,
+) -> None:
+    """List every environment this tool created, newest first."""
+    set_json_mode(as_json)
+    do_inventory_list(as_json)
+
+
 host_app = typer.Typer(
     no_args_is_help=True,
     help="Manage deployment hosts (the machines/contexts where containers run).",

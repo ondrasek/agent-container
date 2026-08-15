@@ -182,6 +182,11 @@ test_tool() {
     assert_has "${tool}:up-authkey"  "--authorized-key" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" ""
     assert_has "${tool}:subcmd-keys" "keys" "${COMPREPLY[@]}"
+    # Feature 014: the completions' command list is pinned to the CLI's, so a new
+    # subcommand that never reaches here is a completion that silently lags the tool.
+    assert_has "${tool}:subcmd-inventory" "inventory" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "inventory" ""
+    assert_has "${tool}:inventory-list" "list" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "keys" "--"
     assert_lacks "${tool}:keys-no-hostkey" "--host-key" "${COMPREPLY[@]}"
     assert_has "${tool}:keys-flag"   "--authorized-key" "${COMPREPLY[@]}"

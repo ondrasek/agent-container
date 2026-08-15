@@ -13,6 +13,7 @@ name used two ways anywhere else in the docs, this file wins.
 | **Derived host state** | `$XDG_STATE_HOME/agent-container/<host>/` | computed; safe to delete |
 | **Run records** | `$XDG_DATA_HOME/agent-container/runs/<host>/<environment>/` | one operator machine — **durable**; outlives every container |
 | **Egress events** | `$XDG_DATA_HOME/agent-container/egress/<host>/<environment>/` | one operator machine — **durable**; a sibling of the run records, never inside them |
+| **Inventory** | `$XDG_DATA_HOME/agent-container/inventory/` | one operator machine — **durable**; a third sibling, and **flat**: it must outlive the host |
 | **Image sources** | `<checkout>/image/` | the tool's own repo |
 
 "Project directory" is **not** used: it is ambiguous between the first two.
@@ -125,6 +126,30 @@ a regression in either direction.
 **Never the operator's `~/.ssh/known_hosts`.** The tool manages its own file and leaves the
 operator's byte-identical. It *emits* text for them to place (an `ssh` config stanza, a
 `known_hosts` line); it never writes into files they own.
+
+## The inventory is a THIRD tenant of the durable location — and the odd one out
+
+`$XDG_DATA_HOME/agent-container/inventory/<entry-id>.json` — one entry per **deployment** the tool
+made: what, where, when, and what became of it (Feature 014). It sits beside `runs/` (016) and
+`egress/` (012 US3), sharing the location and the atomic write path but **not** their schema or their
+retention.
+
+**It is FLAT, and that is load-bearing.** Its siblings are `<host>/<environment>/`; this one keys on a
+generated entry id with host as an *attribute*:
+
+```text
+runs/<host>/<environment>/<run-id>.json      egress/<host>/<environment>/…
+inventory/<entry-id>.json                     ← no <host>/ level
+```
+
+An inventory entry must **outlive its host's removal** — that is the question it exists to answer
+(*"is something still billing me on a host I removed?"*). A per-host directory is deleted with its
+host, destroying exactly the entries the requirement exists to keep. Do not "fix" the inconsistency.
+
+**Retention is also not shared.** `runs/` prunes by age *and* count, because a run's value decays once
+its commits are ordinary history. The inventory prunes by **count only, never by age**: the entry most
+worth having is the one you forgot six months ago, so a time criterion would delete the feature's whole
+value first.
 
 ## Run records are observations — not state, not configuration
 
