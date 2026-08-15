@@ -75,6 +75,15 @@ success is worse than an error.
   `ps` was still legitimately running — the exact false answer SC-002 counts. Any default below 20s
   inherits that. 60s was rejected because this command's value is speed under pressure.
 
+- Q: On a re-run, does a still-unreachable host still fail the invocation? → A: **Yes —
+  `undetermined` is never success, however many times it is run.** FR-010's repeatability promise is
+  about not erroring on *already-stopped*, which this preserves; it was never a promise to stop
+  reporting a host we cannot see. The alternative would have the SECOND run report success while a
+  host that may still be running everything is invisible — the failure this spec calls "worse than an
+  error". The non-zero exit therefore persists until the host is reached or its entries leave the
+  inventory, making it a standing reminder rather than a one-time complaint. SC-008 is qualified
+  accordingly.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -97,8 +106,10 @@ undetermined, and the exit result reflects incomplete success.
    stop — one failure does not abort the rest.
 3. **Given** anything could not be stopped or confirmed, **When** the command finishes, **Then**
    it says so explicitly and does **not** report overall success.
-4. **Given** the operator re-runs it, **When** everything is already stopped, **Then** it
-   succeeds without error — the action is repeatable.
+4. **Given** the operator re-runs it, **When** everything is already stopped **and every host is
+   reachable**, **Then** it succeeds without error — the action is repeatable.
+5. **Given** a host that is still unreachable, **When** the operator re-runs it, **Then** the run
+   still reports failure — repeating an action does not turn *we cannot tell* into success.
 
 ---
 
@@ -207,7 +218,10 @@ untouched.
   affecting it**.
 - **FR-009**: The action MUST NOT touch a container the tool did not create.
 - **FR-010**: The action MUST be **repeatable**: running it when everything is already stopped
-  succeeds without error.
+  succeeds without error. Repeatability applies to *already-stopped* environments only — it MUST NOT
+  suppress an *undetermined* outcome. A host that is still unreachable on a later run still yields
+  *undetermined*, and the run still reports failure (FR-005): the promise is that acting twice is
+  safe, never that a host we cannot see stops being reported.
 - **FR-011**: The action MUST be scopeable to a subset by **host** and by **environment name**, each
   repeatable, and MUST state what it excluded. The scope MUST be resolvable from **stored inventory
   fields alone**, without contacting a host — otherwise scoping would depend on the same reachability
@@ -248,7 +262,9 @@ untouched.
 - **SC-005**: The stopping form preserves all volumes — **100%** of runs.
 - **SC-006**: The destroying form without confirmation performs **zero** destructive operations.
 - **SC-007**: Preview affects nothing — verified by comparing state before and after — **100%**.
-- **SC-008**: A repeated invocation after a complete run succeeds without error — **100%**.
+- **SC-008**: A repeated invocation after a complete run, **with every host reachable**, succeeds
+  without error — **100%**. Where a host remains unreachable, the repeat still reports failure; that
+  is SC-003 holding, not SC-008 failing.
 - **SC-009**: With the inventory unavailable, the action refuses — **zero** silent fallbacks.
 
 ## Assumptions
