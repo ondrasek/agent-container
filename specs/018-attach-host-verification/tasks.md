@@ -297,7 +297,7 @@ nothing, after every deployment path that exists.
       being reachable
 - [X] T046 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Removing a documented flag
       is breaking, and python-semantic-release under-bumps if the message does not say so
-- [ ] T047 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then
+- [X] T047 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then
       `pytest -m acceptance bin/tests` (CI-authoritative, excluded from the gate)
 
 ---
