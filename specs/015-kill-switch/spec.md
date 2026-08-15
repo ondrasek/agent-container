@@ -61,6 +61,14 @@ success is worse than an error.
   while doing nothing for the emergency this form exists for: a leaked credential lives on a volume,
   never in an image layer. Rebuilding at that moment is slow for no benefit.
 
+- Q: What may the scope filter on, besides a host? → A: **`--host` and `--name`, both repeatable,
+  filtering on inventory fields only.** The scope is applied to entries *before* any host is
+  contacted, so every criterion must be answerable from a stored field — and Feature 014's field set
+  is deliberately closed. Age-based selection was rejected: `created_at` is deployment age rather than
+  idle time, so it does not mean "abandoned", and asking an operator under pressure to select by a
+  property they must reason about is a poor trade. Pattern matching was rejected as semantics to argue
+  over (glob? regex? case?) for a namespace the operator already knows exactly.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -191,7 +199,10 @@ untouched.
 - **FR-009**: The action MUST NOT touch a container the tool did not create.
 - **FR-010**: The action MUST be **repeatable**: running it when everything is already stopped
   succeeds without error.
-- **FR-011**: The action MUST be scopeable to a subset, and MUST state what it excluded.
+- **FR-011**: The action MUST be scopeable to a subset by **host** and by **environment name**, each
+  repeatable, and MUST state what it excluded. The scope MUST be resolvable from **stored inventory
+  fields alone**, without contacting a host — otherwise scoping would depend on the same reachability
+  the feature cannot assume. Selection by age or by name pattern is out of scope.
 - **FR-012**: Outcomes MUST be written to the inventory, so a later run and a later audit both
   reflect what happened.
 - **FR-013**: If the inventory is unavailable, the action MUST **refuse** rather than silently
