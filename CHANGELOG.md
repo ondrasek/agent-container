@@ -2,6 +2,96 @@
 
 <!-- version list -->
 
+## v0.24.0 (2026-08-15)
+
+### Bug Fixes
+
+- **tests**: Repair two checks that only failed on Linux
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`fd37a92`](https://github.com/ondrasek/agent-container/commit/fd37a92fdb9ba8fc0e6667f2ed167f59f1f2c9de))
+
+### Documentation
+
+- **specs**: Add SC-009 so US3 is measurable, and cite FR-002
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`1c9b399`](https://github.com/ondrasek/agent-container/commit/1c9b399647046fb2015d237e8b3f1f0aa0a38a5b))
+
+- **specs**: An absent pin ASKS, a mismatch never does
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`0504cf2`](https://github.com/ondrasek/agent-container/commit/0504cf2761d1ff8b9dd5d11e90be18b039e5ce0a))
+
+- **specs**: Close out 018's task list ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`236c786`](https://github.com/ondrasek/agent-container/commit/236c786026803d46f4fc37e496afdaa9fd43689c))
+
+- **specs**: FR-002 names the inventory a TENANT, not a new location
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`e119abe`](https://github.com/ondrasek/agent-container/commit/e119abeb7f2c945dbf241080618260a36edd4fbe))
+
+- **specs**: FR-014 covers THREE memories, not two
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`cb164ca`](https://github.com/ondrasek/agent-container/commit/cb164ca01db0afcb07b4cd405efc477c41c60493))
+
+- **specs**: Generate tasks for Feature 014 host inventory
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`449bd58`](https://github.com/ondrasek/agent-container/commit/449bd5872337e649c919d5d5e74bd265a5093ec4))
+
+- **specs**: Generate tasks for Feature 018
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`ee9bf1c`](https://github.com/ondrasek/agent-container/commit/ee9bf1c7d725a798f6edb898ef063f28b7a0f1f1))
+
+- **specs**: Name 014's backstop cap — 5000 entries, count only
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`d78c091`](https://github.com/ondrasek/agent-container/commit/d78c091731e465bc48b4db49a8bf8613d7f5d5cf))
+
+- **specs**: Plan Feature 014 host inventory, and qualify 016's SC-008 (#014)
+  ([#016](https://github.com/ondrasek/agent-container/pull/16),
+  [`83830d6`](https://github.com/ondrasek/agent-container/commit/83830d633e0975cea6a7f25903ef51d410764f80))
+
+- **specs**: Plan Feature 018 verified attach
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`ab2510d`](https://github.com/ondrasek/agent-container/commit/ab2510d2971a654cbe37231cfeca3480d22582d8))
+
+- **specs**: Resolve the remaining analyze findings for 018
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`3e34bfc`](https://github.com/ondrasek/agent-container/commit/3e34bfccdd4fc1df1541ce71001cdd239b59d0bd))
+
+- **specs**: Specify Feature 018 — verified attach, no private host key on disk
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`097e37c`](https://github.com/ondrasek/agent-container/commit/097e37c0c38b14a71a09f39931861e28522ea4da))
+
+- **specs**: The inventory begins at install and is not backfilled
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`89c5eec`](https://github.com/ondrasek/agent-container/commit/89c5eec11eb7d0f558cc94a1a5c55b0b717567db))
+
+### Features
+
+- **attach**: Capture at every deploy, and ASK when nothing is pinned
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`aea0a45`](https://github.com/ondrasek/agent-container/commit/aea0a459c8cea3b7942f96ea6fec46cd4db270d2))
+
+- **attach**: Pin the container's host PUBLIC key and verify against it
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`5bcfaeb`](https://github.com/ondrasek/agent-container/commit/5bcfaebb506b9487468938bd160d42443906d3ad))
+
+- **credentials**: Remove every private-host-key channel
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`07e14a3`](https://github.com/ondrasek/agent-container/commit/07e14a30c66bafd20f3e54e806271db71baa533e))
+
+### Testing
+
+- **attach**: Prove the pin actually refuses, against real containers
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`ca7fc5d`](https://github.com/ondrasek/agent-container/commit/ca7fc5d628cc0ea35c169a1eb8fa12dd320b5223))
+
+### Breaking Changes
+
+- **credentials**: `up --host-key`, `keys --host-key`, `redeploy --host-key`, the
+  `SSH_HOST_ED25519_KEY_B64` env-file variable, and `target: host_key` in a project's
+  `.agent-container/` spec are all removed. Each now fails with a message saying host identity is
+  CAPTURED, not supplied -- a bare "no such option" would be a regression rather than a removal,
+  because the operator who used the flag had a reason and it is now served without the cost.
+
+
 ## v0.23.0 (2026-08-10)
 
 
