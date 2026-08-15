@@ -75,6 +75,13 @@ it would read as "you have nothing running" at the worst possible moment.
 **This is the one place the plan reads FR-013 more narrowly than its literal wording**, and it is
 recorded here rather than decided quietly at implementation time.
 
+### 3a. Destroy has PURGE reach — containers and volumes, never images
+
+Settled by clarification after this plan was first written. `wipe`'s extra reach deletes the
+locally-built image, which is a build artifact other environments may share and which holds no
+credential — so it costs a slow rebuild during an emergency and mitigates nothing. The emergency
+`destroy` exists for is a leaked credential, and those live on volumes.
+
 ### 4. What gets written back is `notes`, not a new outcome (FR-012)
 
 Feature 014's outcome set is **closed** and describes *existence*, not runstate: `active` / `removed`
@@ -109,6 +116,12 @@ verification re-query stays meaningful.
 The timeout is per host and overridable, because the spec's own edge case distinguishes *slow* from
 *unreachable* and an operator who knows their host is slow should be able to wait rather than be told
 *undetermined*.
+
+**The default is 30s, and it has a floor rather than a taste.** `host_ps_rows` already bounds its own
+query at 20s, so any per-host budget below that expires *before* the call it is meant to bound — a
+healthy-but-loaded host would be reported *undetermined* while its `ps` was still legitimately
+running, which is the exact false answer SC-002 counts. Reusing the existing 10s `RUNS_PROBE_TIMEOUT`
+would inherit that bug.
 
 ## Technical Context
 

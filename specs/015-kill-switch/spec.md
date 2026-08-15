@@ -84,6 +84,15 @@ success is worse than an error.
   inventory, making it a standing reminder rather than a one-time complaint. SC-008 is qualified
   accordingly.
 
+- Q: When the inventory is ABSENT rather than unreadable, refuse or succeed? → A: **Unreadable
+  refuses; absent or empty succeeds, saying *nothing recorded*.** FR-013's stated mischief is *silent
+  fallback to live enumeration*, and emptiness causes no fallback — there is nothing to fall back
+  from. Refusing on absence would also break a fresh install, where Feature 014's store legitimately
+  does not exist yet, and would contradict this spec's own edge case that *nothing to stop* is an
+  unambiguous success. The accepted risk is an operator whose store was deleted being told *nothing
+  recorded* — which is why the wording must say **nothing recorded, not nothing exists**, at a moment
+  when the weaker reading sounds like reassurance.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -174,8 +183,10 @@ untouched.
 - **Concurrent lifecycle operations** — must not corrupt state or produce a partial teardown that
   looks complete.
 - **Nothing to stop** — must be an unambiguous success, not an error.
-- **The inventory is absent** — the feature must refuse rather than fall back to "whatever
+- **The inventory cannot be read** — the feature must refuse rather than fall back to "whatever
   answers", because a kill switch that silently narrows its scope is a false guarantee.
+- **The inventory is absent or empty** — a different case, and a normal one on a fresh machine: the
+  feature must succeed and report *nothing recorded*, never implying that nothing exists.
 - **A stop that appears to succeed but does not** — must be verified by re-query, not assumed.
 - **A host that is merely slow rather than unreachable** — the timeout is overridable precisely so
   an operator who knows their host is slow can wait instead of receiving *undetermined*.
@@ -228,8 +239,12 @@ untouched.
   the feature cannot assume. Selection by age or by name pattern is out of scope.
 - **FR-012**: Outcomes MUST be written to the inventory, so a later run and a later audit both
   reflect what happened.
-- **FR-013**: If the inventory is unavailable, the action MUST **refuse** rather than silently
-  fall back to live enumeration — a kill switch that narrows its own scope is a false guarantee.
+- **FR-013**: If the inventory cannot be **read** — an I/O error, or entries that cannot be parsed —
+  the action MUST **refuse**, naming the store, rather than silently falling back to live enumeration:
+  a kill switch that narrows its own scope is a false guarantee. An **absent or empty** inventory is
+  NOT that case and MUST succeed, reporting that **nothing is recorded** — stated in those terms,
+  because "nothing exists" is a different claim and the tool cannot make it. Feature 014's store
+  begins at install and is not backfilled, so absence is the normal state of a fresh machine.
 - **FR-014**: A stop MUST be **verified** by re-querying the host afterwards and confirming the
   container is absent from what it reports — never inferred from a command exiting zero. The
   verification MUST be **per host**, so its cost scales with hosts rather than environments.
@@ -265,7 +280,9 @@ untouched.
 - **SC-008**: A repeated invocation after a complete run, **with every host reachable**, succeeds
   without error — **100%**. Where a host remains unreachable, the repeat still reports failure; that
   is SC-003 holding, not SC-008 failing.
-- **SC-009**: With the inventory unavailable, the action refuses — **zero** silent fallbacks.
+- **SC-009**: With the inventory **unreadable**, the action refuses — **zero** silent fallbacks. With
+  it **absent or empty**, the action succeeds and says *nothing recorded* — **zero** runs that imply
+  nothing exists.
 
 ## Assumptions
 
