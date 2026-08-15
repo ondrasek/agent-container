@@ -1109,9 +1109,18 @@ def test_attach_print_matches_the_live_target(acc):
     state = acc.tmp / "state"
     r = _run_cli([*AGENT_CONTAINER, "attach", "acc5print", "--local", "--print"], state)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == f"ssh dev@localhost -p {port} -t tmux attach -t main"
+    out = r.stdout.strip()
+    # The LIVE coordinates and the remote command, asserted around the middle rather
+    # than as one byte string: Feature 018 inserted the verification options, whose
+    # UserKnownHostsFile path is the test's own temp state dir and so cannot be
+    # spelled out here. Byte-for-byte parity with the execute path is unit-proven.
+    assert out.startswith(f"ssh dev@localhost -p {port} ")
+    assert out.endswith("-t tmux attach -t main")
+    assert "-o StrictHostKeyChecking=yes" in out
+    assert f"-o UserKnownHostsFile={state}/agent-container/local/known_hosts" in out
     r2 = _run_cli([*AGENT_CONTAINER, "attach", "acc5print", "--local", "--ssh-config"], state)
     assert f"Port {port}" in r2.stdout and "RemoteCommand tmux attach -t main" in r2.stdout
+    assert "StrictHostKeyChecking yes" in r2.stdout
 
 
 @pytest.mark.skipif(

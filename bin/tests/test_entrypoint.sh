@@ -61,7 +61,10 @@ check_ne() {  # check_ne <label> <unwanted> <actual>
         note "  must NOT equal: [$2]"
     fi
 }
-perm() { stat -f '%OLp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+# GNU first, BSD second. The reverse order is a trap: on Linux `stat -f` is VALID
+# (it means FILESYSTEM status) and SUCCEEDS, so a `stat -f … || stat -c …` fallback
+# never fires and silently returns filesystem info instead of a mode.
+perm() { stat -c '%a' "$1" 2>/dev/null || stat -f '%OLp' "$1"; }
 ok()  { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); note "FAIL: $1"; }
 
