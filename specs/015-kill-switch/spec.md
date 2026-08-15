@@ -69,6 +69,12 @@ success is worse than an error.
   property they must reason about is a poor trade. Pattern matching was rejected as semantics to argue
   over (glob? regex? case?) for a namespace the operator already knows exactly.
 
+- Q: What is the per-host timeout default? → A: **30 seconds, overridable.** It must sit ABOVE the
+  20s bound `host_ps_rows` already applies to its own query: a shorter budget would expire before the
+  call it is meant to bound, so a healthy-but-loaded host would be reported *undetermined* while its
+  `ps` was still legitimately running — the exact false answer SC-002 counts. Any default below 20s
+  inherits that. 60s was rejected because this command's value is speed under pressure.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -175,9 +181,12 @@ untouched.
   against the others.
 - **FR-004**: The result MUST distinguish **stopped**, **not stopped**, and **could not be
   determined**, per environment.
-- **FR-004a**: Hosts MUST be contacted **in parallel**, with a **per-host timeout** that has a
-  sensible default and is overridable. A host that does not answer within it yields *could not be
+- **FR-004a**: Hosts MUST be contacted **in parallel**, with a **per-host timeout** defaulting to
+  **30 seconds** and overridable. A host that does not answer within it yields *could not be
   determined* for its environments. Total time MUST be bounded by the slowest host, not the sum.
+  The default MUST remain **above** the timeout the tool already applies to a host listing (20s), or
+  the budget expires before the call it bounds and a healthy-but-slow host is misreported as
+  undetermined. The documented default and the enforced one MUST be the same value.
 - **FR-005**: If anything was not stopped or not confirmed, the action MUST NOT report overall
   success.
 - **FR-006**: A **stopping** form and a **destroying** form MUST both exist, and destruction MUST
