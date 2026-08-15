@@ -53,6 +53,14 @@ success is worse than an error.
   keep their volumes and start again. Destroy keeps its confirmation because it is not
   recoverable, and FR-008's preview serves anyone who wants to look first.
 
+### Session 2026-08-15
+
+- Q: What exactly does the destroying form remove? → A: **`purge` semantics — containers and their
+  volumes. Images are untouched.** The tool already has two destructive reaches, and `wipe`'s extra
+  reach (deleting the locally-built image) destroys a build artifact other environments may share
+  while doing nothing for the emergency this form exists for: a leaked credential lives on a volume,
+  never in an image layer. Rebuilding at that moment is slow for no benefit.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -165,7 +173,10 @@ untouched.
 - **FR-005**: If anything was not stopped or not confirmed, the action MUST NOT report overall
   success.
 - **FR-006**: A **stopping** form and a **destroying** form MUST both exist, and destruction MUST
-  never be the default or implicit.
+  never be the default or implicit. The destroying form removes **containers and their volumes**
+  (`purge` reach), and MUST NOT remove locally-built **images**: an image is a build artifact other
+  environments may share, and no credential lives in one — so deleting it costs a slow rebuild during
+  an emergency and buys nothing.
 - **FR-006a**: The tool MUST state **which form suits which emergency**, because the difference is
   not obvious under pressure: a runaway or looping agent calls for **stopping** (recoverable,
   volumes intact); a suspected credential leak calls for **destroying**, because stopping leaves
