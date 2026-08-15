@@ -181,7 +181,7 @@ discrepancies are reported distinctly.
       persisted. Read the existing structure first: structural guards in `bin/tests/` parse that file
 - [X] T042 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
       before adding**. Report the before/after number
-- [ ] T043 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier with **no `-k`
+- [X] T043 Run `scripts/quality-gate.sh` **unpiped** plus the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S12 by hand. A `-k` pattern matching nothing is
       indistinguishable from one whose tests all passed
 
