@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.25.0 (2026-08-15)
+
+### Documentation
+
+- **specs**: Specify Feature 019 — the push key is generated in the container
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`a3ec51e`](https://github.com/ondrasek/agent-container/commit/a3ec51ecf72bf7e4bdab98dd7491165935b4dee0))
+
+### Features
+
+- **inventory**: Reconcile the record against reality, fail-closed
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`7971ea3`](https://github.com/ondrasek/agent-container/commit/7971ea301b124d3060ea9ff91f72099e58bab524))
+
+- **inventory**: Remember every environment the tool created
+  ([#014](https://github.com/ondrasek/agent-container/pull/14),
+  [`895b619`](https://github.com/ondrasek/agent-container/commit/895b619c02aa5b2298f493bb286e94e18a7b9e55))
+
+
 ## v0.24.0 (2026-08-15)
 
 ### Bug Fixes
