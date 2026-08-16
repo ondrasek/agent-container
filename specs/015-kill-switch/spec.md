@@ -93,6 +93,25 @@ success is worse than an error.
   recorded* — which is why the wording must say **nothing recorded, not nothing exists**, at a moment
   when the weaker reading sounds like reassurance.
 
+### Session 2026-08-16
+
+- Q: What is the command called? → A: **`panic`.** Unmistakably the emergency command, so a habitual
+  typo cannot reach it — `kill` is overloaded (elsewhere it signals one process) and `stop-all` reads
+  oddly with `--destroy`, which does more than stop. Discoverability is the accepted cost, addressed
+  by naming it in the help text and in `docs/orchestration.md`.
+- Q: How are the kill switch's `notes` bounded on an entry? → A: **Keep the last 5.** Every run
+  otherwise appends forever to a file re-read on every `inventory list`. Five shows a *pattern* — an
+  environment repeatedly stopped that keeps coming back — which a single most-recent note cannot.
+- Q: Does the project label define ownership? → A: **Yes — anything in the deployment's compose
+  project is ours to stop.** That is what reliably catches the egress sidecar and operator helpers;
+  stopping only the agent container would leave them running while the report claimed everything was
+  stopped. The accepted consequence is that a container an operator attached to our project by hand
+  is also stopped.
+- Q: Does `--preview` contact hosts? → A: **Yes.** A preview that lists only what is *recorded* can
+  disagree with what is *running*, and the operator is previewing in order to decide. It still
+  affects nothing, so SC-007 holds unchanged; it inherits the per-host timeout and reports an
+  unreachable host as *undetermined* rather than hanging.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stop everything, and know what didn't stop (Priority: P1)
@@ -195,8 +214,8 @@ untouched.
 
 ### Functional Requirements
 
-- **FR-001**: The tool MUST provide a single action that stops every environment it owns across
-  every host it knows of.
+- **FR-001**: The tool MUST provide a single action, named **`panic`**, that stops every environment
+  it owns across every host it knows of.
 - **FR-002**: The action MUST enumerate from the **durable inventory**, not from whatever hosts
   currently answer.
 - **FR-003**: A failure against one host or environment MUST NOT prevent the action proceeding
@@ -226,8 +245,15 @@ untouched.
   a prompt is friction on the action whose value is speed. FR-008's preview covers anyone wanting
   to check first.
 - **FR-008**: The operator MUST be able to preview exactly what would be affected **without
-  affecting it**.
-- **FR-009**: The action MUST NOT touch a container the tool did not create.
+  affecting it**. The preview MUST contact hosts, so that what it lists is what is actually running
+  rather than only what is recorded — an operator previews in order to decide. It inherits the
+  per-host timeout and reports an unreachable host as *undetermined*; it MUST NOT hang, and it MUST
+  still change nothing.
+- **FR-009**: The action MUST NOT touch a container outside a deployment the tool created. **The
+  compose project label is the ownership boundary**: every container in a deployment's project is in
+  scope, which is what reliably includes the egress sidecar and declared helpers — stopping only the
+  agent container would leave them running while the report claimed otherwise. A container carrying
+  the tool's naming convention but belonging to **no recorded deployment** is never touched.
 - **FR-010**: The action MUST be **repeatable**: running it when everything is already stopped
   succeeds without error. Repeatability applies to *already-stopped* environments only — it MUST NOT
   suppress an *undetermined* outcome. A host that is still unreachable on a later run still yields
@@ -238,7 +264,10 @@ untouched.
   fields alone**, without contacting a host — otherwise scoping would depend on the same reachability
   the feature cannot assume. Selection by age or by name pattern is out of scope.
 - **FR-012**: Outcomes MUST be written to the inventory, so a later run and a later audit both
-  reflect what happened.
+  reflect what happened. A **stop** records its result in the entry's diagnostics, retaining the
+  **five most recent** so the store cannot grow without bound while still showing a pattern. A
+  **destroy** MUST change the entry's outcome **only when the destruction was verified**: recording
+  a removal that may not have happened puts a lie in the one store a later audit reads.
 - **FR-013**: If the inventory cannot be **read** — an I/O error, or entries that cannot be parsed —
   the action MUST **refuse**, naming the store, rather than silently falling back to live enumeration:
   a kill switch that narrows its own scope is a false guarantee. An **absent or empty** inventory is

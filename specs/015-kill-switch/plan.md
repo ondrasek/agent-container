@@ -16,6 +16,9 @@ while something is still running. Every decision below resolves toward that.
 Feature 014 landed first and is a **hard** prerequisite: it is the enumeration source *and* the
 ownership rule. This feature does not ask hosts what exists; it asks the record, then goes and checks.
 
+**The command is `panic`** (settled by clarification after this plan was first drafted; the plan
+previously assumed `kill`).
+
 ## The decisions this plan settles first
 
 ### 1. Stop by PROJECT LABEL, not by compose file — the state dir dies with its host
@@ -41,6 +44,11 @@ present (verified against the live daemon during planning). So the kill switch:
 egress sidecar and any operator helpers running — and "everything is stopped" would be false. The
 label covers the whole project, which is what the operator means.
 
+**And the label IS the ownership boundary** (clarified): everything in a recorded deployment's
+project is in scope, including a container an operator attached to it by hand. The alternative —
+acting only on the agent container — is the false report above. A container carrying the tool's
+naming but belonging to no recorded deployment is still never touched.
+
 ### 2. Verification means "absent from the RUNNING set", and the distinction is the whole of FR-014
 
 A stopped container still **exists**; it is not running. So "confirm the container is absent from what
@@ -52,7 +60,15 @@ For the **destroying** form the opposite holds: absent from `ps -a`, because the
 gone.
 
 Two different queries for two different forms, and conflating them breaks one of them completely.
-**One re-query per host** (FR-014's cost bound), after that host's work is done, not per environment.
+
+**TWO host queries, not one — and the first draft of this plan budgeted one.** Verification is a
+single re-query per host (FR-014's cost bound), but `already-stopped` is defined as *"not running
+before we acted"*, which cannot be derived after the fact: once a container is not running, nothing
+distinguishes *we stopped it* from *it was already stopped*. So each host gets a **pre-snapshot**
+before its work and **one verification** after it.
+
+FR-014's per-host bound still holds — it constrains *verification*, and a pre-snapshot is not
+verification. But SC-002a's timing math counts two round-trips per host, not one.
 
 ### 3. Refuse on UNREADABLE; succeed on EMPTY — and say which
 

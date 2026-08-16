@@ -1,5 +1,8 @@
 # Contract: Kill Switch (Feature 015)
 
+**The command is `panic`.** Named so a habitual typo cannot reach it — `kill` is overloaded and
+`stop-all` reads oddly with `--destroy`, which does more than stop.
+
 Numbered so tasks and tests can cite them. Each is testable.
 
 ## C1 — One action stops everything, from the RECORD
@@ -21,6 +24,10 @@ environments — **zero** may be reported `stopped` (FR-004, SC-002).
 
 Every `stopped` was confirmed by the host's re-query: absent from the **running** set for `stop`,
 absent from `ps -a` for `destroy` (FR-014, SC-002b). An exit status alone is not evidence.
+
+Each host is queried **twice**: a **pre-snapshot** before its work, and **one verification** after.
+The pre-snapshot is what makes `already-stopped` distinguishable from `stopped` — after the fact the
+two are identical. FR-014's per-host bound constrains verification, which remains one call.
 
 ## C5 — Parallel, bounded by the slowest host
 
@@ -50,15 +57,25 @@ The documentation states the mapping (FR-006a): a runaway or looping agent → *
 credential leak → **destroy**, because stopping leaves volumes that may hold an operator-interactive
 login. It also states plainly that revoking a credential at the provider is **outside this tool**.
 
-## C9 — Preview affects nothing
+## C9 — Preview affects nothing, but it does LOOK
 
 The preview shows exactly what would be affected and changes no state — verified by comparing before
-and after (FR-008, SC-007).
+and after (FR-008, SC-007). It **contacts hosts**, so it reports what is actually running rather than
+only what is recorded: an operator previews in order to decide. It inherits the per-host timeout,
+reports an unreachable host as *undetermined*, and never hangs.
 
-## C10 — Never touch what we did not create
+Contacting a host is a read; SC-007 is unaffected.
 
-A container matching the tool's naming but absent from the inventory is never acted on (FR-009,
-SC-004). Enumeration and ownership are one decision.
+## C10 — The project label is the ownership boundary
+
+Every container in a recorded deployment's compose project is in scope — which is what reliably
+includes the egress sidecar and declared helpers (FR-009). A container matching the tool's **naming**
+but belonging to **no recorded deployment** is never acted on (SC-004): enumeration and ownership are
+one decision, and the inventory is the record of what we created.
+
+A container an operator attached to one of our projects by hand **is** stopped. Accepted: it is in a
+deployment we own, and the alternative — stopping only the agent — leaves sidecars running while the
+report says everything stopped.
 
 ## C11 — Repeatable, but repetition never launders an unknown
 
@@ -77,10 +94,15 @@ stored inventory fields **without contacting a host** — otherwise scoping woul
 reachability this feature cannot assume. It **states what it excluded** (FR-011), and a scope matching
 nothing says so rather than silently doing nothing.
 
-## C13 — Outcomes are written back
+## C13 — Outcomes are written back, and only VERIFIED ones
 
-A `stop` appends to the entry's `notes`; a `destroy` sets `outcome = removed` (FR-012, data-model §4).
-No new outcome value is introduced into Feature 014's closed set.
+A `stop` appends to the entry's `notes`, **retaining the 5 most recent**; a **verified** `destroy`
+sets `outcome = removed` (FR-012, data-model §4). No new outcome value is introduced into Feature 014's closed set.
+
+**An `undetermined` destroy MUST leave the entry `active`.** Writing `removed` for an environment
+whose host never answered would put a lie in the durable store — the precise failure Feature 014's
+"`unknown` is unstorable" rule exists to prevent, and the opposite of this feature's whole premise.
+`failed` likewise writes nothing.
 
 ## C14 — Unreadable refuses; empty succeeds
 

@@ -19,7 +19,7 @@ so it is built first and everything else assembles around it.
 | `<runtime> stop <container-name>` | halts the agent and leaves the **egress sidecar and operator helpers running**, while the report says everything stopped |
 | verifying a **stop** against `ps -a` | a stopped container still exists, so every stop would report failed (research R2) |
 | `RUNS_PROBE_TIMEOUT` (10s) as the per-host budget | **below** the 20s bound `host_ps_rows` already applies, so it expires before the call it bounds and misreports a healthy host |
-| enumerating live and filtering by name prefix | stops containers the tool did not create (FR-009 — 014 *reported* those, this feature *acts*) |
+| enumerating live and filtering by name prefix | stops containers belonging to no recorded deployment (FR-009 — 014 *reported* those, this feature *acts*). The **project label** of a recorded deployment is the boundary; the naming convention is not |
 
 ---
 
@@ -54,13 +54,17 @@ so it is built first and everything else assembles around it.
 - [ ] T008 [P] Unit test that T007 builds a label filter and **never** references
       `compose_file_path` — the regression this feature exists to avoid, asserted over the call rather
       than trusted
-- [ ] T009 `kill_verify(host_rec, form)` — ONE re-query per host after its work (FR-014, C4).
+- [ ] T009a `kill_snapshot(host_rec, form)` — the **pre-snapshot** of what is running on a host,
+      taken BEFORE its work (C4, data-model §3). Without it `already-stopped` is underivable: once a
+      container is not running, nothing distinguishes *we stopped it* from *it was already stopped*.
+      Two host queries per host, not one — the first draft of the plan budgeted one
+- [ ] T009 `kill_verify(host_rec, form)` — ONE re-query per host after its work (FR-014, C4, C5).
       **`stop` checks the RUNNING set; `destroy` checks `ps -a`.** Two queries for two forms;
       conflating them breaks one completely (research R2)
 - [ ] T010 [P] Unit tests for T009: a stopped-but-existing container verifies as stopped under `stop`
       and would NOT verify under `destroy` — the test that catches the conflation
 - [ ] T011 `classify(entry, before, after, form)` returning exactly one `KILL_OUTCOMES` value
-      (data-model §3, C3). Every entry lands in exactly one; zero unclassified
+      (FR-004, data-model §3, C3). Every entry lands in exactly one; zero unclassified
 - [ ] T012 [P] Unit test that `undetermined` is produced for **both** its causes — an unreachable host
       **and** a contended `deployment_lock` (research R5) — and that neither is ever `stopped`
 
@@ -74,7 +78,7 @@ could not reach.
 one is `undetermined`, and the exit is non-zero.
 
 - [ ] T013 [US1] `do_kill(scope, form, preview)` in `bin/agent-container` — enumerate, act per host,
-      verify, classify, report (C1)
+      verify, classify, report (FR-001, C1)
 - [ ] T014 [US1] **THE GATE: the unreachable host** (C3, SC-002, S2). A host that does not answer
       within `KILL_HOST_TIMEOUT` yields `undetermined` for **all** of its environments, and **zero**
       of them may be reported `stopped`. **Write this before the happy path** — a build that reports
@@ -82,7 +86,7 @@ one is `undetermined`, and the exit is non-zero.
 - [ ] T015 [US1] [P] Unit test for T014 asserting the ABSENCE of `stopped` for the unreachable host
       **and** a positive control on a reachable one — asserting only the absence would pass for a
       build that classifies nothing at all (the 014 lesson)
-- [ ] T016 [US1] Per-host parallelism with a per-host timeout; **environments sequential within a
+- [ ] T016 [US1] Per-host parallelism with a per-host timeout (C5); **environments sequential within a
       host** so that host's single verification re-query stays meaningful (FR-004a, research R6).
       `concurrent.futures.ThreadPoolExecutor` — stdlib, Constitution VI
 - [ ] T017 [US1] One host's failure does not abort the others (FR-003, C2) — each host's task is
@@ -92,7 +96,7 @@ one is `undetermined`, and the exit is non-zero.
 - [ ] T019 [US1] `stopped` is written **only** after observation (FR-014, SC-002b). A command exiting
       zero is not evidence and must not reach the classifier as one
 - [ ] T020 [US1] Exit status follows the worst outcome: anything not `stopped`/`already-stopped` means
-      overall failure (FR-005, C6). **`undetermined` counts as failure** — "we do not know" is not
+      overall failure (FR-005, SC-003, C6). **`undetermined` counts as failure** — "we do not know" is not
       success, and this is the requirement the feature turns on
 - [ ] T021 [US1] [P] Unit test that a single `undetermined` among many `stopped` still fails the run
 - [ ] T022 [US1] A contended `deployment_lock` yields `undetermined`, never a `die` and never a silent
@@ -101,7 +105,7 @@ one is `undetermined`, and the exit is non-zero.
       unreachable: reachable stop, unreachable `undetermined`, non-zero exit
 - [ ] T024 [US1] [P] Acceptance S5 — every environment reported `stopped` is **absent from the running
       listing**, and still present in `ps -a` (which is correct for a stop)
-- [ ] T025 [US1] [P] Acceptance S1 + S3 — everything stops; one failure does not abort the rest
+- [ ] T025 [US1] [P] Acceptance S1 + S3 (SC-001) — everything stops; one failure does not abort the rest
 
 ---
 
@@ -121,16 +125,33 @@ nothing.
 - [ ] T029 [US2] `destroy` requires explicit confirmation; **`stop` requires none** (FR-007, C7). The
       asymmetry is deliberate: stopping is recoverable and a prompt is friction on the action whose
       value is speed
-- [ ] T030 [US2] [P] Acceptance S7 — volumes survive a stop; `destroy` without `-y` performs **zero**
-      destructive operations
+- [ ] T030 [US2] [P] Acceptance S7 (SC-005, SC-006) — volumes survive a stop; `destroy` without `-y`
+      performs **zero** destructive operations
 - [ ] T031 [US2] `--preview` prints exactly what would be affected and **changes nothing** (FR-008,
-      C9)
+      SC-007, C9). It **contacts hosts** (clarified) so it reports what is actually RUNNING rather
+      than only what is recorded — an operator previews in order to decide. It reuses the same
+      pre-snapshot path as T009a, inherits the per-host timeout, and reports an unreachable host as
+      *undetermined*
+- [ ] T031a [US2] Preview **never hangs and never fails the invocation**: an unreachable host during a
+      preview is information, not an error. Preview is a query, so unlike the action (T020) it exits 0
+      even with an undetermined host — and says which host it could not reach
 - [ ] T032 [US2] [P] Acceptance S8 — capture container and volume state before and after a preview
-      and assert they are identical
-- [ ] T033 [US2] Write back per data-model §4: a **stop** appends to the entry's `notes`; a
-      **destroy** sets `outcome = removed` through 014's existing `set_inventory_outcome` (FR-012,
-      C13). **Do not add a `stopped` outcome** — 014's set is closed and describes existence, not
-      runstate, and a test pins it
+      and assert they are identical. Contacting a host is a read; SC-007 is unaffected by T031
+- [ ] T033 [US2] Write back per data-model §4: a **stop** appends to the entry's `notes`, **retaining
+      the 5 most recent** (clarified); a
+      **VERIFIED destroy** sets `outcome = removed` through 014's existing `set_inventory_outcome`
+      (FR-012, C13). **Do not add a `stopped` outcome** — 014's set is closed and describes existence,
+      not runstate, and a test pins it
+- [ ] T033a [US2] **An `undetermined` or `failed` destroy writes NOTHING** — the entry stays `active`
+      (C13, data-model §4). Recording `removed` for an environment whose host never answered puts a
+      lie in the store a later audit and a later kill run both read; 014 refuses to store `unknown`
+      for exactly this reason, and this would smuggle the same lie in under an accepted value
+- [ ] T033ab [US2] [P] Unit test the `notes` cap: six runs leave five notes, newest kept, and the
+      entry does not grow without bound. Feature 014 caps the store by ENTRY COUNT only — nothing
+      bounds an entry's size, and this feature writes on every run
+- [ ] T033b [US2] [P] Unit test T033a: a destroy against an unreachable host leaves the entry
+      `active`. **This is the test that would otherwise be missing** — the happy path passes without
+      it, and the bug only shows in a store nobody reads until it matters
 - [ ] T034 [US2] [P] Unit test that a stop leaves `outcome` untouched while recording what happened,
       and that a destroy marks `removed` — the pair that proves §4 rather than either half alone
 - [ ] T035 [US2] Document **which form suits which emergency** in `docs/orchestration.md` (FR-006a,
@@ -149,25 +170,35 @@ what it skipped.
 - [ ] T036 [US3] `--host` and `--name`, both repeatable, applied to T003's candidates (FR-011)
 - [ ] T037 [US3] The report **states what the scope excluded** (FR-011, C12) — a kill switch that
       silently narrowed itself is the same false guarantee as one that fell back to live enumeration
-- [ ] T038 [US3] A scope matching nothing **says so** rather than silently doing nothing (C12)
+- [ ] T038 [US3] A scope matching nothing **says so** rather than silently doing nothing (C12). When
+      the store is ALSO empty, the store's message wins — "nothing recorded" is the more surprising
+      condition and the one an operator most needs to hear
 - [ ] T039 [US3] [P] Acceptance S11 — one host scoped, others untouched, exclusions named
 
 ---
 
 ## Phase 6: The honest edges
 
-- [ ] T040 Never act on a container absent from the inventory (FR-009, C10, SC-004). Feature 014
-      *reported* such containers without claiming them; this feature **acts**, so the same rule now
-      has teeth
+- [ ] T040 **The compose project label is the ownership boundary** (FR-009, C10, clarified): every
+      container in a RECORDED deployment's project is in scope, including one an operator attached by
+      hand. A container matching the tool's naming but belonging to **no recorded deployment** is
+      never acted on (SC-004) — Feature 014 *reported* those without claiming them, and this feature
+      **acts**, so the rule now has teeth
 - [ ] T041 [P] Acceptance S9 — create `agent-container-impostor` with a plain `docker run`, kill, and
       assert it is **still running**. The naming convention can be imitated; a match is evidence of a
       name and nothing more
 - [ ] T042 Repeatability (FR-010, C11): a second run over already-stopped environments exits 0 —
-      **but a still-unreachable host still yields `undetermined` and still fails the run**.
+      (SC-008) **but a still-unreachable host still yields `undetermined` and still fails the run**.
       Repetition never launders an unknown (clarified)
 - [ ] T043 [P] Acceptance S10 + the clarified case: a clean repeat succeeds; a repeat with a host
       still unreachable does not. Both halves, or the test asserts the easy one
-- [ ] T044 Interruption partway leaves a truthful record and a repeat is safe (FR-016)
+- [ ] T044 Interruption partway leaves a truthful record and a repeat is safe (FR-016). **The record
+      IS the inventory write-back** (data-model §4): each environment's result is written as it is
+      classified, not batched at the end, so an interrupted run has recorded exactly what it
+      completed and nothing it did not
+- [ ] T044a [P] Unit test T044: interrupt after some environments are classified and assert the store
+      reflects those and only those. Every other honesty requirement here has a test; this one had
+      none
 - [ ] T045 [P] Acceptance S4 — with N hosts and one unreachable, elapsed time is **one** timeout, not
       N (SC-002a). Measured, because a sequential implementation passes every other test in this file
 - [ ] T046 [P] Acceptance S12 — an unreadable store refuses; an absent one succeeds saying *nothing
@@ -189,8 +220,10 @@ what it skipped.
       DoS, and 014's record as a target list. Structural guards in `bin/tests/` parse that file
 - [ ] T051 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
       before adding**. Report the before/after number
-- [ ] T052 Name the command. The plan assumes `kill`; the spec never settles it, and it is the one
-      outstanding item from clarification. Decide before the completions and docs above harden it
+- [ ] T052 Register the command as **`panic`** (settled by clarification; FR-001). Named so a
+      habitual typo cannot reach it — `kill` is overloaded and `stop-all` reads oddly with
+      `--destroy`. Discoverability is the accepted cost: name it in the help text and in
+      `docs/orchestration.md` so someone scanning for "stop" still finds it
 - [ ] T053 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S12 by hand. A selector matching nothing is
       indistinguishable from one whose tests all passed — that happened in this project

@@ -28,7 +28,7 @@ success, and this is the requirement the whole feature turns on.
 | Value | Means |
 |---|---|
 | `stopped` | acted on, **and observed absent** on the host's re-query (FR-014) |
-| `already-stopped` | not running before we acted; still not running after |
+| `already-stopped` | not running in the host's **pre-snapshot**, and still not running after |
 | `failed` | the runtime refused, and the host answered |
 | `undetermined` | **the host did not answer, or the deployment lock was held** |
 
@@ -47,10 +47,22 @@ differently:
 
 ## §4 What is written back to the inventory (FR-012)
 
-| Form | Effect on the 014 entry |
-|---|---|
-| `stop` | append one line to `notes`; **`outcome` unchanged** |
-| `destroy` | `outcome = removed` via 014's `set_inventory_outcome` |
+| Form | Per-environment outcome | Effect on the 014 entry |
+|---|---|---|
+| `stop` | any | append one line to `notes`, **retaining the 5 most recent**; `outcome` unchanged |
+| `destroy` | `stopped` (i.e. **verified gone**) | `outcome = removed` via 014's `set_inventory_outcome` |
+| `destroy` | `undetermined` or `failed` | **nothing** — the entry stays `active` |
+
+**`notes` is capped at 5 per entry**, because this feature writes to it on every run and Feature 014
+caps the store by *entry count* only — nothing bounds an entry's size, and the file is re-read on
+every `inventory list`. Five rather than one so a **pattern** stays visible: an environment
+repeatedly stopped that keeps coming back is information a single most-recent note destroys.
+
+**The gate on the destroy row is not defensive coding, it is the feature's premise.** Writing
+`removed` for an environment whose host never answered records a destruction that may not have
+happened, in the one store a later audit and a later kill run both read. Feature 014 refuses to store
+`unknown` for exactly this reason; storing `removed` on an unverified destroy would smuggle the same
+lie in under an accepted value.
 
 A stopped environment is still `active` in 014's vocabulary — it **exists**. 014's outcome set is
 closed and describes existence, not runstate, so there is no `stopped` outcome to write and reusing
@@ -75,6 +87,7 @@ read inventory ── unreadable ─> REFUSE, naming the store          (FR-013)
       ├─ preview ─> print the plan, touch nothing, exit           (FR-008/SC-007)
       │
       └─ per HOST, in parallel, each with its own timeout:        (FR-004a)
+             PRE-SNAPSHOT of what is running                       (makes already-stopped knowable)
              per environment, sequentially:
                  take the deployment lock ── held ─> undetermined (R5)
                  stop/destroy the project by LABEL                (R1)
