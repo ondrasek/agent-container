@@ -242,6 +242,11 @@ unregistered, and confirm the output names the key and the consequence.
   volume; the amendment is scoped to material the container generated itself.**
 - **FR-004**: The operator MUST be able to obtain an environment's agent SSH **public** key through the
   existing machine-readable interface, in a form that can be registered directly.
+- **FR-004a**: The inspection and rotation surface is a noun sub-command — **`agent-container ssh-key
+  show <name>`** and **`agent-container ssh-key rotate <name>`** — matching the existing `runs` /
+  `egress` / `inventory` shape. It is deliberately NOT part of `keys`, which injects *authorized* keys:
+  the agent's own identity and the principals allowed to reach it are different things, and one command
+  doing both would invite confusing the two under pressure.
 - **FR-005**: Obtaining the public key MUST NOT depend on the environment's host being reachable — the
   answer comes from what the tool captured, or an explicit statement that none was captured.
 - **FR-006**: A deploy of an environment that pushes over SSH MUST state the public key and that pushes
@@ -262,23 +267,44 @@ unregistered, and confirm the output names the key and the consequence.
   goes stale the moment the operator revokes the key.
 - **FR-012**: The HTTPS + token push path and the outbound `known_hosts` channel (which verifies the
   **remote**, not the container) MUST be unaffected.
-- **FR-014a**: The agent's `~/.ssh/config` MUST be written **once, if absent**, and MUST NOT be
-  rewritten on later boots. Its content is static, so a per-boot rewrite would gain nothing while
-  silently discarding edits the agent legitimately makes. Any later change to what the tool needs
-  there MUST be an **explicit** operator action, not a side effect of restarting.
-- **FR-014b**: The operator MUST be able to **regenerate the key deliberately**, without destroying
-  the environment. `--purge` already rotates it by destroying the volume; that is disproportionate
-  when the workspace is worth keeping, and a suspected key compromise is exactly when an operator
-  needs rotation to be cheap. Regeneration MUST state that the previous registration is now dead.
 - **FR-013**: Clone-on-start over an **SSH** URL MUST become two-phase: the container starts, generates
   its key, does **not** clone, and states the key and the next command. The invocation MUST exit
-  **non-zero** with a **distinct code** meaning *pending registration*, so an automated caller can tell
+  **non-zero** with exit code **3**, meaning *pending registration* (1 is generic failure and 2 is
+  already the non-TTY refusal). The documented code and the enforced code MUST be the same value, so an automated caller can tell
   it from a real failure. Because a non-zero exit invites an automated caller to tear the environment
   down and retry — which would destroy the very key awaiting registration and make every retry
   generate a new one — the output MUST state that tearing down destroys the key and that the recovery
   is **register, then `redeploy`**, never recreate. This relaxes FR-014's
   empty-workspace refusal for **this case only** — the container is deliberately pending and says so,
   which serves that refusal's intent rather than defeating it. HTTPS clone-on-start is unchanged.
+- **FR-014**: The agent's `~/.ssh/config` MUST carry the tool's settings **explicitly** rather than
+  relying on ssh's defaults — `IdentityFile`, `IdentitiesOnly yes`, `UserKnownHostsFile` and
+  `StrictHostKeyChecking accept-new`. Explicit configuration documents what the agent's identity *is*,
+  survives a change in ssh's default identity search order, and — once a second key ever exists —
+  `IdentitiesOnly` stops ssh offering it and tripping a server's auth-attempt limit.
+  The block MUST be **appended if absent and never rewritten**: write-once applies to the **block**,
+  not the file, so an agent's own entries (a jump host, a per-host user) survive while the tool's
+  settings are still guaranteed to exist. A file that already exists without the block MUST gain it.
+  (This is the rule Feature 003 lacked; it does not relax anything.)
+- **FR-014a**: The tool's **exit codes MUST be documented**, both in `docs/` and in the CLI's own
+  `--help`, because an automated caller cannot branch on a code it has to reverse-engineer. The set,
+  as it stands after this feature:
+
+  | Code | Meaning |
+  |---|---|
+  | `0` | success |
+  | `1` | failure (the general case) |
+  | `2` | refused — a usage error, or a destructive action declined without `-y` on a non-TTY |
+  | `3` | **pending registration** — the environment started, its key is not registered, nothing was cloned (FR-013) |
+
+  Two caveats MUST be stated rather than left to be discovered: `2` is **shared** with the CLI
+  framework's own usage-error code, so it does not uniquely identify a refusal; and a **headless
+  `--foreground` run propagates the AGENT's exit code**, so in that mode the status is not the tool's
+  at all. The documented codes and the enforced codes MUST be the same values.
+- **FR-015**: The operator MUST be able to **regenerate the key deliberately**, without destroying the
+  environment. `--purge` already rotates it by destroying the volume; that is disproportionate when the
+  workspace is worth keeping, and a suspected key compromise is exactly when an operator needs
+  rotation to be cheap. Regeneration MUST state that the previous registration is now dead.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -302,13 +328,19 @@ unregistered, and confirm the output names the key and the consequence.
   **zero** manual reformatting.
 - **SC-005**: A deploy that will push over SSH with an unregistered key states the consequence —
   **zero** silent setups that fail at first push.
-- **SC-010**: A deferred clone exits with the distinct *pending registration* code and names the
+- **SC-009**: A deferred clone exits with the distinct *pending registration* code and names the
   register-then-redeploy recovery — **zero** occurrences of an operator or agent being left to infer
   that recreating the environment is the fix.
 - **SC-006**: Obtaining the public key succeeds for a stopped environment and for an unreachable host —
   **100%**.
 - **SC-007**: Every removed channel fails with an explanatory message — **zero** bare
   unrecognised-argument errors.
+- **SC-010**: Key generation failure never yields a silently keyless container — **zero** containers
+  that start, cannot authenticate, and say nothing.
+- **SC-012**: Every exit code the tool can return is documented in `--help` and in `docs/`, and the
+  documented values match the enforced ones — **zero** codes an automated caller must reverse-engineer.
+- **SC-011**: Clone and push over **HTTPS + `GH_TOKEN`** still work after every removal in this
+  feature — verified, not assumed, because three deletions sit beside that credential helper.
 - **SC-008**: A container's push key authorises only what the operator registered it for — verified by
   confirming a second repository is **not** reachable with it.
 

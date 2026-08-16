@@ -40,6 +40,11 @@ start when `--repo` is an SSH URL and no key was supplied, which is a premise th
 inverts. Settled as two-phase (boot, register, redeploy) and recorded as FR-013, which relaxes FR-014's
 empty-workspace refusal for that case alone.
 
+**Analyze findings are closed.** Two requirements had zero tasks (FR-008 generation failure, FR-012 the
+HTTPS regression) and now have both tasks and criteria; three unnamed values are named (exit code `3`,
+probe timeout `10s`, the `ssh-key show|rotate` surface); `FR-014a/b` and the missing `SC-009` were
+renumbering artefacts of the clarification rounds and are fixed.
+
 **One requirement deliberately amends another feature**, and that is called out rather than smuggled:
 FR-003 puts self-generated push material on a persisted volume, which Feature 003's rule forbids for
 push material generally. The spec states the amendment, its scope (self-generated only), and the reason

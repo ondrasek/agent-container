@@ -28,7 +28,17 @@ private key to your disk at all.
 agent-container exec pk-demo -- ls -l ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub ~/.ssh/config
 ```
 
-**Expect**: private `0600`, public `0644`, and a `config`. The private half exists **only** here.
+**Expect**: private `0600`, public `0644`, and a `config` containing the tool's block **explicitly**:
+
+```
+Host *
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.ssh/known_hosts
+    StrictHostKeyChecking accept-new
+```
+
+The private half exists **only** here.
 
 The **conventional path** is the point: nothing had to be wired for git to use it, and `ssh`, `scp`
 and `rsync` use it too. Confirm no wiring survives:
@@ -42,6 +52,8 @@ agent-container exec pk-demo -- git config --global --get core.sshCommand; echo 
 ## S3 — Register the public key and push for real (C3, SC-002)
 
 ```sh
+agent-container ssh-key show pk-demo
+# or from the row, for an agent:
 agent-container list --json | jq -r '.data.containers[] | select(.name|endswith("pk-demo")) | .agent_ssh_public_key'
 ```
 
@@ -153,7 +165,21 @@ agent-container down pk-demo && agent-container up pk-demo
 agent-container exec pk-demo -- grep myjump ~/.ssh/config
 ```
 
-**Expect**: the agent's own edit **survives** the recreate. A tool that rewrote this file each boot
+**Expect**: the agent's own edit **survives** the recreate, *and* the tool's block is still present.
+
+Then the harder half — a config that existed **before** any deploy:
+
+```sh
+agent-container down cfg-demo --purge
+agent-container up cfg-demo   # fresh volume
+agent-container exec cfg-demo -- sh -c 'printf "Host early\n" > ~/.ssh/config'
+agent-container down cfg-demo && agent-container up cfg-demo
+agent-container exec cfg-demo -- grep -c "IdentitiesOnly" ~/.ssh/config
+```
+
+**Expect**: `1`. Write-once applies to the **block**, not the file — a config the agent created first
+must still gain the tool's settings, or `StrictHostKeyChecking` is never set and every SSH the agent
+attempts hangs on an interactive prompt it cannot answer. A tool that rewrote this file each boot
 would discard it silently, and the agent would have no way to discover why its jump host stopped
 working.
 
@@ -161,7 +187,7 @@ working.
 
 ```sh
 agent-container exec pk-demo -- cat ~/.ssh/id_ed25519.pub > /tmp/old
-agent-container <rotate-command> pk-demo
+agent-container ssh-key rotate pk-demo
 agent-container exec pk-demo -- cat ~/.ssh/id_ed25519.pub > /tmp/new
 diff /tmp/old /tmp/new; agent-container exec pk-demo -- ls /workspace
 ```
@@ -188,3 +214,36 @@ your personal key, which reaches everything that key reaches.
 **S1 and S12 are the point.** S1 is an absence, and S12 is a permission that is *narrower* than before
 — neither is visible in a passing test that only checks the push works. S4 is the one that will break
 quietly if generation is not idempotent, and its symptom would arrive days later.
+
+
+## S15 — Exit codes are documented and match reality (C14, SC-012)
+
+```sh
+agent-container --help | grep -A6 -i "exit code"
+agent-container up two-phase --repo git@github.com:you/test.git > /dev/null 2>&1; echo "exit=$?"
+```
+
+**Expect**: `--help` lists `0` success, `1` failure, `2` refused, `3` pending registration — and the
+deferred clone really exits **3**. The documented values and the enforced ones must be the same, which
+is why a test binds them rather than trusting the prose.
+
+Both caveats must appear: `2` is shared with the CLI framework's usage-error code, and a headless
+`--foreground` run propagates the **agent's** exit code rather than the tool's.
+
+## S16 — Key generation failure is loud (C15, SC-010)
+
+Make generation fail (a read-only `~/.ssh`, or a full volume), then deploy.
+
+**Expect**: the failure is **stated**. A container that starts, cannot authenticate anywhere, and says
+nothing is the outcome this scenario exists to make impossible — the agent would discover it as an
+inexplicable permission denied, hours later.
+
+## S17 — The HTTPS path still works (C16, SC-011)
+
+```sh
+agent-container up https-demo --repo https://github.com/you/test.git
+agent-container exec https-demo -- git -C /workspace push
+```
+
+**Expect**: clone and push both succeed on `GH_TOKEN` alone, with no SSH key involved. Three deletions
+in this feature sit beside that credential helper, and nothing else would catch collateral damage.

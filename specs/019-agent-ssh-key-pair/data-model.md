@@ -6,7 +6,7 @@
 |---|---|---|
 | agent SSH **private** key | **`~/.ssh/id_ed25519`** — the conventional path, which IS the persisted `ssh` volume | survives `down`/`up`; **dies with `--purge`**, or an explicit rotate |
 | agent SSH **public** key | `~/.ssh/id_ed25519.pub`, world-readable | same |
-| `~/.ssh/config` | same volume; **written once, never rewritten** | survives everything except `--purge` |
+| `~/.ssh/config` | same volume; the tool's **block** appended if absent, never rewritten | survives everything except `--purge` |
 | captured public key | the tool's local state, for FR-004 | re-capturable; safe to delete |
 | ~~`<state>/<host>/<name>.push_key`~~ | ~~operator's disk, 0644~~ | **deleted, and no longer written** |
 
@@ -54,11 +54,27 @@ which is what makes a `not-registered` answer predictive rather than a guess.
 
 ## §3a `~/.ssh/config` — written once, then the agent's
 
-Content is **static** (`IdentitiesOnly`, a fixed `IdentityFile`, a fixed `UserKnownHostsFile`), so
-there is nothing a per-boot rewrite could update. It is written **if absent** and never rewritten
-(FR-014a): rewriting would discard edits the agent legitimately makes — a jump host, a per-host user —
-while gaining nothing. Only the *contents* of the referenced `known_hosts` vary, through their own
-injection path.
+The block is **explicit rather than default-reliant** (FR-014):
+
+```
+Host *
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.ssh/known_hosts
+    StrictHostKeyChecking accept-new
+```
+
+Only `StrictHostKeyChecking` is strictly load-bearing — ssh defaults to `ask`, which for a
+non-interactive agent means *fail*. The rest is stated anyway because it documents what the agent's
+identity is, survives a change in ssh's default identity search order, and `IdentitiesOnly` prevents
+ssh offering every key it finds once a second one ever exists.
+
+`UserKnownHostsFile` names the **conventional** path, which is already on this volume — so
+`--known-hosts` injection targets `~/.ssh/known_hosts` directly rather than a private location.
+
+**Write-once applies to the BLOCK, not the file.** Appended if absent; never rewritten; a file that
+already exists without the block still gains it — otherwise an agent that created `~/.ssh/config` for a
+jump host before the first deploy would permanently lose the tool's settings.
 
 ## §4 Clone-on-start becomes a three-way decision
 
@@ -66,8 +82,8 @@ injection path.
 --repo https://…            -> clone (GH_TOKEN; unchanged)
 --repo ssh://…, key registered   -> clone
 --repo ssh://…, NOT registered   -> START, DO NOT CLONE, say so, print the key
-                                    and the exact next command, and EXIT NON-ZERO
-                                    with a DISTINCT "pending registration" code
+                                    and the exact next command, and EXIT 3
+                                    ("pending registration")
 ```
 
 **The non-zero exit carries a hazard the wording must defuse.** An automated caller seeing failure will

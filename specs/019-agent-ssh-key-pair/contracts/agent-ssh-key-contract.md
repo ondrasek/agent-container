@@ -58,7 +58,7 @@ there is no probe and the key is reported *unverified*, never assumed good or ba
 ## C10 — SSH clone-on-start is two-phase
 
 With an SSH `--repo` and no registered key, the container **starts without cloning**, says so, prints
-the key and the next command, and **exits non-zero with a distinct *pending registration* code**
+the key and the next command, and **exits 3 (*pending registration*)**
 (data-model §4). The output MUST state that tearing the environment down destroys the key and that the
 recovery is **register, then `redeploy`** — a caller that reads only the exit status will otherwise
 recreate, regenerating the key it was about to register. This relaxes FR-014 for **this case only**; every
@@ -71,11 +71,15 @@ other empty-workspace refusal stands.
 
 ## C13 — `~/.ssh/config` is written once, and rotation is explicit
 
-The tool writes the agent's `~/.ssh/config` **once if absent** and never rewrites it (FR-014a): the
-content is static, and a per-boot rewrite would discard edits the agent legitimately makes while
-gaining nothing.
+The tool **appends its block** to the agent's `~/.ssh/config` if absent and never rewrites it
+(FR-014) — write-once applies to the **block**, not the file, so a config the agent created earlier
+still gains the tool's settings while keeping its own entries. The block states `IdentityFile`,
+`IdentitiesOnly`, `UserKnownHostsFile` and `StrictHostKeyChecking` **explicitly** rather than relying
+on ssh's defaults.
 
-The key can be **regenerated deliberately** without destroying the environment (FR-014b), and doing so
+`agent-container ssh-key show <name>` and `ssh-key rotate <name>` are the surface (FR-004a) — not part
+of `keys`, which injects *authorized* keys. The key can be **regenerated deliberately** without
+destroying the environment (FR-015), and doing so
 states that the previous registration is dead. `--purge` also rotates it, as a side effect of
 destroying the volume — that is the large hammer, not the intended one.
 
@@ -84,3 +88,24 @@ destroying the volume — that is the large hammer, not the intended one.
 The key grants access to what the operator registered it for and nothing else — verified by confirming
 a second repository is **not** reachable with it (SC-008). This is the least-privilege gain over
 injecting the operator's own key.
+
+
+## C14 — Exit codes are documented, in `--help` and in `docs/`
+
+`0` success · `1` failure · `2` refused (usage error **or** a destructive action declined without `-y`
+on a non-TTY) · `3` pending registration (FR-014a, SC-012).
+
+Two caveats are stated rather than left to be discovered: `2` is **shared** with the CLI framework's
+usage-error code, and a headless `--foreground` run **propagates the agent's** exit code so the status
+is not the tool's. A test binds the documented values to the enforced ones.
+
+## C15 — Generation failure is loud, and never silent
+
+A failure to generate the key MUST be surfaced and MUST NOT yield a container that starts, cannot
+authenticate, and says nothing (FR-008, SC-010).
+
+## C16 — The HTTPS path still works
+
+Clone and push over HTTPS + `GH_TOKEN` are verified after every removal in this feature (FR-012,
+SC-011) — three deletions sit beside that credential helper, and nothing else would catch collateral
+damage to it.

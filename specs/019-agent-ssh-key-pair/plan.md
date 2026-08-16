@@ -44,26 +44,65 @@ Everything follows from that, and all of it is removal:
 
 The container's own `~/.ssh/config` is **greenfield**: nothing writes it today (verified).
 
-### 2. `~/.ssh/config` is written ONCE, and rotation is an explicit command
+### 2. `~/.ssh/config` — EXPLICIT content, appended if absent, never rewritten
 
-The block's content is entirely static — `IdentitiesOnly`, a fixed `IdentityFile`, a fixed
-`UserKnownHostsFile`. Verified against what `core.sshCommand` carries today, which is exactly those
-flags and fixed paths. **Nothing in it varies per boot**, so a per-boot rewrite gains nothing while
-costing an ownership conflict on a file the agent may legitimately need (a jump host, a per-host user).
-Only the *contents* of the referenced `known_hosts` vary, and that is a different file with its own
-injection path.
+Analysis asked what the block must *contain*, and the answer trimmed it: `UserKnownHostsFile` pointing
+at a private path is unnecessary (`~/.ssh/known_hosts` is both the default **and** already on the
+persisted volume, so `--known-hosts` injection targets it directly), and the only strictly load-bearing
+line is `StrictHostKeyChecking accept-new` — ssh's default is `ask`, which for a non-interactive agent
+means *fail*.
 
-The stale-after-upgrade case is handled by an **explicit** command, not silent clobbering — the same
-reason `--purge` exists rather than the tool quietly resetting volumes.
+The operator's decision is nonetheless to state everything **explicitly** rather than lean on defaults:
 
-That surfaced a capability the spec was missing: **deliberate key rotation** (FR-014b). `--purge`
+```
+Host *
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.ssh/known_hosts
+    StrictHostKeyChecking accept-new
+```
+
+That is defensible beyond legibility: the config then documents what the agent's identity *is*, it
+survives a change in ssh's default identity search order, and `IdentitiesOnly` earns its keep the
+moment a second key ever exists — without it ssh offers every identity it finds and can trip a
+server's auth-attempt limit before reaching the right one.
+
+**Write-once applies to the BLOCK, not the file.** Append if absent; never rewrite; a file that already
+exists without the block still gains it. That preserves an agent's own entries — a jump host, a
+per-host user — while guaranteeing the tool's settings exist, which "write the file only if absent"
+would not.
+
+### 2a. Rotation is an explicit command
+
+Nothing in the block varies per boot, so there is no case for the tool rewriting it. The
+stale-after-upgrade case — a container created before a later fix — is handled by an **explicit**
+command rather than silent clobbering, the same reason `--purge` exists rather than the tool quietly
+resetting volumes when it believes it knows better.
+
+The surface is a noun sub-command, matching `runs` / `egress` / `inventory`:
+`agent-container ssh-key show <name>` and `ssh-key rotate <name>`. Deliberately **not** part of
+`keys`, which injects *authorized* keys — the agent's own identity and the principals allowed to reach
+it are different things.
+
+Deliberate key rotation (FR-015) is the capability this surfaced. `--purge`
 already rotates the key by destroying the volume, which is disproportionate when the workspace is
 worth keeping — and a suspected compromise is exactly when rotation should be cheap.
+
+### 2b. Exit codes are documented, including in `--help`
+
+`0` success · `1` failure · `2` refused (usage error **or** a destructive action declined without `-y`
+on a non-TTY) · `3` **pending registration** (FR-013).
+
+Two caveats stated rather than discovered: `2` is **shared** with the CLI framework's usage-error code
+so it does not uniquely identify a refusal, and a headless `--foreground` run **propagates the agent's**
+exit code, so in that mode the status is not the tool's at all. An automated caller cannot branch on
+codes it has to reverse-engineer, and this project has a documented habit of documented-vs-enforced
+drift — so a test binds them.
 
 ### 3. A deferred clone exits NON-ZERO, so the output must prevent the obvious wrong reaction
 
 FR-013's two-phase flow starts the container without cloning, and that invocation exits **non-zero**
-with a **distinct code** meaning *pending registration*.
+with **exit code 3**, meaning *pending registration*.
 
 I argued for exit 0 and was overruled, so the objection becomes a design constraint rather than
 disappearing: an automated caller seeing non-zero will reasonably `down` and retry, which **destroys
@@ -86,8 +125,9 @@ It targets **only** the host of `--repo`. With no `--repo` there is no probe and
 *unverified* — never assumed good or bad. Defaulting to `github.com` would invent a fact and send
 traffic to a third party the operator never named.
 
-**It must fail soft.** Denied egress (Feature 012), offline, or a forge outage yields *unknown* and
-never blocks a deploy.
+**Bounded at 10 seconds, and it must fail soft.** A healthy forge answers `ssh -T` in under two;
+unbounded, "fail soft" would be meaningless because the probe would never return. Denied egress
+(Feature 012), offline, or a forge outage yields *unknown* and never blocks a deploy.
 
 ### 5. Four removal channels, grepped rather than recalled
 
