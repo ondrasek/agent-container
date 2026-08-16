@@ -2,6 +2,63 @@
 
 <!-- version list -->
 
+## v0.26.0 (2026-08-16)
+
+### Bug Fixes
+
+- **tests**: A host-key refusal must be refused for the RIGHT reason
+  ([#018](https://github.com/ondrasek/agent-container/pull/18),
+  [`6198c0a`](https://github.com/ondrasek/agent-container/commit/6198c0acc409866b7fe09a7d0cdfe32ac4fc255b))
+
+### Documentation
+
+- **specs**: Close out 015 — full acceptance tier and quickstart verified
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`555cadc`](https://github.com/ondrasek/agent-container/commit/555cadcefb97df943c9bf0f5d7f59a86f4b97b8e))
+
+- **specs**: Generate tasks for Feature 015 kill switch
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`f815d68`](https://github.com/ondrasek/agent-container/commit/f815d68b00afe78987f48a441f66dfe57f468590))
+
+- **specs**: Name the per-host timeout — 30s, and say why not less
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`cd12a1d`](https://github.com/ondrasek/agent-container/commit/cd12a1d900747ddff7f763e2ee720a169bb19f48))
+
+- **specs**: Plan Feature 015 kill switch
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`3c51a44`](https://github.com/ondrasek/agent-container/commit/3c51a441180f8c44fcc3dbda147331303cae02c4))
+
+- **specs**: Repeating the action never turns "we cannot tell" into success
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`e7867a5`](https://github.com/ondrasek/agent-container/commit/e7867a5dd2790e6ed9b24bfa6e5c381e48e6bcd5))
+
+- **specs**: Resolve every analyze finding for Feature 015
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`b3e345c`](https://github.com/ondrasek/agent-container/commit/b3e345c9cb1063ad8b37b41a9340743e1930df8d))
+
+- **specs**: Scope filters on stored inventory fields only
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`5d38cb8`](https://github.com/ondrasek/agent-container/commit/5d38cb843ddda065ac77f37a586872e35b9e768b))
+
+- **specs**: The destroying form has PURGE reach, not wipe
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`78f777a`](https://github.com/ondrasek/agent-container/commit/78f777a2db7bc52d939b0d13c3d2d0be9b8a1f88))
+
+- **specs**: Unreadable refuses, absent succeeds — ratified, not assumed
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`b722f84`](https://github.com/ondrasek/agent-container/commit/b722f84f64b405b683d0de44974a530d57476183))
+
+### Features
+
+- **panic**: A kill switch that tells the truth about what it could not reach
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`58fd42a`](https://github.com/ondrasek/agent-container/commit/58fd42a155b7246d865951c2b1c1f09ea8cfd8e9))
+
+- **panic**: The honest edges — interruption, parallelism, and the threat model
+  ([#015](https://github.com/ondrasek/agent-container/pull/15),
+  [`7e12b53`](https://github.com/ondrasek/agent-container/commit/7e12b534f73a9227d19bddd6108bb56f5ab20551))
+
+
 ## v0.25.0 (2026-08-15)
 
 ### Documentation
