@@ -224,7 +224,7 @@ what it skipped.
       habitual typo cannot reach it — `kill` is overloaded and `stop-all` reads oddly with
       `--destroy`. Discoverability is the accepted cost: name it in the help text and in
       `docs/orchestration.md` so someone scanning for "stop" still finds it
-- [ ] T053 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`
+- [X] T053 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S12 by hand. A selector matching nothing is
       indistinguishable from one whose tests all passed — that happened in this project
 
