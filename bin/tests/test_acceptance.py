@@ -209,6 +209,29 @@ def _wait_sshd(port: int, timeout: int = 45) -> None:
     raise AssertionError(f"sshd never became reachable on port {port}")
 
 
+def _ssh_until_protocol_answer(argv: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run `ssh` until it gets far enough to give a PROTOCOL answer, not a transport one.
+
+    `pkill -HUP sshd` makes sshd re-exec itself, so for a moment the port is bound
+    (a TCP connect succeeds, which is all `_wait_sshd` proves) while the banner
+    exchange fails with `kex_exchange_identification: Connection reset by peer`.
+
+    That matters because the caller is asserting a HOST-KEY REFUSAL. A transport
+    reset is also a non-zero exit, so a test that only checked the exit code would
+    pass here while proving nothing about the pin — which is exactly the failure
+    mode Feature 018 exists to prevent, reproduced in its own test. So retry past
+    the restart and let the caller assert on the reason.
+    """
+    deadline = time.monotonic() + timeout
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    while time.monotonic() < deadline and (
+        "kex_exchange_identification" in r.stderr or "Connection reset" in r.stderr
+    ):
+        time.sleep(1)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    return r
+
+
 def _ssh(port: int, key: Path, command: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
@@ -3651,15 +3674,20 @@ def test_a_substituted_host_key_is_REFUSED(acc):
     assert sub.returncode == 0, sub.stderr
     assert _pinned_lines(acc)[0] == pinned_before  # the tool did NOT re-pin: no deploy happened
 
-    r = subprocess.run(
+    _wait_sshd(port)
+    r = _ssh_until_protocol_answer(
         ["ssh", "-i", str(laptop), "-p", str(port),
          "-o", f"UserKnownHostsFile={kh}", "-o", "StrictHostKeyChecking=yes",
          "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
          "dev@localhost", "whoami"],
-        capture_output=True, text=True, timeout=60,
     )  # fmt: skip
     assert r.returncode != 0, "a substituted host key was ACCEPTED — the pin is decoration"
-    assert "HOST IDENTIFICATION HAS CHANGED" in r.stderr or "host key" in r.stderr.lower()
+    # The REASON matters as much as the refusal. A transport-level reset is also a
+    # non-zero exit, and accepting it here would let this test pass while sshd was
+    # merely down — proving nothing about the pin.
+    assert "HOST IDENTIFICATION HAS CHANGED" in r.stderr or "host key" in r.stderr.lower(), (
+        f"refused, but not for a host-key reason: {r.stderr!r}"
+    )
 
 
 def test_a_tool_caused_recreation_repins_silently(acc):
