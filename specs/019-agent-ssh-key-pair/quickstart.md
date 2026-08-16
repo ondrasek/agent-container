@@ -1,8 +1,8 @@
-# Quickstart: Validating the Container-Generated Push Key (Feature 019)
+# Quickstart: Validating the Agent SSH Key Pair (Feature 019)
 
 Runnable scenarios. Each names the contract (`C#`) and criterion (`SC-###`) it validates. Requirements
 and field detail live in [spec.md](./spec.md), [data-model.md](./data-model.md) and
-[contracts/](./contracts/push-key-contract.md).
+[contracts/](./contracts/agent-ssh-key-contract.md).
 
 **Prerequisites**: a working runtime, and a git forge account where you can add a **deploy key** to a
 test repository. S3 and S12 need real network access to that forge.
@@ -11,7 +11,7 @@ test repository. S3 and S12 need real network access to that forge.
 
 ---
 
-## S1 — No private push key anywhere (C1, SC-001)
+## S1 — No agent SSH private key on the operator's disk (C1, SC-001)
 
 ```sh
 agent-container up pk-demo
@@ -25,7 +25,7 @@ private key to your disk at all.
 ## S2 — The container made one, and it is public-half-visible (C1)
 
 ```sh
-agent-container exec pk-demo -- ls -l ~/.ssh/push_ed25519_key ~/.ssh/push_ed25519_key.pub
+agent-container exec pk-demo -- ls -l ~/.ssh/agent_ssh_ed25519_key ~/.ssh/agent_ssh_ed25519_key.pub
 ```
 
 **Expect**: private `0600`, public `0644`. The private half exists **only** here.
@@ -33,7 +33,7 @@ agent-container exec pk-demo -- ls -l ~/.ssh/push_ed25519_key ~/.ssh/push_ed2551
 ## S3 — Register the public key and push for real (C3, SC-002)
 
 ```sh
-agent-container list --json | jq -r '.data.containers[] | select(.name|endswith("pk-demo")) | .push_public_key'
+agent-container list --json | jq -r '.data.containers[] | select(.name|endswith("pk-demo")) | .agent_ssh_public_key'
 ```
 
 Paste that into the repository's **Deploy keys** (write access), then inside the container:
@@ -48,9 +48,9 @@ the scenario that proves the feature does the job — everything else proves it 
 ## S4 — The key survives recreation (C4, SC-003)
 
 ```sh
-agent-container exec pk-demo -- cat ~/.ssh/push_ed25519_key.pub > /tmp/before
+agent-container exec pk-demo -- cat ~/.ssh/agent_ssh_ed25519_key.pub > /tmp/before
 agent-container down pk-demo && agent-container up pk-demo
-agent-container exec pk-demo -- cat ~/.ssh/push_ed25519_key.pub > /tmp/after
+agent-container exec pk-demo -- cat ~/.ssh/agent_ssh_ed25519_key.pub > /tmp/after
 diff /tmp/before /tmp/after && echo "unchanged — no re-registration needed"
 ```
 
@@ -65,7 +65,7 @@ agent-container down pk-demo --purge
 agent-container up pk-demo
 ```
 
-**Expect**: a warning that the push key was regenerated and the previous registration is now dead, and
+**Expect**: a warning that the agent SSH key was regenerated and the previous registration is now dead, and
 a new public key. Nothing else in the system would tell you.
 
 ## S6 — Every removed channel explains itself (C6, SC-007)
@@ -76,7 +76,7 @@ agent-container redeploy gone --push-key ~/.ssh/id_ed25519; echo "exit=$?"
 agent-container up gone2 -e <(echo 'SSH_PUSH_KEY_B64=abc')
 ```
 
-**Expect**: each fails non-zero with a message saying the push key is generated in the container and
+**Expect**: each fails non-zero with a message saying the agent SSH key is generated in the container and
 its public half registered. A bare "unrecognized argument" is a **fail** — an operator who used this
 flag had a reason, and it is now served without a private key on their disk.
 

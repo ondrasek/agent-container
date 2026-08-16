@@ -1,11 +1,11 @@
-# Data Model: Container-Generated Push Key (Feature 019)
+# Data Model: Agent SSH Key Pair (Feature 019)
 
 ## §1 No new store, and one file that stops existing
 
 | Artefact | Where | Lifetime |
 |---|---|---|
-| push **private** key | the container's persisted `ssh` volume | survives `down`/`up`; **dies with `--purge`** |
-| push **public** key | derived beside it, world-readable | same |
+| agent SSH **private** key | the container's persisted `ssh` volume | survives `down`/`up`; **dies with `--purge`** |
+| agent SSH **public** key | derived beside it, world-readable | same |
 | captured public key | the tool's local state, for FR-004 | re-capturable; safe to delete |
 | ~~`<state>/<host>/<name>.push_key`~~ | ~~operator's disk, 0644~~ | **deleted, and no longer written** |
 

@@ -1,4 +1,4 @@
-# Specification Quality Checklist: The Push Key Is Generated In the Container Too
+# Specification Quality Checklist: The Agent SSH Key Pair Is Generated In the Container
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-08-15
@@ -36,7 +36,7 @@ operator's machine holds no private key and cannot answer), fail **soft**, and c
 registration lives on the forge and a stored answer goes stale the moment a key is revoked.
 
 **A second decision arrived at plan time**, not from the spec: `clone_credential_precheck` refuses to
-start when `--repo` is an SSH URL and no push key was supplied, which is a premise this feature
+start when `--repo` is an SSH URL and no key was supplied, which is a premise this feature
 inverts. Settled as two-phase (boot, register, redeploy) and recorded as FR-013, which relaxes FR-014's
 empty-workspace refusal for that case alone.
 

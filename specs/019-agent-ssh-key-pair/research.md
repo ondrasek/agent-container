@@ -1,4 +1,4 @@
-# Research: The Push Key Is Generated In the Container (Feature 019)
+# Research: The Agent SSH Key Pair Is Generated In the Container (Feature 019)
 
 Phase 0. Each entry records a **decision**, its **rationale**, and what was **rejected** — and where a
 fact is claimed, how it was established.
@@ -29,7 +29,7 @@ place (the exposure the feature exists to remove).
 **only** for this case.
 
 **Rationale**: read from the tree. `clone_credential_precheck` today refuses to start when `--repo` is
-an SSH URL and no push key was supplied, and the entrypoint's clone is `git clone … || die`. Both
+an SSH URL and no key was supplied, and the entrypoint's clone is `git clone … || die`. Both
 assume the key predates the container. Under 019 the key is generated **inside** it, so on a first
 boot nothing is registered and an SSH clone cannot succeed — the capability does not survive
 unchanged whatever we choose.
@@ -117,7 +117,7 @@ removal indistinguishable from a complete one by every other test).
 
 ## R6 — Reuse 018's capture
 
-**Decision**: point `capture_host_pubkey`'s mechanism at the push key's `.pub`; do not write a second
+**Decision**: point `capture_host_pubkey`'s mechanism at the agent SSH key's `.pub`; do not write a second
 capture.
 
 **Rationale**: it already reads a public key out of a container through the runtime, with the bounded

@@ -1,7 +1,7 @@
-# Tasks: The Push Key Is Generated In the Container Too (Feature 019)
+# Tasks: The Agent SSH Key Pair Is Generated In the Container (Feature 019)
 
 **Input**: [plan.md](./plan.md) · [research.md](./research.md) (R1–R6) · [data-model.md](./data-model.md) ·
-[contracts/push-key-contract.md](./contracts/push-key-contract.md) (C1–C12) ·
+[contracts/agent-ssh-key-contract.md](./contracts/agent-ssh-key-contract.md) (C1–C12) ·
 [quickstart.md](./quickstart.md) (S1–S12)
 
 **Format**: `- [ ] TNNN [P?] [Story?] description with file path`
@@ -14,7 +14,7 @@ demonstrate. If a private key is still being written, everything else working is
 **Read before starting.** The 018 argument does **not** transfer, and assuming it does is the single
 most likely way to build the wrong thing:
 
-| | Feature 018 (host key) | Feature 019 (push key) |
+| | Feature 018 (host key) | Feature 019 (agent SSH key) |
 |---|---|---|
 | Who proves what | the container proves itself **to us** | the container proves **us** to a forge |
 | So verification needs | the **public** key only | **possession of the private** key |
@@ -35,7 +35,7 @@ and grep found five):
 
 ## Phase 1: Setup
 
-- [ ] T001 `CONTAINER_PUSH_KEY = "/home/dev/.ssh/push_ed25519_key"` and its `.pub` in
+- [ ] T001 `CONTAINER_AGENT_SSH_KEY = "/home/dev/.ssh/agent_ssh_ed25519_key"` and its `.pub` in
       `bin/agent-container` — on the persisted `ssh` volume, beside the host key (FR-003, research R4)
 - [ ] T002 [P] Amend the `/run` invariant in `CLAUDE.md`: tool-**injected** secrets stay ephemeral;
       **self-generated** material may live on the container's own volume. State the exception rather
@@ -45,7 +45,7 @@ and grep found five):
 
 ## Phase 2: Foundational — blocking prerequisites for every story
 
-- [ ] T003 Generate the push keypair in `image/entrypoint.sh` on the `ssh` volume **only when absent**,
+- [ ] T003 Generate the agent SSH key pair in `image/entrypoint.sh` on the `ssh` volume **only when absent**,
       and derive its `.pub` at 0644 (C1, C2). Mirror the host-key block that 018 left in place
 - [ ] T004 **Idempotence is load-bearing** (C2, data-model §2): regenerating on every boot would
       silently invalidate the operator's registration while every other symptom looked healthy, and
@@ -54,7 +54,7 @@ and grep found five):
       half is 0600 and the public half 0644
 - [ ] T006 Point git at the generated key via `core.sshCommand`, replacing the injected-key path
       (`image/entrypoint.sh`). `IdentitiesOnly=yes` stays — only this key is offered
-- [ ] T007 Capture the push **public** key through the runtime by **reusing 018's primitive** (research
+- [ ] T007 Capture the agent's **public** key through the runtime by **reusing 018's primitive** (research
       R6) — it already polls, validates and refuses an empty read, and a fresh copy would omit exactly
       those subtleties
 - [ ] T008 **THE REMOVAL CENSUS**, as a test over the source (T023's shape in 018). Known today:
@@ -72,7 +72,7 @@ and grep found five):
 **Independent test**: S3 — register the emitted line on a real repository and push.
 
 - [ ] T010 [US1] Capture at deploy, reusing 018's hook site in `compose_up_exec` (C1)
-- [ ] T011 [US1] Expose the public key on `list --json` as `push_public_key`, following 018's
+- [ ] T011 [US1] Expose the public key on `list --json` as `agent_ssh_public_key`, following 018's
       `row_known_hosts_entry` (C3, FR-004)
 - [ ] T012 [US1] The answer must **not depend on the host being reachable** (C3, FR-005, SC-006) — it
       comes from what was captured, and a stopped or unreachable environment is exactly when an
@@ -87,7 +87,7 @@ and grep found five):
 
 ---
 
-## Phase 4: User Story 2 — no push private key on the operator's disk (P1)
+## Phase 4: User Story 2 — no agent SSH private key on the operator's disk (P1)
 
 **Goal**: the tool neither takes, stores, stages nor injects an outbound private key.
 **Independent test**: S1 — `grep -rl 'PRIVATE KEY'` over state and config finds nothing.
@@ -173,8 +173,8 @@ and grep found five):
       channels and why; the `/run` rule amended for self-generated material
 - [ ] T040 [P] `docs/execution.md` — SSH clone-on-start is two-phase, and why it cannot be otherwise
 - [ ] T041 [P] `docs/agent-as-code.md` — `target: push_key` is refused, not ignored
-- [ ] T042 [P] `README.md` — the push key section, matching 018's treatment of the host key
-- [ ] T043 [P] `docs/agent-interface.md` — the new `push_public_key` field on `list --json`
+- [ ] T042 [P] `README.md` — the agent SSH key section, matching 018's treatment of the host key
+- [ ] T043 [P] `docs/agent-interface.md` — the new `agent_ssh_public_key` field on `list --json`
 - [ ] T044 [P] Reconcile `docs/threat-model.md`'s 019 row against what was built — the last
       private-key write site removed, a grant narrowed, and a signing key now on a volume that
       outlives its container. Structural guards in `bin/tests/` parse that file

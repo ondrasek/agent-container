@@ -1,6 +1,6 @@
-# Feature Specification: The Push Key Is Generated In the Container Too
+# Feature Specification: The Agent SSH Key Pair Is Generated In the Container
 
-**Feature Branch**: `019-container-generated-push-key`
+**Feature Branch**: `019-agent-ssh-key-pair`
 
 **Created**: 2026-08-15
 
@@ -9,6 +9,23 @@
 **Input**: Operator directive: *"When the agent needs outbound authentication via ssh, the workflow is
 for me to get its public key via agent-container cli and register/push it wherever needed. The
 private/host key is generated inside the container ONLY and never leaves it."*
+
+## Terminology — and why the old name was wrong
+
+**It is the agent's SSH key pair.** The container holds a keypair for outbound SSH authentication; the
+**private half never leaves it**, and the **public half** is what the operator obtains and registers.
+
+The existing code calls this a *"push key"* (`--push-key`, `push_key`, `INJECT_PUSH_KEY_PATH`, from
+Feature 003). **That name is wrong and this feature does not carry it forward.** The key is wired to
+git's `core.sshCommand`, which git uses for **every** SSH transport operation — `clone`, `fetch`,
+`pull`, `ls-remote`, `push` — so it was never push-specific. The entrypoint's own clone path already
+refers to *"an SSH URL with no push key configured"*, i.e. it clones with the thing it calls a push
+key. Under FR-013's two-phase flow the first thing the key ever does is **clone**; it may never push
+at all.
+
+Nor is it git-specific. It is the agent's outbound SSH identity, and git is merely today's consumer.
+
+The legacy names appear below **only** where this feature names what it removes.
 
 ## Overview
 
@@ -27,7 +44,7 @@ consequences, both established by reading the code:
    key, so a container that needs to push one repository receives credentials for everything that key
    authorises.
 
-Inverting it fixes both at once: **the container generates its own push keypair, the operator obtains
+Inverting it fixes both at once: **the container generates its own agent SSH key pair, the operator obtains
 the PUBLIC key through the CLI and registers it wherever the push must land** — a per-repository
 deploy key, an account key, a mirror, anything. The private half is created in the container and never
 leaves.
@@ -85,7 +102,7 @@ data.
 
 ### User Story 1 - The container makes its own push key and I register its public half (Priority: P1)
 
-The operator deploys, obtains the container's push **public** key through the CLI, registers it as a
+The operator deploys, obtains the container's agent SSH **public** key through the CLI, registers it as a
 deploy key (or wherever the push must land), and the agent pushes.
 
 **Why this priority**: it is the feature. Everything else is consequence.
@@ -95,9 +112,9 @@ repository, and confirm the agent can push while no private key exists on the op
 
 **Acceptance Scenarios**:
 
-1. **Given** a newly created environment, **When** it starts, **Then** it has a push keypair it
+1. **Given** a newly created environment, **When** it starts, **Then** it has a agent SSH key pair it
    generated itself, and the private half exists only inside the container.
-2. **Given** a running environment, **When** the operator asks for its push key, **Then** they get the
+2. **Given** a running environment, **When** the operator asks for its agent SSH key, **Then** they get the
    **public** key in a form they can paste into a deploy-key field.
 3. **Given** the public key is registered on the remote, **When** the agent pushes, **Then** the push
    succeeds using that key.
@@ -106,9 +123,9 @@ repository, and confirm the agent can push while no private key exists on the op
 
 ---
 
-### User Story 2 - No push private key on the operator's disk (Priority: P1)
+### User Story 2 - No agent SSH private key on the operator's disk (Priority: P1)
 
-The tool neither takes, stores, stages nor injects an outbound SSH private key.
+The tool neither takes, stores, stages nor injects an agent SSH private key.
 
 **Why this priority**: P1 alongside US1 because it is the other half of the same change, and because it
 removes an existing exposure rather than adding a capability.
@@ -119,9 +136,9 @@ the operator's state or config directories contains private key material.
 **Acceptance Scenarios**:
 
 1. **Given** any environment created by any path, **When** the operator inspects the state directory,
-   **Then** no push private key file exists.
+   **Then** no agent SSH private key file exists.
 2. **Given** an operator who uses a removed channel, **When** they run the command, **Then** it fails
-   with a message explaining that the push key is generated in the container and its public half
+   with a message explaining that the agent SSH key is generated in the container and its public half
    registered.
 3. **Given** an upgrade from a version that staged one, **When** the operator next deploys, **Then**
    the stale private key file is removed and its removal is stated.
@@ -171,26 +188,26 @@ unregistered, and confirm the output names the key and the consequence.
 
 - **FR-001**: The tool MUST NOT take, store, stage or inject an outbound SSH **private** key. The push
   keypair MUST be generated inside the container and the private half MUST NOT leave it.
-- **FR-002**: **Every** channel that supplies a push private key MUST be removed: `up --push-key`,
+- **FR-002**: **Every** channel that supplies a agent SSH private key MUST be removed: `up --push-key`,
   `redeploy --push-key`, the `SSH_PUSH_KEY_B64` env-file variable, and `target: push_key` in a
   project's `.agent-container/` spec. Using one MUST fail with a message explaining the replacement. A
   declared `push_key` MUST be **refused**, never ignored.
 - **FR-003**: The generated key MUST persist across recreation, so a registered key keeps working
   without re-registration. **This amends Feature 003's rule that outbound key material never lands on a
   volume; the amendment is scoped to material the container generated itself.**
-- **FR-004**: The operator MUST be able to obtain an environment's push **public** key through the
+- **FR-004**: The operator MUST be able to obtain an environment's agent SSH **public** key through the
   existing machine-readable interface, in a form that can be registered directly.
 - **FR-005**: Obtaining the public key MUST NOT depend on the environment's host being reachable — the
   answer comes from what the tool captured, or an explicit statement that none was captured.
 - **FR-006**: A deploy of an environment that pushes over SSH MUST state the public key and that pushes
   fail until it is registered — unless it is already known to be registered (FR-011).
-- **FR-007**: `down --purge` MUST warn that the push key will be regenerated and the existing
+- **FR-007**: `down --purge` MUST warn that the agent SSH key will be regenerated and the existing
   registration will stop working.
 - **FR-008**: Key generation failure MUST be surfaced and MUST NOT leave the operator believing the
   environment can push.
-- **FR-009**: An upgrade MUST remove any push private key file staged by an earlier version, and MUST
+- **FR-009**: An upgrade MUST remove any agent SSH private key file staged by an earlier version, and MUST
   say that it did.
-- **FR-010**: No push private key material may be written anywhere on the operator's machine by this
+- **FR-010**: No agent SSH private key material may be written anywhere on the operator's machine by this
   feature (Constitution III).
 - **FR-011**: The tool MUST NOT nag about registering a key on every deploy once pushing demonstrably
   works. Registration MUST be established by **probing the forge from inside the container** — the
@@ -210,14 +227,14 @@ unregistered, and confirm the output names the key and the consequence.
 - **Container push identity**: the keypair the container generates for outbound authentication. The
   private half lives only on the container's persisted volume; the public half is what the operator
   registers.
-- **Captured push public key**: the tool's local copy of that public key, used to answer FR-004
+- **Captured agent SSH public key**: the tool's local copy of that public key, used to answer FR-004
   without reaching the container.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: No file on the operator's machine contains push private key material after any deployment
+- **SC-001**: No file on the operator's machine contains agent SSH private key material after any deployment
   path — **100%**.
 - **SC-002**: A registered public key lets the agent push successfully — verified with a real push, not
   inferred from configuration.

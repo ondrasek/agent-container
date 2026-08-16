@@ -1,8 +1,8 @@
-# Implementation Plan: The Push Key Is Generated In the Container Too
+# Implementation Plan: The Agent SSH Key Pair Is Generated In the Container
 
-**Branch**: `019-container-generated-push-key` | **Date**: 2026-08-16 | **Spec**: [spec.md](./spec.md)
+**Branch**: `019-agent-ssh-key-pair` | **Date**: 2026-08-16 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/019-container-generated-push-key/`
+**Input**: Feature specification from `/specs/019-agent-ssh-key-pair/`
 
 ## Summary
 
@@ -138,12 +138,12 @@ across recreate, a real `git push` with the registered key, and no private key a
 ## Project Structure
 
 ```text
-bin/agent-container       generation trigger, capture of the push public key (reusing 018's),
+bin/agent-container       generation trigger, capture of the agent SSH public key (reusing 018's),
                           the registration probe, the two-phase clone decision, removal of
                           --push-key from up/redeploy, stage_push_injection's push arm,
                           INJECT_PUSH_KEY_PATH, CRED_SSH_TARGETS' push_key, stale-file cleanup,
                           the list --json field
-image/entrypoint.sh       generate the push key on the ssh volume if absent; derive its .pub;
+image/entrypoint.sh       generate the agent SSH key on the ssh volume if absent; derive its .pub;
                           delete the SSH_PUSH_KEY_B64 branch; make clone-on-start over SSH
                           PENDING rather than fatal when no key is registered
 completions/*.bash|zsh    drop --push-key

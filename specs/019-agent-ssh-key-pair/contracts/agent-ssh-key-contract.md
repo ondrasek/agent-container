@@ -1,10 +1,10 @@
-# Contract: Container-Generated Push Key (Feature 019)
+# Contract: Agent SSH Key Pair (Feature 019)
 
 Numbered so tasks and tests can cite them.
 
 ## C1 — The container generates its own key, and it never leaves
 
-The push keypair is created **inside** the container on its persisted `ssh` volume. No private half
+The agent SSH key pair is created **inside** the container on its persisted `ssh` volume. No private half
 exists anywhere on the operator's machine after any deployment path (FR-001, FR-010, SC-001 at 100%).
 
 ## C2 — Generation is idempotent
@@ -31,7 +31,7 @@ unreachable host still answers** (FR-005, SC-006) — that is when an operator m
 ## C6 — Every supplying channel is removed, and each explains itself
 
 `up --push-key`, `redeploy --push-key`, `SSH_PUSH_KEY_B64` and `target: push_key` all fail with a
-message explaining that the push key is generated in the container and its public half registered
+message explaining that the agent SSH key is generated in the container and its public half registered
 (FR-002, SC-007). A declared `push_key` is **refused**, never ignored.
 
 ## C7 — A stale staged key is deleted, and stated
