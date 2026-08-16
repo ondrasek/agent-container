@@ -864,45 +864,73 @@ if [[ -d "${CONFIG_INJECT_DIR}" ]]; then
     fi
 fi
 
-# --- 3b. Outbound SSH push key (Feature 003, US1) ---------------------------
-# The agent PUSHES with a key DISTINCT from the inbound sshd host key. It is
-# injected EPHEMERALLY (INJECT_DIR is a /run compose config) and MUST NOT be
-# copied onto the persisted ~/.ssh volume (FR-012) — the operator's local copy is
-# the sole durable copy. ssh refuses a group/world-readable private key and the
-# injected file is 0644, so copy it to a 0600 file in an EPHEMERAL, container-
-# private dir (under /tmp — vanishes with the container, never a named volume) and
-# point git's ssh command at it. Layered alongside the HTTPS+GH_TOKEN helper
-# above: the operator selects per remote (git@github.com vs https://github.com).
-PUSH_RUNTIME="${AGENT_CONTAINER_PUSH_RUNTIME:-/tmp/agent-container-push.$(id -u)}"
-_push_src=""
-if [[ -f "${INJECT_DIR}/push_ed25519_key" ]]; then
-    _push_src="${INJECT_DIR}/push_ed25519_key"
-elif [[ -n "${SSH_PUSH_KEY_B64:-}" ]]; then
-    mkdir -p "${PUSH_RUNTIME}" && chmod 700 "${PUSH_RUNTIME}"
-    if printf '%s' "${SSH_PUSH_KEY_B64}" | base64 -d > "${PUSH_RUNTIME}/.b64" 2>/dev/null; then
-        _push_src="${PUSH_RUNTIME}/.b64"
+# --- 3b. The agent's own SSH key pair (Feature 019) -------------------------
+# GENERATED HERE, AT THE CONVENTIONAL PATH, AND IT NEVER LEAVES. The tool used to
+# INJECT a private key (`--push-key`, SSH_PUSH_KEY_B64) — copying a 0644 file to a
+# 0600 one under /tmp and pointing git's core.sshCommand at it. All of that is
+# gone: a key the container generates is 0600 from birth, and `~/.ssh/id_ed25519`
+# is where ssh looks by default, so git, ssh, scp and rsync all use it with NO
+# wiring. Only the PUBLIC half ever leaves, captured through the runtime.
+#
+# It is called the AGENT's key, not a "push key": it is wired to nothing
+# push-specific, and the first thing it does is usually clone.
+AGENT_KEY="${SSH_DIR}/id_ed25519"
+if [[ ! -f "${AGENT_KEY}" ]]; then
+    # ONLY when absent. Regenerating on every boot would silently invalidate the
+    # operator's registration on the forge while every other symptom looked
+    # healthy — surfacing days later as a push that stopped working.
+    log "generating the agent SSH key (ed25519) at ${AGENT_KEY}"
+    if ! ssh-keygen -q -t ed25519 -f "${AGENT_KEY}" -N '' 2>/dev/null; then
+        # LOUD, and fatal. A container that starts, cannot authenticate anywhere,
+        # and says nothing is the worst outcome: the agent meets it hours later as
+        # an inexplicable permission denied.
+        die "could not generate the agent SSH key at ${AGENT_KEY} — the container would start unable to authenticate anywhere"
     fi
+else
+    log "agent SSH key already present, keeping it (registration stays valid)"
 fi
-if [[ -n "${_push_src}" ]]; then
-    mkdir -p "${PUSH_RUNTIME}" && chmod 700 "${PUSH_RUNTIME}"
-    install -m 0600 "${_push_src}" "${PUSH_RUNTIME}/push_key"
-    rm -f "${PUSH_RUNTIME}/.b64"
-    # A WRITABLE known_hosts (empty or pre-seeded from the injected file / env) so
-    # accept-new never prompts: a pre-seeded entry means the remote is already
-    # trusted; otherwise it is trusted-on-first-use and appended here.
-    : > "${PUSH_RUNTIME}/known_hosts"
-    if [[ -f "${INJECT_DIR}/known_hosts" ]]; then
-        cat "${INJECT_DIR}/known_hosts" > "${PUSH_RUNTIME}/known_hosts"
-    elif [[ -n "${PUSH_KNOWN_HOSTS:-}" ]]; then
-        printf '%s\n' "${PUSH_KNOWN_HOSTS}" > "${PUSH_RUNTIME}/known_hosts"
-    fi
-    # core.sshCommand (in the ephemeral ~/.gitconfig) applies to every git push —
-    # more robust than GIT_SSH_COMMAND, which would need env propagation into each
-    # tmux/ssh session. IdentitiesOnly=yes so only this key is offered (no prompt).
-    git config --global core.sshCommand \
-        "ssh -i ${PUSH_RUNTIME}/push_key -o IdentitiesOnly=yes -o UserKnownHostsFile=${PUSH_RUNTIME}/known_hosts -o StrictHostKeyChecking=accept-new"
-    log "Configured outbound git push over SSH (ephemeral key; IdentitiesOnly)"
+if ! ssh-keygen -y -f "${AGENT_KEY}" > "${AGENT_KEY}.pub" 2>/dev/null; then
+    die "the agent SSH key at ${AGENT_KEY} is missing or invalid"
 fi
+chmod 0600 "${AGENT_KEY}"
+chmod 0644 "${AGENT_KEY}.pub"   # the tool reads this back through the runtime
+
+# The operator's known_hosts for outbound remotes goes to the CONVENTIONAL path —
+# already on this volume — so the config below can name a default rather than a
+# tool-specific location.
+if [[ -f "${INJECT_DIR}/known_hosts" ]]; then
+    cat "${INJECT_DIR}/known_hosts" >> "${SSH_DIR}/known_hosts"
+elif [[ -n "${PUSH_KNOWN_HOSTS:-}" ]]; then
+    printf '%s\n' "${PUSH_KNOWN_HOSTS}" >> "${SSH_DIR}/known_hosts"
+fi
+[[ -f "${SSH_DIR}/known_hosts" ]] || : > "${SSH_DIR}/known_hosts"
+chmod 0644 "${SSH_DIR}/known_hosts"
+
+# The tool's ssh_config block — APPENDED IF THE BLOCK IS ABSENT, never rewritten.
+# Write-once applies to the BLOCK, not the file: an agent that created ~/.ssh/config
+# first (a jump host, a per-host user) must still gain these settings, or
+# StrictHostKeyChecking is never set and every SSH it attempts hangs on a prompt it
+# cannot answer.
+#
+# Stated EXPLICITLY rather than leaning on ssh's defaults: the block then documents
+# what the agent's identity IS, survives a change in ssh's default search order, and
+# IdentitiesOnly stops ssh offering every key it finds — which matters the moment a
+# second one exists, because a server's auth-attempt limit can be reached before the
+# right key is tried.
+SSH_CONFIG="${SSH_DIR}/config"
+if ! grep -q '^# BEGIN agent-container' "${SSH_CONFIG}" 2>/dev/null; then
+    cat >> "${SSH_CONFIG}" <<EOF
+# BEGIN agent-container (managed; appended once, never rewritten)
+Host *
+    IdentityFile ${AGENT_KEY}
+    IdentitiesOnly yes
+    UserKnownHostsFile ${SSH_DIR}/known_hosts
+    StrictHostKeyChecking accept-new
+# END agent-container
+EOF
+    log "wrote the agent ssh_config block"
+fi
+chmod 0600 "${SSH_CONFIG}"
 
 # --- 3c. Model/API credentials (Feature 003, US2) ---------------------------
 # The TOOL-INJECTED model/API credential is ALWAYS ephemeral (H1, FR-012/SC-004):
@@ -1037,10 +1065,14 @@ fi
 
 # --- 3d. Clone-on-start (Feature 004, US4) ----------------------------------
 # Populate /workspace from a source repo on first start (persistent/ephemeral).
-# The credential is chosen by URL SCHEME (both wired above): https:// uses the
-# github.com GH_TOKEN helper (section 3); git@…/ssh:// uses the ephemeral push key
-# via core.sshCommand (section 3b) — and an SSH URL with NO push key configured
-# fails fast (FR-014), never starting an empty-workspace agent. Idempotent: skip
+# The credential is chosen by URL SCHEME: https:// uses the github.com GH_TOKEN
+# helper (section 3); git@…/ssh:// uses the agent's own key (section 3b).
+#
+# THE SSH CASE IS TWO-PHASE (Feature 019, FR-013). The key is generated HERE, so on
+# a first boot it cannot yet be registered on the forge and the clone cannot
+# succeed. Rather than dying — which would make the container unusable and destroy
+# the key on the retry — the boot completes and marks the clone PENDING. The
+# operator registers the public key and runs `redeploy`. Idempotent: skip
 # when /workspace already holds a working copy (a persistent recreate never
 # re-clones over local state). A bind workspace is never given a clone URL by the
 # CLI. Runs BEFORE the agent launch (interactive window / headless workload).
@@ -1066,12 +1098,24 @@ if [[ -n "${CLONE_URL}" ]]; then
                 log "clone-on-start: cloning via HTTPS (non-github.com host — GH_TOKEN does NOT apply; repo must be public or have its own git credentials)"
                 git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
                 ;;
-            *)  # ssh:// or scp-like git@host:path — needs the injected push key
-                if ! git config --global --get core.sshCommand >/dev/null 2>&1; then
-                    die "clone-on-start: ${CLONE_URL} is an SSH URL but no push key was injected (FR-014); refusing to start an empty-workspace agent"
+            *)  # ssh:// or scp-like git@host:path — the agent's own key (section 3b)
+                # PENDING, NOT FATAL. A failure here is overwhelmingly "the key is not
+                # registered yet", which is the expected first-boot state — and dying
+                # would leave an operator with no container to read the key from.
+                log "clone-on-start: cloning via SSH (the agent's own key)"
+                if git clone "${CLONE_URL}" "${WORKSPACE_DIR}"; then
+                    :
+                else
+                    rm -rf "${WORKSPACE_DIR:?}/.git" 2>/dev/null || true
+                    printf '%s\n' "${CLONE_URL}" > "${SSH_DIR}/.clone_pending"
+                    log "clone-on-start: PENDING — could not clone ${CLONE_URL}."
+                    log "  The agent SSH key is generated in this container and must be"
+                    log "  REGISTERED on the remote before it can clone or push:"
+                    log "    $(cat "${AGENT_KEY}.pub")"
+                    log "  Register it, then run: agent-container redeploy <name>"
+                    log "  Do NOT tear this environment down — that destroys the key you are"
+                    log "  about to register, and the replacement will be a different key."
                 fi
-                log "clone-on-start: cloning via SSH (injected push key)"
-                git clone "${CLONE_URL}" "${WORKSPACE_DIR}" || die "clone-on-start failed for ${CLONE_URL}"
                 ;;
         esac
     fi

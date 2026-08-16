@@ -329,29 +329,48 @@ run_entrypoint __unset__
 check_eq "ssh: authorized_keys deduped union has 2 keys" "2" "$(grep -c . "${AK}")"
 if grep -qxF "${PUB1}" "${AK}" && grep -qxF "${PUB2}" "${AK}"; then ok; else bad "ssh: both unique keys present"; fi
 
-# --- 8. Outbound SSH push key (Feature 003 US1) ------------------------------
-# The push key is injected via INJECT_DIR, delivered EPHEMERALLY: copied 0600 to
-# an ephemeral runtime dir (never the ~/.ssh volume, FR-012), git's core.sshCommand
-# points at it with IdentitiesOnly, and the inbound host-key path is untouched
-# (SC-008).
+# --- 8. The agent's own SSH key pair (Feature 019) ---------------------------
+# GENERATED HERE and never supplied. The assertions INVERT rather than disappear:
+# offering a key through either removed channel must now change NOTHING, and a
+# removal with no test behind it is a removal nobody notices being undone.
 reset_session; reset_ssh
-PUSHRT="${SB}/pushrt"; rm -rf "${PUSHRT}"; TEST_PUSH_RUNTIME="${PUSHRT}"
-PKSRC="${SB}/agent_push_key"; ssh-keygen -q -t ed25519 -f "${PKSRC}" -N '' <<<y >/dev/null 2>&1
+PKSRC="${SB}/offered_key"; ssh-keygen -q -t ed25519 -f "${PKSRC}" -N '' <<<y >/dev/null 2>&1
 cp "${PKSRC}" "${INJECTDIR}/push_ed25519_key"
+TEST_ENV_PUSHB64="$(base64 < "${PKSRC}" | tr -d '\n')"
 printf 'github.com ssh-ed25519 AAAAKH\n' > "${INJECTDIR}/known_hosts"
 run_entrypoint __unset__
-# core.sshCommand configured with the ephemeral key + IdentitiesOnly (no prompt)
-if git_has 'core.sshCommand'; then ok; else bad "push: core.sshCommand configured"; fi
-if git_has "IdentitiesOnly=yes"; then ok; else bad "push: IdentitiesOnly set"; fi
-if git_has "${PUSHRT}/push_key"; then ok; else bad "push: sshCommand points at the ephemeral key"; fi
-# the ephemeral key exists 0600 in the runtime dir, byte-identical to the source
-check_eq "push: ephemeral key mode 0600" "600" "$(stat -c '%a' "${PUSHRT}/push_key" 2>/dev/null || stat -f '%Lp' "${PUSHRT}/push_key")"
-if cmp -s "${PKSRC}" "${PUSHRT}/push_key"; then ok; else bad "push: ephemeral key matches source"; fi
-# FR-012: the push key is NOT written onto the persisted ~/.ssh volume
-if [[ ! -e "${HOMEDIR}/.ssh/push_ed25519_key" && ! -e "${HOMEDIR}/.ssh/push_key" ]]; then ok; else bad "push: key must NOT land on the ~/.ssh volume"; fi
-# SC-008: the inbound host key still lives on its own path, untouched/unconflated
-if [[ -f "${HK}" ]]; then ok; else bad "push: inbound host key path untouched"; fi
-if ! cmp -s "${PUSHRT}/push_key" "${HK}"; then ok; else bad "push: push key and host key are distinct"; fi
+
+AGENTKEY="${HOMEDIR}/.ssh/id_ed25519"
+# The key exists at the CONVENTIONAL path — which is what makes git, ssh, scp and
+# rsync all use it with no wiring at all.
+if [[ -f "${AGENTKEY}" ]]; then ok; else bad "agent key: generated at ~/.ssh/id_ed25519"; fi
+check_eq "agent key: private is 0600" "600" "$(perm "${AGENTKEY}")"
+check_eq "agent key: public is 0644" "644" "$(perm "${AGENTKEY}.pub")"
+# NEITHER offered key became the identity.
+if ! cmp -s "${PKSRC}" "${AGENTKEY}"; then ok; else bad "agent key: an OFFERED key became the identity"; fi
+# core.sshCommand and the /tmp scaffolding are GONE, not rewired.
+if git_has 'core.sshCommand'; then bad "agent key: core.sshCommand still configured"; else ok; fi
+if [[ ! -e "${SB}/pushrt" ]]; then ok; else bad "agent key: PUSH_RUNTIME scaffolding survives"; fi
+# Idempotent: a second boot KEEPS the key. Regenerating would silently invalidate
+# the operator's registration while every other symptom looked healthy.
+FP1="$(fp "${AGENTKEY}.pub")"
+reset_session
+run_entrypoint __unset__
+check_eq "agent key: a second boot keeps it" "${FP1}" "$(fp "${AGENTKEY}.pub")"
+# The ssh_config block is explicit, and appended ONCE.
+CFG="${HOMEDIR}/.ssh/config"
+if grep -q 'IdentitiesOnly yes' "${CFG}"; then ok; else bad "agent config: IdentitiesOnly"; fi
+if grep -q 'StrictHostKeyChecking accept-new' "${CFG}"; then ok; else bad "agent config: StrictHostKeyChecking"; fi
+check_eq "agent config: block appended once, not repeatedly" "1" "$(grep -c '^# BEGIN agent-container' "${CFG}")"
+# THE CASE THAT MATTERS: a config the agent wrote FIRST must still gain the block,
+# or StrictHostKeyChecking is never set and every ssh hangs on a prompt it cannot answer.
+reset_session; reset_ssh
+mkdir -p "${HOMEDIR}/.ssh"; printf 'Host early\n    User someone\n' > "${CFG}"
+run_entrypoint __unset__
+if grep -q 'Host early' "${CFG}"; then ok; else bad "agent config: the agent's own entry was clobbered"; fi
+if grep -q 'IdentitiesOnly yes' "${CFG}"; then ok; else bad "agent config: pre-existing file never gained the block"; fi
+TEST_ENV_PUSHB64=""
+rm -f "${INJECTDIR}/push_ed25519_key"
 
 # 8b. no push key injected -> no core.sshCommand (HTTPS path is unaffected)
 reset_session; reset_ssh; PUSHRT2="${SB}/pushrt2"; rm -rf "${PUSHRT2}"; TEST_PUSH_RUNTIME="${PUSHRT2}"

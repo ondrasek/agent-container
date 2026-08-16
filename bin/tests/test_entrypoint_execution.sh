@@ -131,6 +131,10 @@ if [[ "$1" == "config" ]]; then
     exit 0
 fi
 if [[ "$1" == "clone" ]]; then
+    # AGENT_CONTAINER_STUB_CLONE_FAILS models an unregistered key: the clone is
+    # attempted and REJECTED by the remote, which is the whole first-boot case
+    # Feature 019's two-phase flow exists for.
+    [[ -n "${AGENT_CONTAINER_STUB_CLONE_FAILS:-}" ]] && exit 128
     dest="${@: -1}"; mkdir -p "${dest}/.git"; exit 0
 fi
 exit 0
@@ -355,20 +359,37 @@ run_entry AGENT_CONTAINER_MODE=interactive AGENT_CONTAINER_AGENT=claude \
           AGENT_CONTAINER_CLONE_URL=https://github.com/you/repo.git
 if git_has 'clone https://github.com/you/repo.git'; then ok; else bad "US4: HTTPS clone-on-start invoked"; fi
 
-# --- US4: SSH URL without a push key dies fast (FR-014) ----------------------
+# --- US4: an SSH clone is TWO-PHASE, not fatal (Feature 019, FR-013) ---------
+# This used to assert that an SSH URL with no push key DIED. Feature 019 inverted
+# the premise: the key is generated in this container, so on a first boot it cannot
+# be registered yet and no precheck could ever pass. Dying would leave the operator
+# with no container to read the public key from — so the boot COMPLETES and records
+# the clone as pending.
 reset
 run_entry AGENT_CONTAINER_MODE=interactive AGENT_CONTAINER_AGENT=claude \
           AGENT_CONTAINER_CLONE_URL=git@github.com:you/repo.git
 rc=$?
-if [[ "${rc}" -ne 0 ]]; then ok; else bad "US4: SSH clone with no push key must die (got exit 0)"; fi
-if git_has 'clone git@'; then bad "US4: must NOT clone an SSH URL without a key"; else ok; fi
+if [[ "${rc}" -eq 0 ]]; then ok; else bad "US4: an SSH clone must not kill the boot (got exit ${rc})"; fi
+# It DID attempt the clone (the key exists; only registration is missing)...
+if git_has 'clone git@github.com:you/repo.git'; then ok; else bad "US4: SSH clone attempted"; fi
 
-# --- US4: SSH URL WITH an injected push key clones ---------------------------
+# --- US4: when the remote REJECTS it, the boot still completes and says why ---
+# The case the two-phase flow exists for: the key is generated here, so on a first
+# boot it is not registered and the clone cannot succeed.
 reset
-printf 'PRIVATE-KEY\n' > "${INJECTDIR}/push_ed25519_key"
-run_entry AGENT_CONTAINER_MODE=interactive AGENT_CONTAINER_AGENT=claude \
-          AGENT_CONTAINER_CLONE_URL=git@github.com:you/repo.git
-if git_has 'clone git@github.com:you/repo.git'; then ok; else bad "US4: SSH clone with push key invoked"; fi
+AGENT_CONTAINER_STUB_CLONE_FAILS=1 run_entry AGENT_CONTAINER_MODE=interactive \
+          AGENT_CONTAINER_AGENT=claude AGENT_CONTAINER_CLONE_URL=git@github.com:you/repo.git
+rc=$?
+if [[ "${rc}" -eq 0 ]]; then ok; else bad "US4: a rejected clone must not kill the boot (got ${rc})"; fi
+# The MARKER is what the CLI reads to decide the pending exit code, so it is the
+# assertion that matters here; the guidance wording is checked where it lives
+# (test_execution.py reads the entrypoint source) rather than through log plumbing
+# this harness does not capture.
+if [[ -f "${HOMEDIR}/.ssh/.clone_pending" ]]; then ok; else bad "US4: pending marker recorded for the CLI"; fi
+if grep -q 'github.com:you/repo.git' "${HOMEDIR}/.ssh/.clone_pending"; then ok; else bad "US4: pending marker names the repo"; fi
+# And the workspace was NOT left with a half-made .git that would make the retry
+# look like an already-cloned workspace and skip forever.
+if [[ ! -d "${WORKSPACE}/.git" ]]; then ok; else bad "US4: a failed clone left a .git behind"; fi
 
 # --- US4: idempotent — a populated /workspace is not re-cloned ---------------
 reset

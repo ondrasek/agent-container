@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress inventory panic plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress inventory panic ssh-key plan apply status destroy menu context skill commands completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -246,6 +246,25 @@ _agent_container() {
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
+            ;;
+        ssh-key)
+            local ksub="" k
+            for (( k = i + 1; k < cword; k++ )); do
+                case "${words[k]}" in
+                    -*) ;;
+                    *) ksub="${words[k]}"; break ;;
+                esac
+            done
+            if [[ -z "${ksub}" ]]; then
+                COMPREPLY=( $(compgen -W "show rotate" -- "${cur}") )
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--json -y --yes" -- "${cur}") )
+                return 0
+            fi
+            __agent_container_add_names __agent_container_names_local
+            return 0
             ;;
         panic)
             if [[ "${cur}" == -* ]]; then

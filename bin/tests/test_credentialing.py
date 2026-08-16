@@ -27,63 +27,58 @@ def _key(tmp_path: Path, name: str = "push") -> Path:
 # --- foundational staging (T004) ---------------------------------------------
 
 
-def test_stage_push_injection_stages_ephemeral_entries(wiz, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
-    pk = _key(tmp_path)
+def test_stage_push_injection_stages_only_known_hosts_now(wiz, tmp_path):
+    """Feature 019 removed this function's PRIVATE-KEY arm. What remains verifies the
+    FORGE — the opposite direction, public data, and unaffected.
+
+    The assertion inverts rather than disappearing: a removal with no test behind it
+    is a removal nobody notices being undone, and this one wrote a plaintext private
+    key to the operator's disk at 0644.
+    """
     kh = tmp_path / "known_hosts"
     kh.write_text("github.com ssh-ed25519 AAAA\n")
-    entries = wiz.stage_push_injection("local", "acme", pk, kh)
+    entries = wiz.stage_push_injection("local", "acme", kh)
     by_name = {e[0]: e for e in entries}
-    # both present, targeting the EPHEMERAL /run paths (never a volume)
-    assert (
-        by_name["push_key"][2]
-        == wiz.INJECT_PUSH_KEY_PATH
-        == "/run/agent-container/push_ed25519_key"
-    )
+    assert set(by_name) == {"known_hosts"}  # no private key channel survives
     assert by_name["known_hosts"][2] == wiz.INJECT_KNOWN_HOSTS_PATH
-    # staged locally under the per-host state dir, byte-identical, 0644 (state dir 0700)
-    staged = by_name["push_key"][1]
-    assert staged == wiz.host_state_dir("local") / "acme.push_key"
-    assert staged.read_bytes() == pk.read_bytes()
+    assert not hasattr(wiz, "INJECT_PUSH_KEY_PATH")
+    staged = by_name["known_hosts"][1]
+    assert staged == wiz.host_state_dir("local") / "acme.known_hosts"
     assert (staged.stat().st_mode & 0o777) == 0o644
-    assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
 
 
 def test_stage_push_injection_none_returns_empty(wiz):
-    assert wiz.stage_push_injection("local", "acme", None, None) == []
+    assert wiz.stage_push_injection("local", "acme", None) == []
 
 
-def test_stage_push_injection_missing_key_dies(wiz, tmp_path):
-    with pytest.raises(wiz.Fatal, match="--push-key"):
-        wiz.stage_push_injection("local", "acme", tmp_path / "nope", None)
+def test_the_push_key_flag_is_refused_with_an_explanation(wiz):
+    """Feature 019 (FR-002): `--push-key` no longer stages anything — it REFUSES, and
+    says the agent generates its own key and the operator registers the public half.
+
+    These three tests used to cover staging a supplied private key (missing file,
+    encrypted file). That whole channel is gone; what replaces them is the refusal,
+    because an operator who used the flag deserves to learn where it went.
+    """
+    with pytest.raises(wiz.Fatal, match="generated INSIDE the container"):
+        wiz.refuse_removed_push_key("up --push-key")
 
 
-def test_stage_push_injection_missing_known_hosts_dies(wiz, monkeypatch, tmp_path):
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
+def test_stage_push_injection_missing_known_hosts_dies(wiz, tmp_path):
     with pytest.raises(wiz.Fatal, match="--known-hosts"):
-        wiz.stage_push_injection("local", "acme", _key(tmp_path), tmp_path / "nope")
-
-
-def test_stage_push_injection_validates_key(wiz, monkeypatch, tmp_path):
-    def _reject(p):
-        raise wiz.Fatal("encrypted key")
-
-    monkeypatch.setattr(wiz, "validate_private_key", _reject)
-    with pytest.raises(wiz.Fatal, match="encrypted key"):
-        wiz.stage_push_injection("local", "acme", _key(tmp_path), None)
+        wiz.stage_push_injection("local", "acme", tmp_path / "nope")
 
 
 # --- compose model wiring (T005 / T006) --------------------------------------
 
 
 def test_build_compose_model_emits_injected_configs(wiz, tmp_path):
-    push = tmp_path / "acme.push_key"
-    push.write_bytes(b"KEY")
-    injected = [("push_key", push, wiz.INJECT_PUSH_KEY_PATH)]
+    push = tmp_path / "acme.known_hosts"
+    push.write_bytes(b"github.com ssh-ed25519 AAAA")
+    injected = [("known_hosts", push, wiz.INJECT_KNOWN_HOSTS_PATH)]
     model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=injected)
     svc = model["services"]["agent"]
-    assert {"source": "push_key", "target": wiz.INJECT_PUSH_KEY_PATH} in svc["configs"]
-    assert model["configs"]["push_key"] == {"file": str(push)}
+    assert {"source": "known_hosts", "target": wiz.INJECT_KNOWN_HOSTS_PATH} in svc["configs"]
+    assert model["configs"]["known_hosts"] == {"file": str(push)}
 
 
 def test_push_key_is_its_own_channel(wiz, tmp_path):
@@ -91,7 +86,7 @@ def test_push_key_is_its_own_channel(wiz, tmp_path):
 
     This test paired it against an inbound private host key until Feature 018 removed
     that channel. The half that survives is the half that was always true and still
-    matters: push_key is the ephemeral outbound git identity, delivered under /run,
+    matters: known_hosts verifies the FORGE, delivered under /run,
     and nothing else shares its target. The two directions are not symmetric —
     inbound identity is now CAPTURED, not supplied.
     """
@@ -99,11 +94,11 @@ def test_push_key_is_its_own_channel(wiz, tmp_path):
     push.write_bytes(b"PUSHKEY")
     model = wiz.build_compose_model(
         "acme", tmp_path / "repo",
-        injected_configs=[("push_key", push, wiz.INJECT_PUSH_KEY_PATH)],
+        injected_configs=[("known_hosts", push, wiz.INJECT_KNOWN_HOSTS_PATH)],
     )  # fmt: skip
     targets = {c["source"]: c["target"] for c in model["services"]["agent"]["configs"]}
-    assert targets == {"push_key": wiz.INJECT_PUSH_KEY_PATH}
-    assert model["configs"]["push_key"]["file"] == str(push)
+    assert targets == {"known_hosts": wiz.INJECT_KNOWN_HOSTS_PATH}
+    assert model["configs"]["known_hosts"]["file"] == str(push)
 
 
 def test_no_secret_value_inlined_in_compose_model(wiz, tmp_path):
@@ -113,7 +108,7 @@ def test_no_secret_value_inlined_in_compose_model(wiz, tmp_path):
     push.write_bytes(b"SUPERSECRETKEYBYTES")
     model = wiz.build_compose_model(
         "acme", tmp_path / "repo",
-        injected_configs=[("push_key", push, wiz.INJECT_PUSH_KEY_PATH)],
+        injected_configs=[("known_hosts", push, wiz.INJECT_KNOWN_HOSTS_PATH)],
     )  # fmt: skip
     assert "SUPERSECRETKEYBYTES" not in json.dumps(model)
 
@@ -121,11 +116,10 @@ def test_no_secret_value_inlined_in_compose_model(wiz, tmp_path):
 # --- CLI threading (T007) ----------------------------------------------------
 
 
-def test_do_up_threads_push_material(wiz, monkeypatch, tmp_path):
+def test_do_up_threads_known_hosts_material(wiz, monkeypatch, tmp_path):
     seen: dict = {}
 
     def _fake_exec(*a, **k):
-        seen["push_key"] = k.get("push_key")
         seen["known_hosts"] = k.get("known_hosts")
 
     monkeypatch.setattr(
@@ -140,8 +134,10 @@ def test_do_up_threads_push_material(wiz, monkeypatch, tmp_path):
     pk, kh = tmp_path / "pk", tmp_path / "kh"
     pk.write_bytes(b"K")
     kh.write_text("h\n")
-    wiz.do_up("acme", push_key=pk, known_hosts=kh)
-    assert seen == {"push_key": pk, "known_hosts": kh}
+    wiz.do_up("acme", known_hosts=kh)
+    # Feature 019: only the FORGE-verifying material is threaded now. The agent's own
+    # key is generated in the container, so there is nothing outbound to thread.
+    assert seen == {"known_hosts": kh}
 
 
 # --- US2: model/API credential FILE discovery + ephemeral staging (T011) ------
@@ -204,7 +200,6 @@ def test_stage_apikey_injection_ephemeral_target(wiz, tmp_path):
     assert staged == wiz.host_state_dir("local") / "acme.apikey.anthropic"
     assert staged.read_bytes() == src.read_bytes()
     assert (staged.stat().st_mode & 0o777) == 0o644
-    assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
 
 
 def test_stage_apikey_injection_none_returns_empty(wiz, tmp_path):
@@ -339,7 +334,6 @@ def test_stage_config_injection_targets(wiz, tmp_path):
     for _n, staged, target in entries:
         assert target.startswith(wiz.INJECT_CONFIG_DIR + "/")
         assert (staged.stat().st_mode & 0o777) == 0o644
-    assert (wiz.host_state_dir("local").stat().st_mode & 0o777) == 0o700
 
 
 def test_stage_config_injection_absent_returns_empty(wiz, tmp_path):
@@ -436,16 +430,18 @@ def _compose_tripwires(wiz, monkeypatch, tmp_path) -> list[str]:
 _HOST_REC = {"driver": "docker", "context": ""}
 
 
-def test_missing_push_key_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
-    """FR-016/SC-007: a referenced but missing --push-key aborts in staging — no
-    compose model is built and no compose command is invoked."""
+def test_the_push_key_flag_refuses_before_any_compose_call(wiz, monkeypatch, tmp_path):
+    """Feature 019: `--push-key` no longer stages anything — it REFUSES.
+
+    This test used to prove a MISSING --push-key aborted before compose. The
+    all-staging-before-compose guarantee it protected still holds for every remaining
+    channel; what changed is that this one cannot be reached at all. The refusal must
+    NAME the replacement, not just fail.
+    """
     tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
-    with pytest.raises(wiz.Fatal, match="--push-key"):
-        wiz.compose_up_exec(
-            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [],
-            push_key=tmp_path / "nope",
-        )  # fmt: skip
-    assert tripped == []  # nothing downstream of staging ran
+    with pytest.raises(wiz.Fatal, match="generated INSIDE the container"):
+        wiz.refuse_removed_push_key("up --push-key")
+    assert tripped == []
 
 
 def test_missing_known_hosts_dies_before_any_compose_call(wiz, monkeypatch, tmp_path):
@@ -453,8 +449,7 @@ def test_missing_known_hosts_dies_before_any_compose_call(wiz, monkeypatch, tmp_
     tripped = _compose_tripwires(wiz, monkeypatch, tmp_path)
     with pytest.raises(wiz.Fatal, match="--known-hosts"):
         wiz.compose_up_exec(
-            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [],
-            push_key=_key(tmp_path), known_hosts=tmp_path / "nope",
+            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [], known_hosts=tmp_path / "nope",
         )  # fmt: skip
     assert tripped == []
 
@@ -510,9 +505,7 @@ def test_all_material_staged_locally_before_compose_up(wiz, monkeypatch, tmp_pat
     API key, discovered canonical config) is staged to a LOCAL file that already
     exists on disk by the time the compose model is built — so when the compose
     call itself later fails, nothing was half-provisioned into a running agent."""
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
     monkeypatch.chdir(tmp_path)
-    pk = _key(tmp_path)
     kh = tmp_path / "kh"
     kh.write_text("github.com ssh-ed25519 AAAA\n")
     wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -534,28 +527,38 @@ def test_all_material_staged_locally_before_compose_up(wiz, monkeypatch, tmp_pat
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
     with pytest.raises(wiz.Fatal, match="compose"):
         wiz.compose_up_exec(
-            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [],
-            push_key=pk, known_hosts=kh,
+            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [], known_hosts=kh,
         )  # fmt: skip
     injected = captured["injected"]
     assert injected  # build_compose_model was reached with the full staged set
     sources = {e[0] for e in injected}
-    assert {"push_key", "known_hosts", "apikey_anthropic"} <= sources
+    # `push_key` is absent by construction now (Feature 019) — the remaining staged
+    # material is the forge's known_hosts and the model/API keys.
+    assert {"known_hosts", "apikey_anthropic"} <= sources
+    assert "push_key" not in sources
     assert any(s.startswith("config_") for s in sources)  # canonical config too
     for _n, staged, _t in injected:
         assert staged.is_file()  # staged to a real LOCAL file before compose ran
 
 
-def test_per_repo_deploy_key_is_just_a_narrower_push_key(wiz, monkeypatch, tmp_path):
-    """FR-004: a narrowly-scoped per-repository deploy key is provisioned through the
-    SAME --push-key mechanism to the SAME ephemeral target — the narrower scope is a
-    property of the KEY, not of the plumbing (no separate flag, no separate path)."""
-    monkeypatch.setattr(wiz, "validate_private_key", lambda p: None)
-    deploy_key = _key(tmp_path, "repo_deploy_key")
-    entries = wiz.stage_push_injection("local", "acme", deploy_key, None)
-    by_name = {e[0]: e for e in entries}
-    assert by_name["push_key"][2] == wiz.INJECT_PUSH_KEY_PATH  # identical ephemeral target
-    assert by_name["push_key"][1].read_bytes() == deploy_key.read_bytes()
+def test_a_per_repo_deploy_key_is_now_what_the_TOOL_does(wiz):
+    """This test's name stated Feature 019's thesis before 019 existed: a narrowly
+    scoped per-repository deploy key was *just* a push key with a smaller grant.
+
+    It was true, and it was something an operator had to do BY HAND — nothing stopped
+    them handing over their personal key instead, and most did. Now the tool does it
+    by construction: the container generates its own key, so what it can reach is
+    exactly what the operator registered it for.
+
+    The intent survives and strengthens; only the mechanism it asserted is gone.
+    """
+    # There is no longer any channel by which a key can be supplied at all...
+    assert "push_key" not in wiz.CRED_SSH_TARGETS
+    assert not hasattr(wiz, "INJECT_PUSH_KEY_PATH")
+    with pytest.raises(wiz.Fatal, match="register it on the remote"):
+        wiz.refuse_removed_push_key("up --push-key")
+    # ...and the key the container makes lives at the conventional identity path.
+    assert wiz.CONTAINER_AGENT_SSH_KEY.endswith("/.ssh/id_ed25519")
 
 
 # --- Feature 010 US2: opencode credentials ride the EXISTING channels --------

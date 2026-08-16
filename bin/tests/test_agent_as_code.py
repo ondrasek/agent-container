@@ -859,20 +859,23 @@ def test_destroy_deprovision_without_token_fails_upfront(wiz, aac_env, tmp_path,
 
 
 def test_ssh_target_credential_routes_to_ssh_channel(wiz, tmp_path, monkeypatch):
-    key = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
-    monkeypatch.setenv("PUSHKEY", key)  # multi-line — the env-file channel rejects this
-    creds = [{"name": "git-push", "source": "env", "var": "PUSHKEY", "target": "push_key"}]
+    """`authorized_key` is the only SSH target left.
+
+    `host_key` went with Feature 018 and `push_key` with 019 — both were channels for
+    supplying a PRIVATE key, and both are now refused outright rather than silently
+    dropped, because ignoring a declared credential leaves an operator believing their
+    key is in use.
+    """
+    pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample000000000000000000000000000000="
+    monkeypatch.setenv("AUTHKEY", pub)
+    creds = [{"name": "laptop", "source": "env", "var": "AUTHKEY", "target": "authorized_key"}]
     configs, env_file, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert configs == [] and env_file is None  # NOT the apikey/env channels
-    # `host_key` was a third SSH target until Feature 018 removed it; a spec that
-    # declares one is now refused outright rather than silently dropped.
-    assert ssh.push_key is not None and ssh.authorized_keys == []
-    assert not hasattr(ssh, "host_key")
-    body = ssh.push_key.read_text()
-    assert "BEGIN OPENSSH" in body and body.endswith("\n")  # multi-line kept, newline ensured
+    assert ssh.authorized_keys and not hasattr(ssh, "host_key")
+    assert not hasattr(ssh, "push_key")
     import stat
 
-    assert stat.S_IMODE(ssh.push_key.stat().st_mode) == 0o600  # 0600 staged file
+    assert stat.S_IMODE(ssh.authorized_keys[0].stat().st_mode) == 0o600
 
 
 def test_ssh_target_credential_invalid_target_rejected(wiz):
@@ -880,7 +883,12 @@ def test_ssh_target_credential_invalid_target_rejected(wiz):
         wiz.validate_credential({"name": "K", "source": "env", "var": "V", "target": "bogus"}, "w")
 
 
-def test_apply_threads_ssh_push_key_to_do_up(wiz, aac_env, tmp_path, monkeypatch):
+def test_a_declared_push_key_is_REFUSED_not_ignored(wiz, tmp_path, monkeypatch):
+    """Feature 019 (FR-002). This test used to prove a declared `push_key` was threaded
+    through to `do_up`. That channel is gone, and the assertion inverts to the thing
+    that matters: silently dropping it would leave an operator believing their key is
+    in use — the worst of the three possible outcomes.
+    """
     spec_yaml = (
         "environments:\n  - name: acme\n    host: local\n"
         "    credentials:\n      - { name: gitpush, source: env, var: PUSHKEY, target: push_key }\n"
@@ -888,11 +896,10 @@ def test_apply_threads_ssh_push_key_to_do_up(wiz, aac_env, tmp_path, monkeypatch
     root = _project(tmp_path, spec_yaml)
     monkeypatch.chdir(root)
     monkeypatch.setenv("PUSHKEY", "-----BEGIN KEY-----\nx\n-----END KEY-----")
-    (root / ".env").write_text("GH_TOKEN=x\n")  # base env so do_up has one
+    (root / ".env").write_text("GH_TOKEN=x\n")
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
-    wiz.do_aac_apply(yes=True)
-    _name, kw = aac_env["up"][0]
-    assert kw["push_key"] is not None and kw["push_key"].read_text().startswith("-----BEGIN KEY")
+    with pytest.raises(wiz.Fatal, match="generated INSIDE the container"):
+        wiz.do_aac_apply(yes=True)
 
 
 # --- Feature 008: credential managers ----------------------------------------
@@ -1125,7 +1132,7 @@ def test_delivery_routing_unchanged_for_new_sources(wiz, tmp_path, monkeypatch):
     creds = [{"name": "anthropic", "source": "command", "argv": ["op", "read", "x"]}]
     configs, env_file, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert configs and configs[0][2] == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
-    assert env_file is None and ssh.push_key is None  # not the env/ssh channels
+    assert env_file is None and ssh.authorized_keys == []  # not the env/ssh channels
 
 
 def test_delivery_strips_trailing_newline_for_apikey_and_env(wiz, tmp_path, monkeypatch):
@@ -1141,15 +1148,20 @@ def test_delivery_strips_trailing_newline_for_apikey_and_env(wiz, tmp_path, monk
 
 def test_delivery_ensures_trailing_newline_for_ssh_target(wiz, tmp_path, monkeypatch):
     # FR-012: SSH-key delivery needs the terminating newline ensured, not stripped.
-    monkeypatch.setattr(
-        wiz, "_run_resolver", lambda argv, name, **k: "-----BEGIN KEY-----\nabc\n-----END KEY-----"
-    )
+    # Asserted on the one SSH target that survives — authorized_key.
+    pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample000000000000000000000000000000="
+    monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: pub)
     creds = [
-        {"name": "gitpush", "source": "command", "argv": ["op", "read", "x"], "target": "push_key"}
+        {
+            "name": "laptop",
+            "source": "command",
+            "argv": ["op", "read", "x"],
+            "target": "authorized_key",
+        }
     ]
     _c, _e, ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
-    assert ssh.push_key is not None
-    assert ssh.push_key.read_text().endswith("-----END KEY-----\n")
+    assert ssh.authorized_keys
+    assert ssh.authorized_keys[0].read_text().endswith(pub + "\n")
 
 
 def test_delivered_spec_path_and_read_only_survive_feature_011(wiz):

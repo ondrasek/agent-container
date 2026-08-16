@@ -38,7 +38,7 @@ completed).
 
 ## Phase 1: Setup
 
-- [ ] T001 `CONTAINER_AGENT_SSH_KEY = "/home/dev/.ssh/id_ed25519"` in `bin/agent-container` — the
+- [X] T001 `CONTAINER_AGENT_SSH_KEY = "/home/dev/.ssh/id_ed25519"` in `bin/agent-container` — the
       **conventional** identity path, which is already the persisted `ssh` volume (research R4). Not a
       tool-specific filename: being conventional is what makes git, `ssh`, `scp` and `rsync` all use it
       with no wiring
@@ -50,43 +50,43 @@ completed).
 
 ## Phase 2: Foundational — blocking prerequisites for every story
 
-- [ ] T003 Generate the key at `~/.ssh/id_ed25519` (FR-001, FR-003) in `image/entrypoint.sh`, **only when absent**,
+- [X] T003 Generate the key at `~/.ssh/id_ed25519` (FR-001, FR-003) in `image/entrypoint.sh`, **only when absent**,
       deriving the `.pub` at 0644 and keeping the private half 0600 (C1, C2)
-- [ ] T004 **Idempotence is load-bearing** (C2): regenerating each boot would silently invalidate the
+- [X] T004 **Idempotence is load-bearing** (C2): regenerating each boot would silently invalidate the
       operator's registration while every other symptom looked healthy, surfacing days later as a push
       that stopped working
-- [ ] T005 [P] `bin/tests/test_entrypoint.sh`: a second boot keeps the first boot's key; modes are
+- [X] T005 [P] `bin/tests/test_entrypoint.sh`: a second boot keeps the first boot's key; modes are
       0600/0644
-- [ ] T006 **DELETE `core.sshCommand`** from `image/entrypoint.sh` — do not rewire it. Git reads the
+- [X] T006 **DELETE `core.sshCommand`** from `image/entrypoint.sh` — do not rewire it. Git reads the
       conventional identity by itself, and that line existed only to point at an injected `/run` path
-- [ ] T007 **DELETE all 11 `PUSH_RUNTIME` references** (`image/entrypoint.sh`), including the copy-to-
+- [X] T007 **DELETE all 11 `PUSH_RUNTIME` references** (`image/entrypoint.sh`), including the copy-to-
       0600 dance a self-generated key makes unnecessary
-- [ ] T008 [P] Test that neither `core.sshCommand` nor `PUSH_RUNTIME` survives — asserted over the
+- [X] T008 [P] Test that neither `core.sshCommand` nor `PUSH_RUNTIME` survives — asserted over the
       **executable lines** of the entrypoint, not the whole file, so the comment explaining the removal
       does not fail its own check (the 018 lesson)
-- [ ] T009 Append the tool's block to `~/.ssh/config` **if the BLOCK is absent** — not merely if the
+- [X] T009 Append the tool's block to `~/.ssh/config` **if the BLOCK is absent** — not merely if the
       file is (FR-014, C13). Content is **explicit**, not default-reliant: `IdentityFile`,
       `IdentitiesOnly yes`, `UserKnownHostsFile ~/.ssh/known_hosts`, `StrictHostKeyChecking accept-new`.
       Only the last is strictly load-bearing (ssh defaults to `ask`, which for a non-interactive agent
       means *fail*); the rest documents the identity, survives a change in ssh's search order, and
       stops ssh offering every key it finds once a second one exists
-- [ ] T009a Point `--known-hosts` injection at **`~/.ssh/known_hosts`** — the conventional path, already
+- [X] T009a Point `--known-hosts` injection at **`~/.ssh/known_hosts`** — the conventional path, already
       on this volume — instead of a private location. That is what lets the config name a default rather
       than a tool-specific path
-- [ ] T010 [P] Test T009 three ways: no file → block written; file with an agent's own `Host` block →
+- [X] T010 [P] Test T009 three ways: no file → block written; file with an agent's own `Host` block →
       block **appended, the agent's entry untouched**; block already present → **nothing changes**
       (idempotent). **The middle case is the one that matters**: "write the file only if absent" would
       leave a config the agent created first without `StrictHostKeyChecking`, so every SSH it attempts
       hangs on a prompt it cannot answer
-- [ ] T010a **Key generation failure is LOUD** (FR-008, C15, SC-010) — surfaced, and never yielding a
+- [X] T010a **Key generation failure is LOUD** (FR-008, C15, SC-010) — surfaced, and never yielding a
       container that starts, cannot authenticate anywhere, and says nothing. `ssh-keygen` can fail on a
       full or read-only volume, and the agent would otherwise meet it hours later as an inexplicable
       permission denied
 - [ ] T010b [P] Test T010a: with generation forced to fail, the failure is stated — asserted on the
       message, because a container that started is not by itself evidence of anything
-- [ ] T011 Capture the public key by **reusing 018's primitive** (research R6) — it already polls,
+- [X] T011 Capture the public key by **reusing 018's primitive** (research R6) — it already polls,
       validates and refuses an empty read, and a fresh copy would omit exactly those subtleties
-- [ ] T012 **THE REMOVAL CENSUS**, as a test over the source. Known today: `up --push-key`,
+- [X] T012 **THE REMOVAL CENSUS**, as a test over the source. Known today: `up --push-key`,
       `redeploy --push-key`, `SSH_PUSH_KEY_B64`, `target: push_key`, `stage_push_injection`'s push arm,
       `INJECT_PUSH_KEY_PATH`, `clone_credential_precheck`. The failure mode is **one channel
       surviving**, indistinguishable from a complete removal by every other test here
@@ -99,16 +99,16 @@ completed).
 **Goal**: a key pair the container generated, whose public half the operator can register.
 **Independent test**: S3 — register the emitted line on a real repository and push.
 
-- [ ] T014 [US1] Capture at deploy, reusing 018's hook site in `compose_up_exec` (C1)
-- [ ] T015 [US1] Expose it on `list --json` as `agent_ssh_public_key`, following 018's
+- [X] T014 [US1] Capture at deploy, reusing 018's hook site in `compose_up_exec` (C1)
+- [X] T015 [US1] Expose it on `list --json` as `agent_ssh_public_key`, following 018's
       `row_known_hosts_entry` (C3, FR-004)
-- [ ] T015a [US1] `agent-container ssh-key show <name>` — a noun sub-command matching `runs` /
+- [X] T015a [US1] `agent-container ssh-key show <name>` — a noun sub-command matching `runs` /
       `egress` / `inventory` (FR-004a). Deliberately **not** part of `keys`, which injects *authorized*
       keys: the agent's own identity and the principals allowed to reach it are different things, and
       one command doing both invites confusing them under pressure
-- [ ] T016 [US1] The answer must **not depend on the host being reachable** (C3, FR-005, SC-006) — it
+- [X] T016 [US1] The answer must **not depend on the host being reachable** (C3, FR-005, SC-006) — it
       comes from what was captured, and a stopped or unreachable environment is when it is most needed
-- [ ] T017 [US1] [P] Unit tests for T015/T016: a captured key yields a pasteable line; an uncaptured
+- [X] T017 [US1] [P] Unit tests for T015/T016: a captured key yields a pasteable line; an uncaptured
       one yields an explicit "not captured", never a silent empty string (SC-004)
 - [ ] T018 [US1] [P] Acceptance S4 — `down` then `up` keeps the key (C4, SC-003). **The test that
       catches a non-idempotent generator**, whose symptom otherwise arrives days later
@@ -126,28 +126,28 @@ completed).
 - [ ] T020 [US2] **THE GATE: acceptance S1** (FR-010) — after every deploy path the CLI still offers, no file
       under state or config contains `PRIVATE KEY` (SC-001 at 100%). **Land this before Phase 5.**
       With 018's equivalent, the tool then writes no private key anywhere at all
-- [ ] T021 [US2] Remove `--push-key` from `up` and `redeploy`; each **fails with an explanation**
+- [X] T021 [US2] Remove `--push-key` from `up` and `redeploy`; each **fails with an explanation**
       (FR-002, C6, SC-007). A bare "unrecognized argument" is a regression, not a removal
-- [ ] T022 [US2] Delete `stage_push_injection`'s push arm and `INJECT_PUSH_KEY_PATH`; **keep** the
+- [X] T022 [US2] Delete `stage_push_injection`'s push arm and `INJECT_PUSH_KEY_PATH`; **keep** the
       `known_hosts` arm — it verifies the *forge*, opposite direction, public data (C11)
-- [ ] T023 [US2] Delete the `SSH_PUSH_KEY_B64` branch from `image/entrypoint.sh`
-- [ ] T024 [US2] Remove `push_key` from `CRED_SSH_TARGETS` and **refuse** a spec declaring it (C6).
+- [X] T023 [US2] Delete the `SSH_PUSH_KEY_B64` branch from `image/entrypoint.sh`
+- [X] T024 [US2] Remove `push_key` from `CRED_SSH_TARGETS` and **refuse** a spec declaring it (C6).
       Silently ignoring it leaves an operator believing their key is in use — the worst outcome
-- [ ] T025 [US2] Delete any stale `<state>/<host>/<name>.push_key` on deploy and **say so** (C7,
+- [X] T025 [US2] Delete any stale `<state>/<host>/<name>.push_key` on deploy and **say so** (C7,
       FR-009), following 018's `remove_stale_staged_host_key`. `--purge` never removed this file, so
       merely ceasing to write it would leave the exposure on every machine that used it
-- [ ] T026 [US2] [P] Unit tests: each removed channel fails with the FR-002 wording; a declared
+- [X] T026 [US2] [P] Unit tests: each removed channel fails with the FR-002 wording; a declared
       `push_key` is refused; a pre-existing `.push_key` is deleted and the deletion reported
-- [ ] T027 [US2] **Re-point `test_credentialing.py` (31 refs)** — the staged-path, compose-config and
+- [X] T027 [US2] **Re-point `test_credentialing.py` (31 refs)** — the staged-path, compose-config and
       `missing_push_key_dies_before_compose` assertions invert; `test_push_key_is_its_own_channel` keeps
       its `known_hosts` half
-- [ ] T028 [US2] [P] **Re-point `test_agent_as_code.py` (11)** — the declared-target routing
-- [ ] T029 [US2] [P] **Re-point `test_acceptance.py` (9)** — harness plumbing and the `up(push_key=…)`
+- [X] T028 [US2] [P] **Re-point `test_agent_as_code.py` (11)** — the declared-target routing
+- [X] T029 [US2] [P] **Re-point `test_acceptance.py` (9)** — harness plumbing and the `up(push_key=…)`
       parameter
-- [ ] T030 [US2] [P] **Re-point `test_entrypoint.sh` (6)** — the injected-key branches become **inert**,
+- [X] T030 [US2] [P] **Re-point `test_entrypoint.sh` (6)** — the injected-key branches become **inert**,
       as 018's did: offer the key, and the container's own identity is unchanged
-- [ ] T031 [US2] [P] **Re-point `test_execution.py` (2)** — `clone_credential_precheck`
-- [ ] T032 [US2] [P] `test_credentialing.py:549` is named
+- [X] T031 [US2] [P] **Re-point `test_execution.py` (2)** — `clone_credential_precheck`
+- [X] T032 [US2] [P] `test_credentialing.py:549` is named
       `test_per_repo_deploy_key_is_just_a_narrower_push_key`. Its **intent survives and strengthens**:
       what an operator *could* do by hand is now what the tool does by construction. Re-point it rather
       than deleting a test whose name states this feature's thesis
@@ -158,28 +158,28 @@ completed).
 
 **Goal**: the operator learns the key and the consequence at deploy time, not from a failed push.
 
-- [ ] T033 [US3] A deploy that will use SSH states the public key and that authentication fails until
+- [X] T033 [US3] A deploy that will use SSH states the public key and that authentication fails until
       it is registered (C8, FR-006, SC-005)
-- [ ] T034 [US3] The probe: `<runtime> exec … ssh -T <host>`, run **inside the container** (C9,
+- [X] T034 [US3] The probe: `<runtime> exec … ssh -T <host>`, run **inside the container** (C9,
       research R3). The operator's machine holds no private key — this placement is forced, not chosen
-- [ ] T035 [US3] The probe targets **only `--repo`'s host**; with no `--repo` there is **no probe** and
+- [X] T035 [US3] The probe targets **only `--repo`'s host**; with no `--repo` there is **no probe** and
       the key is reported *unverified* (research R8). Defaulting to `github.com` would invent a fact and
       send traffic to a host the agent never contacts
-- [ ] T035a [US3] The probe is **bounded at 10 seconds** (FR-011). A healthy forge answers `ssh -T` in
+- [X] T035a [US3] The probe is **bounded at 10 seconds** (FR-011). A healthy forge answers `ssh -T` in
       under two, and unbounded, "fails soft" would be meaningless because it would never return
-- [ ] T036 [US3] **The probe FAILS SOFT** (C9, FR-011): denied egress (Feature 012), offline, or a
+- [X] T036 [US3] **The probe FAILS SOFT** (C9, FR-011): denied egress (Feature 012), offline, or a
       forge outage yields `unknown` — never `not-registered` — and **never blocks the deploy**
 - [ ] T037 [US3] [P] Unit test T036: the deploy's exit status is untouched **and** the report says
       `unknown`. Asserting only the exit status would pass for a build that says nothing at all
-- [ ] T038 [US3] Registration is **never cached** (data-model §3) — it lives on the forge, and a stored
+- [X] T038 [US3] Registration is **never cached** (data-model §3) — it lives on the forge, and a stored
       "registered" goes stale the moment the operator revokes the key
-- [ ] T039 [US3] **`agent-container ssh-key rotate <name>`** (FR-015, FR-004a, C13): a new key **without destroying the workspace**,
+- [X] T039 [US3] **`agent-container ssh-key rotate <name>`** (FR-015, FR-004a, C13): a new key **without destroying the workspace**,
       stating that the previous registration is dead. `--purge` already rotates by destroying the
       volume — the large hammer, not the intended one, and a suspected compromise is exactly when
       rotation must be cheap
 - [ ] T040 [US3] [P] Acceptance S14 — rotate, confirm a **different** key, the warning, and an **intact
       workspace**
-- [ ] T040a [US3] [P] Completions for `ssh-key show|rotate` in both shells, plus the assertion in
+- [X] T040a [US3] [P] Completions for `ssh-key show|rotate` in both shells, plus the assertion in
       `bin/tests/test_completions.sh` — the completions' command list is pinned to the CLI's by a test,
       so it fails until updated (the lesson 014's `inventory` taught)
 - [ ] T041 [US3] [P] Acceptance S10 — with egress enforced and the forge undeclared, the deploy
@@ -189,21 +189,21 @@ completed).
 
 ## Phase 6: The honest edges
 
-- [ ] T042 **Two-phase SSH clone-on-start** (C10, FR-013): with an SSH `--repo` and no registered key,
+- [X] T042 **Two-phase SSH clone-on-start** (C10, FR-013): with an SSH `--repo` and no registered key,
       the container **starts without cloning**, says so, and prints the key and the next command.
       Replaces `clone_credential_precheck`, whose premise this feature inverts
-- [ ] T043 That invocation exits **3** — *pending registration* (FR-013). `1` is generic failure and
+- [X] T043 That invocation exits **3** — *pending registration* (FR-013). `1` is generic failure and
       `2` is already the non-TTY refusal, so `3` is the first free value. A test binds the documented
       code to the enforced one
-- [ ] T044 **The output must forbid the destructive reaction** (FR-013, SC-010): tearing the
+- [X] T044 **The output must forbid the destructive reaction** (FR-013, SC-010): tearing the
       environment down destroys the key awaiting registration, and the retry generates a different one,
       so an agent that reads only the exit status loops forever while invalidating each registration.
       It must say the recovery is **register, then `redeploy`**
 - [ ] T045 [P] Test T044 on the **wording**, not the exit code alone — the exit code is the thing that
       *causes* the wrong reaction, so it cannot also be the thing that prevents it
-- [ ] T046 The entrypoint's `git clone … || die` must not fail the boot in that case
+- [X] T046 The entrypoint's `git clone … || die` must not fail the boot in that case
       (`image/entrypoint.sh`) — pending is not failure
-- [ ] T047 The FR-014 relaxation is **scoped to this case alone**; every other empty-workspace refusal
+- [X] T047 The FR-014 relaxation is **scoped to this case alone**; every other empty-workspace refusal
       stands, and a test pins that
 - [ ] T048 [P] Acceptance S11 — `up` starts without cloning and exits with the pending code; after
       registering, `redeploy` clones
@@ -226,7 +226,7 @@ completed).
 - [ ] T053 [P] `docs/execution.md` — SSH clone-on-start is two-phase, what its exit code means, and
       that recreating destroys the key
 - [ ] T054 [P] `docs/agent-as-code.md` — `target: push_key` is refused, not ignored
-- [ ] T054a **Document the exit codes** (FR-014a, C14, SC-012) — in `docs/` **and in the CLI's own
+- [X] T054a **Document the exit codes** (FR-014a, C14, SC-012) — in `docs/` **and in the CLI's own
       `--help`**: `0` success, `1` failure, `2` refused, `3` pending registration. State both caveats
       rather than leaving them to be discovered: `2` is **shared** with the CLI framework's usage-error
       code so it does not uniquely identify a refusal, and a headless `--foreground` run **propagates

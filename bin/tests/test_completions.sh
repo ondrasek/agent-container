@@ -187,6 +187,12 @@ test_tool() {
     assert_has "${tool}:subcmd-inventory" "inventory" "${COMPREPLY[@]}"
     # Feature 015: the kill switch. Named `panic` so a habitual typo cannot reach it.
     assert_has "${tool}:subcmd-panic" "panic" "${COMPREPLY[@]}"
+    # Feature 019: the agent's own key pair. Separate from `keys`, which injects
+    # AUTHORIZED keys — different things, and one command doing both invites confusion.
+    assert_has "${tool}:subcmd-sshkey" "ssh-key" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "ssh-key" ""
+    assert_has "${tool}:sshkey-show" "show" "${COMPREPLY[@]}"
+    assert_has "${tool}:sshkey-rotate" "rotate" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "panic" "--"
     assert_has "${tool}:panic-destroy" "--destroy" "${COMPREPLY[@]}"
     assert_has "${tool}:panic-preview" "--preview" "${COMPREPLY[@]}"

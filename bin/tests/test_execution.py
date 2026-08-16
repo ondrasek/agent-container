@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -281,47 +282,38 @@ def test_is_ssh_git_url(wiz):
     assert not wiz.is_ssh_git_url("https://github.com/you/repo.git")
 
 
-def test_clone_precheck_ssh_without_key_dies(wiz, tmp_path):
-    # FR-014/SC-008: an SSH-URL clone with no push key dies before compose.
-    (tmp_path / ".agent-container").mkdir(exist_ok=True)
-    ef = tmp_path / ".agent-container" / ".env"
-    ef.write_text("GH_TOKEN=x\n")
-    spec = wiz.ExecSpec(repo="git@github.com:you/repo", workspace="ephemeral")
-    with pytest.raises(wiz.Fatal, match="SSH URL but no push key"):
-        wiz.clone_credential_precheck(spec, ef, None)
+def test_clone_on_start_over_ssh_is_two_phase_not_a_precheck(wiz):
+    """Feature 019 (FR-013) INVERTED `clone_credential_precheck`'s premise.
+
+    That function refused to start when `--repo` was an SSH URL and no push key was
+    supplied. The key is now generated INSIDE the container, so on a first boot it
+    cannot be registered yet and no precheck could ever pass — refusing would leave
+    the operator with no container to read the key from.
+
+    These five tests covered the precheck's branches. What replaces them is the
+    assertion that the precheck is GONE, plus the two-phase behaviour it became: the
+    entrypoint records the clone as pending rather than dying, and the CLI exits with
+    a distinct code.
+    """
+    assert not hasattr(wiz, "clone_credential_precheck")
+    assert wiz.EXIT_PENDING_REGISTRATION == 3
 
 
-def test_clone_precheck_https_needs_no_key(wiz, tmp_path):
-    (tmp_path / ".agent-container").mkdir(exist_ok=True)
-    ef = tmp_path / ".agent-container" / ".env"
-    ef.write_text("GH_TOKEN=x\n")
-    spec = wiz.ExecSpec(repo="https://github.com/you/repo", workspace="persistent")
-    wiz.clone_credential_precheck(spec, ef, None)  # no raise
+def test_the_pending_exit_code_is_distinct_from_failure_and_refusal(wiz):
+    """An automated caller must be able to tell "started, needs a key registered" from
+    "broken" WITHOUT parsing prose — it is the difference between registering a key and
+    tearing the environment down, and tearing it down destroys the key."""
+    assert wiz.EXIT_PENDING_REGISTRATION not in (wiz.EXIT_OK, wiz.EXIT_FAILURE, wiz.EXIT_REFUSED)
 
 
-def test_clone_precheck_ssh_with_pushkey_ok(wiz, tmp_path):
-    key = tmp_path / "id"
-    key.write_text("KEY")
-    spec = wiz.ExecSpec(repo="git@github.com:you/repo", workspace="persistent")
-    wiz.clone_credential_precheck(spec, None, key)  # --push-key satisfies it
-
-
-def test_clone_precheck_ssh_with_env_key_ok(wiz, tmp_path):
-    (tmp_path / ".agent-container").mkdir(exist_ok=True)
-    ef = tmp_path / ".agent-container" / ".env"
-    ef.write_text("SSH_PUSH_KEY_B64=aGVsbG8=\n")
-    spec = wiz.ExecSpec(repo="git@github.com:you/repo", workspace="persistent")
-    wiz.clone_credential_precheck(spec, ef, None)  # env-provided key satisfies it
-
-
-def test_clone_precheck_bind_never_cloned(wiz, tmp_path):
-    spec = wiz.ExecSpec(
-        repo="git@github.com:you/repo", workspace="bind", workspace_dir=str(tmp_path)
-    )
-    wiz.clone_credential_precheck(spec, None, None)  # bind is skipped, no raise
-
-
-# --- headless foreground argv (T014) -----------------------------------------
+def test_the_entrypoint_records_a_pending_clone_instead_of_dying(wiz):
+    """The half that makes the exit code survivable: dying on a first boot would leave
+    no container to read the public key from, so the operator could never register it."""
+    entry = (Path(wiz.__file__).parents[1] / "image" / "entrypoint.sh").read_text()
+    i = entry.index("clone-on-start: cloning via SSH")
+    block = entry[i : i + 900]
+    assert ".clone_pending" in block
+    assert "Do NOT tear this environment down" in block
 
 
 def test_driver_up_argv_detached_default(wiz):

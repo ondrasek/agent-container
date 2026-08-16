@@ -574,7 +574,35 @@ INJECT_AUTHORIZED_KEYS_PATH = "/run/agent-container/authorized_keys"
 # named volume) so the material vanishes with the container (FR-012) — the
 # deliberate opposite of the inbound host key above, which persists for identity.
 # The entrypoint reads them here; kept in sync with INJECT_DIR in entrypoint.sh.
-INJECT_PUSH_KEY_PATH = "/run/agent-container/push_ed25519_key"
+# --- Feature 019: the agent's own SSH key pair -------------------------------
+# The CONVENTIONAL identity path, inside the container, on the already-persisted
+# `ssh` volume. Conventional is load-bearing: git, ssh, scp and rsync all use it
+# with NO wiring, which is why `core.sshCommand` and its scaffolding are deleted
+# rather than rewired.
+CONTAINER_AGENT_SSH_KEY = "/home/dev/.ssh/id_ed25519"
+
+# The tool's exit codes, documented here, in --help and in docs/ (FR-014a).
+# TWO CAVEATS, stated rather than left to be discovered:
+#   * 2 is SHARED with the CLI framework's own usage-error code, so it does not
+#     uniquely identify a refusal;
+#   * a headless `--foreground` run PROPAGATES THE AGENT's exit code, so in that
+#     mode the status is not the tool's at all.
+EXIT_OK = 0
+EXIT_FAILURE = 1
+EXIT_REFUSED = 2
+EXIT_PENDING_REGISTRATION = 3
+EXIT_CODES = (
+    (EXIT_OK, "success"),
+    (EXIT_FAILURE, "failure"),
+    (
+        EXIT_REFUSED,
+        "refused (usage error, or a destructive action declined without -y on a non-TTY)",
+    ),
+    (
+        EXIT_PENDING_REGISTRATION,
+        "pending registration: started, key not registered, nothing cloned",
+    ),
+)
 INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
 INJECT_APIKEY_DIR = "/run/agent-container/apikeys"
 INJECT_CONFIG_DIR = "/run/agent-container/config"
@@ -1250,7 +1278,12 @@ CAPTURE_TIMEOUT = 30.0
 CAPTURE_POLL_INTERVAL = 0.5
 
 
-def capture_host_pubkey(host_rec: dict, name: str, timeout: float = CAPTURE_TIMEOUT) -> str | None:
+def capture_host_pubkey(
+    host_rec: dict,
+    name: str,
+    timeout: float = CAPTURE_TIMEOUT,
+    pubkey_path: str = CONTAINER_HOSTKEY_PUB,
+) -> str | None:
     """The container's host PUBLIC key, read THROUGH THE RUNTIME (FR-003).
 
     Never `ssh-keyscan`, and that is a requirement rather than a preference: asking
@@ -1274,7 +1307,7 @@ def capture_host_pubkey(host_rec: dict, name: str, timeout: float = CAPTURE_TIME
     # fast path back into a slow one silently.
     if not runtime_container_exists(base, cname):
         return None
-    argv = base + ["exec", cname, "cat", CONTAINER_HOSTKEY_PUB]
+    argv = base + ["exec", cname, "cat", pubkey_path]
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -1332,6 +1365,164 @@ def remove_stale_staged_host_key(host: str, name: str) -> None:
         f"own key and keeps it; nothing private is stored here any more. If that key "
         f"exists anywhere else, treat it as exposed."
     )
+
+
+def refuse_removed_push_key(flag_source: str) -> None:
+    """FR-002: every channel that supplied an outbound private key is removed, and
+    using one must SAY WHY rather than produce a bare "no such option".
+
+    An operator who used `--push-key` had a reason — the agent needed to authenticate
+    outbound. That is now served without a private key on their disk: the container
+    generates its own, and they register the PUBLIC half.
+    """
+    die(
+        f"{flag_source}: removed. The agent's SSH key pair is generated INSIDE the "
+        f"container and its private half never leaves (Feature 019). Get the public "
+        f"key with `agent-container ssh-key show <name>` and register it on the "
+        f"remote. Nothing private is written to your disk any more. Drop the flag."
+    )
+
+
+def remove_stale_staged_push_key(host: str, name: str) -> None:
+    """Delete an outbound private key staged by a pre-019 version, and SAY SO (FR-009).
+
+    `--purge` never removed this file, so a release that merely stopped WRITING it
+    would leave the exposure on every machine that ever used the flag. Loud rather
+    than quiet: an operator should learn a private key left their disk, because
+    copies may exist elsewhere worth revoking.
+    """
+    stale = host_state_dir(host) / f"{name}.push_key"
+    if not stale.exists():
+        return
+    try:
+        stale.unlink()
+    except OSError as e:
+        warn(f"could not remove the stale private key at {stale} ({e}) — delete it yourself")
+        return
+    warn(
+        f"removed a PRIVATE SSH key staged by an older version: {stale}. It was mode "
+        f"0644 and `--purge` never deleted it. The container now generates its own "
+        f"key and keeps it. If that key exists anywhere else, treat it as exposed."
+    )
+
+
+def capture_agent_ssh_pubkey(host_rec: dict, name: str) -> str | None:
+    """The container's agent SSH PUBLIC key, read through the runtime (FR-004).
+
+    Reuses Feature 018's capture rather than growing a second one: that primitive
+    already polls (016 measured `Up` preceding the entrypoint), validates, and
+    refuses an empty read — the three subtleties a fresh copy would omit.
+    """
+    return capture_host_pubkey(host_rec, name, pubkey_path=f"{CONTAINER_AGENT_SSH_KEY}.pub")
+
+
+def agent_ssh_key_path(host: str, name: str) -> Path:
+    """Where the tool keeps its copy of the PUBLIC key (FR-005).
+
+    Derived host state: re-capturable, so `safe to delete` is true of it. Local, so
+    the answer survives a stopped environment or an unreachable host — which is
+    exactly when an operator needs to register a key.
+    """
+    return host_state_dir(host) / f"{name}.agent_ssh_pub"
+
+
+def record_agent_ssh_pubkey(host: str, name: str, pubkey: str) -> None:
+    with contextlib.suppress(OSError):
+        p = agent_ssh_key_path(host, name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(pubkey.strip() + "\n")
+
+
+def read_agent_ssh_pubkey(host: str, name: str) -> str | None:
+    """Read from LOCAL state — never the daemon, so an unreachable host still answers."""
+    try:
+        t = agent_ssh_key_path(host, name).read_text().strip()
+    except OSError:
+        return None
+    return t or None
+
+
+PROBE_TIMEOUT = 10.0  # a healthy forge answers `ssh -T` in under two (FR-011)
+
+
+def ssh_probe_registration(host_rec: dict, name: str, repo: str | None) -> str:
+    """Is the agent's key registered? `registered` | `not-registered` | `unknown`.
+
+    RUNS INSIDE THE CONTAINER, because the operator's machine holds no private key —
+    that is the point of the feature — so it has nothing to authenticate with. A
+    useful consequence: the probe inherits the same egress the agent will, so a
+    `not-registered` answer is predictive rather than a guess about conditions the
+    agent never meets.
+
+    Targets ONLY the host of `--repo`. With no repo there is nothing to probe and the
+    answer is `unknown`: defaulting to github.com would invent a fact and send traffic
+    to a host the agent may never contact.
+
+    FAILS SOFT, always. Denied egress (Feature 012), offline, or a forge outage is
+    `unknown` — never `not-registered`, and never a reason to fail a deploy.
+    """
+    if not repo or not is_ssh_git_url(repo):
+        return "unknown"
+    endpoint = ssh_remote_endpoint(repo)
+    if endpoint is None:
+        return "unknown"
+    target = endpoint[0]
+    try:
+        r = query(
+            driver_runtime_argv(host_rec)
+            + ["exec", container_name(name), "ssh", "-o", "BatchMode=yes",
+               "-o", f"ConnectTimeout={int(PROBE_TIMEOUT)}", "-T", f"git@{target}"],
+            timeout=PROBE_TIMEOUT,
+        )  # fmt: skip
+    except OSError, subprocess.SubprocessError:
+        return "unknown"
+    blob = (r.stdout + r.stderr).lower()
+    if "successfully authenticated" in blob or "does not provide shell access" in blob:
+        return "registered"
+    if "permission denied" in blob:
+        return "not-registered"
+    return "unknown"
+
+
+def announce_agent_ssh_key(host_rec: dict, name: str, pubkey: str, repo: str | None) -> None:
+    """Say what to register, BEFORE the agent needs it (FR-006).
+
+    Commit-and-push is this project's first constraint, so an agent discovering an
+    unregistered key mid-run is unacceptable. Silent once the forge confirms it works
+    (FR-011) — a nag that never stops is a nag nobody reads.
+    """
+    state = ssh_probe_registration(host_rec, name, repo)
+    if state == "registered":
+        return
+    detail = {
+        "not-registered": "the remote REJECTED it — pushes and clones will fail until it is registered",
+        "unknown": "registration could NOT be confirmed (no repo to check, or the remote was unreachable)",
+    }[state]
+    warn(
+        f"{name}: agent SSH key — {detail}.\n  {pubkey.strip()}\n"
+        f"  Register it on the remote (a deploy key is enough), then the agent can "
+        f"clone and push. The private half never leaves the container."
+    )
+
+
+def clone_pending_url(host_rec: dict, name: str) -> str | None:
+    """The repo the entrypoint could not clone, or None (FR-013).
+
+    The entrypoint records this rather than dying: on a first boot the key cannot yet
+    be registered, and dying would leave the operator with no container to read the
+    key from.
+    """
+    try:
+        r = query(
+            driver_runtime_argv(host_rec)
+            + ["exec", container_name(name), "cat", "/home/dev/.ssh/.clone_pending"],
+            timeout=RUNS_PROBE_TIMEOUT,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    # `or ""` rather than trusting stdout: this runs on EVERY deploy, and a runtime
+    # that returns no stdout must not crash a deployment that otherwise succeeded.
+    return ((r.stdout or "").strip() or None) if r.returncode == 0 else None
 
 
 def capture_and_pin(
@@ -2130,6 +2321,69 @@ def do_panic(
             f"this run did NOT succeed. An unreachable host is reported undetermined, "
             f"never stopped."
         )
+
+
+def do_ssh_key_show(name: str, as_json: bool) -> None:
+    """The agent's public key, from LOCAL state (FR-004, FR-005).
+
+    Never reaches the container: a stopped environment or an unreachable host is
+    exactly when an operator needs the key, and a lookup that required reachability
+    would fail in the one case it exists for.
+    """
+    validate_name(name)
+    host_name, _ = resolve_deploy_host(None)
+    pub = read_agent_ssh_pubkey(host_name, name)
+    if as_json:
+        emit_json({"name": name, "host": host_name, "agent_ssh_public_key": pub})
+        return
+    if pub is None:
+        # Explicit, never a silent empty result — "no key" and "not captured" are
+        # different, and only one of them is fixable by deploying.
+        die(f"no agent SSH key captured for {name}; deploy it and try again")
+    print_shell(pub)
+
+
+def do_ssh_key_rotate(name: str, yes: bool, as_json: bool) -> None:
+    """A NEW key, WITHOUT destroying the environment (FR-015).
+
+    `--purge` already rotates by destroying the volume; that is disproportionate when
+    the workspace is worth keeping, and a suspected compromise is exactly when
+    rotation must be cheap.
+    """
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(None)
+    if not yes:
+        if not is_tty():
+            eprint("[agent-container] refusing to rotate without -y/--yes on a non-TTY")
+            raise typer.Exit(EXIT_REFUSED)
+        if not questionary.confirm(
+            f"rotate {name}'s agent SSH key? The current registration STOPS WORKING.",
+            default=False,
+        ).ask():
+            log("aborted")
+            return
+    rt_argv = driver_runtime_argv(host_rec)
+    cname = container_name(name)
+    sh = (
+        f"rm -f {CONTAINER_AGENT_SSH_KEY} {CONTAINER_AGENT_SSH_KEY}.pub && "
+        f"ssh-keygen -q -t ed25519 -N '' -f {CONTAINER_AGENT_SSH_KEY} && "
+        f"ssh-keygen -y -f {CONTAINER_AGENT_SSH_KEY} > {CONTAINER_AGENT_SSH_KEY}.pub && "
+        f"chmod 0600 {CONTAINER_AGENT_SSH_KEY} && chmod 0644 {CONTAINER_AGENT_SSH_KEY}.pub"
+    )
+    if run_child(rt_argv + ["exec", cname, "bash", "-lc", sh]).returncode != 0:
+        die(f"could not rotate the agent SSH key in {cname}")
+    pub = capture_agent_ssh_pubkey(host_rec, name)
+    if pub is None:
+        die("rotated, but the new key could not be read back — check the container")
+    record_agent_ssh_pubkey(host_name, name, pub)
+    if as_json:
+        emit_json({"name": name, "rotated": True, "agent_ssh_public_key": pub})
+        return
+    warn(
+        f"{name}: the agent SSH key was ROTATED. The PREVIOUS registration is now "
+        f"dead — register this one wherever the agent must reach:"
+    )
+    print_shell(pub)
 
 
 def do_inventory_list(as_json: bool) -> None:
@@ -6580,31 +6834,23 @@ def stage_ssh_injection(host: str, name: str, authorized_keys: list[Path]) -> Pa
 
 
 def stage_push_injection(
-    host: str, name: str, push_key: Path | None, known_hosts: Path | None
+    host: str, name: str, known_hosts: Path | None
 ) -> list[tuple[str, Path, str]]:
     """Stage the outbound push credential (US1) as LOCAL files under the per-host
     state dir and return the (config-name, staged file, in-container target)
     entries for build_compose_model's `injected_configs`. EPHEMERAL by design: the
     targets live under /run (FR-012), so the entrypoint reads the key there and
     NEVER copies it onto the persisted ~/.ssh volume — the deliberate opposite of
-    the inbound host key. Fails fast if a referenced file is absent (FR-016). 0644
-    for the same uid-mismatch reason as stage_ssh_injection (the state dir is
-    0700). The push key is a DISTINCT credential from the inbound host key (SC-008)."""
+    Feature 019 removed this function's PRIVATE-KEY arm. What remains is
+    `known_hosts`, which verifies the FORGE — the opposite direction, public data,
+    and unaffected. The agent's own key is now generated in the container and never
+    supplied, so there is nothing private left to stage."""
     entries: list[tuple[str, Path, str]] = []
-    if push_key is known_hosts is None:
+    if known_hosts is None:
         return entries
     d = host_state_dir(host)
     d.mkdir(parents=True, exist_ok=True)
     d.chmod(0o700)
-    if push_key is not None:
-        pk = push_key.expanduser()
-        if not pk.is_file():
-            die(f"--push-key: {push_key} does not exist or is not a file")
-        validate_private_key(pk)  # reject encrypted — a passphrase would block push
-        f = d / f"{name}.push_key"
-        f.write_bytes(pk.read_bytes())
-        f.chmod(0o644)
-        entries.append(("push_key", f, INJECT_PUSH_KEY_PATH))
     if known_hosts is not None:
         kh = known_hosts.expanduser()
         if not kh.is_file():
@@ -6815,25 +7061,6 @@ def _one_env_file_defines(env_file: Path, key: str) -> bool:
     return False
 
 
-def clone_credential_precheck(
-    spec: ExecSpec, env_file: Path | list[Path] | None, push_key: Path | None
-) -> None:
-    """Fail fast (FR-014) when an SSH-URL clone-on-start has no push key: refuse
-    BEFORE creating an empty-workspace container. https:// needs no key (GH_TOKEN
-    is always present); bind is never cloned. The entrypoint re-checks in-container."""
-    if not spec.repo or spec.workspace == "bind":
-        return
-    if not is_ssh_git_url(spec.repo):
-        return  # https:// → GH_TOKEN
-    if push_key is not None or env_file_defines(env_file, "SSH_PUSH_KEY_B64"):
-        return
-    die(
-        f"--repo {spec.repo} is an SSH URL but no push key is injected — pass "
-        f"--push-key (or set SSH_PUSH_KEY_B64 in the env-file). Refusing to start "
-        f"an empty-workspace agent (FR-014)."
-    )
-
-
 def stage_task_injection(
     host: str, name: str, task_text: str | None
 ) -> list[tuple[str, Path, str]]:
@@ -6915,7 +7142,6 @@ def compose_up_exec(
     mounts: list[str],
     authorized_keys: list[Path],
     redeploy: bool = False,
-    push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
     extra_injected_configs: list[tuple[str, Path, str]] | None = None,
@@ -6949,7 +7175,7 @@ def compose_up_exec(
         log(f"port {port} is busy; waiting for it to be released…")
         wait_port_released(port)
     ak_file = stage_ssh_injection(host_name, name, authorized_keys)
-    injected = stage_push_injection(host_name, name, push_key, known_hosts)  # US1, ephemeral
+    injected = stage_push_injection(host_name, name, known_hosts)  # US1, ephemeral
     # US2 (T012): convention-discovered model/API key files, staged ephemerally to
     # INJECT_APIKEY_DIR/<provider> (H1/FR-012). Automatic — no flags; env/.env still works.
     injected += stage_apikey_injection(host_name, name)
@@ -7155,10 +7381,36 @@ def compose_up_exec(
     record_inventory_creation(name, host_name, bool(host_rec.get("created_by_tool")))
     # FR-011: an upgrade must not leave a pre-018 private key behind.
     remove_stale_staged_host_key(host_name, name)
+    # Feature 019: the same, for the pre-019 outbound key — and capture the agent's
+    # own PUBLIC key so the operator can register it without reaching the container.
+    remove_stale_staged_push_key(host_name, name)
+    if (agent_pub := capture_agent_ssh_pubkey(host_rec, name)) is not None:
+        record_agent_ssh_pubkey(host_name, name, agent_pub)
+        announce_agent_ssh_key(host_rec, name, agent_pub, spec.repo)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     verb = "redeployed" if redeploy else "started"
     log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
     log(f"or directly: ssh dev@{addr} -p {port} -t tmux attach -t main")
+    # Feature 019 (FR-013): an SSH clone-on-start that could not run because the
+    # agent's key is not registered yet. The container IS created and its key
+    # generated — "created, not ready", not "nothing happened" — so the code is
+    # distinct rather than the generic failure.
+    #
+    # The wording matters as much as the code: a caller reading only the status will
+    # tear the environment down and retry, DESTROYING the key it was about to
+    # register, and the replacement is a different key. So say what not to do.
+    # Only an SSH clone-on-start can be pending, so only that case pays for the
+    # round-trip — and the check cannot misfire where there is nothing to clone.
+    if spec.repo and is_ssh_git_url(spec.repo) and clone_pending_url(host_rec, name):
+        warn(
+            f"{name}: the workspace was NOT cloned — the agent's SSH key is not "
+            f"registered on the remote yet. Register it:\n"
+            f"  agent-container ssh-key show {name}\n"
+            f"then: agent-container redeploy {name}{hflag}\n"
+            f"DO NOT tear this environment down to retry — that destroys the key you "
+            f"are about to register, and the replacement will be a different one."
+        )
+        raise typer.Exit(EXIT_PENDING_REGISTRATION)
 
 
 def do_up(
@@ -7167,7 +7419,6 @@ def do_up(
     env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
     authorized_keys: list[Path] | None = None,
-    push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
     extra_injected_configs: list[tuple[str, Path, str]] | None = None,
@@ -7229,7 +7480,6 @@ def do_up(
 
         # Fail fast (FR-014) if an SSH-URL clone-on-start has no push key — before the
         # container is created; https:// uses GH_TOKEN and needs none.
-        clone_credential_precheck(spec, env_file, push_key)
 
         # The image builds on the host via compose (`up --build`) — no pre-built
         # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
@@ -7241,7 +7491,6 @@ def do_up(
                 env_file,
                 resolved_mounts,
                 authorized_keys or [],
-                push_key=push_key,
                 known_hosts=known_hosts,
                 spec=spec,
                 extra_injected_configs=extra_injected_configs,
@@ -7484,7 +7733,6 @@ def do_redeploy(
     env_file_override: list[Path] | None = None,
     mounts: list[str] | None = None,
     authorized_keys: list[Path] | None = None,
-    push_key: Path | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
 ) -> None:
@@ -7510,7 +7758,6 @@ def do_redeploy(
         # never gets a half-configured environment built from files we no longer read.
         refuse_superseded_layout(name)
         env_file = _resolve_env_files(name, env_file_override)
-        clone_credential_precheck(spec, env_file, push_key)
         with deployment_lock(host_name, name):
             compose_up_exec(
                 host_name,
@@ -7520,7 +7767,6 @@ def do_redeploy(
                 resolved_mounts,
                 authorized_keys or [],
                 redeploy=True,
-                push_key=push_key,
                 known_hosts=known_hosts,
                 spec=spec,
             )
@@ -10032,7 +10278,10 @@ CRED_PROVIDER = {
 # `host_key` was a target here until Feature 018: a declared PRIVATE host key is
 # now REFUSED rather than dropped, because silently ignoring it would leave an
 # operator believing their key is in use.
-CRED_SSH_TARGETS = ("push_key", "authorized_key")
+# `push_key` was a target here until Feature 019: a declared outbound PRIVATE key
+# is now REFUSED rather than dropped, because silently ignoring it would leave an
+# operator believing their key is in use.
+CRED_SSH_TARGETS = ("authorized_key",)
 # US4 declarative host provisioning: a `host:` table's provider discriminator + the
 # keys forwarded to the Feature 001 provisioner (provision_host's actual args).
 PROVISION_PROVIDERS = ("hetzner",)
@@ -10178,6 +10427,8 @@ def validate_credential(cred: object, where: str) -> None:
     # right spelling of something that no longer exists.
     if tgt == "host_key":
         refuse_removed_host_key(f"{where}: target=host_key")
+    if tgt == "push_key":
+        refuse_removed_push_key(f"{where}: target=push_key")
     if tgt is not None and tgt not in CRED_SSH_TARGETS:
         die(f"{where}: target={tgt!r} is not one of {{{', '.join(CRED_SSH_TARGETS)}}}")
     allowed = {"name", "source", "target", *detail}
@@ -12414,10 +12665,9 @@ def resolver_argv(cred: dict) -> list[str]:
 @dataclass
 class SshCreds:
     """Resolved SSH-target credentials (T012a) threaded into do_up's typed params —
-    distinct lifecycles: push_key is the ephemeral outbound git identity, host_key the
+    distinct lifecycles: authorized_key is an inbound principal; the
     persisted inbound sshd identity, authorized_keys accumulate inbound principals."""
 
-    push_key: Path | None = None
     authorized_keys: list[Path] = field(default_factory=list)
 
 
@@ -12425,7 +12675,7 @@ def stage_declared_credentials(
     host_name: str, name: str, creds: list[dict] | None, root: Path, base_env_file: Path | None
 ) -> tuple[list[tuple[str, Path, str]], Path | None, SshCreds]:
     """Resolve the declared credentials and deliver them: an explicit SSH **target**
-    (push_key/authorized_key) → a 0600 staged file threaded into the 003
+    (authorized_key) → a 0600 staged file threaded into the 003
     ssh-injection channels (multi-line keys the env-file rejects, T012a); **provider
     API keys** (by name) via the 003 file-first apikey channel (a config →
     INJECT_APIKEY_DIR/<provider>, never even the env); **everything else** as env vars
@@ -12453,10 +12703,10 @@ def stage_declared_credentials(
             f = d / f"{name}.cred.{target}"
             f.write_text(value)
             f.chmod(0o600)
-            if target == "push_key":
-                ssh.push_key = f
-            else:
-                ssh.authorized_keys.append(f)
+            # `authorized_key` is the only SSH target left: `host_key` went with
+            # Feature 018 and `push_key` with 019, both being channels for supplying a
+            # PRIVATE key. Declaring either is refused earlier, in validate_credential.
+            ssh.authorized_keys.append(f)
             continue
         # Drop a spurious trailing newline (a key file often ends in one) so the
         # value is delivered byte-clean to both the apikey file and the env var.
@@ -12590,15 +12840,13 @@ def do_aac_apply(
             # Deploy to the SAME host the plan/preview resolved (honoring --host), not
             # the raw spec host — else the container would land on a host the operator
             # never confirmed. `host_name` is the resolved name; do_up re-resolves it.
-            # SSH-target credentials (T012a) ride do_up's typed params (push_key must be
-            # a param, not a config, so clone_credential_precheck sees it for an ssh --repo).
+            # a param, not a config).
             do_up(
                 name,
                 host=host_name,
                 env_file_override=[env_file] if env_file else None,
                 spec=spec,
                 extra_injected_configs=aac,
-                push_key=ssh.push_key,
                 authorized_keys=ssh.authorized_keys,
             )
             done.append(name)
@@ -12692,6 +12940,17 @@ app = typer.Typer(
     no_args_is_help=False,
     pretty_exceptions_enable=False,
     help="Interactive wizard + CLI for agent-container containers.",
+    # FR-014a: the exit codes are DOCUMENTED HERE, in the tool's own --help, because
+    # an automated caller cannot branch on a code it has to reverse-engineer — and
+    # this project is driven by agents. Built from EXIT_CODES so the documented values
+    # cannot drift from the enforced ones; a test binds them.
+    epilog=(
+        "Exit codes: "
+        + " · ".join(f"{c} = {d}" for c, d in EXIT_CODES)
+        + ".  Caveats: 2 is SHARED with the CLI framework's own usage-error code, so "
+        "it does not uniquely identify a refusal; and a headless --foreground run "
+        "propagates the AGENT's exit code, so there the status is not the tool's."
+    ),
 )
 
 
@@ -12777,9 +13036,8 @@ def up(
     push_key: Path | None = typer.Option(
         None,
         "--push-key",
-        help="Inject an OpenSSH PRIVATE key the agent PUSHES with (distinct from "
-        "--host-key). Delivered EPHEMERALLY — never written to the ~/.ssh volume. "
-        "Must be unencrypted (a passphrase would block non-interactive push).",
+        hidden=True,
+        help="REMOVED (Feature 019). The agent generates its own key; register the public half.",
     ),
     known_hosts: Path | None = typer.Option(
         None,
@@ -12843,6 +13101,8 @@ def up(
     Default: an interactive claude session on a persistent workspace (attach with
     `agent-container attach NAME`). Use --mode headless for a one-shot job."""
     set_json_mode(as_json)
+    if push_key is not None:
+        refuse_removed_push_key("up --push-key")
     if host_key is not None:
         refuse_removed_host_key("up --host-key")
     for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
@@ -12863,7 +13123,6 @@ def up(
         env_file,
         mount or [],
         authorized_key or [],
-        push_key,
         known_hosts,
         spec=spec,
     )
@@ -12971,7 +13230,10 @@ def redeploy(
         None, "--authorized-key", help="Inject an SSH public key (repeatable)."
     ),
     push_key: Path | None = typer.Option(
-        None, "--push-key", help="Inject the outbound push key (ephemeral; as for `up`)."
+        None,
+        "--push-key",
+        hidden=True,
+        help="REMOVED (Feature 019). The agent generates its own key; register the public half.",
     ),
     known_hosts: Path | None = typer.Option(
         None, "--known-hosts", help="Inject known_hosts for the push remote (as for `up`)."
@@ -13002,6 +13264,8 @@ def redeploy(
     Deliberately non-idempotent: always rebuilds + recreates, even with no change.
     May change mode/agent/workspace/repo."""
     set_json_mode(as_json)
+    if push_key is not None:
+        refuse_removed_push_key("redeploy --push-key")
     if host_key is not None:
         refuse_removed_host_key("redeploy --host-key")
     for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
@@ -13022,7 +13286,6 @@ def redeploy(
         env_file,
         mount or [],
         authorized_key or [],
-        push_key,
         known_hosts,
         spec=spec,
     )
@@ -13174,6 +13437,39 @@ egress_cmd.__doc__ = (egress_cmd.__doc__ or "").format(
 # default). There is deliberately no `host up`/`host down` — those are container
 # operations, not host operations. Deprovisioning a host is `host rm --destroy`
 # (guarded: refused while containers remain, or for hosts the tool did not create).
+ssh_key_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "The agent's own SSH key pair — generated INSIDE the container, private half "
+        "never leaves. Register the public half on whatever the agent must reach. "
+        "Separate from `keys`, which injects AUTHORIZED keys: the agent's identity and "
+        "the principals allowed to reach it are different things."
+    ),
+)
+app.add_typer(ssh_key_app, name="ssh-key")
+
+
+@ssh_key_app.command("show")
+def ssh_key_show(
+    name: str = typer.Argument(..., help="Container short name."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Print the agent's SSH PUBLIC key, for registering on a remote."""
+    set_json_mode(as_json)
+    do_ssh_key_show(name, as_json)
+
+
+@ssh_key_app.command("rotate")
+def ssh_key_rotate(
+    name: str = typer.Argument(..., help="Container short name."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Generate a NEW agent SSH key, keeping the workspace."""
+    set_json_mode(as_json)
+    do_ssh_key_rotate(name, yes, as_json)
+
+
 inventory_app = typer.Typer(
     no_args_is_help=True,
     help=(
