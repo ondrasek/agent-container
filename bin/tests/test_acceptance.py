@@ -3863,3 +3863,150 @@ def test_the_inventory_holds_no_free_text_field(acc):
         "outcome_at",
         "notes",
     }
+
+
+# --- Feature 015: the kill switch (`panic`) ----------------------------------
+# S2 and S9 come first deliberately. A kill switch that stops the reachable things
+# and reports success is easy to build and passes everything else here.
+
+
+def _panic(acc, *args):
+    return acc.cli(["panic", *args])
+
+
+def _panic_json(acc, *args):
+    r = _panic(acc, *args, "--json")
+    return json.loads(r.stdout)["data"], r
+
+
+def test_panic_stops_everything_recorded_and_verifies_it(acc):
+    """S1/S5 (C1, C4, SC-002b): every environment reported `stopped` is absent from
+    the RUNNING listing — and still present in `ps -a`, which is correct for a stop
+    and is why verifying against `ps -a` would report every stop as failed."""
+    acc.up("accpanic1")
+    acc.up("accpanic2")
+    data, r = _panic_json(acc)
+    assert r.returncode == 0, r.stderr
+    got = {x["name"]: x["outcome"] for x in data["results"]}
+    assert got.get("accpanic1") == "stopped" and got.get("accpanic2") == "stopped"
+
+    running = subprocess.run(
+        [RUNTIME, "ps", "--format", "{{.Names}}"], capture_output=True, text=True
+    ).stdout
+    assert "agent-container-accpanic1" not in running
+    all_ct = subprocess.run(
+        [RUNTIME, "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True
+    ).stdout
+    assert "agent-container-accpanic1" in all_ct  # stopped, not destroyed
+
+
+def test_panic_never_touches_a_container_it_did_not_record(acc):
+    """S9 (C10, SC-004). The naming convention can be imitated; a match is evidence
+    of a NAME and nothing more. Verified live, because the claim is about what the
+    tool does to something it does not own."""
+    subprocess.run(
+        [RUNTIME, "run", "-d", "--name", "agent-container-impostor", "alpine", "sleep", "300"],
+        capture_output=True,
+        check=True,
+    )
+    try:
+        acc.up("accpanic3")
+        _panic(acc)
+        running = subprocess.run(
+            [RUNTIME, "ps", "--format", "{{.Names}}"], capture_output=True, text=True
+        ).stdout
+        assert "agent-container-impostor" in running, "panic stopped a container it did not create"
+    finally:
+        subprocess.run([RUNTIME, "rm", "-f", "agent-container-impostor"], capture_output=True)
+
+
+def test_panic_reports_an_unrecorded_host_as_undetermined_and_fails(acc):
+    """S2/S6 (C3, C6, SC-002, SC-003). THE test: a host the tool cannot reach must
+    never be reported stopped, and any undetermined result must fail the run.
+
+    A host recorded in the inventory but absent from the registry is unreachable by
+    construction — no daemon to ask — which is the same situation as a dead host
+    without needing to break one.
+    """
+    acc.up("accpanic4")
+    inv = acc.state_dir / "xdgdata" / "agent-container" / "inventory"
+    ghost = json.loads(next(inv.glob("*.json")).read_text())
+    ghost["entry_id"] = "ghost-entry"
+    ghost["name"] = "accghost"
+    ghost["host"] = "a-host-that-is-not-registered"
+    (inv / "ghost-entry.json").write_text(json.dumps(ghost))
+
+    data, r = _panic_json(acc)
+    assert r.returncode != 0, "a run with an unreachable host reported success"
+    # Assert on the PAYLOAD, not only the exit code: a crash after the envelope was
+    # written also exits non-zero, and this test passed once for exactly that reason
+    # while the code raised NameError. The verdict must be in the data.
+    assert data["ok"] is False
+    assert data["unresolved"] >= 1
+    assert "Traceback" not in r.stderr and "NameError" not in r.stderr
+    got = {x["name"]: x["outcome"] for x in data["results"]}
+    assert got["accghost"] == "undetermined"
+    assert got["accpanic4"] == "stopped"  # the reachable one still completed (C2)
+    assert "undetermined" not in [
+        v for k, v in got.items() if k == "accpanic4"
+    ]  # never mislabelled
+
+
+def test_panic_preview_changes_nothing(acc):
+    """S8 (C9, SC-007). Contacting a host is a read; SC-007 is about state change."""
+    acc.up("accpanic5")
+
+    def snapshot():
+        return subprocess.run(
+            [RUNTIME, "ps", "-a", "--format", "{{.Names}} {{.State}}"],
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    before = snapshot()
+    r = _panic(acc, "--preview")
+    assert r.returncode == 0, r.stderr
+    assert snapshot() == before
+
+
+def test_panic_is_repeatable(acc):
+    """S10 (C11, SC-008): nothing to stop is an unambiguous success, not an error."""
+    acc.up("accpanic6")
+    assert _panic(acc).returncode == 0
+    r = _panic(acc)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(_panic(acc, "--json").stdout)["data"]
+    assert {x["outcome"] for x in data["results"]} == {"already-stopped"}
+
+
+def test_panic_stop_preserves_volumes(acc):
+    """S7 (C7, SC-005): the stopping form is recoverable, which is why it needs no
+    confirmation."""
+    acc.up("accpanic7")
+    before = acc.volumes_of("accpanic7")
+    assert before
+    _panic(acc)
+    assert sorted(acc.volumes_of("accpanic7")) == sorted(before)
+
+
+def test_panic_destroy_without_confirmation_destroys_nothing(acc):
+    """S7 (C7, SC-006). The one unrecoverable form keeps its prompt."""
+    acc.up("accpanic8")
+    before = acc.volumes_of("accpanic8")
+    r = _panic(acc, "--destroy")  # no -y, non-TTY
+    assert r.returncode != 0
+    assert sorted(acc.volumes_of("accpanic8")) == sorted(before)
+
+
+def test_panic_scope_leaves_other_environments_untouched(acc):
+    """S11 (C12): and it says what it excluded."""
+    acc.up("accpanic9")
+    acc.up("accpanic10")
+    data, r = _panic_json(acc, "--name", "accpanic9")
+    names = {x["name"] for x in data["results"]}
+    assert names == {"accpanic9"}
+    assert data["excluded"] >= 1
+    running = subprocess.run(
+        [RUNTIME, "ps", "--format", "{{.Names}}"], capture_output=True, text=True
+    ).stdout
+    assert "agent-container-accpanic10" in running  # untouched

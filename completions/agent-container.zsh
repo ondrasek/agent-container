@@ -127,6 +127,7 @@ _agent-container() {
         'runs:Durable run records (list, show) — survives teardown'
         'egress:Durable record of undeclared egress — survives teardown'
         'inventory:Durable record of every environment created — survives its host'
+        'panic:KILL SWITCH — stop everything, everywhere, and report what it could not reach'
         'plan:Show the plan for the declarative spec (no mutation)'
         'apply:Converge the declarative spec'
         'status:Report declarative spec drift'
@@ -211,6 +212,17 @@ _agent-container() {
                         '--egress[Read the egress boundary log, where refusals are recorded]' \
                         '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names_local'
+                    ;;
+                panic)
+                    _arguments \
+                        '*--host[Limit to these hosts]:host:' \
+                        '*--name[Limit to these environments]:name:' \
+                        '--destroy[Remove containers AND volumes]' \
+                        '--preview[Show what would be affected; change nothing]' \
+                        '--host-timeout[Per-host budget in seconds]:seconds:' \
+                        '(-y --yes)'{-y,--yes}'[Skip the --destroy confirmation]' \
+                        '--json[Emit machine-readable JSON]'
+                    return 0
                     ;;
                 inventory)
                     _arguments '1:command:(list)' '--json[Emit machine-readable JSON]'

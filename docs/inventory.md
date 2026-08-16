@@ -5,7 +5,14 @@ there a container on a host I removed from the registry?"* or *"something is bil
 make it?"*
 
 The inventory is that memory. It **remembers, compares and reports**. It deletes nothing — acting on
-the result is the kill switch's job (Feature 015).
+the result is the kill switch's job (`agent-container panic`, Feature 015).
+
+That split is deliberate. Remembering is safe and can run on every deploy; acting is not, and must be
+a separate, explicit command. The kill switch consumes this record and writes back to it: a stop
+appends to an entry's diagnostics (keeping the five most recent), and a **verified** destroy sets the
+entry `removed`. An **unverified** destroy — one whose host never answered — writes no outcome at all,
+for the same reason `unknown` is unstorable: recording a removal that may not have happened is a lie
+in the one store a later audit reads.
 
 ```bash
 agent-container inventory list           # everything ever created, newest first

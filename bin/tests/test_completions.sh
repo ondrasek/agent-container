@@ -185,6 +185,11 @@ test_tool() {
     # Feature 014: the completions' command list is pinned to the CLI's, so a new
     # subcommand that never reaches here is a completion that silently lags the tool.
     assert_has "${tool}:subcmd-inventory" "inventory" "${COMPREPLY[@]}"
+    # Feature 015: the kill switch. Named `panic` so a habitual typo cannot reach it.
+    assert_has "${tool}:subcmd-panic" "panic" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "panic" "--"
+    assert_has "${tool}:panic-destroy" "--destroy" "${COMPREPLY[@]}"
+    assert_has "${tool}:panic-preview" "--preview" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "inventory" ""
     assert_has "${tool}:inventory-list" "list" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "keys" "--"

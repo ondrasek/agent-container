@@ -222,3 +222,46 @@ reconcile away.
 The live daemon is authoritative for *now* and nothing else. `inventory reconcile` is the only place
 the three are compared, and it is deliberately **fail-closed**: a host that cannot be reached yields
 `unknown`, never `missing`, because invisible is indistinguishable from gone.
+
+## The kill switch — `panic`
+
+One deliberate action that stops everything this tool is running, everywhere, and **tells the truth
+about what it could not reach**.
+
+```bash
+agent-container panic                      # stop everything (no confirmation — it is recoverable)
+agent-container panic --preview            # look, change nothing
+agent-container panic --host vps1          # scope it
+agent-container panic --destroy -y         # containers AND volumes
+```
+
+### Which form for which emergency
+
+| Situation | Use | Why |
+|---|---|---|
+| A runaway or looping agent | **`panic`** | recoverable — volumes survive and `up` brings it back |
+| Costs climbing, you cannot remember what is running | **`panic`** | same; stop first, decide later |
+| **Suspected credential leak** | **`panic --destroy`** | stopping leaves the volumes, and a volume may hold an operator-interactive login |
+
+**Revoking a credential at the provider is outside this tool.** `--destroy` removes what is on your
+hosts; it cannot un-issue an API key. Do that at the provider, and treat `--destroy` as the local half.
+
+`--destroy` removes containers **and their volumes**, never locally-built **images** — an image is a
+shared build artifact holding no credential, so deleting it would cost a slow rebuild mid-emergency
+and mitigate nothing.
+
+### Why it can be trusted about what it could not do
+
+- It enumerates from the **durable inventory** (Feature 014), not from whichever hosts answer —
+  asking live daemons fails precisely when a kill switch matters: an unreachable host, a forgotten
+  one, a deprovisioned one.
+- Every `stopped` is **observed**, by re-querying the host afterwards. A command exiting zero is not
+  evidence.
+- An unreachable host is reported **`undetermined`**, never `stopped`, and **any** undetermined
+  result makes the whole run report failure. Invisible is not the same as gone.
+- Hosts are contacted **in parallel** with a 30s per-host budget, so total time is bounded by the
+  slowest host rather than the sum.
+- It never touches a container outside a **recorded** deployment.
+
+Repeating it is safe — but repetition never launders an unknown: a host that is still unreachable
+still fails the run, so the non-zero exit is a standing reminder rather than a one-time complaint.

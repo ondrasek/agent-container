@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress inventory plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress inventory panic plan apply status destroy menu context skill commands completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -246,6 +246,12 @@ _agent_container() {
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
+            ;;
+        panic)
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--host --name --destroy --preview --host-timeout -y --yes --json" -- "${cur}") )
+            fi
+            return 0
             ;;
         inventory)
             # Feature 014: no per-entry targets to offer — the store is flat and keyed

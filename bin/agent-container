@@ -30,6 +30,7 @@
 import atexit
 import base64
 import calendar
+import concurrent.futures
 import contextlib
 import fcntl
 import hashlib
@@ -1472,6 +1473,31 @@ INVENTORY_OUTCOMES = ("active", "removed", "vanished", "host-gone")
 # spec's own estimate that years of heavy use is hundreds of rows — a backstop
 # against runaway growth, not tidying. A test binds this number to the help text.
 INVENTORY_MAX_ENTRIES = 5000
+
+# --- Feature 015: the kill switch ("panic") ----------------------------------
+# Named `panic` rather than `kill` so a habitual typo cannot reach it: `kill`
+# means "signal one process" everywhere else, and `stop-all` reads oddly with
+# --destroy, which does more than stop.
+#
+# 30s, and it has a FLOOR rather than a taste: host_ps_rows bounds its own query
+# at 20s, so any per-host budget below that expires BEFORE the call it is meant to
+# bound — a healthy-but-loaded host would then be reported `undetermined` while
+# its `ps` was still legitimately running, which is the exact false answer SC-002
+# counts. Reusing RUNS_PROBE_TIMEOUT (10s) would inherit that bug.
+KILL_HOST_TIMEOUT = 30.0
+# Closed at construction, as Feature 014 closes its own set. `undetermined` is the
+# load-bearing one: it is what an unreachable host AND a contended lock both
+# produce, and collapsing either into `failed` or `stopped` is the failure this
+# feature exists to prevent.
+KILL_OUTCOMES = ("stopped", "already-stopped", "failed", "undetermined")
+# Outcomes that mean "this environment is not running and we SAW that".
+KILL_OK_OUTCOMES = ("stopped", "already-stopped")
+# Feature 014 caps the store by ENTRY COUNT only — nothing bounds an entry's size,
+# and this feature writes a note on every run to a file re-read by every
+# `inventory list`. Five rather than one so a PATTERN stays visible: an
+# environment repeatedly stopped that keeps coming back is information a single
+# most-recent note would destroy.
+KILL_NOTES_KEPT = 5
 INVENTORY_SCHEMA = 1
 # Pinned closed by a test. Unlike Feature 016 — which had to STATE its task-text
 # exposure — FR-010's guarantee here is structural: every field is tool-generated,
@@ -1752,6 +1778,358 @@ def inventory_age(created_at: str, now: float | None = None) -> str:
     if seconds < 86400:
         return f"{seconds // 3600}h"
     return f"{seconds // 86400}d"
+
+
+def kill_read_inventory() -> list[dict]:
+    """The candidate pool, or a refusal (FR-013, C14).
+
+    THE DISTINCTION IS THE POINT. FR-013's stated mischief is *silently falling back
+    to live enumeration* — a kill switch that narrows its own scope is a false
+    guarantee. Emptiness causes no fallback; there is nothing to fall back from.
+
+    So an inventory that cannot be READ refuses, naming the store. An ABSENT or
+    EMPTY one succeeds: Feature 014's store begins at install and is not
+    backfilled, so absence is the normal state of a fresh machine, and refusing
+    there would contradict this feature's own rule that "nothing to stop" is an
+    unambiguous success.
+    """
+    d = inventory_store_dir()
+    if d.exists() and not os.access(d, os.R_OK | os.X_OK):
+        die(
+            f"cannot read the inventory at {d}, and refusing to fall back to asking "
+            f"whichever hosts happen to answer. A kill switch that silently narrows "
+            f"its own scope is a false guarantee. Fix the permissions and re-run."
+        )
+    return read_inventory_entries()
+
+
+def kill_candidates(hosts: list[str] | None, names: list[str] | None) -> list[dict]:
+    """`active` entries matching the scope (FR-002, FR-011, data-model §5).
+
+    `removed` and `host-gone` are excluded: they are already accounted for, and
+    re-attempting them would manufacture failures out of environments that are
+    correctly gone.
+
+    The scope resolves from STORED FIELDS ALONE, contacting no host — scoping that
+    needed a daemon would depend on the very reachability this feature cannot
+    assume, which is the whole reason enumeration comes from the record.
+    """
+    out = []
+    for e in kill_read_inventory():
+        if e.get("outcome") != "active":
+            continue
+        if hosts and e.get("host") not in hosts:
+            continue
+        if names and e.get("name") not in names:
+            continue
+        out.append(e)
+    return out
+
+
+def project_containers(host_rec: dict, project: str, include_stopped: bool) -> set[str]:
+    """Every container in a deployment's compose project, by LABEL (research R1).
+
+    NEVER via the compose file. `do_stop` resolves `compose_file_path`, which lives
+    in derived host state that dies with its host — while Feature 014's entries
+    deliberately outlive it. So the forgotten environment on a host whose state was
+    cleared, which is exactly what this feature exists to reach, is the one case a
+    compose-file path refuses.
+
+    The label is also what covers SIDECARS. Stopping `agent-container-<name>` alone
+    would leave the egress boundary and any operator helpers running while the
+    report said everything had stopped.
+    """
+    argv = driver_runtime_argv(host_rec) + ["ps"]
+    if include_stopped:
+        argv.append("-a")
+    argv += ["--filter", f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"]
+    r = query(argv, timeout=KILL_HOST_TIMEOUT)
+    if r.returncode != 0:
+        raise Fatal(f"could not list containers for project {project}")
+    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+
+
+def kill_snapshot(host_rec: dict, entries: list[dict], form: str) -> dict[str, set[str]]:
+    """What is present on this host BEFORE we act, per project (C4, data-model §3).
+
+    Without this, `already-stopped` is underivable: once a container is not running,
+    nothing distinguishes *we stopped it* from *it was already stopped*. The first
+    draft of the plan budgeted one host query and made one of the four outcomes
+    unreachable.
+
+    FR-014's per-host bound constrains VERIFICATION, and a pre-snapshot is not
+    verification — so two host queries per host, one of each.
+    """
+    return {
+        e["name"]: project_containers(host_rec, compose_project(e["name"]), form == "destroy")
+        for e in entries
+    }
+
+
+def kill_verify(host_rec: dict, entries: list[dict], form: str) -> dict[str, set[str]]:
+    """What is present AFTER we act — the observation `stopped` requires (FR-014).
+
+    TWO FORMS, TWO QUERIES, and conflating them breaks one completely:
+
+      stop    -> the RUNNING set. A stopped container still EXISTS, so checking
+                 `ps -a` would report every stop as failed.
+      destroy -> `ps -a`. The container is really gone, and checking only the
+                 running set would report success for one that is merely paused.
+    """
+    return {
+        e["name"]: project_containers(host_rec, compose_project(e["name"]), form == "destroy")
+        for e in entries
+    }
+
+
+def classify_kill(name: str, before: set[str], after: set[str]) -> str:
+    """Exactly one of KILL_OUTCOMES for one environment (C3, data-model §3).
+
+    `before` is why this can tell `stopped` from `already-stopped` at all.
+    """
+    if after:
+        return "failed"  # still there after we acted, and the host answered
+    return "stopped" if before else "already-stopped"
+
+
+def kill_note(entry: dict, form: str, outcome: str) -> None:
+    """Record what happened to this environment, capped (FR-012, data-model §4).
+
+    Written PER ENVIRONMENT as it is classified rather than batched at the end, so
+    an interrupted run has recorded exactly what it completed and nothing it did not
+    (FR-016).
+
+    A VERIFIED destroy sets `removed`; an undetermined or failed one writes no
+    outcome at all. Recording a removal that may not have happened would put a lie
+    in the one store a later audit and a later run both read — the same lie Feature
+    014 refuses when it makes `unknown` unstorable, smuggled in under an accepted
+    value.
+    """
+    notes = list(entry.get("notes") or [])
+    notes.append(f"{utc_now()} panic/{form} -> {outcome}")
+    entry["notes"] = notes[-KILL_NOTES_KEPT:]
+    if form == "destroy" and outcome == "stopped":
+        entry["outcome"] = "removed"
+        entry["outcome_at"] = utc_now()
+    with contextlib.suppress(OSError, Fatal):
+        write_inventory_entry(entry)
+
+
+def _kill_one_host(
+    host_name: str, host_rec: dict, entries: list[dict], form: str, preview: bool
+) -> list[dict]:
+    """Act on one host's environments, then verify once. Never raises.
+
+    Every failure mode here becomes `undetermined` for THIS host's environments and
+    nothing else — one host's failure must not abort the others (FR-003), and
+    reporting them `failed` would claim we know something we do not.
+    """
+    results = []
+
+    def undetermined(why: str) -> list[dict]:
+        return [
+            {"name": e["name"], "host": host_name, "outcome": "undetermined", "detail": why}
+            for e in entries
+        ]
+
+    try:
+        before = kill_snapshot(host_rec, entries, form)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        return undetermined(f"host did not answer ({e})")
+
+    if preview:
+        # A preview LOOKS but never acts (FR-008). Contacting a host is a read, so
+        # SC-007 is unaffected — and reporting what is actually RUNNING is the point:
+        # an operator previews in order to decide, and a list of what is merely
+        # RECORDED can disagree with reality.
+        return [
+            {
+                "name": e["name"],
+                "host": host_name,
+                "outcome": "would-act" if before.get(e["name"]) else "already-stopped",
+                "detail": ", ".join(sorted(before.get(e["name"], ()))) or "nothing running",
+            }
+            for e in entries
+        ]
+
+    acted: list[dict] = []
+    for e in entries:
+        targets = sorted(before.get(e["name"], ()))
+        if not targets:
+            acted.append(e)
+            continue
+        try:
+            # A contended lock is UNDETERMINED, never a die and never a silent skip:
+            # dying aborts the run (FR-003), skipping reports success for something
+            # never touched (FR-005). "We did not stop it and cannot tell you its
+            # state" is simply true.
+            with deployment_lock(host_name, e["name"]):
+                verb = ["rm", "-f", "-v"] if form == "destroy" else ["stop"]
+                run_child(driver_runtime_argv(host_rec) + verb + targets)
+            acted.append(e)
+        except (Fatal, OSError, subprocess.SubprocessError) as exc:
+            results.append(
+                {
+                    "name": e["name"],
+                    "host": host_name,
+                    "outcome": "undetermined",
+                    "detail": f"another lifecycle operation held the lock, or the runtime failed ({exc})",
+                }
+            )
+
+    try:
+        after = kill_verify(host_rec, acted, form)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        return results + [
+            {"name": x["name"], "host": host_name, "outcome": "undetermined",
+             "detail": f"acted, but the host did not answer the verification ({e})"}
+            for x in acted
+        ]  # fmt: skip
+
+    for e in acted:
+        outcome = classify_kill(
+            e["name"], before.get(e["name"], set()), after.get(e["name"], set())
+        )
+        kill_note(e, form, outcome)
+        results.append({"name": e["name"], "host": host_name, "outcome": outcome, "detail": ""})
+    return results
+
+
+def do_panic(
+    hosts: list[str] | None,
+    names: list[str] | None,
+    destroy: bool,
+    yes: bool,
+    preview: bool,
+    timeout: float,
+    as_json: bool,
+) -> None:
+    """The kill switch (C1). Stops everything recorded, and tells the truth about
+    what it could not reach.
+
+    THE HARD PART IS NOT STOPPING. An operator reaching for this is already having a
+    bad day, and a report that overstates success is worse than an error because it
+    ends the investigation. Hence: enumerate from the RECORD (not from whichever
+    hosts answer), verify by OBSERVATION (not by exit status), and let a single
+    `undetermined` fail the whole run.
+    """
+    form = "destroy" if destroy else "stop"
+    entries = kill_candidates(hosts, names)
+    all_active = kill_candidates(None, None)
+    excluded = len(all_active) - len(entries)
+
+    if not all_active:
+        # Absent or empty store. NOTHING RECORDED, not nothing exists — the tool
+        # cannot make the second claim, and at this moment the weaker reading sounds
+        # like reassurance. The store's message wins over the scope's (A2).
+        log(
+            "nothing recorded to act on. The inventory begins at install and is not "
+            "backfilled, so this means nothing was RECORDED — not that nothing exists."
+        )
+        if as_json:
+            emit_json({"form": form, "results": [], "excluded": excluded, "ok": True})
+        return
+    if not entries:
+        log(f"the scope matched none of the {len(all_active)} recorded environments")
+        if as_json:
+            emit_json({"form": form, "results": [], "excluded": excluded, "ok": True})
+        return
+
+    if destroy and not preview and not yes:
+        # Only DESTROY confirms. Stopping is recoverable and a prompt is friction on
+        # the action whose entire value is speed (FR-007).
+        if not is_tty():
+            die("refusing to destroy without -y/--yes on a non-TTY")
+        what = ", ".join(sorted({f"{e['name']}@{e['host']}" for e in entries}))
+        if not questionary.confirm(
+            f"DESTROY {len(entries)} environment(s) and their volumes ({what})?", default=False
+        ).ask():
+            log("aborted")
+            return
+
+    by_host: dict[str, list[dict]] = {}
+    for e in entries:
+        by_host.setdefault(str(e.get("host")), []).append(e)
+
+    reg = load_registry()
+    results: list[dict] = []
+    # PARALLEL BY HOST, sequential within one: total time is bounded by the slowest
+    # host rather than the sum, which matters when the point is acting quickly — with
+    # N unreachable hosts, sequential contact costs N timeouts. Sequential within a
+    # host because that host's single verification re-query must follow its work.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(by_host))) as pool:
+        futures = {}
+        for host_name, host_entries in by_host.items():
+            rec = get_host(reg, host_name) or (
+                implicit_local_host() if host_name == DEFAULT_HOST else None
+            )
+            if rec is None:
+                # The entry names a host the registry no longer has. Not reachable,
+                # and not a lie either — FR-003 keeps the reference precisely so this
+                # reads as "cannot check" rather than "never existed".
+                results += [
+                    {"name": e["name"], "host": host_name, "outcome": "undetermined",
+                     "detail": "host is no longer registered"}
+                    for e in host_entries
+                ]  # fmt: skip
+                continue
+            futures[pool.submit(_kill_one_host, host_name, rec, host_entries, form, preview)] = (
+                host_name,
+                host_entries,
+            )
+        for fut in concurrent.futures.as_completed(futures):
+            host_name, host_entries = futures[fut]
+            try:
+                results += fut.result(timeout=timeout)
+            except Exception as e:  # noqa: BLE001 — one host must never abort the rest
+                results += [
+                    {"name": x["name"], "host": host_name, "outcome": "undetermined",
+                     "detail": f"host did not answer within {timeout:g}s ({e})"}
+                    for x in host_entries
+                ]  # fmt: skip
+
+    results.sort(key=operator.itemgetter("host", "name"))
+    # A PREVIEW IS A QUERY, not an action: an unreachable host during a preview is
+    # information, so it exits 0 even when it could not see everything.
+    ok = preview or all(r["outcome"] in KILL_OK_OUTCOMES for r in results)
+    unresolved = [r for r in results if r["outcome"] not in KILL_OK_OUTCOMES]
+    if as_json:
+        # ONE envelope, carrying the verdict — not a results envelope followed by
+        # `die`'s error envelope. Feature 009 promises exactly one envelope per
+        # invocation ("23 commands cannot drift into 23 payload shapes"), and two
+        # JSON documents on stdout are unparseable by the agents --json exists for.
+        # The non-zero exit still happens; only the emitting is done here.
+        emit_json(
+            {
+                "form": form,
+                "preview": preview,
+                "results": results,
+                "excluded": excluded,
+                "ok": ok,
+                "unresolved": len(unresolved),
+            }
+        )
+        if not ok:
+            raise typer.Exit(1)
+        return
+    else:
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        for col in ("OUTCOME", "NAME", "HOST", "DETAIL"):
+            table.add_column(col)
+        for r in results:
+            table.add_row(r["outcome"], r["name"], r["host"], r.get("detail", ""))
+        console.print(table)
+        if excluded:
+            log(f"{excluded} recorded environment(s) excluded by the scope")
+    if not ok:
+        # "We do not know" is NOT success. This is the requirement the whole feature
+        # turns on: a run that reported success while something was unstopped or
+        # unconfirmed would end the investigation.
+        die(
+            f"{len(unresolved)} environment(s) were not stopped or not confirmed — "
+            f"this run did NOT succeed. An unreachable host is reported undetermined, "
+            f"never stopped."
+        )
 
 
 def do_inventory_list(as_json: bool) -> None:
@@ -12808,6 +13186,43 @@ inventory_app = typer.Typer(
     ),
 )
 app.add_typer(inventory_app, name="inventory")
+
+
+@app.command()
+def panic(
+    host: list[str] = typer.Option(
+        None, "--host", help="Limit to these hosts (repeatable). Default: every recorded host."
+    ),
+    name: list[str] = typer.Option(
+        None, "--name", help="Limit to these environments (repeatable)."
+    ),
+    destroy: bool = typer.Option(
+        False,
+        "--destroy",
+        help="Remove the containers AND their volumes (never images). For a suspected "
+        "credential leak: stopping leaves volumes that may hold a login.",
+    ),
+    preview: bool = typer.Option(
+        False, "--preview", help="Show what would be affected, and change nothing."
+    ),
+    timeout: float = typer.Option(
+        KILL_HOST_TIMEOUT, "--host-timeout", help="Per-host budget in seconds."
+    ),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the --destroy confirmation."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """STOP EVERYTHING this tool is running, everywhere (the kill switch).
+
+    Enumerates from the durable inventory rather than from whichever hosts answer,
+    verifies every stop by observation, and reports overall FAILURE if anything was
+    not stopped or could not be confirmed.
+
+    Runaway or looping agent -> plain `panic` (recoverable; volumes intact).
+    Suspected credential leak -> `panic --destroy` (a volume may hold a login).
+    Revoking a credential at the provider is outside this tool.
+    """
+    set_json_mode(as_json)
+    do_panic(list(host or []), list(name or []), destroy, yes, preview, timeout, as_json)
 
 
 @inventory_app.command("reconcile")
