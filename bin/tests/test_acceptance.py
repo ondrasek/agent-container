@@ -4010,3 +4010,38 @@ def test_panic_scope_leaves_other_environments_untouched(acc):
         [RUNTIME, "ps", "--format", "{{.Names}}"], capture_output=True, text=True
     ).stdout
     assert "agent-container-accpanic10" in running  # untouched
+
+
+def test_panic_repeat_with_an_unreachable_host_still_fails(acc):
+    """S10 clarified (C11): repeatability means acting twice is SAFE — never that a
+    host we cannot see stops being reported. Both halves, because asserting only the
+    clean repeat tests the easy one."""
+    acc.up("accpanic11")
+    assert _panic(acc).returncode == 0
+    assert _panic(acc).returncode == 0  # clean repeat succeeds
+
+    inv = acc.state_dir / "xdgdata" / "agent-container" / "inventory"
+    ghost = json.loads(next(inv.glob("*.json")).read_text())
+    ghost |= {"entry_id": "ghost2", "name": "accghost2", "host": "unregistered-host"}
+    (inv / "ghost2.json").write_text(json.dumps(ghost))
+    r = _panic(acc)
+    assert r.returncode != 0, "a repeat laundered an unknown into success"
+
+
+def test_panic_is_bounded_by_the_slowest_host_not_the_sum(acc):
+    """S4 (C5, SC-002a). MEASURED, because a sequential implementation passes every
+    other panic test here and only shows up as N timeouts against N dead hosts."""
+    acc.up("accpanic12")
+    inv = acc.state_dir / "xdgdata" / "agent-container" / "inventory"
+    base = json.loads(next(inv.glob("*.json")).read_text())
+    for i in range(3):
+        e = base | {"entry_id": f"dead{i}", "name": f"accdead{i}", "host": f"dead-host-{i}"}
+        (inv / f"dead{i}.json").write_text(json.dumps(e))
+
+    started = time.monotonic()
+    r = _panic(acc, "--host-timeout", "8")
+    elapsed = time.monotonic() - started
+    assert r.returncode != 0  # three undetermined hosts
+    # Three dead hosts sequentially would be ~24s+. Generous ceiling so this is a
+    # shape assertion, not a stopwatch: anything near N*timeout means sequential.
+    assert elapsed < 20, f"looks sequential: {elapsed:.1f}s for 3 unreachable hosts"

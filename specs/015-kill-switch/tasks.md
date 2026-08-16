@@ -190,16 +190,16 @@ what it skipped.
 - [X] T042 Repeatability (FR-010, C11): a second run over already-stopped environments exits 0 —
       (SC-008) **but a still-unreachable host still yields `undetermined` and still fails the run**.
       Repetition never launders an unknown (clarified)
-- [ ] T043 [P] Acceptance S10 + the clarified case: a clean repeat succeeds; a repeat with a host
+- [X] T043 [P] Acceptance S10 + the clarified case: a clean repeat succeeds; a repeat with a host
       still unreachable does not. Both halves, or the test asserts the easy one
 - [X] T044 Interruption partway leaves a truthful record and a repeat is safe (FR-016). **The record
       IS the inventory write-back** (data-model §4): each environment's result is written as it is
       classified, not batched at the end, so an interrupted run has recorded exactly what it
       completed and nothing it did not
-- [ ] T044a [P] Unit test T044: interrupt after some environments are classified and assert the store
+- [X] T044a [P] Unit test T044: interrupt after some environments are classified and assert the store
       reflects those and only those. Every other honesty requirement here has a test; this one had
       none
-- [ ] T045 [P] Acceptance S4 — with N hosts and one unreachable, elapsed time is **one** timeout, not
+- [X] T045 [P] Acceptance S4 — with N hosts and one unreachable, elapsed time is **one** timeout, not
       N (SC-002a). Measured, because a sequential implementation passes every other test in this file
 - [X] T046 [P] Acceptance S12 — an unreadable store refuses; an absent one succeeds saying *nothing
       recorded* (SC-009)
@@ -216,9 +216,9 @@ what it skipped.
 - [X] T049 [P] `docs/inventory.md` — the kill switch as the inventory's consumer: 014 remembers and
       reports, 015 acts. State that 014's deliberate refusal to delete anything is what makes this a
       separate, explicit action
-- [ ] T050 [P] Reconcile `docs/threat-model.md`'s 015 row against what was built — a single-command
+- [X] T050 [P] Reconcile `docs/threat-model.md`'s 015 row against what was built — a single-command
       DoS, and 014's record as a target list. Structural guards in `bin/tests/` parse that file
-- [ ] T051 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
+- [X] T051 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
       before adding**. Report the before/after number
 - [X] T052 Register the command as **`panic`** (settled by clarification; FR-001). Named so a
       habitual typo cannot reach it — `kill` is overloaded and `stop-all` reads oddly with

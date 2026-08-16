@@ -354,3 +354,66 @@ def test_json_mode_emits_exactly_ONE_envelope_even_when_the_run_fails(seeded, mo
     assert parsed["data"]["ok"] is False  # ...and the payload carries the verdict
     assert parsed["data"]["unresolved"] == 2
     assert all(r["outcome"] == "undetermined" for r in parsed["data"]["results"])
+
+
+def test_an_interrupted_run_recorded_exactly_what_it_completed(wiz, monkeypatch):
+    """T044a/FR-016. The record IS the inventory write-back, and it happens per
+    environment as classified rather than batched at the end — so an interruption
+    leaves a truthful record rather than none, or worse, a complete-looking one.
+
+    Every other honesty requirement in this feature has a test; this one had none.
+    """
+    for n in ("alpha", "beta", "gamma"):
+        wiz.write_inventory_entry(wiz.build_inventory_entry(n, "local", False))
+    _no_act(wiz, monkeypatch)
+    monkeypatch.setattr(wiz, "kill_snapshot", lambda h, e, f: {x["name"]: {"c"} for x in e})
+    monkeypatch.setattr(wiz, "kill_verify", lambda h, e, f: {x["name"]: set() for x in e})
+
+    real_note = wiz.kill_note
+    seen: list[str] = []
+
+    def note_then_die(entry, form, outcome):
+        if len(seen) == 2:
+            raise KeyboardInterrupt("operator hit Ctrl-C")
+        seen.append(entry["name"])
+        real_note(entry, form, outcome)
+
+    monkeypatch.setattr(wiz, "kill_note", note_then_die)
+    with pytest.raises(KeyboardInterrupt):
+        wiz.do_panic(None, None, False, False, False, 5.0, False)
+
+    noted = {e["name"] for e in wiz.read_inventory_entries() if e.get("notes")}
+    assert noted == set(seen), "the record does not match what the run actually completed"
+    assert len(noted) == 2  # not zero (batched) and not three (claimed more than it did)
+
+
+def test_hosts_are_contacted_in_parallel_not_in_sequence(wiz, monkeypatch):
+    """SC-002a's mechanism, hermetically: with N hosts, the per-host work must
+    OVERLAP. A sequential implementation passes every other test in this file and
+    costs N timeouts against N unreachable hosts — in the one command whose value is
+    speed under pressure."""
+    import threading
+    import time as _t
+
+    for i in range(4):
+        wiz.write_inventory_entry(wiz.build_inventory_entry(f"env{i}", f"host{i}", False))
+    monkeypatch.setattr(
+        wiz, "get_host", lambda reg, n: {"driver": "docker", "context": "", "address": "localhost"}
+    )
+    concurrent_peak = [0]
+    live = [0]
+    lock = threading.Lock()
+
+    def slow_snapshot(host_rec, entries, form):
+        with lock:
+            live[0] += 1
+            concurrent_peak[0] = max(concurrent_peak[0], live[0])
+        _t.sleep(0.2)
+        with lock:
+            live[0] -= 1
+        return {e["name"]: set() for e in entries}
+
+    monkeypatch.setattr(wiz, "kill_snapshot", slow_snapshot)
+    monkeypatch.setattr(wiz, "kill_verify", lambda h, e, f: {x["name"]: set() for x in e})
+    wiz.do_panic(None, None, False, False, False, 5.0, False)
+    assert concurrent_peak[0] > 1, "hosts were contacted sequentially"
