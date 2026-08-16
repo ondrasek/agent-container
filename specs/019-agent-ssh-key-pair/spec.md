@@ -63,6 +63,15 @@ data.
 
 ### Session 2026-08-16 (later)
 
+- Q: Which host does the registration probe target? → A: **Only the `--repo` host; with no `--repo`,
+  no probe — and say the key is unverified.** The only host the tool can name without guessing is the
+  one the operator told it about. Defaulting to `github.com` would invent a fact: an agent whose only
+  SSH use is a self-hosted forge would be told "not registered" about a host it never contacts, and
+  the tool would send traffic to a third party the operator never named — which a Feature 012
+  declaration would then have to permit. The cost is accepted: an operator using the key for plain
+  `ssh` to their own servers gets the key and *unverified*, because the tool cannot enumerate
+  everywhere an agent might connect.
+
 - Q: What does `up` exit with when FR-013 defers the clone? → A: **Non-zero.** The environment is not
   usable yet, so `up` did not do what was asked, and the exit status says so. The container is still
   created and its key generated — this is *"created, not ready"*, not *"nothing happened"*.
