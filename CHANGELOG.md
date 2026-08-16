@@ -2,6 +2,72 @@
 
 <!-- version list -->
 
+## v0.28.0 (2026-08-16)
+
+### Bug Fixes
+
+- **ssh-key**: Carry the agent's public key on the list --json row
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`0a06fa8`](https://github.com/ondrasek/agent-container/commit/0a06fa802d0c8c5bc0e7f73daab5e2e157200b3d))
+
+- **ssh-key**: Make the clone DECIDE before the deploy reports on it
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`43a4040`](https://github.com/ondrasek/agent-container/commit/43a40400d7ae98439ce82b6a06e2236b1ae87019))
+
+- **ssh-key**: The pending-clone recovery names a command that works
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`defdcf6`](https://github.com/ondrasek/agent-container/commit/defdcf6296098b0b15b58d02f56cc92895d1131c))
+
+### Documentation
+
+- **specs**: A deferred clone exits non-zero, and must say what NOT to do
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`82b5e07`](https://github.com/ondrasek/agent-container/commit/82b5e0730ae4253c0d93d728d58020fe0f0eae8f))
+
+- **specs**: Close every analyze finding for 019, and document the exit codes
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`286e305`](https://github.com/ondrasek/agent-container/commit/286e30566415a1a205b5f3e7a443954da27b5d64))
+
+- **specs**: Re-plan 019 after four clarifications
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`04864bc`](https://github.com/ondrasek/agent-container/commit/04864bc00bdb30781553843fae169c342db4f60c))
+
+- **specs**: Regenerate tasks for 019 after the re-plan
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`2953409`](https://github.com/ondrasek/agent-container/commit/2953409c592da96ab53049a7bc31784b71027569))
+
+- **specs**: The probe targets the --repo host, or nothing at all
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`3f5711f`](https://github.com/ondrasek/agent-container/commit/3f5711f9cb01f0d1bf7eefb0d7f7827b44c97ad9))
+
+- **specs**: Write ~/.ssh/config once; make rotation an explicit command
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`1d8454f`](https://github.com/ondrasek/agent-container/commit/1d8454f1ae1ae6984ef0fd9b31c8d79c6a294d93))
+
+- **ssh-key**: Reconcile the docs with a feature that is mostly a deletion
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`d0f05d7`](https://github.com/ondrasek/agent-container/commit/d0f05d7d404a50257de3db820602cd513b30f803))
+
+### Features
+
+- **ssh**: The agent generates its own SSH key pair
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`c2610a2`](https://github.com/ondrasek/agent-container/commit/c2610a2bdc300457d154e3ea708d663ee77a9bc3))
+
+### Testing
+
+- **ssh-key**: The hermetic and acceptance tiers for the agent key pair
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`394c0a4`](https://github.com/ondrasek/agent-container/commit/394c0a4c77750effed304b80b3ad4c91955dfa70))
+
+### Breaking Changes
+
+- **ssh**: `up --push-key`, `redeploy --push-key`, the SSH_PUSH_KEY_B64 env-file variable and
+  `target: push_key` in a project spec are all removed. Each now fails with a message saying the
+  agent generates its own key and the operator registers the PUBLIC half. `--known-hosts` and
+  PUSH_KNOWN_HOSTS STAY — they verify the forge, which is the opposite direction and public data.
+
+
 ## v0.27.0 (2026-08-16)
 
 ### Documentation
