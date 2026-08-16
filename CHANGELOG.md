@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.27.0 (2026-08-16)
+
+### Documentation
+
+- **specs**: Generate tasks for Feature 019 — PREMISE UNDER REVIEW
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`7fe1210`](https://github.com/ondrasek/agent-container/commit/7fe12101ffacd10422d668f7cab44efa25c3e780))
+
+- **specs**: It is the AGENT SSH KEY PAIR, not a "push key"
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`a51b591`](https://github.com/ondrasek/agent-container/commit/a51b591350540f9d8bec73103ca7dc3a725df16b))
+
+- **specs**: Plan Feature 019 container-generated push key
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`e7a39ed`](https://github.com/ondrasek/agent-container/commit/e7a39edff43b25095f684c0255c41d0c3c8deb48))
+
+
 ## v0.26.0 (2026-08-16)
 
 ### Bug Fixes
