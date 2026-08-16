@@ -12,10 +12,12 @@ baked into an image):
 2. **Runtime-injected ephemeral material** (Feature 003). `up`/`redeploy` stage
    selected files on the operator's machine and ship them to the target host as
    compose `configs`, so they travel over a **remote** runtime context too. A
-   **tool-injected secret** (the outbound push key, an API-key file) lands under
-   `/run/agent-container/…` — an ephemeral tmpfs-style path that **vanishes with
-   the container** and is **never** copied onto a persistent per-container volume
-   (least-exposure invariant **FR-012**). The CLI passes **paths, never secret
+   **tool-injected secret** (an API-key file) lands under `/run/agent-container/…`
+   — an ephemeral tmpfs-style path that **vanishes with the container** and is
+   **never** copied onto a persistent per-container volume (least-exposure
+   invariant **FR-012**). The rule is about material the **tool injects**: since
+   Feature 019 the agent's own SSH key is *generated inside the container* and
+   deliberately persists on the `ssh` volume, which no injection channel touches. The CLI passes **paths, never secret
    values** (never on argv — FR-011), and never inlines a secret into the
    generated compose file.
 
@@ -23,9 +25,12 @@ baked into an image):
 image layer (FR-010), placed on a process command line (FR-011), or left in a
 host persistent volume by the tool (FR-012). The operator's local copy remains
 the **sole durable copy**; rotating a secret is a local edit + `redeploy`
-(FR-015). The one deliberate exception is the **inbound sshd host key**, which
-persists on the `~/.ssh` volume **by design** so the container keeps a stable
-identity — it is distinct from every outbound/ephemeral credential below (SC-008).
+(FR-015). Two deliberate exceptions persist on the `~/.ssh` volume **by design**,
+and both are **container-generated, never injected**: the **inbound sshd host
+key** (a stable identity to attach to) and, since Feature 019, the **agent's own
+SSH key pair** (a stable identity to *register* — regenerating it each boot would
+silently invalidate whatever the operator registered on the forge). They are
+distinct keys with distinct roles, never interchanged (SC-008).
 
 ## What's in `.env`
 
@@ -37,7 +42,6 @@ identity — it is distinct from every outbound/ephemeral credential below (SC-0
 | `ANTHROPIC_API_KEY`  | Claude Code authentication (layered fallback; the file-first channel is preferred — see below).                 |
 | `OPENAI_API_KEY`     | Codex (`@openai/codex`) authentication (layered fallback).                                                      |
 | (other provider keys) | `pi-coding-agent` and `opencode` are multi-provider; add whichever provider keys you point them at (e.g. `GOOGLE_API_KEY`). |
-| `SSH_PUSH_KEY_B64`   | base64 of an unencrypted **outbound** SSH push key (Feature 003). Ephemeral — consumed at boot, **never** persisted. Env-file parity for `up --push-key`. |
 | `PUSH_KNOWN_HOSTS`   | `known_hosts` lines for the push remote, so outbound push never stalls on unknown-host verification. Env-file parity for `up --known-hosts`. |
 
 See `.env.example` at the repo root for the canonical template. The actual `.env` is gitignored.
@@ -75,42 +79,61 @@ The whole ephemeral-container model rests on agents pushing autonomously and
 the operator selects by the remote's URL scheme, and a deployment may carry
 either or both.
 
-### SSH push (default)
+### SSH — the agent's own key pair (default)
 
-An **outbound SSH deploy key** injected at runtime as an ephemeral secret. This
-is the documented default — it matches the SSH-first design and needs no
-long-lived token.
+Since **Feature 019** the container **generates its own** ed25519 key pair on
+first boot at the conventional identity path `~/.ssh/id_ed25519`, and the
+**private half never leaves it**. The operator's part is to take the **public**
+half and register it wherever the agent must reach:
 
 ```bash
-agent-container up acme --push-key ~/.ssh/agent_push_ed25519 \
-                        --known-hosts ~/.ssh/known_hosts.github
+agent-container ssh-key show acme        # the line to paste into the forge
+agent-container list --json              # same value, as agent_ssh_public_key
 ```
 
-- The key is validated (`validate_private_key`; encrypted keys are **rejected**)
-  and its path (never its bytes) is threaded through; a **missing** file makes
-  the deploy `die` before any container is created (FR-016).
-- It is delivered to `INJECT_PUSH_KEY_PATH` = `/run/agent-container/push_ed25519_key`
-  — **ephemeral** (FR-012). The entrypoint reads it **in place** and sets:
+- **Captured, not supplied.** The tool reads the *public* key back through the
+  runtime at deploy time and stores it in host state, so `ssh-key show` answers
+  with the environment **stopped** or its host unreachable — which is exactly when
+  an operator needs it.
+- **Nothing wires it.** The conventional path is the whole mechanism: `git`,
+  `ssh`, `scp` and `rsync` all find it with no configuration. `core.sshCommand` is
+  **empty**, and its emptiness is asserted by a test — with a value there the key
+  could be working through scaffolding this feature claims to have deleted.
+- **`~/.ssh/config` is written once**, and write-once applies to the **block**,
+  not the file: a config the agent wrote first still gains the tool's block, and
+  the agent's own entries survive a recreate. The block is explicit —
+  `IdentityFile`, `IdentitiesOnly yes`, `UserKnownHostsFile`,
+  `StrictHostKeyChecking accept-new` (ssh's default is `ask`, which for a
+  non-interactive agent means *fail*).
+- **Rotation is explicit**: `agent-container ssh-key rotate <name>` replaces the
+  key **without destroying the workspace**, and says the previous registration is
+  now dead. `down --purge` also rotates it — by destroying the volume, which is
+  the wrong tool when the work is worth keeping — and warns that it did.
+- **Least privilege.** A per-container key registered as a repository deploy key
+  authorises **one repository**. The removed `--push-key` was in practice handed
+  the operator's *personal* key, so the container received everything that key
+  authorised.
+- **A first boot with an SSH `--repo` cannot clone** — the key cannot exist before
+  the container does. That invocation starts the container anyway, prints the key,
+  and exits with the *pending registration* code; see `docs/execution.md`.
 
-  ```sh
-  git config --global core.sshCommand \
-    "ssh -i <push-key> -o IdentitiesOnly=yes \
-         -o UserKnownHostsFile=<known_hosts> -o StrictHostKeyChecking=accept-new"
-  ```
+**Four channels were removed**, each refusing with an explanation rather than a
+bare "no such option" — the operator who used them had a reason, and it is now
+served without a private key on their disk:
 
-  `IdentitiesOnly=yes` stops SSH from offering any other key; the seeded
-  `known_hosts` (from `--known-hosts` / `PUSH_KNOWN_HOSTS`) means the first push
-  to the remote does not stall on unknown-host verification (FR-003).
-- The push key is **never** written onto the `~/.ssh` volume, and is a **distinct
-  credential from the inbound sshd host key** — different key, different role,
-  never interchanged (FR-002 / SC-008). After teardown no copy survives on any
-  volume; `~/.ssh/agent_push_ed25519` on the operator's machine is the sole
-  durable copy (SC-004).
-- **Env-file parity:** `SSH_PUSH_KEY_B64` (base64 private key) + `PUSH_KNOWN_HOSTS`
-  deliver the same via the env channel — the natural fit for the Quadlet path.
-- **Scoping (FR-004):** the default is a single user key; a **narrowly-scoped
-  per-repository deploy key** is simply a narrower key passed to the same
-  `--push-key` flag, limiting blast radius.
+| Removed | Replacement |
+|---|---|
+| `up --push-key` / `redeploy --push-key` | `ssh-key show`, then register the public half |
+| `SSH_PUSH_KEY_B64` (env-file parity) | as above — there is no private key to carry |
+| declarative `target: push_key` | as above; a declared `push_key` is **refused**, not ignored |
+| `clone_credential_precheck` | the two-phase clone (FR-013) — the premise inverted |
+
+`--known-hosts` / `PUSH_KNOWN_HOSTS` **stay**: they verify the **forge**, which is
+the opposite direction and public data.
+
+Any agent SSH private key staged by a pre-019 release is **deleted on the next
+deploy, loudly** — `--purge` never removed that file, so a release that merely
+stopped writing it would leave the exposure on every machine that used the flag.
 
 ### HTTPS + `GH_TOKEN` (alternative)
 
@@ -299,16 +322,18 @@ formalizes the whole-directory model on top of this thin manifest.
 | Token in container logs                  | Operator responsibility   | Don't `echo $GH_TOKEN`. Entrypoint scripts avoid logging env contents.                                  |
 | Long-lived broad-scope PAT               | Mitigated by hygiene      | Use `repo`-scoped PATs with explicit expiration. Rotate.                                                |
 | Agent OAuth credential on a named volume | **Accepted**              | Interactive `claude`/`codex`/`pi`/`opencode` login persists to a per-container volume (inside the Lima VM on macOS). Restrict access to the runtime's volume storage. `down --purge` deletes it. |
-| Tool-injected push key / API-key file    | **Eliminated by design**  | Delivered under `/run/agent-container/…` (ephemeral); never copied to a volume (FR-012). Vanishes with the container; the operator's local copy is the sole durable copy (SC-004). |
+| Tool-injected API-key file               | **Eliminated by design**  | Delivered under `/run/agent-container/…` (ephemeral); never copied to a volume (FR-012). Vanishes with the container; the operator's local copy is the sole durable copy (SC-004). |
+| Agent SSH **private** key on the operator's disk | **Eliminated by design** (019) | The tool has no channel that accepts one. The key is generated in the container and never leaves it; only the public half is read back. |
+| Agent SSH private key on a persisted volume | **Accepted, deliberately** (019) | It must outlive a recreate or every recreate invalidates the operator's registration. `--purge` (or `ssh-key rotate`) is the revocation boundary, and both say so. Restrict access to the runtime's volume storage. |
 
-If hardening the HTTPS path is needed later, the upgrade path is: switch `GH_TOKEN` to a compose `secrets:` block (or `podman secret` on the VPS), keep `.env` for non-secret config, and read `/run/secrets/gh-token` in the entrypoint instead of `$GH_TOKEN`. One-line change in the helper. (The SSH push key already rides the ephemeral-config channel.)
+If hardening the HTTPS path is needed later, the upgrade path is: switch `GH_TOKEN` to a compose `secrets:` block (or `podman secret` on the VPS), keep `.env` for non-secret config, and read `/run/secrets/gh-token` in the entrypoint instead of `$GH_TOKEN`. One-line change in the helper. (The agent's SSH key is not affected — it is generated in the container and never travels.)
 
 ### Agent provider auth: three layered options
 
 Model/API credentials have three layered delivery paths; pick per agent:
 
 1. **File-first injection (default)** — a convention-discovered per-provider key
-   file (or `SSH_PUSH_KEY_B64`-style env), delivered **ephemerally** (see
+   file (or a provider-key env var), delivered **ephemerally** (see
    *Model/API credentials — file-first delivery* above). Rotates by a local edit +
    `redeploy`; never persisted by the tool.
 2. **Interactive login** — especially for Claude/Codex **subscription** accounts,
@@ -321,13 +346,14 @@ Model/API credentials have three layered delivery paths; pick per agent:
    layered fallback for agents that read the credential from the environment.
 
 Git identity (`GIT_USER_NAME` / `GIT_USER_EMAIL`) is always **required**. A push
-credential is required for autonomous push — either the SSH deploy key (default)
-or `GH_TOKEN` (HTTPS alternative).
+credential is required for autonomous push — either the container's own SSH key
+registered on the remote (default) or `GH_TOKEN` (HTTPS alternative).
 
 ## Out of scope (deferred)
 
 - **Per-remote** credential routing (a different push credential per git remote).
-  Per-**repo** scoping is supported — a narrowly-scoped deploy key via `--push-key`.
+  Per-**repo** scoping is supported, and is now the default shape: register the
+  container's own key (`ssh-key show`) as a deploy key on one repository.
 - External secret managers (Vault, 1Password, AWS Secrets Manager).
 - Encrypted-at-rest `.env` (e.g. `sops`, `age`) — operator can adopt later without changing the container contract.
 

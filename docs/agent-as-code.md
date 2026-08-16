@@ -157,25 +157,37 @@ Multi-line values, and values with characters an env-file parser would mangle
 env delivery — deliver those as a provider API key (file channel), or, for an SSH key,
 give the credential an explicit **`target`** (below).
 
-**SSH-key credentials** — a credential with `target: push_key |
-authorized_key` is routed to the Feature 003 ssh-injection channels instead of an env
-var (the multi-line delivery the env-file rejects): `push_key` → the outbound git push
-identity (`--push-key`, ephemeral `/run`), `authorized_key` → an inbound principal
-(`--authorized-key`, accumulates).
+**SSH-key credentials** — a credential with `target: authorized_key` is routed to
+the Feature 003 ssh-injection channel instead of an env var (the multi-line delivery
+the env-file rejects): it declares an **inbound principal** (`--authorized-key`,
+accumulates). The resolved key stays in memory then a 0600 staged file; it never
+touches the project, logs, argv, or registry.
 
-`target: host_key` was a third option until Feature 018 removed private-host-key
-injection. A spec that declares it is now **refused with an explanation**, not silently
-dropped — silently dropping it would leave you believing your key is in use. The
-container generates its own host key and the tool captures the public half; there is
-nothing to supply. The resolved key stays in memory then a
-0600 staged file; it never touches the project, logs, argv, or registry. A
-passphrase-protected private key is (correctly) refused for `push_key` — store the
-unencrypted key in a manager and fetch it, rather than decrypting a committed file.
+**Two targets were removed, and both are REFUSED rather than silently dropped** —
+silently dropping one would leave you believing your key is in use:
+
+- `target: host_key`, until **Feature 018** removed private-host-key injection. The
+  container generates its own host key and the tool captures the public half.
+- `target: push_key`, until **Feature 019** removed the last private-key channel. The
+  container generates its **own** SSH key pair; the private half never leaves it, and
+  the public half is what you register:
+
+  ```sh
+  agent-container ssh-key show acme    # paste this into the forge as a deploy key
+  ```
+
+  A per-container key registered on one repository authorises **one repository** —
+  where a declared `push_key` was in practice the operator's personal key, which
+  authorises everything that key reaches.
+
+There is nothing left to supply for either: what the container needs, it makes.
 
 ```yaml
 credentials:
+  # REFUSED since 019 — there is no private key to deliver.
   - { name: git-push, source: onepassword, vault: Infra, item: deploy-key, field: private_key, target: push_key }
-  - { name: git-push, source: command, argv: ["pass", "show", "infra/deploy-key"], target: push_key }
+  # Still valid: an inbound principal allowed to reach the container.
+  - { name: laptop, source: file, path: ~/.ssh/id_ed25519.pub, target: authorized_key }
 ```
 
 ## Where secrets should live — the recommended taxonomy

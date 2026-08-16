@@ -42,7 +42,7 @@ completed).
       **conventional** identity path, which is already the persisted `ssh` volume (research R4). Not a
       tool-specific filename: being conventional is what makes git, `ssh`, `scp` and `rsync` all use it
       with no wiring
-- [ ] T002 [P] Amend the `/run` invariant in `CLAUDE.md`: tool-**injected** secrets stay ephemeral;
+- [X] T002 [P] Amend the `/run` invariant in `CLAUDE.md`: tool-**injected** secrets stay ephemeral;
       **self-generated** material may live on the container's own volume. State the exception — an
       invariant quietly broken is worse than one deliberately changed
 
@@ -82,7 +82,7 @@ completed).
       container that starts, cannot authenticate anywhere, and says nothing. `ssh-keygen` can fail on a
       full or read-only volume, and the agent would otherwise meet it hours later as an inexplicable
       permission denied
-- [ ] T010b [P] Test T010a: with generation forced to fail, the failure is stated — asserted on the
+- [X] T010b [P] Test T010a: with generation forced to fail, the failure is stated — asserted on the
       message, because a container that started is not by itself evidence of anything
 - [X] T011 Capture the public key by **reusing 018's primitive** (research R6) — it already polls,
       validates and refuses an empty read, and a fresh copy would omit exactly those subtleties
@@ -90,7 +90,7 @@ completed).
       `redeploy --push-key`, `SSH_PUSH_KEY_B64`, `target: push_key`, `stage_push_injection`'s push arm,
       `INJECT_PUSH_KEY_PATH`, `clone_credential_precheck`. The failure mode is **one channel
       surviving**, indistinguishable from a complete removal by every other test here
-- [ ] T013 [P] Prove T012's census can fail: reintroduce a fake channel and assert it is rejected
+- [X] T013 [P] Prove T012's census can fail: reintroduce a fake channel and assert it is rejected
 
 ---
 
@@ -110,9 +110,9 @@ completed).
       comes from what was captured, and a stopped or unreachable environment is when it is most needed
 - [X] T017 [US1] [P] Unit tests for T015/T016: a captured key yields a pasteable line; an uncaptured
       one yields an explicit "not captured", never a silent empty string (SC-004)
-- [ ] T018 [US1] [P] Acceptance S4 — `down` then `up` keeps the key (C4, SC-003). **The test that
+- [X] T018 [US1] [P] Acceptance S4 — `down` then `up` keeps the key (C4, SC-003). **The test that
       catches a non-idempotent generator**, whose symptom otherwise arrives days later
-- [ ] T019 [US1] [P] Acceptance S3 — register the emitted line on a real repository and **push for
+- [X] T019 [US1] [P] Acceptance S3 — register the emitted line on a real repository and **push for
       real** (C3, SC-002), plus S2's check that `core.sshCommand` is **empty** — proving the key works
       through the conventional path with nothing wired
 
@@ -123,7 +123,7 @@ completed).
 **Goal**: the tool neither takes, stores, stages nor injects an outbound private key.
 **Independent test**: S1 — `grep -rl 'PRIVATE KEY'` over state and config finds nothing.
 
-- [ ] T020 [US2] **THE GATE: acceptance S1** (FR-010) — after every deploy path the CLI still offers, no file
+- [X] T020 [US2] **THE GATE: acceptance S1** (FR-010) — after every deploy path the CLI still offers, no file
       under state or config contains `PRIVATE KEY` (SC-001 at 100%). **Land this before Phase 5.**
       With 018's equivalent, the tool then writes no private key anywhere at all
 - [X] T021 [US2] Remove `--push-key` from `up` and `redeploy`; each **fails with an explanation**
@@ -169,7 +169,7 @@ completed).
       under two, and unbounded, "fails soft" would be meaningless because it would never return
 - [X] T036 [US3] **The probe FAILS SOFT** (C9, FR-011): denied egress (Feature 012), offline, or a
       forge outage yields `unknown` — never `not-registered` — and **never blocks the deploy**
-- [ ] T037 [US3] [P] Unit test T036: the deploy's exit status is untouched **and** the report says
+- [X] T037 [US3] [P] Unit test T036: the deploy's exit status is untouched **and** the report says
       `unknown`. Asserting only the exit status would pass for a build that says nothing at all
 - [X] T038 [US3] Registration is **never cached** (data-model §3) — it lives on the forge, and a stored
       "registered" goes stale the moment the operator revokes the key
@@ -177,12 +177,12 @@ completed).
       stating that the previous registration is dead. `--purge` already rotates by destroying the
       volume — the large hammer, not the intended one, and a suspected compromise is exactly when
       rotation must be cheap
-- [ ] T040 [US3] [P] Acceptance S14 — rotate, confirm a **different** key, the warning, and an **intact
+- [X] T040 [US3] [P] Acceptance S14 — rotate, confirm a **different** key, the warning, and an **intact
       workspace**
 - [X] T040a [US3] [P] Completions for `ssh-key show|rotate` in both shells, plus the assertion in
       `bin/tests/test_completions.sh` — the completions' command list is pinned to the CLI's by a test,
       so it fails until updated (the lesson 014's `inventory` taught)
-- [ ] T041 [US3] [P] Acceptance S10 — with egress enforced and the forge undeclared, the deploy
+- [X] T041 [US3] [P] Acceptance S10 — with egress enforced and the forge undeclared, the deploy
       succeeds and reports that registration could not be confirmed
 
 ---
@@ -199,46 +199,46 @@ completed).
       environment down destroys the key awaiting registration, and the retry generates a different one,
       so an agent that reads only the exit status loops forever while invalidating each registration.
       It must say the recovery is **register, then `redeploy`**
-- [ ] T045 [P] Test T044 on the **wording**, not the exit code alone — the exit code is the thing that
+- [X] T045 [P] Test T044 on the **wording**, not the exit code alone — the exit code is the thing that
       *causes* the wrong reaction, so it cannot also be the thing that prevents it
 - [X] T046 The entrypoint's `git clone … || die` must not fail the boot in that case
       (`image/entrypoint.sh`) — pending is not failure
 - [X] T047 The FR-014 relaxation is **scoped to this case alone**; every other empty-workspace refusal
       stands, and a test pins that
-- [ ] T048 [P] Acceptance S11 — `up` starts without cloning and exits with the pending code; after
+- [X] T048 [P] Acceptance S11 — `up` starts without cloning and exits with the pending code; after
       registering, `redeploy` clones
-- [ ] T049 `--purge` warns that the key is **regenerated** and the previous registration is dead (C5,
+- [X] T049 `--purge` warns that the key is **regenerated** and the previous registration is dead (C5,
       FR-007). Nothing else would say so
-- [ ] T050 [P] Acceptance S5 + S13 — purge rotates and warns; and an agent's own `~/.ssh/config` edit
+- [X] T050 [P] Acceptance S5 + S13 — purge rotates and warns; and an agent's own `~/.ssh/config` edit
       **survives** a `down`/`up`
-- [ ] T050a [P] **Acceptance S17 — the HTTPS path still works** (FR-012, C16, SC-011): clone and push
+- [X] T050a [P] **Acceptance S17 — the HTTPS path still works** (FR-012, C16, SC-011): clone and push
       over `GH_TOKEN` alone, no SSH key involved. **Three deletions in this feature sit beside that
       credential helper**, and nothing else would catch collateral damage to it
-- [ ] T051 [P] Acceptance S12 — the key reaches **only** the repository it was registered for (C12,
+- [X] T051 [P] Acceptance S12 — the key reaches **only** the repository it was registered for (C12,
       SC-008). The least-privilege gain, invisible in a test that only checks the push works
 
 ---
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T052 [P] `docs/credentials.md` — the agent's key is captured, not supplied; the four removed
+- [X] T052 [P] `docs/credentials.md` — the agent's key is captured, not supplied; the four removed
       channels; the `/run` rule amended for self-generated material
-- [ ] T053 [P] `docs/execution.md` — SSH clone-on-start is two-phase, what its exit code means, and
+- [X] T053 [P] `docs/execution.md` — SSH clone-on-start is two-phase, what its exit code means, and
       that recreating destroys the key
-- [ ] T054 [P] `docs/agent-as-code.md` — `target: push_key` is refused, not ignored
+- [X] T054 [P] `docs/agent-as-code.md` — `target: push_key` is refused, not ignored
 - [X] T054a **Document the exit codes** (FR-014a, C14, SC-012) — in `docs/` **and in the CLI's own
       `--help`**: `0` success, `1` failure, `2` refused, `3` pending registration. State both caveats
       rather than leaving them to be discovered: `2` is **shared** with the CLI framework's usage-error
       code so it does not uniquely identify a refusal, and a headless `--foreground` run **propagates
       the agent's** exit code, so there the status is not the tool's at all
-- [ ] T054b [P] Test that the documented codes ARE the enforced ones — this project has a documented
+- [X] T054b [P] Test that the documented codes ARE the enforced ones — this project has a documented
       habit of a number in prose drifting from the number in code, and an automated caller branching on
       a stale value fails silently
-- [ ] T055 [P] `docs/agent-interface.md` — the `agent_ssh_public_key` field
-- [ ] T056 [P] `README.md` — the agent SSH key section, matching 018's treatment of the host key
-- [ ] T057 [P] Reconcile `docs/threat-model.md`'s 019 row against what was built. Structural guards in
+- [X] T055 [P] `docs/agent-interface.md` — the `agent_ssh_public_key` field
+- [X] T056 [P] `README.md` — the agent SSH key section, matching 018's treatment of the host key
+- [X] T057 [P] Reconcile `docs/threat-model.md`'s 019 row against what was built. Structural guards in
       `bin/tests/` parse that file
-- [ ] T058 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
+- [X] T058 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
       before adding**. Report the before/after number
 - [ ] T059 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Four channels removed and
       SSH clone-on-start changes shape **and exit status**

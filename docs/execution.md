@@ -138,13 +138,62 @@ For a persistent/ephemeral workspace, `--repo` populates `/workspace` on first
 start (a bind workspace is already present and is never cloned). The credential is
 chosen by **URL scheme**, both wired by [Feature 003](./credentials.md):
 
-- `git@github.com:…` / `ssh://…` → the injected **SSH push key** (`--push-key`).
-  An SSH URL with **no** injected key **fails fast** — the deploy dies before
-  starting an empty-workspace agent.
+- `git@github.com:…` / `ssh://…` → the container's **own SSH key**
+  ([Feature 019](./credentials.md)), found at the conventional identity path with
+  nothing wired.
 - `https://github.com/…` → **`GH_TOKEN`** (always present).
 
 Clone-on-start is **idempotent**: it is skipped when `/workspace` already holds a
 working copy, so a persistent recreate never clobbers local state.
+
+### An SSH clone-on-start is TWO-PHASE
+
+The key cannot exist before the container does, so a **first** boot with an SSH
+`--repo` cannot clone: the forge has never seen the key. Feature 019 makes that
+case explicit rather than fatal.
+
+Phase 1 — the container **starts**, generates its key, does **not** clone, and
+says so, printing the key and the exact next command. The invocation exits **3**,
+*pending registration*.
+
+Phase 2 — register the key, then `redeploy`. The clone runs.
+
+```sh
+agent-container up two-phase --repo git@github.com:you/test.git   # exits 3
+agent-container ssh-key show two-phase                            # register this
+agent-container redeploy two-phase                                # now it clones
+```
+
+> **Do not tear the environment down to retry.** `down --purge` destroys the key
+> you were about to register, and the replacement is a *different* key — so a
+> caller that reads only the exit status loops forever, invalidating each
+> registration it just made. The recovery is **register, then `redeploy`**. The
+> tool says this in the output for exactly that reason: the exit code is what
+> *causes* the wrong reaction, so it cannot also be what prevents it.
+
+This is the one case where the empty-workspace refusal is relaxed. Every other
+one stands, and a test pins that: the container here is *pending and says so*,
+not silently useless.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | failure |
+| `2` | refused — a usage error, **or** a destructive action declined without `-y` on a non-TTY |
+| `3` | pending registration: the environment exists but an SSH clone-on-start is waiting for the agent's key to be registered |
+
+Two caveats, stated rather than left to be discovered:
+
+- **`2` is shared** with the CLI framework's own usage-error code, so it does not
+  *uniquely* identify a refusal.
+- A headless `--foreground` run **propagates the agent's** exit code, so in that
+  mode the status is not the tool's at all.
+
+The same table is in `agent-container --help`, built from the same constants — a
+number in prose drifting from the number in code is how an automated caller
+branching on a stale value fails silently.
 
 ## Where each setting travels
 

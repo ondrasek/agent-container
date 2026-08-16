@@ -296,8 +296,9 @@ agent-container logs job               # retrieve the output afterward
   (**`--workspace-dir`**, local hosts only — a remote host refuses it); or nothing
   (the container layer, **gone on teardown** — commit-and-push or lose it).
 - **`--repo <url>`** — clone-on-start for a persistent/ephemeral workspace, credential
-  by URL scheme: `git@…`/`ssh://…` uses the injected push key (`--push-key`; **an
-  SSH URL with no key fails fast**), `https://…` uses `GH_TOKEN`.
+  by URL scheme: `git@…`/`ssh://…` uses the container's **own** SSH key (**a first
+  boot cannot clone — the forge has never seen the key — so it starts anyway, says
+  so, and exits `3`; register, then `redeploy`**), `https://…` uses `GH_TOKEN`.
 
 Detach/reattach is unchanged (tmux survives disconnect; reattach from any machine).
 `attach` now probes the live session first, so a session that has ended is reported
@@ -633,7 +634,7 @@ optional. `GH_TOKEN` and git identity remain required.)
 > on macOS). That's an accepted trade-off — see [`docs/credentials.md`](docs/credentials.md).
 > `down --purge` deletes it.
 
-### Credential model (push key, API keys, canonical config)
+### Credential model (the agent's SSH key, API keys, canonical config)
 
 Beyond interactive login, `up`/`redeploy` inject an agent's credentials and
 config at runtime under a strict **least-exposure** discipline — a tool-injected
@@ -641,19 +642,30 @@ secret lands under `/run/agent-container/…` (ephemeral) and is **never** copie
 onto a persistent volume (it vanishes with the container; your local copy is the
 sole durable copy). Full contract: [`docs/credentials.md`](docs/credentials.md).
 
-- **Outbound SSH push key (the default push channel).** So agents push
-  autonomously with **zero prompts**:
+- **The agent's own SSH key pair (the default push channel).** The container
+  **generates** an ed25519 key on first boot at `~/.ssh/id_ed25519` and the
+  **private half never leaves it**. You register the **public** half:
 
   ```bash
-  agent-container up acme --push-key ~/.ssh/agent_push_ed25519 \
-                          --known-hosts ~/.ssh/known_hosts.github
+  agent-container ssh-key show acme     # paste into the forge as a deploy key
+  agent-container ssh-key rotate acme   # a new key, workspace intact
   ```
 
-  The entrypoint wires `core.sshCommand` with `IdentitiesOnly=yes` + the seeded
-  `known_hosts`. This key is **distinct** from the inbound sshd host key and is
-  never written to `~/.ssh`. HTTPS + `GH_TOKEN` remains the alternative; a
-  per-repository deploy key is just a narrower `--push-key`. Env-file parity:
-  `SSH_PUSH_KEY_B64` / `PUSH_KNOWN_HOSTS`.
+  Nothing wires it — the conventional path is the whole mechanism, so `git`, `ssh`,
+  `scp` and `rsync` all use it. The key is **distinct** from the inbound sshd host
+  key, and it **persists across a recreate** (regenerating each boot would silently
+  invalidate what you registered); `down --purge` rotates it and warns that it did.
+
+  This is a least-privilege gain, not only a hygiene one: a per-container key
+  registered on one repository authorises **one repository**, where the removed
+  `--push-key` was in practice your *personal* key. HTTPS + `GH_TOKEN` remains the
+  alternative. `--known-hosts` / `PUSH_KNOWN_HOSTS` stay — they verify the
+  **forge**, which is the opposite direction and public data.
+
+  > **No private key of any kind is written to your disk.** Feature 018 removed the
+  > host key, 019 removed the agent key; the tool has no channel that accepts one,
+  > and `--push-key` / `SSH_PUSH_KEY_B64` / `target: push_key` are **refused with an
+  > explanation** rather than silently ignored.
 
 - **File-first API keys.** Drop a per-provider key file next to your `.env` and
   it is discovered and injected **ephemerally** (Claude gets an `apiKeyHelper`;

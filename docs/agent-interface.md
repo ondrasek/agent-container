@@ -35,20 +35,31 @@ Every command accepts `--json` and then emits **one** JSON object on **stdout**:
 or consumed as a stream**, so wrapping it would break `eval $(…)`; `menu` is the interactive
 wizard. This set is asserted by the test suite, so a new command cannot silently opt out.
 
-## `list --json`: the pinned host key travels with the row
+## `list --json`: both public keys travel with the row
 
-Each container row carries **`known_hosts_entry`** — the `known_hosts`-format line the
-tool pinned for that environment, or **`null`** when nothing was captured:
+Each container row carries two captured **public** keys, or **`null`** when nothing
+was captured — one per direction:
+
+- **`known_hosts_entry`** (Feature 018) — the `known_hosts`-format line the tool
+  pinned, which verifies the container on the way **in**.
+- **`agent_ssh_public_key`** (Feature 019) — the key the container generated for
+  itself, which the operator registers so the agent can authenticate on the way
+  **out**. The same value is what `agent-container ssh-key show <name>` prints.
 
 ```json
 {"containers": [
   {"name": "agent-container-acme", "host": "local", "port": 2206,
-   "known_hosts_entry": "[localhost]:2206 ssh-ed25519 AAAAC3Nz..."}
+   "known_hosts_entry": "[localhost]:2206 ssh-ed25519 AAAAC3Nz...",
+   "agent_ssh_public_key": "ssh-ed25519 AAAAC3Nz... dev@agent-container-acme"}
 ]}
 ```
 
 `null`, never `""` — a JSON consumer must be able to tell *never captured* from a
 captured value.
+
+**Only ever public halves.** Neither private key exists outside the container: 018
+removed the host key from the operator's disk, 019 removed the agent key. There is
+no field, and no command, that would hand one back.
 
 **Read from local state, never the daemon.** So it still answers for a stopped
 environment or an unreachable host, which is exactly when it is needed: recovering
