@@ -68,6 +68,17 @@ report "could not confirm" and **never** block or fail the deploy. FR-008 alread
 operator believing the environment can push; it does not license refusing to deploy because a third
 party is unreachable.
 
+### 2a. `~/.ssh/config` is written ONCE, and regeneration is an explicit command
+
+Settled by clarification after this plan was drafted. The block's content is entirely static —
+`IdentitiesOnly`, a fixed `IdentityFile`, a fixed `UserKnownHostsFile` — so a per-boot rewrite gains
+nothing while costing an ownership conflict on a file the agent may legitimately need. Only the
+*contents* of the referenced `known_hosts` vary, and that is a different file with its own injection
+path.
+
+The stale-after-upgrade case is handled by an **explicit** command (FR-014b's rotate), not by silent
+clobbering — the same reason `--purge` exists rather than the tool quietly resetting volumes.
+
 ### 3. The generated key lives on the persisted `ssh` volume — amending Feature 003, deliberately
 
 Stated in the spec (FR-003) and repeated here because it contradicts a CLAUDE.md invariant:

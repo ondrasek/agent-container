@@ -62,6 +62,16 @@ other empty-workspace refusal stands.
 `--repo https://…` with `GH_TOKEN` clones and pushes exactly as before (FR-012). `--known-hosts` and
 `PUSH_KNOWN_HOSTS` are unaffected — they verify the forge, not the container.
 
+## C13 — `~/.ssh/config` is written once, and rotation is explicit
+
+The tool writes the agent's `~/.ssh/config` **once if absent** and never rewrites it (FR-014a): the
+content is static, and a per-boot rewrite would discard edits the agent legitimately makes while
+gaining nothing.
+
+The key can be **regenerated deliberately** without destroying the environment (FR-014b), and doing so
+states that the previous registration is dead. `--purge` also rotates it, as a side effect of
+destroying the volume — that is the large hammer, not the intended one.
+
 ## C12 — A per-container key authorises only what was registered
 
 The key grants access to what the operator registered it for and nothing else — verified by confirming

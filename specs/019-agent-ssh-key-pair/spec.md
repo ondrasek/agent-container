@@ -63,6 +63,20 @@ data.
 
 ### Session 2026-08-16 (later)
 
+- Q: Who owns `~/.ssh/config`, and why would the tool rewrite it every boot? → A: **Written once if
+  absent; never rewritten. Regeneration is an explicit CLI action.** The block's content is entirely
+  static — `IdentitiesOnly`, a fixed `IdentityFile` path, a fixed `UserKnownHostsFile` path — so a
+  per-boot rewrite buys nothing while costing an ownership conflict on a file the agent may
+  legitimately need (a jump host, a per-host user). Only the *contents* of the referenced
+  `known_hosts` vary, and that is a different file, refreshed through its own injection path.
+  The stale-after-upgrade case is handled by an **explicit** command rather than by silent clobbering
+  — consistent with this project's preference for operator-invoked change over tool-invoked surprise,
+  and the same reason `--purge` exists rather than the tool quietly resetting volumes.
+- Q: How is the key regenerated without destroying the whole environment? → A: **An explicit CLI
+  action.** `--purge` already regenerates it as a side effect of destroying the volume, which is a
+  large hammer for a small job; a direct rotate is the proportionate one, and it makes deliberate
+  rotation possible after a suspected compromise without losing the workspace.
+
 - Q: Which host does the registration probe target? → A: **Only the `--repo` host; with no `--repo`,
   no probe — and say the key is unverified.** The only host the tool can name without guessing is the
   one the operator told it about. Defaulting to `github.com` would invent a fact: an agent whose only
@@ -248,6 +262,14 @@ unregistered, and confirm the output names the key and the consequence.
   goes stale the moment the operator revokes the key.
 - **FR-012**: The HTTPS + token push path and the outbound `known_hosts` channel (which verifies the
   **remote**, not the container) MUST be unaffected.
+- **FR-014a**: The agent's `~/.ssh/config` MUST be written **once, if absent**, and MUST NOT be
+  rewritten on later boots. Its content is static, so a per-boot rewrite would gain nothing while
+  silently discarding edits the agent legitimately makes. Any later change to what the tool needs
+  there MUST be an **explicit** operator action, not a side effect of restarting.
+- **FR-014b**: The operator MUST be able to **regenerate the key deliberately**, without destroying
+  the environment. `--purge` already rotates it by destroying the volume; that is disproportionate
+  when the workspace is worth keeping, and a suspected key compromise is exactly when an operator
+  needs rotation to be cheap. Regeneration MUST state that the previous registration is now dead.
 - **FR-013**: Clone-on-start over an **SSH** URL MUST become two-phase: the container starts, generates
   its key, does **not** clone, and states the key and the next command. The invocation MUST exit
   **non-zero** with a **distinct code** meaning *pending registration*, so an automated caller can tell
