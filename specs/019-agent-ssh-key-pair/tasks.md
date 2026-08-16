@@ -242,7 +242,7 @@ completed).
       before adding**. Report the before/after number
 - [X] T059 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Four channels removed and
       SSH clone-on-start changes shape **and exit status**
-- [ ] T060 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`
+- [X] T060 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S14 by hand. A selector matching nothing is
       indistinguishable from one whose tests all passed — that happened in this project
 
