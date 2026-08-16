@@ -4,7 +4,10 @@ Numbered so tasks and tests can cite them.
 
 ## C1 — The container generates its own key, and it never leaves
 
-The agent SSH key pair is created **inside** the container on its persisted `ssh` volume. No private half
+The agent SSH key pair is created **inside** the container at **`~/.ssh/id_ed25519`** — the
+conventional identity path, which is already the persisted `ssh` volume's mount point. Being
+conventional is load-bearing: git, `ssh`, `scp` and `rsync` all use it with no wiring, so
+`core.sshCommand` and `PUSH_RUNTIME` are deleted rather than rewired. No private half
 exists anywhere on the operator's machine after any deployment path (FR-001, FR-010, SC-001 at 100%).
 
 ## C2 — Generation is idempotent
@@ -48,13 +51,17 @@ is registered (FR-006, SC-005) — unless the probe says it already works.
 ## C9 — The probe runs in the container and FAILS SOFT
 
 Registration is checked by `ssh -T <forge>` **inside** the container, where the key is — the operator's
-machine has nothing to authenticate with. A forge that cannot be reached yields `unknown`, never
+machine has nothing to authenticate with. It targets **only the host of `--repo`**; with no `--repo`
+there is no probe and the key is reported *unverified*, never assumed good or bad. A forge that cannot be reached yields `unknown`, never
 `not-registered`, and **never blocks or fails the deploy** (FR-011, research R3).
 
 ## C10 — SSH clone-on-start is two-phase
 
-With an SSH `--repo` and no registered key, the container **starts without cloning**, says so, and
-prints the key and the next command (data-model §4). This relaxes FR-014 for **this case only**; every
+With an SSH `--repo` and no registered key, the container **starts without cloning**, says so, prints
+the key and the next command, and **exits non-zero with a distinct *pending registration* code**
+(data-model §4). The output MUST state that tearing the environment down destroys the key and that the
+recovery is **register, then `redeploy`** — a caller that reads only the exit status will otherwise
+recreate, regenerating the key it was about to register. This relaxes FR-014 for **this case only**; every
 other empty-workspace refusal stands.
 
 ## C11 — The HTTPS path is untouched

@@ -25,10 +25,19 @@ private key to your disk at all.
 ## S2 — The container made one, and it is public-half-visible (C1)
 
 ```sh
-agent-container exec pk-demo -- ls -l ~/.ssh/agent_ssh_ed25519_key ~/.ssh/agent_ssh_ed25519_key.pub
+agent-container exec pk-demo -- ls -l ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub ~/.ssh/config
 ```
 
-**Expect**: private `0600`, public `0644`. The private half exists **only** here.
+**Expect**: private `0600`, public `0644`, and a `config`. The private half exists **only** here.
+
+The **conventional path** is the point: nothing had to be wired for git to use it, and `ssh`, `scp`
+and `rsync` use it too. Confirm no wiring survives:
+
+```sh
+agent-container exec pk-demo -- git config --global --get core.sshCommand; echo "exit=$?"
+```
+
+**Expect**: empty, non-zero — `core.sshCommand` is gone, not rewired.
 
 ## S3 — Register the public key and push for real (C3, SC-002)
 
@@ -119,8 +128,14 @@ would be a worse failure than the one it prevents.
 agent-container up two-phase --repo git@github.com:you/test.git
 ```
 
-**Expect**: the container **starts**, does **not** clone, says so, and prints the key with the exact
-next command. Register it, then:
+**Expect**: the container **starts**, does **not** clone, says so, prints the key with the exact next
+command, and **exits non-zero** with the distinct *pending registration* code.
+
+**Check the wording, not just the code**: it must say that tearing the environment down destroys the
+key, and that the fix is register-then-`redeploy`. An agent that reads only the exit status will
+otherwise `down` and retry — regenerating the very key it was about to register, forever.
+
+Register it, then:
 
 ```sh
 agent-container redeploy two-phase
@@ -129,6 +144,31 @@ agent-container exec two-phase -- ls /workspace
 
 **Expect**: now cloned. The first step deliberately relaxes the empty-workspace refusal for this case
 only — the container is *pending and says so*, not silently useless.
+
+## S13 — `~/.ssh/config` is written once, not clobbered (C13, FR-014a)
+
+```sh
+agent-container exec pk-demo -- sh -c 'echo "Host myjump" >> ~/.ssh/config'
+agent-container down pk-demo && agent-container up pk-demo
+agent-container exec pk-demo -- grep myjump ~/.ssh/config
+```
+
+**Expect**: the agent's own edit **survives** the recreate. A tool that rewrote this file each boot
+would discard it silently, and the agent would have no way to discover why its jump host stopped
+working.
+
+## S14 — Rotation is explicit and proportionate (C13, FR-014b)
+
+```sh
+agent-container exec pk-demo -- cat ~/.ssh/id_ed25519.pub > /tmp/old
+agent-container <rotate-command> pk-demo
+agent-container exec pk-demo -- cat ~/.ssh/id_ed25519.pub > /tmp/new
+diff /tmp/old /tmp/new; agent-container exec pk-demo -- ls /workspace
+```
+
+**Expect**: a **different** key, an explicit statement that the previous registration is now dead, and
+the **workspace intact**. `--purge` also rotates the key — by destroying everything, which is the
+wrong tool when the workspace is worth keeping.
 
 ## S12 — The key authorises only what you registered (C12, SC-008)
 

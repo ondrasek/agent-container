@@ -75,7 +75,57 @@ requirement exists to catch).
 
 ---
 
-## R4 — The generated key lives on the `ssh` volume, amending Feature 003
+## R4 — The CONVENTIONAL path, which makes this a deletion
+
+**Decision**: `~/.ssh/id_ed25519`, and therefore no new path at all.
+
+**Rationale**: it is the agent's SSH identity, so it belongs where an SSH identity belongs — and the
+consequences are all *removal* rather than rewiring:
+
+| What existed | Why it existed | What happens now |
+|---|---|---|
+| `core.sshCommand` | the key arrived at an arbitrary `/run` path, so git had to be told | **deleted** — git shells out to `ssh`, which reads the conventional identity |
+| `PUSH_RUNTIME` (**11 references**) | copying an injected 0644 key to a private 0600 location | **deleted** — a self-generated key is 0600 from birth |
+| a persistence decision | — | **none needed**: `SSH_DIR="${AGENT_CONTAINER_HOME}/.ssh"` is already the `ssh` volume's mount point |
+
+`IdentitiesOnly` and the pinned `UserKnownHostsFile` move into `~/.ssh/config`, which is **greenfield**
+— nothing writes the container's copy today (verified).
+
+**And the scope widens for free.** Every outbound SSH the agent makes — git, `ssh`, `scp`, `rsync` —
+now uses one identity the operator has registered, instead of git alone holding a credential nothing
+else can reach.
+
+**Rejected**: a private path wired through `core.sshCommand` (keeps scaffolding that exists only to
+solve a problem this feature removes, and leaves the agent with no ambient identity — a defensible
+least-privilege position, but the operator named this the *agent's* key).
+
+---
+
+## R4a — `~/.ssh/config` is written ONCE
+
+**Decision**: write it if absent; never rewrite. Rotation is an explicit command.
+
+**Rationale**: the block's content is **static** — `IdentitiesOnly`, a fixed `IdentityFile`, a fixed
+`UserKnownHostsFile`; verified against what `core.sshCommand` carries today, which is exactly those
+flags and fixed paths. Nothing varies per boot, so a rewrite gains nothing while costing an ownership
+conflict on a file the agent may legitimately need. Only the *contents* of the referenced
+`known_hosts` vary, and that is a different file with its own injection path.
+
+**The rejected argument was mine.** I proposed rewriting each boot so a container created before a
+later fix could not keep a stale config. The risk is real; the remedy was wrong. It is handled by an
+**explicit** command — the same reason `--purge` exists rather than the tool quietly resetting volumes
+when it believes it knows better.
+
+**That surfaced a missing capability**: deliberate rotation (FR-014b). `--purge` already rotates the
+key by destroying the volume, which is disproportionate when the workspace is worth keeping, and a
+suspected compromise is precisely when rotation should be cheap.
+
+**Rejected**: rewrite-per-boot (above); fully tool-owned (clobbers a file the agent may legitimately
+edit, with no way for it to discover why).
+
+---
+
+## R4b — Storage: amending Feature 003, deliberately
 
 **Decision**: persist it on the existing per-container `ssh` volume; scope the amendment to
 **self-generated** material.
@@ -127,3 +177,45 @@ encodes (poll, validate, refuse empty) is exactly what a fresh copy would omit.
 
 **Rejected**: a parallel `capture_push_pubkey` (duplicate); reading the key from a volume mount (fails
 over a remote context, the 001/003 lesson).
+
+
+---
+
+## R7 — A deferred clone exits non-zero, and the wording carries the mitigation
+
+**Decision**: non-zero, with a **distinct** code meaning *pending registration*, and output that
+states the recovery is **register then `redeploy`** — never recreate.
+
+**Rationale**: the operator's decision, and it is coherent: the environment is not usable yet, so the
+invocation did not do what was asked.
+
+**I argued for exit 0 and was overruled, so the objection becomes a constraint rather than
+disappearing.** An automated caller seeing non-zero will reasonably `down` and retry — destroying the
+key awaiting registration. The retry generates a *different* key, so the loop never terminates and each
+iteration invalidates the registration just made. This tool is driven by agents, so that caller is the
+expected one, not a hypothetical.
+
+Hence both mitigations: a distinct code so a caller can tell *pending* from *broken* without parsing
+prose, and wording that forbids the destructive reaction, because non-zero conventionally means "that
+did not work — try again".
+
+**Rejected**: exit 0 (argued, overruled); exit 0 with a `--json` field only (same, and it leaves the
+exit status silent about a state the caller must handle).
+
+---
+
+## R8 — The probe targets the `--repo` host, or nothing
+
+**Decision**: probe only the host of `--repo`. With no `--repo`, no probe — report *unverified*.
+
+**Rationale**: the only host the tool can name without guessing is the one the operator told it about.
+Defaulting to `github.com` would invent a fact: an agent whose only SSH use is a self-hosted forge
+would be told "not registered" about a host it never contacts, and the tool would send traffic to a
+third party the operator never named — which a Feature 012 declaration would then have to permit.
+
+**Accepted cost**: an operator using the key for plain `ssh` to their own servers gets the key and
+*unverified*. That is the honest consequence of the key being the agent's identity rather than one
+service's credential — the tool cannot enumerate everywhere an agent might connect.
+
+**Rejected**: defaulting to `github.com` (invents a fact, manufactures an egress requirement); no probe
+at all (makes FR-011 unimplementable — the nag would be permanent or fabricated).
