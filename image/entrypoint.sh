@@ -1120,7 +1120,10 @@ if [[ -n "${CLONE_URL}" ]]; then
                     log "  The agent SSH key is generated in this container and must be"
                     log "  REGISTERED on the remote before it can clone or push:"
                     log "    $(cat "${AGENT_KEY}.pub")"
-                    log "  Register it, then run: agent-container redeploy <name>"
+                    log "  Register it, then run:"
+                    log "    agent-container redeploy <name> --repo ${CLONE_URL}"
+                    log "  (--repo is required: a bare redeploy starts from an empty"
+                    log "   spec and would clone nothing.)"
                     log "  Do NOT tear this environment down — that destroys the key you are"
                     log "  about to register, and the replacement will be a different key."
                 fi

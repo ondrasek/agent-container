@@ -308,12 +308,20 @@ def test_the_pending_exit_code_is_distinct_from_failure_and_refusal(wiz):
 
 def test_the_entrypoint_records_a_pending_clone_instead_of_dying(wiz):
     """The half that makes the exit code survivable: dying on a first boot would leave
-    no container to read the public key from, so the operator could never register it."""
+    no container to read the public key from, so the operator could never register it.
+
+    The slice ends at the case arm's `;;` rather than after a fixed character count:
+    a fixed window silently shrinks the assertion every time the branch grows, and
+    twice already it pushed a line being asserted out of view — a check that fails for
+    a reason unrelated to what it is checking."""
     entry = (Path(wiz.__file__).parents[1] / "image" / "entrypoint.sh").read_text()
     i = entry.index("clone-on-start: cloning via SSH")
-    block = entry[i : i + 900]
+    block = entry[i : entry.index("\n                ;;", i)]
     assert ".clone_pending" in block
+    assert ".clone_done" in block  # both outcomes marked, or the CLI cannot tell
     assert "Do NOT tear this environment down" in block
+    # The recovery must carry the URL: a bare redeploy starts from an empty spec.
+    assert "--repo ${CLONE_URL}" in block
 
 
 def test_driver_up_argv_detached_default(wiz):

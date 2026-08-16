@@ -7439,7 +7439,13 @@ def compose_up_exec(
             f"{name}: the workspace was NOT cloned — the agent's SSH key is not "
             f"registered on the remote yet. Register it:\n"
             f"  agent-container ssh-key show {name}\n"
-            f"then: agent-container redeploy {name}{hflag}\n"
+            # `--repo` is REQUIRED here, not decoration. A bare `redeploy` starts from
+            # an empty ExecSpec by design (Feature 004: a redeploy may CHANGE
+            # mode/agent/workspace/repo), so it would not set the clone URL and the
+            # recovery would silently do nothing — leaving an empty workspace and no
+            # explanation, at the end of the one instruction this message exists to
+            # give. Measured against a real container.
+            f"then: agent-container redeploy {name}{hflag} --repo {spec.repo}\n"
             f"DO NOT tear this environment down to retry — that destroys the key you "
             f"are about to register, and the replacement will be a different one."
         )

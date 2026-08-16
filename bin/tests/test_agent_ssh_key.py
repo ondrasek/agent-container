@@ -259,12 +259,26 @@ def test_a_registered_key_stops_the_nagging(wiz, monkeypatch, capsys):
 # --- the destructive reactions, forbidden in words ---------------------------
 
 
+def test_the_recovery_command_CARRIES_THE_REPO(wiz):
+    """The defect a real container found: `redeploy <name>` alone starts from an empty
+    ExecSpec by design (Feature 004 — a redeploy may CHANGE the repo), so it sets no
+    clone URL and the recovery does nothing. The operator registers the key, runs the
+    one command this message exists to give, and gets an empty workspace and silence.
+
+    Asserting the flag is in the printed line is the cheap half; the acceptance test
+    runs that exact line and checks the clone lands, which is what stops the two from
+    drifting apart."""
+    src = Path(wiz.__file__).read_text()
+    block = src[src.index("the workspace was NOT cloned") :][:900]
+    assert "redeploy {name}{hflag} --repo {spec.repo}" in block
+
+
 def test_the_pending_report_forbids_the_teardown(wiz):
     """T045, on the WORDING. The exit code is the thing that *causes* the wrong
     reaction — a caller reading only the status tears the environment down, destroying
     the key it was about to register — so it cannot also be the thing that prevents it."""
     src = Path(wiz.__file__).read_text()
-    block = src[src.index("the workspace was NOT cloned") :][:700]
+    block = src[src.index("the workspace was NOT cloned") :][:1400]
     assert "DO NOT tear this environment down" in block
     assert "redeploy" in block  # names the recovery, not only the hazard
     assert "ssh-key show" in block

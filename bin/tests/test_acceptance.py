@@ -4559,7 +4559,6 @@ def test_an_ssh_clone_on_start_is_two_phase(acc):
         assert "was NOT cloned" in r.stderr
         assert "DO NOT tear this environment down" in r.stderr  # the wording, not the code
         assert "ssh-key show acc019pend" in r.stderr
-        assert "redeploy acc019pend" in r.stderr
         # Started, and empty — "pending and says so", not "nothing happened".
         listed = _exec("acc019pend", ["sh", "-c", "ls -A /workspace | wc -l"])
         assert listed.stdout.strip() == "0", listed.stdout
@@ -4567,7 +4566,14 @@ def test_an_ssh_clone_on_start_is_two_phase(acc):
         # Register it, then redeploy — the recovery the message names, and the only
         # one that does not destroy the key.
         _register_on(names[0], _agent_pub(acc, "acc019pend"))
-        r2 = acc.cli(["redeploy", "acc019pend", "--env-file", str(acc.tmp / "acc019pend.env")])
+        # Exactly the command the message printed — including `--repo`, without which
+        # a bare redeploy starts from an empty spec and clones nothing. Asserting the
+        # message CONTAINS this command is what stops the two drifting apart.
+        assert f"redeploy acc019pend --repo {url}" in r.stderr, r.stderr
+        r2 = acc.cli(
+            ["redeploy", "acc019pend", "--repo", url,
+             "--env-file", str(acc.tmp / "acc019pend.env")]
+        )  # fmt: skip
         assert r2.returncode == 0, r2.stderr
         cloned = _exec("acc019pend", ["sh", "-c", "ls -A /workspace | wc -l"])
         assert cloned.stdout.strip() != "0", "registering and redeploying did not clone"

@@ -161,8 +161,13 @@ Phase 2 — register the key, then `redeploy`. The clone runs.
 ```sh
 agent-container up two-phase --repo git@github.com:you/test.git   # exits 3
 agent-container ssh-key show two-phase                            # register this
-agent-container redeploy two-phase                                # now it clones
+agent-container redeploy two-phase --repo git@github.com:you/test.git   # now it clones
 ```
+
+**`--repo` is required on the redeploy**, and the tool prints the whole line for you.
+A bare `redeploy` starts from an empty spec by design — it is also how you *change* a
+deployment's mode, agent, workspace or repo — so without the flag it sets no clone URL
+and the recovery silently does nothing.
 
 > **Do not tear the environment down to retry.** `down --purge` destroys the key
 > you were about to register, and the replacement is a *different* key — so a
