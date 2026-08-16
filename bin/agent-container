@@ -1367,19 +1367,23 @@ def remove_stale_staged_host_key(host: str, name: str) -> None:
     )
 
 
-def refuse_removed_push_key(flag_source: str) -> None:
+def refuse_removed_push_key(flag_source: str, *, remedy: str = "Drop the flag.") -> None:
     """FR-002: every channel that supplied an outbound private key is removed, and
     using one must SAY WHY rather than produce a bare "no such option".
 
     An operator who used `--push-key` had a reason — the agent needed to authenticate
     outbound. That is now served without a private key on their disk: the container
     generates its own, and they register the PUBLIC half.
+
+    `remedy` because the channels are not all flags: telling someone who declared
+    `target: push_key` in a spec file to "drop the flag" names a thing they are not
+    looking at, and the last line of a refusal is the line they act on.
     """
     die(
         f"{flag_source}: removed. The agent's SSH key pair is generated INSIDE the "
         f"container and its private half never leaves (Feature 019). Get the public "
         f"key with `agent-container ssh-key show <name>` and register it on the "
-        f"remote. Nothing private is written to your disk any more. Drop the flag."
+        f"remote. Nothing private is written to your disk any more. {remedy}"
     )
 
 
@@ -2366,7 +2370,9 @@ def do_ssh_key_show(name: str, as_json: bool) -> None:
         # Explicit, never a silent empty result — "no key" and "not captured" are
         # different, and only one of them is fixable by deploying.
         die(f"no agent SSH key captured for {name}; deploy it and try again")
-    print_shell(pub)
+    # Newline-terminated: `$(...)` strips it anyway, and without it a terminal
+    # glues the shell prompt onto the end of the key the operator is copying.
+    print_shell(pub + "\n")
 
 
 def do_ssh_key_rotate(name: str, yes: bool, as_json: bool) -> None:
@@ -2409,7 +2415,9 @@ def do_ssh_key_rotate(name: str, yes: bool, as_json: bool) -> None:
         f"{name}: the agent SSH key was ROTATED. The PREVIOUS registration is now "
         f"dead — register this one wherever the agent must reach:"
     )
-    print_shell(pub)
+    # Newline-terminated: `$(...)` strips it anyway, and without it a terminal
+    # glues the shell prompt onto the end of the key the operator is copying.
+    print_shell(pub + "\n")
 
 
 def do_inventory_list(as_json: bool) -> None:
@@ -10501,7 +10509,9 @@ def validate_credential(cred: object, where: str) -> None:
     if tgt == "host_key":
         refuse_removed_host_key(f"{where}: target=host_key")
     if tgt == "push_key":
-        refuse_removed_push_key(f"{where}: target=push_key")
+        refuse_removed_push_key(
+            f"{where}: target=push_key", remedy="Remove this credential from the spec."
+        )
     if tgt is not None and tgt not in CRED_SSH_TARGETS:
         die(f"{where}: target={tgt!r} is not one of {{{', '.join(CRED_SSH_TARGETS)}}}")
     allowed = {"name", "source", "target", *detail}

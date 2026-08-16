@@ -123,10 +123,16 @@ def test_each_removed_flag_explains_itself(wiz, source):
 
 
 def test_a_declared_push_key_is_refused_not_ignored(wiz):
-    with pytest.raises(wiz.Fatal, match="generated INSIDE the container"):
+    with pytest.raises(wiz.Fatal) as e:
         wiz.validate_credential(
             {"name": "K", "source": "file", "path": "/k", "target": "push_key"}, "spec.yaml"
         )
+    assert "generated INSIDE the container" in str(e.value)
+    # Not "drop the flag": there is no flag here, and the last line of a refusal is
+    # the line the operator acts on — naming something they are not looking at sends
+    # them hunting through their shell history instead of their spec file.
+    assert "Remove this credential from the spec." in str(e.value)
+    assert "Drop the flag" not in str(e.value)
 
 
 def test_a_stale_staged_key_is_removed_and_reported(wiz, capsys):
@@ -180,6 +186,14 @@ def test_show_is_explicit_when_nothing_was_captured(wiz):
     only one of them is fixed by deploying."""
     with pytest.raises(wiz.Fatal, match="no agent SSH key captured"):
         wiz.do_ssh_key_show("acme", False)
+
+
+def test_show_ends_the_line(wiz, capsys):
+    """`$(...)` strips it either way, but without it a terminal glues the prompt onto
+    the end of the key the operator is about to copy."""
+    wiz.record_agent_ssh_pubkey("local", "acme", "ssh-ed25519 AAAA agent")
+    wiz.do_ssh_key_show("acme", False)
+    assert capsys.readouterr().out == "ssh-ed25519 AAAA agent\n"
 
 
 def test_show_json_carries_null_rather_than_an_empty_string(wiz, capsys):
