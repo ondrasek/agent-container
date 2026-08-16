@@ -20,6 +20,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -287,7 +288,6 @@ def acc(_image):
         *,
         authorized_key=None,
         env_extra=None,
-        push_key=None,
         known_hosts=None,
         mode=None,
         agent=None,
@@ -309,8 +309,6 @@ def acc(_image):
         argv = [*AGENT_CONTAINER, "up", name, "--env-file", str(env_file)]
         for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
-        if push_key is not None:
-            argv += ["--push-key", str(push_key)]
         if known_hosts is not None:
             argv += ["--known-hosts", str(known_hosts)]
         if mode is not None:
@@ -710,37 +708,41 @@ def test_sidecar_shares_deployment_lifecycle(acc, _image):
         cli("wipe", name, "-y", timeout=120)
 
 
-def test_push_credential_ephemeral_and_distinct(acc):
-    """US1 (FR-012 / SC-004 / SC-008) against a REAL container: the injected
-    outbound push key is wired for non-interactive push (IdentitiesOnly), lives
-    ONLY in an ephemeral runtime dir (never on the persisted ~/.ssh volume), and
-    is a DISTINCT credential from the inbound host key. (A full zero-prompt push
-    to a real remote is the opt-in tokened extension, not run here.)"""
-    push = _gen_keypair(acc.tmp / "agent_push")  # ed25519 private key
+def test_the_agent_key_is_generated_in_the_container_and_distinct(acc):
+    """Feature 019 (S2/S4, FR-001/FR-003) — the successor to 003's push-key test,
+    which asserted the exact arrangement this feature deleted.
+
+    003 proved an INJECTED outbound key was ephemeral, off-volume, and wired through
+    `core.sshCommand`. 019 inverts all three: the container makes the key itself, it
+    lives ON the persisted volume so a recreate does not invalidate the operator's
+    registration, and NOTHING wires it — the conventional path is the whole mechanism.
+    What survives unchanged is SC-008: it is a different credential from the inbound
+    host key, so compromising one does not hand over the other.
+    """
     kh = acc.tmp / "known_hosts"
     kh.write_text("github.com ssh-ed25519 AAAAKH\n")
-    acc.up("accpush", push_key=push, known_hosts=kh)
+    acc.up("accpush", known_hosts=kh)
 
-    def _exec(*cmd):
+    def _x(*cmd):
         return subprocess.run(
             [RUNTIME, "exec", "agent-container-accpush", *cmd], capture_output=True, text=True
         )
 
-    # core.sshCommand wires the push key with IdentitiesOnly (no key-guessing prompt)
-    ssh_cmd = _exec("git", "config", "--global", "--get", "core.sshCommand").stdout.strip()
-    assert "IdentitiesOnly=yes" in ssh_cmd, ssh_cmd
-    parts = ssh_cmd.split()
-    keypath = parts[parts.index("-i") + 1]
-    # the ephemeral key is 0600 and NOT under the persisted ~/.ssh volume (FR-012/SC-004)
-    assert "/.ssh/" not in keypath, keypath
-    assert _exec("stat", "-c", "%a", keypath).stdout.strip() == "600"
-    assert _exec("test", "!", "-e", "/home/dev/.ssh/push_ed25519_key").returncode == 0
-    # SC-008: distinct from the inbound host key
-    push_fp = _exec("ssh-keygen", "-lf", keypath).stdout.split()[1]
-    host_fp = _exec(
+    key = "/home/dev/.ssh/id_ed25519"
+    assert _x("test", "-f", key).returncode == 0, "the container generated no key"
+    assert _x("stat", "-c", "%a", key).stdout.strip() == "600"
+    # NOTHING wires it. An empty core.sshCommand is the evidence that the removal was
+    # a deletion and not a rewiring — with a value here, every other assertion could
+    # pass while the conventional path went unused.
+    assert _x("git", "config", "--global", "--get", "core.sshCommand").stdout.strip() == ""
+    # ...and the removed injection path is not merely unused, it is absent.
+    assert _x("test", "-e", "/home/dev/.ssh/push_ed25519_key").returncode != 0
+    # SC-008: distinct from the inbound host key.
+    agent_fp = _x("ssh-keygen", "-lf", key).stdout.split()[1]
+    host_fp = _x(
         "ssh-keygen", "-lf", "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key"
     ).stdout.split()[1]
-    assert push_fp != host_fp
+    assert agent_fp != host_fp
 
 
 def test_apikey_injection_ephemeral_and_off_volume(acc, _image):
@@ -939,9 +941,10 @@ def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
 
     Scope note (opt-in/tokened, NOT run here): confirming a narrowly-scoped
     per-repo deploy key grants ONLY the intended repository access (FR-004) needs a
-    real remote git host and a scoped key — that is the opt-in tokened extension,
-    outside the CI cost boundary. The unit tier proves the deploy key rides the
-    same `--push-key` plumbing (test_per_repo_deploy_key_is_just_a_narrower_push_key)."""
+    real remote git host — that is the opt-in tokened extension, outside the CI cost
+    boundary. Since Feature 019 the deploy key IS the container's own generated key
+    (`ssh-key show`), so there is no injected-key plumbing left for a unit tier to
+    prove; what remains to check is on the forge, not in this tool."""
     name = "accrot"
     work = acc.tmp
     state = work / "state"
@@ -2311,7 +2314,29 @@ def test_a_public_resolver_cannot_be_queried_directly(acc):
 # real repository and a real key, which this module deliberately does not have
 # (see the module docstring). Set both to run it.
 _PUSH_URL = os.environ.get("AGENT_CONTAINER_ACCEPTANCE_PUSH_URL")  # git@host:owner/repo.git
+# Since Feature 019 the tool cannot be handed a private key, so this key is installed
+# the way an operator with container access would — copied straight onto the ssh
+# volume, over the one the container generated. That is deliberately OUTSIDE the tool:
+# the test needs a key the forge already trusts, and a freshly generated one is by
+# definition registered nowhere.
 _PUSH_KEY = os.environ.get("AGENT_CONTAINER_ACCEPTANCE_PUSH_KEY")  # private key path
+
+
+def _install_pre_registered_key(name: str, key_path: str) -> None:
+    """Overwrite the container's generated key with one the forge already trusts.
+
+    Not a back door the tool offers — the tool has no such path any more, which is
+    the feature. This is the harness standing in for an operator with direct access
+    to the container, so the egress arm can push to a REAL remote without waiting on
+    a human to register a key that only exists once this test has already run.
+    """
+    c = f"agent-container-{name}"
+    subprocess.run([RUNTIME, "cp", key_path, f"{c}:/home/dev/.ssh/id_ed25519"], check=False)
+    subprocess.run(
+        [RUNTIME, "exec", "-u", "root", c, "chown", "dev:dev", "/home/dev/.ssh/id_ed25519"],
+        check=False,
+    )
+    subprocess.run([RUNTIME, "exec", c, "chmod", "600", "/home/dev/.ssh/id_ed25519"], check=False)
 
 
 def test_git_push_over_declared_ssh_reaches_the_remote(acc):
@@ -2361,10 +2386,10 @@ def test_git_push_over_declared_ssh_reaches_the_remote(acc):
     proj = _phase_b_project(acc, "accb8", f"        - host: {host}\n          port: {port}\n")
     acc.register("accb8")
     argv = ["up", "accb8", "--authorized-key", str(laptop.with_suffix(".pub"))]
-    if _PUSH_KEY:
-        argv += ["--push-key", _PUSH_KEY]
     r = acc.cli(argv, cwd=proj)
     assert r.returncode == 0, f"deploy with a declared SSH endpoint failed:\n{r.stderr}"
+    if _PUSH_KEY:
+        _install_pre_registered_key("accb8", _PUSH_KEY)
 
     handshake = _exec("accb8", ["ssh", "-T", "-p", str(port),
                                 "-o", "BatchMode=yes",
@@ -3726,30 +3751,28 @@ def test_no_private_host_key_is_written_anywhere(acc):
     combination the CLI still offers. The strongest evidence this feature works is an
     absence.
 
-    Scoped to the host key on purpose. Feature 003's `--push-key` also stages a
-    plaintext private key under the state dir at 0644 — same shape, different
-    credential, different feature: the operator supplies it explicitly, it is the
-    OUTBOUND git identity rather than the container's inbound identity, and 003 owns
-    its lifecycle. Widening this assertion would either fail for a reason 018 did not
-    cause or quietly pull 003's design into 018's scope.
+    Scoped to the host key on purpose, and the carve-out this test used to carry is
+    GONE: Feature 003's `--push-key` staged a second plaintext private key under the
+    state dir at 0644, so 018 had to exclude `*.push_key` to avoid failing for a
+    reason it did not cause. Feature 019 removed that channel, so the exclusion would
+    now be dead weight that quietly re-permits the very thing 019 deleted.
+    test_no_private_key_of_any_kind_is_written_anywhere below is the unrestricted gate.
     """
     laptop = _gen_keypair(acc.tmp / "laptop")
-    push = _gen_keypair(acc.tmp / "push")
-    acc.up("accnokey", authorized_key=[laptop.with_suffix(".pub")], push_key=push)
+    acc.up("accnokey", authorized_key=[laptop.with_suffix(".pub")])
 
     assert list(acc.state_dir.rglob("*.host_key")) == []
-    host_key_bytes = push.read_bytes()  # a real private key, for a real comparison
     hits = [
         p
         for p in acc.state_dir.rglob("*")
-        if p.is_file()
-        and "PRIVATE KEY" in p.read_bytes().decode("utf-8", "replace")
-        and not p.name.endswith(".push_key")
+        if p.is_file() and "PRIVATE KEY" in p.read_bytes().decode("utf-8", "replace")
     ]
     assert hits == [], f"unexpected private key material on disk: {hits}"
-    # And the pinned file itself holds only public material.
+    # And the pinned file itself holds only public material. (The comparison this
+    # line used to make — that an unrelated generated key is absent from known_hosts
+    # — was vacuous: nothing could ever have put it there.)
     kh = acc.state_dir / "agent-container" / "local" / "known_hosts"
-    assert kh.is_file() and host_key_bytes not in kh.read_bytes()
+    assert kh.is_file()
     assert "PRIVATE" not in kh.read_text()
 
 
@@ -4073,3 +4096,421 @@ def test_panic_is_bounded_by_the_slowest_host_not_the_sum(acc):
     # Three dead hosts sequentially would be ~24s+. Generous ceiling so this is a
     # shape assertion, not a stopwatch: anything near N*timeout means sequential.
     assert elapsed < 20, f"looks sequential: {elapsed:.1f}s for 3 unreachable hosts"
+
+
+# --- Feature 019: the agent's own SSH key pair -------------------------------
+# The load-bearing evidence here is an ABSENCE — no private key of any kind on the
+# operator's disk — and an absence is the one thing a working `git push` never
+# demonstrates. Everything else in this block guards a removal.
+
+
+def _agent_pub(acc, name: str) -> str:
+    r = acc.cli(["ssh-key", "show", name])
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def _in_container_pub(name: str) -> str:
+    r = subprocess.run(
+        [RUNTIME, "exec", f"agent-container-{name}", "cat", "/home/dev/.ssh/id_ed25519.pub"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_no_private_key_of_any_kind_is_written_anywhere(acc):
+    """T020, THE GATE — S1/FR-010/SC-001 at 100%.
+
+    018's equivalent had to carve out `*.push_key`, because Feature 003 staged an
+    outbound private key beside the state it was checking. With that channel removed
+    there is no carve-out left to make, so this walks BOTH the state dir and the user
+    config dir with no exclusions at all. Together with 018's test, the tool now
+    writes no private key anywhere on the operator's machine.
+
+    Over every deploy path the CLI still offers — plain, keyed, known-hosts, redeploy
+    — because a single path proves only that one path is clean.
+    """
+    laptop = _gen_keypair(acc.tmp / "lap019")
+    kh = acc.tmp / "kh019"
+    kh.write_text("github.com ssh-ed25519 AAAAKH\n")
+    acc.up("acc019gate", authorized_key=[laptop.with_suffix(".pub")], known_hosts=kh)
+    assert (
+        acc.cli(
+            ["redeploy", "acc019gate", "--env-file", str(acc.tmp / "acc019gate.env")]
+        ).returncode
+        == 0
+    )
+    acc.keys("acc019gate", authorized_key=[laptop.with_suffix(".pub")])
+
+    roots = [acc.state_dir, _config_dir_of(acc.state_dir)]
+    hits = [
+        p
+        for root in roots
+        if root.is_dir()
+        for p in root.rglob("*")
+        if p.is_file() and "PRIVATE KEY" in p.read_bytes().decode("utf-8", "replace")
+    ]
+    assert hits == [], f"private key material on the operator's disk: {hits}"
+    # And the generated key really does exist — otherwise this gate would pass just
+    # as well against a build that never made a key at all.
+    assert _in_container_pub("acc019gate").startswith("ssh-ed25519 ")
+
+
+def test_the_key_survives_down_and_up(acc):
+    """T018 — S4/C4/SC-003, the test that catches a NON-IDEMPOTENT generator.
+
+    Regenerating on each boot leaves every other symptom healthy and surfaces days
+    later as a push that stopped working, against a forge entry naming a key that no
+    longer exists. Nothing but a recreate makes that visible.
+    """
+    acc.up("acc019keep")
+    before = _in_container_pub("acc019keep")
+    assert before == _agent_pub(acc, "acc019keep")
+    acc.down("acc019keep")  # volumes preserved
+    acc.up("acc019keep")
+    assert _in_container_pub("acc019keep") == before, "the generator is not idempotent"
+    assert _agent_pub(acc, "acc019keep") == before
+
+
+def test_show_answers_with_the_environment_STOPPED(acc):
+    """S6/C3/FR-005/SC-006 — a stopped or unreachable environment is exactly when the
+    operator needs the key, so an answer that required reachability would fail in the
+    one case the command exists for."""
+    acc.up("acc019stop")
+    expected = _agent_pub(acc, "acc019stop")
+    assert subprocess.run([RUNTIME, "stop", "agent-container-acc019stop"]).returncode == 0
+    assert _agent_pub(acc, "acc019stop") == expected
+
+
+def test_nothing_wires_the_key_and_list_json_carries_it(acc):
+    """T019's S2 half, plus C3/FR-004.
+
+    An EMPTY `core.sshCommand` is the evidence that the removal was a deletion and
+    not a rewiring: with a value there, the key could be working through scaffolding
+    this feature claims to have deleted, and every other assertion would still pass.
+    """
+    acc.up("acc019json")
+    got = subprocess.run(
+        [RUNTIME, "exec", "agent-container-acc019json",
+         "git", "config", "--global", "--get", "core.sshCommand"],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert got.stdout.strip() == "", f"core.sshCommand survives: {got.stdout!r}"
+    r = acc.cli(["list", "--json"])
+    assert r.returncode == 0, r.stderr
+    rows = json.loads(r.stdout)["data"]["containers"]
+    row = next(x for x in rows if x["name"].endswith("acc019json"))
+    assert row["agent_ssh_public_key"] == _in_container_pub("acc019json")
+    assert "PRIVATE" not in json.dumps(rows)
+
+
+def test_rotate_replaces_the_key_and_keeps_the_workspace(acc):
+    """T040 — S14/FR-015/C13. `--purge` already rotates by destroying the volume; the
+    point of this command is that a suspected compromise does not cost the work."""
+    acc.up("acc019rot")
+    before = _agent_pub(acc, "acc019rot")
+    marker = "/home/dev/workspace/.rotate-marker"
+    assert (
+        subprocess.run(
+            [RUNTIME, "exec", "agent-container-acc019rot", "sh", "-c", f"echo keep > {marker}"]
+        ).returncode
+        == 0
+    )
+
+    r = acc.cli(["ssh-key", "rotate", "acc019rot", "-y"])
+    assert r.returncode == 0, r.stderr
+    assert "PREVIOUS registration is now dead" in r.stderr  # never a silent swap
+    after = _agent_pub(acc, "acc019rot")
+    assert after != before, "rotate returned the same key"
+    assert after == _in_container_pub("acc019rot")  # local state tracks the container
+    # The workspace is INTACT — the whole reason this is not `down --purge`.
+    kept = subprocess.run(
+        [RUNTIME, "exec", "agent-container-acc019rot", "cat", marker],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert kept.stdout.strip() == "keep"
+
+
+def test_rotate_without_confirmation_rotates_nothing(acc):
+    """C13 — the destructive-action rule (exit 2, non-TTY). Rotating silently would
+    kill a working registration on a typo."""
+    acc.up("acc019noy")
+    before = _agent_pub(acc, "acc019noy")
+    r = acc.cli(["ssh-key", "rotate", "acc019noy"])  # no -y, and no TTY here
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert _in_container_pub("acc019noy").split()[1] == before.split()[1]
+
+
+def test_purge_rotates_the_key_and_SAYS_SO(acc):
+    """T050 — S5/C5/FR-007. The key rides the `ssh` volume, so a purge destroys it;
+    nothing else in that output says so, and the operator would otherwise learn it
+    from a push that stopped working."""
+    acc.up("acc019purge")
+    before = _agent_pub(acc, "acc019purge")
+    r = acc.cli(["down", "acc019purge", "--purge", "-y"])
+    assert r.returncode == 0, r.stderr
+    assert "generates a NEW one" in r.stderr and "now dead" in r.stderr
+    acc.up("acc019purge")
+    assert _in_container_pub("acc019purge") != before
+
+
+def test_the_agents_own_ssh_config_edit_SURVIVES(acc):
+    """T050 — S13/FR-014a. Write-once applies to the BLOCK, not the file: an entrypoint
+    that rewrote `~/.ssh/config` each boot would silently discard a jump host the agent
+    configured for itself, and the loss would look like an unrelated network failure."""
+    acc.up("acc019cfg")
+    c = "agent-container-acc019cfg"
+    assert (
+        subprocess.run(
+            [
+                RUNTIME,
+                "exec",
+                c,
+                "sh",
+                "-c",
+                "printf '\\nHost jump\\n  User ferry\\n' >> ~/.ssh/config",
+            ]
+        ).returncode
+        == 0
+    )
+    acc.down("acc019cfg")
+    acc.up("acc019cfg")
+    cfg = subprocess.run(
+        [RUNTIME, "exec", c, "cat", "/home/dev/.ssh/config"], capture_output=True, text=True
+    ).stdout
+    assert "Host jump" in cfg, "the agent's own config edit was clobbered"
+    assert cfg.count("# BEGIN agent-container") == 1, "the managed block was appended twice"
+    assert "StrictHostKeyChecking accept-new" in cfg  # and the tool's settings still hold
+
+
+def test_a_config_that_PREDATES_the_block_still_gains_it(acc):
+    """T050 — S13's harder half, and the case that decided the design.
+
+    "Write the file only if absent" would leave a config the agent created FIRST — for
+    a jump host, say — without `StrictHostKeyChecking`, so every SSH the agent attempts
+    hangs on an interactive prompt it cannot answer. Keying on the BLOCK instead of the
+    file is what makes that impossible, and only a pre-existing config shows it.
+    """
+    acc.up("acc019pre")
+    c = "agent-container-acc019pre"
+    # A fresh volume, then a config written before the tool ever sees one.
+    acc.cli(["down", "acc019pre", "--purge", "-y"])
+    acc.up("acc019pre")
+    assert (
+        subprocess.run(
+            [RUNTIME, "exec", c, "sh", "-c", "printf 'Host early\\n' > ~/.ssh/config"]
+        ).returncode
+        == 0
+    )
+    acc.down("acc019pre")
+    acc.up("acc019pre")
+    cfg = subprocess.run(
+        [RUNTIME, "exec", c, "cat", "/home/dev/.ssh/config"], capture_output=True, text=True
+    ).stdout
+    assert "Host early" in cfg, "the pre-existing config was clobbered"
+    assert cfg.count("IdentitiesOnly") == 1, cfg  # gained the block, exactly once
+    assert "StrictHostKeyChecking accept-new" in cfg
+
+
+def test_the_https_path_is_untouched(acc):
+    """T050a — S17/FR-012/C16/SC-011. THREE deletions in this feature sit beside the
+    `GH_TOKEN` credential helper, and nothing else here would catch collateral damage
+    to it: every other test in this block goes over SSH."""
+    acc.up("acc019https", env_extra=["GH_TOKEN=ghp_acceptance_placeholder"])
+    helper = subprocess.run(
+        [RUNTIME, "exec", "agent-container-acc019https",
+         "git", "config", "--global", "--get", "credential.https://github.com.helper"],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert helper.stdout.strip(), "the HTTPS credential helper is gone"
+    probe = subprocess.run(
+        [RUNTIME, "exec", "agent-container-acc019https", "sh", "-c",
+         "printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill"],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    assert "password=ghp_acceptance_placeholder" in probe.stdout, probe.stdout + probe.stderr
+
+
+def test_the_removed_push_key_flag_refuses_and_explains(acc):
+    """S8/FR-002/C6/SC-007 — a bare "no such option" would be a regression rather than
+    a removal, and the operator who used the flag had a reason that is now served."""
+    for verb in ("up", "redeploy"):
+        r = acc.cli([verb, "acc019gone", "--push-key", "/nonexistent"])
+        assert r.returncode != 0
+        assert "generated INSIDE the container" in r.stderr, (verb, r.stderr)
+        assert "ssh-key show" in r.stderr, verb
+
+
+def test_the_probe_never_blocks_a_deploy(acc):
+    """T041 — S10/C9/FR-011: a forge the container cannot reach must not fail a deploy.
+
+    The soft-failure logic itself is pinned in the unit tier; what only a real
+    container can show is that it holds up with egress ENFORCED — the case the
+    requirement was written for, since Feature 012's default-deny is the most likely
+    reason a probe never answers.
+
+    The endpoint is declared (so FR-003c's deploy-time check passes) but nothing is
+    listening, so the probe times out. The exit code here is `3` — set by the clone,
+    not by the probe — and the point is precisely that: the environment EXISTS, its
+    key was generated and captured, and the unreachable third party cost none of it.
+    A probe that failed the deploy would leave the operator with nothing to read the
+    key out of, which is a worse failure than the one it prevents.
+    """
+    laptop = _gen_keypair(acc.tmp / "lap019eg")
+    dead = "10.255.255.1"  # declared, routable-looking, and nothing answers
+    proj = _phase_b_project(acc, "acc019eg", f"        - host: {dead}\n          port: 22\n")
+    acc.register("acc019eg")
+    r = acc.cli(
+        ["up", "acc019eg", "--authorized-key", str(laptop.with_suffix(".pub")),
+         "--repo", f"ssh://git@{dead}:22/srv/repo.git"],
+        cwd=proj,
+    )  # fmt: skip
+    assert r.returncode == 3, f"an unreachable forge broke the deploy ({r.returncode}):\n{r.stderr}"
+    # NEVER "not registered" — the tool cannot know that, and saying it would send
+    # the operator to re-register a key that is already fine.
+    assert "the remote REJECTED it" not in r.stderr, r.stderr
+    # The container is up and its key exists: the deploy did its job.
+    assert _in_container_pub("acc019eg").startswith("ssh-ed25519 ")
+    assert _agent_pub(acc, "acc019eg") == _in_container_pub("acc019eg")
+
+
+def test_an_environment_with_no_ssh_remote_is_NOT_nagged(acc):
+    """FR-006 is scoped to "an environment that pushes over SSH", and FR-011 forbids a
+    nag on every deploy. With no SSH remote the probe can never confirm anything, so an
+    unconditional announcement would warn forever — training the operator to skip the
+    warning that matters. Such an operator learns the key from `ssh-key show`."""
+    acc.up("acc019quiet")
+    r = acc.cli(["redeploy", "acc019quiet", "--env-file", str(acc.tmp / "acc019quiet.env")])
+    assert r.returncode == 0, r.stderr
+    assert "agent SSH key —" not in r.stderr, r.stderr
+    assert _agent_pub(acc, "acc019quiet").startswith("ssh-ed25519 ")  # still obtainable
+
+
+_BARE_SERVER_DOCKERFILE = """FROM alpine:3.21
+RUN apk add --no-cache openssh-server git \
+ && ssh-keygen -A \
+ && adduser -D -s /bin/sh git \\
+ && passwd -u git 2>/dev/null || true \
+ && mkdir -p /home/git/.ssh && : > /home/git/.ssh/authorized_keys \
+ && chown -R git:git /home/git/.ssh && chmod 700 /home/git/.ssh \
+ && chmod 600 /home/git/.ssh/authorized_keys \
+ && mkdir -p /srv/repo.git && git init --bare -b main /srv/repo.git \
+ && chown -R git:git /srv/repo.git
+EXPOSE 22
+CMD ["/usr/sbin/sshd","-D","-e"]
+"""
+# Empty authorized_keys at build time, filled per-test: the point of S12 is which
+# server trusts the key, so that cannot be baked into a shared image.
+
+
+def _bare_git_servers(acc, names: tuple[str, ...]) -> dict[str, str]:
+    """Throwaway SSH git servers on the default network. Returns name -> address."""
+    ctx = acc.tmp / "baresrv"
+    ctx.mkdir(parents=True, exist_ok=True)
+    (ctx / "Dockerfile").write_text(_BARE_SERVER_DOCKERFILE)
+    assert (
+        subprocess.run(
+            [RUNTIME, "build", "-q", "-t", "acc-baregit:test", str(ctx)], capture_output=True
+        ).returncode
+        == 0
+    ), "could not build the throwaway git server"
+    ips = {}
+    for n in names:
+        subprocess.run([RUNTIME, "run", "-d", "--name", n, "acc-baregit:test"], capture_output=True)
+        ips[n] = subprocess.run(
+            [RUNTIME, "inspect", n, "--format",
+             "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"],
+            capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+        assert ips[n], f"no address for {n}"
+    time.sleep(4)
+    return ips
+
+
+def _drop(names) -> None:
+    for n in names:
+        subprocess.run([RUNTIME, "stop", n], capture_output=True)
+        subprocess.run([RUNTIME, "rm", "-v", n], capture_output=True)
+
+
+def test_the_key_reaches_only_the_repository_it_was_registered_for(acc):
+    """T051 — S12/C12/SC-008, the least-privilege gain, and the one that is INVISIBLE
+    in a test that only checks the push works.
+
+    `--push-key` was in practice handed the operator's personal key, so the container
+    received everything that key authorised. A per-container key registered on one
+    repository authorises one repository — which only a NEGATIVE arm can demonstrate.
+    """
+    names = ("acc-019-srv-a", "acc-019-srv-b")
+    _drop(names)
+    try:
+        ips = _bare_git_servers(acc, names)
+        acc.up("acc019scope")
+        pub = _agent_pub(acc, "acc019scope")
+        # Registered on A ONLY — the whole experiment.
+        assert subprocess.run(
+            [RUNTIME, "exec", names[0], "sh", "-c",
+             f"printf '%s\\n' {shlex.quote(pub)} > /home/git/.ssh/authorized_keys && "
+             f"chown git:git /home/git/.ssh/authorized_keys && "
+             f"chmod 600 /home/git/.ssh/authorized_keys"],
+        ).returncode == 0  # fmt: skip
+
+        def ls_remote(ip):
+            return _exec("acc019scope", ["git", "-c", "core.askpass=true", "ls-remote",
+                                         f"ssh://git@{ip}:22/srv/repo.git"])  # fmt: skip
+
+        a = ls_remote(ips[names[0]])
+        assert a.returncode == 0, f"the registered repository refused its own key:\n{a.stderr}"
+        b = ls_remote(ips[names[1]])
+        assert b.returncode != 0, (
+            "an UNREGISTERED repository accepted the key — without this arm the "
+            f"assertion above proves only that something worked:\n{b.stdout}{b.stderr}"
+        )
+        assert "Permission denied" in b.stderr or "publickey" in b.stderr, b.stderr
+    finally:
+        _drop(names)
+
+
+def test_an_ssh_clone_on_start_is_two_phase(acc):
+    """T048 — S11/C10/FR-013. The key cannot exist before the container does, so a
+    first boot with an SSH `--repo` CANNOT clone. The container starts anyway and says
+    so; refusing would leave the operator with nothing to read the key out of.
+
+    Both halves are asserted, because the exit code is the thing that CAUSES the
+    destructive reaction — a caller reading only the status tears the environment down
+    and retries, regenerating the key it was about to register — so the code cannot
+    also be the thing that prevents it.
+    """
+    names = ("acc-019-pend",)
+    _drop(names)
+    try:
+        ip = _bare_git_servers(acc, names)[names[0]]
+        url = f"ssh://git@{ip}:22/srv/repo.git"
+        acc.register("acc019pend")
+        r = acc.up("acc019pend", repo=url, wait=False)
+        assert r.returncode == 3, f"expected the pending code, got {r.returncode}:\n{r.stderr}"
+        assert "was NOT cloned" in r.stderr
+        assert "DO NOT tear this environment down" in r.stderr  # the wording, not the code
+        assert "ssh-key show acc019pend" in r.stderr
+        assert "redeploy acc019pend" in r.stderr
+        # Started, and empty — "pending and says so", not "nothing happened".
+        listed = _exec("acc019pend", ["sh", "-c", "ls -A /home/dev/workspace | wc -l"])
+        assert listed.stdout.strip() == "0", listed.stdout
+
+        # Register it, then redeploy — the recovery the message names, and the only
+        # one that does not destroy the key.
+        pub = _agent_pub(acc, "acc019pend")
+        subprocess.run(
+            [RUNTIME, "exec", names[0], "sh", "-c",
+             f"printf '%s\\n' {shlex.quote(pub)} > /home/git/.ssh/authorized_keys && "
+             f"chown git:git /home/git/.ssh/authorized_keys && "
+             f"chmod 600 /home/git/.ssh/authorized_keys"],
+        )  # fmt: skip
+        r2 = acc.cli(["redeploy", "acc019pend", "--env-file", str(acc.tmp / "acc019pend.env")])
+        assert r2.returncode == 0, r2.stderr
+        cloned = _exec("acc019pend", ["sh", "-c", "ls -A /home/dev/workspace | wc -l"])
+        assert cloned.stdout.strip() != "0", "registering and redeploying did not clone"
+    finally:
+        _drop(names)

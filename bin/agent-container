@@ -7386,7 +7386,14 @@ def compose_up_exec(
     remove_stale_staged_push_key(host_name, name)
     if (agent_pub := capture_agent_ssh_pubkey(host_rec, name)) is not None:
         record_agent_ssh_pubkey(host_name, name, agent_pub)
-        announce_agent_ssh_key(host_rec, name, agent_pub, spec.repo)
+        # Scoped to "an environment that PUSHES OVER SSH" (FR-006), not every deploy.
+        # With no SSH remote the probe can never confirm anything, so an
+        # unconditional announcement would warn on every deployment forever — the
+        # exact nag FR-011 forbids, and the one that trains operators to skip the
+        # warning that matters. Such an operator learns the key from `ssh-key show`
+        # or `list --json` (FR-004/FR-005), which is what those exist for.
+        if spec.repo and is_ssh_git_url(spec.repo):
+            announce_agent_ssh_key(host_rec, name, agent_pub, spec.repo)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     verb = "redeployed" if redeploy else "started"
     log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
@@ -7601,6 +7608,16 @@ def down_container(
     if purge:
         compose_file.unlink(missing_ok=True)  # the derived artifact goes too
         log(f"purged volumes: {', '.join(vols)}")
+        # Feature 019 (FR-007): the `ssh` volume carries the agent's key pair, so a
+        # purge ROTATES it. Nothing else in this output says so, and the operator
+        # would otherwise learn it from a push that stopped working — the registration
+        # on the forge now names a key that no longer exists anywhere.
+        warn(
+            f"{name}: the agent's SSH key pair was on a purged volume — the next "
+            f"deploy generates a NEW one, and whatever you registered on the remote "
+            f"is now dead. Re-register after deploying:\n"
+            f"  agent-container ssh-key show {name}"
+        )
     else:
         log(f"volumes preserved (use --purge to remove): {', '.join(vols)}")
 
