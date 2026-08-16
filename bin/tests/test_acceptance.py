@@ -1109,9 +1109,19 @@ def test_workspace_bind_reflects_local_dir(acc):
     assert _ssh(port, laptop, "cat /workspace/seed").stdout.strip() == "host-side"
 
 
-def test_clone_on_start_ssh_without_key_fails_fast(acc):
-    """US4/SC-008 (FR-014): an SSH-URL clone with no injected push key fails BEFORE
-    starting an empty-workspace agent (deterministic; no network)."""
+def test_clone_on_start_ssh_with_an_unregistered_key_is_PENDING(acc):
+    """Feature 004's US4/SC-008 inverted by Feature 019, deliberately.
+
+    004 refused BEFORE starting: with no injected push key an SSH clone could never
+    work, so an empty-workspace agent was pure waste. 019 removes the injection — the
+    container makes its own key — and a first boot therefore CANNOT have a registered
+    one. Refusing now would leave the operator with no container to read the key out
+    of, so the refusal became a pending state.
+
+    What FR-014 still guarantees is unchanged and is what this asserts: the deploy
+    does not silently hand back an empty workspace. It exits non-zero, names the key,
+    and names the recovery.
+    """
     r = acc.up(
         "acc4clone",
         workspace="ephemeral",
@@ -1119,7 +1129,9 @@ def test_clone_on_start_ssh_without_key_fails_fast(acc):
         wait=False,
     )
     assert r.returncode != 0
-    assert "push key" in r.stderr.lower() or "fr-014" in r.stderr.lower()
+    assert "was NOT cloned" in r.stderr
+    assert "ssh-key show acc4clone" in r.stderr
+    assert "DO NOT tear this environment down" in r.stderr
 
 
 # --- Feature 005: shell integration (real containers) ------------------------
@@ -4104,10 +4116,24 @@ def test_panic_is_bounded_by_the_slowest_host_not_the_sum(acc):
 # demonstrates. Everything else in this block guards a removal.
 
 
+def _material(line: str) -> str:
+    """Type + base64, dropping any trailing comment.
+
+    The container's `.pub` carries `dev@<container-id>`; what the tool captures does
+    not, because 018's `valid_host_pubkey` strips it. That is the right call rather
+    than a bug to paper over — the comment names the container the key was BORN in,
+    and the key deliberately outlives that container, so after the first recreate the
+    comment identifies the wrong thing. Comparing material is comparing the key.
+    """
+    parts = line.split()
+    assert len(parts) >= 2, f"not a public key line: {line!r}"
+    return " ".join(parts[:2])
+
+
 def _agent_pub(acc, name: str) -> str:
     r = acc.cli(["ssh-key", "show", name])
     assert r.returncode == 0, r.stderr
-    return r.stdout.strip()
+    return _material(r.stdout.strip())
 
 
 def _in_container_pub(name: str) -> str:
@@ -4117,7 +4143,7 @@ def _in_container_pub(name: str) -> str:
         text=True,
     )
     assert r.returncode == 0, r.stderr
-    return r.stdout.strip()
+    return _material(r.stdout.strip())
 
 
 def test_no_private_key_of_any_kind_is_written_anywhere(acc):
@@ -4211,7 +4237,7 @@ def test_rotate_replaces_the_key_and_keeps_the_workspace(acc):
     point of this command is that a suspected compromise does not cost the work."""
     acc.up("acc019rot")
     before = _agent_pub(acc, "acc019rot")
-    marker = "/home/dev/workspace/.rotate-marker"
+    marker = "/workspace/.rotate-marker"
     assert (
         subprocess.run(
             [RUNTIME, "exec", "agent-container-acc019rot", "sh", "-c", f"echo keep > {marker}"]
@@ -4240,7 +4266,7 @@ def test_rotate_without_confirmation_rotates_nothing(acc):
     before = _agent_pub(acc, "acc019noy")
     r = acc.cli(["ssh-key", "rotate", "acc019noy"])  # no -y, and no TTY here
     assert r.returncode == 2, (r.returncode, r.stderr)
-    assert _in_container_pub("acc019noy").split()[1] == before.split()[1]
+    assert _in_container_pub("acc019noy") == before
 
 
 def test_purge_rotates_the_key_and_SAYS_SO(acc):
@@ -4352,11 +4378,17 @@ def test_the_probe_never_blocks_a_deploy(acc):
     reason a probe never answers.
 
     The endpoint is declared (so FR-003c's deploy-time check passes) but nothing is
-    listening, so the probe times out. The exit code here is `3` — set by the clone,
-    not by the probe — and the point is precisely that: the environment EXISTS, its
-    key was generated and captured, and the unreachable third party cost none of it.
-    A probe that failed the deploy would leave the operator with nothing to read the
-    key out of, which is a worse failure than the one it prevents.
+    listening. The deploy still SUCCEEDS: the environment exists and its key was
+    generated and captured, and the unreachable third party cost none of it. A probe
+    that failed the deploy would leave the operator with nothing to read the key out
+    of, which is a worse failure than the one it prevents.
+
+    Exit **0**, not the pending code, and that is not an oversight: an unreachable
+    remote makes the clone HANG rather than answer, so `clone_pending_url` declines to
+    guess within its bound. Reporting `3` there would sometimes fire against a healthy
+    slow clone, and the documented remedy for `3` is one an automated caller can get
+    catastrophically wrong. The two-phase test below covers a forge that REFUSES,
+    which is the case FR-013 is actually about.
     """
     laptop = _gen_keypair(acc.tmp / "lap019eg")
     dead = "10.255.255.1"  # declared, routable-looking, and nothing answers
@@ -4367,7 +4399,7 @@ def test_the_probe_never_blocks_a_deploy(acc):
          "--repo", f"ssh://git@{dead}:22/srv/repo.git"],
         cwd=proj,
     )  # fmt: skip
-    assert r.returncode == 3, f"an unreachable forge broke the deploy ({r.returncode}):\n{r.stderr}"
+    assert r.returncode == 0, f"an unreachable forge broke the deploy ({r.returncode}):\n{r.stderr}"
     # NEVER "not registered" — the tool cannot know that, and saying it would send
     # the operator to re-register a key that is already fine.
     assert "the remote REJECTED it" not in r.stderr, r.stderr
@@ -4405,8 +4437,15 @@ CMD ["/usr/sbin/sshd","-D","-e"]
 # server trusts the key, so that cannot be baked into a shared image.
 
 
-def _bare_git_servers(acc, names: tuple[str, ...]) -> dict[str, str]:
-    """Throwaway SSH git servers on the default network. Returns name -> address."""
+def _bare_git_servers(acc, env: str, names: tuple[str, ...]) -> dict[str, str]:
+    """Throwaway SSH git servers, joined to the ENVIRONMENT's own network.
+
+    Joining matters and cost a full acceptance run to learn: left on the default
+    bridge the servers get a 172.17.x address the agent container cannot route to, so
+    every connection times out and the test reads as "the forge refused the key" when
+    the packets never arrived. The environment must therefore exist first — the
+    network is created by its deploy.
+    """
     ctx = acc.tmp / "baresrv"
     ctx.mkdir(parents=True, exist_ok=True)
     (ctx / "Dockerfile").write_text(_BARE_SERVER_DOCKERFILE)
@@ -4416,17 +4455,42 @@ def _bare_git_servers(acc, names: tuple[str, ...]) -> dict[str, str]:
         ).returncode
         == 0
     ), "could not build the throwaway git server"
+    net = subprocess.run(
+        [RUNTIME, "inspect", f"agent-container-{env}", "--format",
+         "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}"],
+        capture_output=True, text=True,
+    ).stdout.strip()  # fmt: skip
+    assert net, f"no network for agent-container-{env}"
     ips = {}
     for n in names:
         subprocess.run([RUNTIME, "run", "-d", "--name", n, "acc-baregit:test"], capture_output=True)
+        subprocess.run([RUNTIME, "network", "connect", net, n], capture_output=True)
         ips[n] = subprocess.run(
             [RUNTIME, "inspect", n, "--format",
-             "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"],
+             '{{(index .NetworkSettings.Networks "' + net + '").IPAddress}}'],
             capture_output=True, text=True,
         ).stdout.strip()  # fmt: skip
-        assert ips[n], f"no address for {n}"
+        assert ips[n], f"no address for {n} on {net}"
     time.sleep(4)
     return ips
+
+
+def _register_on(server: str, pub: str) -> None:
+    assert (
+        subprocess.run(
+            [
+                RUNTIME,
+                "exec",
+                server,
+                "sh",
+                "-c",
+                f"printf '%s\\n' {shlex.quote(pub)} > /home/git/.ssh/authorized_keys && "
+                f"chown git:git /home/git/.ssh/authorized_keys && "
+                f"chmod 600 /home/git/.ssh/authorized_keys",
+            ],
+        ).returncode
+        == 0  # fmt: skip
+    ), f"could not register the key on {server}"
 
 
 def _drop(names) -> None:
@@ -4446,20 +4510,12 @@ def test_the_key_reaches_only_the_repository_it_was_registered_for(acc):
     names = ("acc-019-srv-a", "acc-019-srv-b")
     _drop(names)
     try:
-        ips = _bare_git_servers(acc, names)
         acc.up("acc019scope")
-        pub = _agent_pub(acc, "acc019scope")
-        # Registered on A ONLY — the whole experiment.
-        assert subprocess.run(
-            [RUNTIME, "exec", names[0], "sh", "-c",
-             f"printf '%s\\n' {shlex.quote(pub)} > /home/git/.ssh/authorized_keys && "
-             f"chown git:git /home/git/.ssh/authorized_keys && "
-             f"chmod 600 /home/git/.ssh/authorized_keys"],
-        ).returncode == 0  # fmt: skip
+        ips = _bare_git_servers(acc, "acc019scope", names)
+        _register_on(names[0], _agent_pub(acc, "acc019scope"))  # server A ONLY
 
         def ls_remote(ip):
-            return _exec("acc019scope", ["git", "-c", "core.askpass=true", "ls-remote",
-                                         f"ssh://git@{ip}:22/srv/repo.git"])  # fmt: skip
+            return _exec("acc019scope", ["git", "ls-remote", f"ssh://git@{ip}:22/srv/repo.git"])
 
         a = ls_remote(ips[names[0]])
         assert a.returncode == 0, f"the registered repository refused its own key:\n{a.stderr}"
@@ -4468,7 +4524,7 @@ def test_the_key_reaches_only_the_repository_it_was_registered_for(acc):
             "an UNREGISTERED repository accepted the key — without this arm the "
             f"assertion above proves only that something worked:\n{b.stdout}{b.stderr}"
         )
-        assert "Permission denied" in b.stderr or "publickey" in b.stderr, b.stderr
+        assert "denied" in b.stderr.lower() or "publickey" in b.stderr.lower(), b.stderr
     finally:
         _drop(names)
 
@@ -4482,13 +4538,22 @@ def test_an_ssh_clone_on_start_is_two_phase(acc):
     destructive reaction — a caller reading only the status tears the environment down
     and retries, regenerating the key it was about to register — so the code cannot
     also be the thing that prevents it.
+
+    The forge must be REACHABLE and refuse: an unreachable one is a different
+    requirement (FR-011's soft failure), and it hangs rather than answers, which is
+    exactly the case `clone_pending_url` declines to guess about.
     """
     names = ("acc-019-pend",)
     _drop(names)
     try:
-        ip = _bare_git_servers(acc, names)[names[0]]
+        # The network exists only once something is deployed on it, and `--repo` is a
+        # deploy-time flag — so a throwaway deploy creates the network, the server
+        # joins it, and the real subject is deployed second.
+        acc.up("acc019pend")
+        ip = _bare_git_servers(acc, "acc019pend", names)[names[0]]
         url = f"ssh://git@{ip}:22/srv/repo.git"
-        acc.register("acc019pend")
+        acc.cli(["down", "acc019pend", "--purge", "-y"])
+
         r = acc.up("acc019pend", repo=url, wait=False)
         assert r.returncode == 3, f"expected the pending code, got {r.returncode}:\n{r.stderr}"
         assert "was NOT cloned" in r.stderr
@@ -4496,21 +4561,15 @@ def test_an_ssh_clone_on_start_is_two_phase(acc):
         assert "ssh-key show acc019pend" in r.stderr
         assert "redeploy acc019pend" in r.stderr
         # Started, and empty — "pending and says so", not "nothing happened".
-        listed = _exec("acc019pend", ["sh", "-c", "ls -A /home/dev/workspace | wc -l"])
+        listed = _exec("acc019pend", ["sh", "-c", "ls -A /workspace | wc -l"])
         assert listed.stdout.strip() == "0", listed.stdout
 
         # Register it, then redeploy — the recovery the message names, and the only
         # one that does not destroy the key.
-        pub = _agent_pub(acc, "acc019pend")
-        subprocess.run(
-            [RUNTIME, "exec", names[0], "sh", "-c",
-             f"printf '%s\\n' {shlex.quote(pub)} > /home/git/.ssh/authorized_keys && "
-             f"chown git:git /home/git/.ssh/authorized_keys && "
-             f"chmod 600 /home/git/.ssh/authorized_keys"],
-        )  # fmt: skip
+        _register_on(names[0], _agent_pub(acc, "acc019pend"))
         r2 = acc.cli(["redeploy", "acc019pend", "--env-file", str(acc.tmp / "acc019pend.env")])
         assert r2.returncode == 0, r2.stderr
-        cloned = _exec("acc019pend", ["sh", "-c", "ls -A /home/dev/workspace | wc -l"])
+        cloned = _exec("acc019pend", ["sh", "-c", "ls -A /workspace | wc -l"])
         assert cloned.stdout.strip() != "0", "registering and redeploying did not clone"
     finally:
         _drop(names)

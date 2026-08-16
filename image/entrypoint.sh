@@ -1102,9 +1102,17 @@ if [[ -n "${CLONE_URL}" ]]; then
                 # PENDING, NOT FATAL. A failure here is overwhelmingly "the key is not
                 # registered yet", which is the expected first-boot state — and dying
                 # would leave an operator with no container to read the key from.
+                #
+                # BOTH outcomes leave a marker. The CLI reaches this container as soon
+                # as the public key exists (section 3b, well before here), so ABSENCE of
+                # the pending file conflates "cloned fine" with "still cloning" — and
+                # the CLI would report success while the clone is in flight. A decided
+                # answer needs a positive signal for BOTH branches; stale ones go first,
+                # since this runs again on every recreate.
                 log "clone-on-start: cloning via SSH (the agent's own key)"
+                rm -f "${SSH_DIR}/.clone_pending" "${SSH_DIR}/.clone_done" 2>/dev/null || true
                 if git clone "${CLONE_URL}" "${WORKSPACE_DIR}"; then
-                    :
+                    : > "${SSH_DIR}/.clone_done"
                 else
                     rm -rf "${WORKSPACE_DIR:?}/.git" 2>/dev/null || true
                     printf '%s\n' "${CLONE_URL}" > "${SSH_DIR}/.clone_pending"

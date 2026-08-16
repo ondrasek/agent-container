@@ -302,6 +302,54 @@ def test_the_documented_codes_ARE_the_enforced_ones(wiz):
     assert "--foreground" in epilog  # the headless caveat
 
 
+# --- the clone must DECIDE before we report on it ----------------------------
+
+
+def test_a_clone_still_running_is_not_reported_as_finished(wiz, monkeypatch):
+    """The defect a full acceptance run found. We reach the container as soon as the
+    public key exists, and the entrypoint generates that key well BEFORE it clones —
+    so reading "no pending file" straight through reported a successful deploy over a
+    clone that had not happened. Measured: exit 0 with an empty workspace, silently."""
+    calls = []
+
+    def undecided_then_pending(argv, **_kw):
+        calls.append(argv)
+        if len(calls) < 3:
+            return subprocess.CompletedProcess(argv, 1, "", "")  # not decided yet
+        return subprocess.CompletedProcess(argv, 0, "git@forge:o/r.git\n", "")
+
+    monkeypatch.setattr(wiz, "query", undecided_then_pending)
+    monkeypatch.setattr(wiz.time, "sleep", lambda _s: None)
+    assert wiz.clone_pending_url(HOST, "acme") == "git@forge:o/r.git"
+    assert len(calls) == 3, "gave up on the first undecided answer"
+
+
+def test_a_finished_clone_returns_at_once(wiz, monkeypatch):
+    """Exit 3 is the entrypoint's positive `.clone_done` signal — a decided answer, so
+    there is nothing to wait for and a healthy deploy pays nothing."""
+    monkeypatch.setattr(wiz, "query", lambda *a, **k: subprocess.CompletedProcess([], 3, "", ""))
+    monkeypatch.setattr(wiz.time, "sleep", lambda _s: pytest.fail("waited on a decided clone"))
+    assert wiz.clone_pending_url(HOST, "acme") is None
+
+
+def test_an_UNDECIDED_clone_says_nothing_rather_than_guessing(wiz, monkeypatch):
+    """The deliberate asymmetry. This answer drives a non-zero exit whose documented
+    remedy an automated caller can get catastrophically wrong — tearing the
+    environment down destroys the key — so a slow-but-healthy clone must never be
+    reported as pending. Declining costs a missed warning; guessing costs the key."""
+    monkeypatch.setattr(wiz, "query", lambda *a, **k: subprocess.CompletedProcess([], 1, "", ""))
+    monkeypatch.setattr(wiz.time, "sleep", lambda _s: None)
+    ticks = iter([0.0] + [wiz.CLONE_RESOLVE_TIMEOUT + 1] * 20)
+    monkeypatch.setattr(wiz.time, "monotonic", lambda: next(ticks))
+    assert wiz.clone_pending_url(HOST, "acme") is None
+
+
+def test_the_wait_is_bounded(wiz):
+    """Unbounded, a deploy against a hanging forge would never return — and the whole
+    point of the pending state is that the operator gets a usable container."""
+    assert wiz.CLONE_RESOLVE_TIMEOUT == 10.0
+
+
 def test_pending_clone_url_tolerates_a_runtime_with_no_stdout(wiz, monkeypatch):
     """The bug the suite caught: this runs on EVERY deploy, and a runtime returning no
     stdout must not crash a deployment that otherwise succeeded."""

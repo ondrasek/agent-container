@@ -1505,24 +1505,50 @@ def announce_agent_ssh_key(host_rec: dict, name: str, pubkey: str, repo: str | N
     )
 
 
+CLONE_RESOLVE_TIMEOUT = 10.0  # bounded; see clone_pending_url
+
+
 def clone_pending_url(host_rec: dict, name: str) -> str | None:
     """The repo the entrypoint could not clone, or None (FR-013).
 
     The entrypoint records this rather than dying: on a first boot the key cannot yet
     be registered, and dying would leave the operator with no container to read the
     key from.
+
+    WAITS, BOUNDED, FOR THE CLONE TO DECIDE. We reach the container as soon as the
+    public key exists, and the entrypoint generates that key well BEFORE it clones —
+    so "no pending file" conflates *cloned fine* with *still cloning*, and reading it
+    straight through reports success over a clone that has not happened. Measured:
+    against an unreachable remote the deploy exited 0 with an empty workspace and said
+    nothing. So the entrypoint marks BOTH outcomes and this polls for either.
+
+    Unresolved within the bound ⇒ **None**, i.e. say nothing. That is deliberate
+    asymmetry: this answer drives a NON-ZERO exit whose documented remedy an automated
+    caller can get catastrophically wrong (tearing the environment down destroys the
+    key), so a slow-but-healthy clone must never be reported as pending. Declining to
+    answer costs a missed warning; answering wrongly costs the key.
     """
-    try:
-        r = query(
-            driver_runtime_argv(host_rec)
-            + ["exec", container_name(name), "cat", "/home/dev/.ssh/.clone_pending"],
-            timeout=RUNS_PROBE_TIMEOUT,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    # `or ""` rather than trusting stdout: this runs on EVERY deploy, and a runtime
-    # that returns no stdout must not crash a deployment that otherwise succeeded.
-    return ((r.stdout or "").strip() or None) if r.returncode == 0 else None
+    argv = driver_runtime_argv(host_rec) + ["exec", container_name(name), "sh", "-c"]
+    # One round trip per poll, and it distinguishes the three states in the exit code
+    # rather than by parsing: 0 = pending (URL on stdout), 3 = decided-and-cloned,
+    # 1 = not decided yet.
+    probe = (
+        "if [ -f /home/dev/.ssh/.clone_pending ]; then cat /home/dev/.ssh/.clone_pending; "
+        "elif [ -f /home/dev/.ssh/.clone_done ]; then exit 3; else exit 1; fi"
+    )
+    deadline = time.monotonic() + CLONE_RESOLVE_TIMEOUT
+    while True:
+        try:
+            r = query(argv + [probe], timeout=RUNS_PROBE_TIMEOUT)
+        except OSError, subprocess.SubprocessError:
+            return None
+        if r.returncode == 0:
+            # `or ""` rather than trusting stdout: this runs on EVERY deploy, and a
+            # runtime that returns no stdout must not crash an otherwise fine deploy.
+            return (r.stdout or "").strip() or None
+        if r.returncode == 3 or time.monotonic() >= deadline:
+            return None
+        time.sleep(0.5)
 
 
 def capture_and_pin(
