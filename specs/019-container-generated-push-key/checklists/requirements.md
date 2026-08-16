@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain
+- [x] No [NEEDS CLARIFICATION] markers remain
 - [x] Requirements are testable and unambiguous
 - [x] Success criteria are measurable
 - [x] Success criteria are technology-agnostic (no implementation details)
@@ -31,11 +31,14 @@
 
 ## Notes
 
-**One marker is open, deliberately.** FR-011 ("do not nag once pushing works") has three plausible
-answers — remember locally after a successful push, probe the remote, or announce once per generated
-key — and they differ in what the tool has to store and whether it needs network access it does not
-otherwise need. It is a US3 (P2) concern, so it does not block US1/US2, and guessing it would embed a
-storage decision nobody made. Resolve it in `/speckit-clarify` or at plan time.
+**The marker is resolved.** FR-011 is settled: probe the forge **from inside the container** (the
+operator's machine holds no private key and cannot answer), fail **soft**, and cache nothing —
+registration lives on the forge and a stored answer goes stale the moment a key is revoked.
+
+**A second decision arrived at plan time**, not from the spec: `clone_credential_precheck` refuses to
+start when `--repo` is an SSH URL and no push key was supplied, which is a premise this feature
+inverts. Settled as two-phase (boot, register, redeploy) and recorded as FR-013, which relaxes FR-014's
+empty-workspace refusal for that case alone.
 
 **One requirement deliberately amends another feature**, and that is called out rather than smuggled:
 FR-003 puts self-generated push material on a persisted volume, which Feature 003's rule forbids for

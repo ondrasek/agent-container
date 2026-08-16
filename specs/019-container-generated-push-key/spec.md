@@ -44,6 +44,23 @@ data.
 
 ## Clarifications
 
+### Session 2026-08-16
+
+- Q: How is "already registered" established (FR-011)? → A: **Probe the forge from inside the
+  container.** The operator's machine cannot answer — it holds no private key, which is the point of
+  the feature. Running the probe where the key is has a second benefit: it inherits the same egress the
+  push will, so a *not registered* answer is predictive rather than a guess about network conditions
+  the agent will never face. It must fail **soft** — denied egress, offline or a forge outage yields
+  *unknown* and never blocks a deploy. Not cached: registration lives on the forge and a stored answer
+  goes stale the moment a key is revoked.
+- Q: SSH clone-on-start needs a key before the container exists, and the container now makes its own.
+  What happens? → A: **Two-phase — boot, register, redeploy.** `up` starts the container, generates
+  the key, does **not** clone, and prints the key with the exact next command. This relaxes FR-014's
+  empty-workspace refusal **for this case only**: that refusal exists so nobody receives a silently
+  useless container, and here the container is *deliberately pending and says so*. Refusing SSH
+  clone-on-start outright was rejected — it deletes a working capability, and `GH_TOKEN` is
+  github.com-scoped, so operators on any other forge would have no path at all.
+
 ### Session 2026-08-15
 
 - Q: Does the public/private argument from Feature 018 transfer directly? → A: **No, and the
@@ -176,10 +193,17 @@ unregistered, and confirm the output names the key and the consequence.
 - **FR-010**: No push private key material may be written anywhere on the operator's machine by this
   feature (Constitution III).
 - **FR-011**: The tool MUST NOT nag about registering a key on every deploy once pushing demonstrably
-  works. [NEEDS CLARIFICATION: how "already registered" is established — remembered locally after a
-  successful push, probed against the remote, or simply announced once per generated key?]
+  works. Registration MUST be established by **probing the forge from inside the container** — the
+  operator's machine holds no private key and so cannot answer the question. The probe MUST **fail
+  soft**: a forge that cannot be reached yields *unknown*, never *not registered*, and MUST NOT block
+  or fail the deploy. Registration MUST NOT be cached: it lives on the forge, and a stored "registered"
+  goes stale the moment the operator revokes the key.
 - **FR-012**: The HTTPS + token push path and the outbound `known_hosts` channel (which verifies the
   **remote**, not the container) MUST be unaffected.
+- **FR-013**: Clone-on-start over an **SSH** URL MUST become two-phase: the container starts, generates
+  its key, does **not** clone, and states the key and the next command. This relaxes FR-014's
+  empty-workspace refusal for **this case only** — the container is deliberately pending and says so,
+  which serves that refusal's intent rather than defeating it. HTTPS clone-on-start is unchanged.
 
 ### Key Entities *(include if feature involves data)*
 
