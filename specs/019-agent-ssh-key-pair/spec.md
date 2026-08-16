@@ -61,6 +61,18 @@ data.
 
 ## Clarifications
 
+### Session 2026-08-16 (later)
+
+- Q: Is it the agent's SSH identity, or git's? → A: **The agent's — generated at
+  `~/.ssh/id_ed25519`.** That is what the thing is, and it is also *less* code: git shells out to
+  `ssh`, which picks up the conventional identity automatically, so `core.sshCommand` and its
+  `PUSH_RUNTIME` scaffolding disappear entirely rather than being rewired. `IdentitiesOnly` and the
+  pinned `UserKnownHostsFile` move to `~/.ssh/config` — the standard mechanism, same effect. The
+  container's `ssh` volume is already mounted at `~/.ssh`, so FR-003's persistence requirement is met
+  by the existing volume with no new path. Every outbound SSH the agent makes — git, `ssh`, `scp`,
+  `rsync` — now uses one identity the operator has registered, rather than git alone having a
+  credential nothing else can use.
+
 ### Session 2026-08-16
 
 - Q: How is "already registered" established (FR-011)? → A: **Probe the forge from inside the
