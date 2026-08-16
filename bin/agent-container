@@ -7964,6 +7964,25 @@ def row_known_hosts_entry(row: dict[str, object]) -> str | None:
     return None if key is None else known_hosts_entry(addr, str(port), key)
 
 
+def row_agent_ssh_public_key(row: dict[str, object]) -> str | None:
+    """The agent's own public key for a `list` row, or None (Feature 019, FR-004).
+
+    The OUTBOUND counterpart to `row_known_hosts_entry`, and read from local state for
+    the same reason: an environment the operator cannot reach is exactly when they need
+    the key, so an answer that required reachability would fail in the one case it
+    exists for. `None` rather than `""` — a consumer must be able to tell *never
+    captured* from a captured value.
+
+    Only ever the PUBLIC half. The private half is generated inside the container and
+    has no path out of it, so there is no field here that could leak one.
+    """
+    name = str(row.get("name") or "")
+    host = str(row.get("host") or "")
+    if not name.startswith(CONTAINER_PREFIX) or not host:
+        return None
+    return read_agent_ssh_pubkey(host, name[len(CONTAINER_PREFIX) :])
+
+
 def do_list(as_json: bool, local_only: bool = False) -> None:
     migrate_flat_state()
     rt = detect_runtime()
@@ -7972,7 +7991,12 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
         emit_json(
             {
                 "containers": [
-                    row | {"known_hosts_entry": row_known_hosts_entry(row)} for row in rows
+                    row
+                    | {
+                        "known_hosts_entry": row_known_hosts_entry(row),
+                        "agent_ssh_public_key": row_agent_ssh_public_key(row),
+                    }
+                    for row in rows
                 ]
             }
         )

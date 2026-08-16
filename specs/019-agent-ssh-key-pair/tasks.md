@@ -240,7 +240,7 @@ completed).
       `bin/tests/` parse that file
 - [X] T058 [P] One-line invariant in `CLAUDE.md`; measure against the 2000-token budget and **prune
       before adding**. Report the before/after number
-- [ ] T059 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Four channels removed and
+- [X] T059 Confirm the commit is `feat!` — **BREAKING** (Constitution VII). Four channels removed and
       SSH clone-on-start changes shape **and exit status**
 - [ ] T060 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`
       selection**, and verify quickstart S1–S14 by hand. A selector matching nothing is

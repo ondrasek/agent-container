@@ -158,6 +158,23 @@ def test_show_reads_local_state_and_never_the_daemon(wiz, monkeypatch):
     assert wiz.read_agent_ssh_pubkey("local", "acme") == "ssh-ed25519 AAAA agent"
 
 
+def test_the_list_row_carries_the_public_key(wiz):
+    """FR-004. The task for this was marked done while the row builder never gained
+    the field — `ssh-key show` worked, so every hand-check passed and only a consumer
+    of `list --json` would have found the hole."""
+    wiz.record_agent_ssh_pubkey("local", "acme", "ssh-ed25519 AAAA agent")
+    row = {"name": f"{wiz.CONTAINER_PREFIX}acme", "host": "local"}
+    assert wiz.row_agent_ssh_public_key(row) == "ssh-ed25519 AAAA agent"
+
+
+def test_an_uncaptured_list_row_is_null_not_empty(wiz):
+    """`None`, never `""` — a consumer must be able to tell *never captured* from a
+    captured value, and an empty string reads as a key that happens to be blank."""
+    row = {"name": f"{wiz.CONTAINER_PREFIX}never", "host": "local"}
+    assert wiz.row_agent_ssh_public_key(row) is None
+    assert wiz.row_agent_ssh_public_key({"name": "not-ours", "host": "local"}) is None
+
+
 def test_show_is_explicit_when_nothing_was_captured(wiz):
     """Never a silent empty result — "no key" and "not captured" are different, and
     only one of them is fixed by deploying."""
