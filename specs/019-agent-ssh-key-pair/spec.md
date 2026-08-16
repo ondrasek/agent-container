@@ -63,6 +63,16 @@ data.
 
 ### Session 2026-08-16 (later)
 
+- Q: What does `up` exit with when FR-013 defers the clone? → A: **Non-zero.** The environment is not
+  usable yet, so `up` did not do what was asked, and the exit status says so. The container is still
+  created and its key generated — this is *"created, not ready"*, not *"nothing happened"*.
+  **The risk this carries, and the mitigation it therefore requires**: an automated caller that sees
+  non-zero may `down` and retry, which **destroys the key the operator was about to register**; the
+  retry generates a different key, so the loop never terminates and each iteration invalidates the
+  registration just made. The failure output MUST therefore state that tearing down destroys the key
+  and that the fix is *register then `redeploy`*, never recreate — and it MUST use a distinct exit
+  code so a caller can tell "pending registration" from a real failure without parsing prose.
+
 - Q: Is it the agent's SSH identity, or git's? → A: **The agent's — generated at
   `~/.ssh/id_ed25519`.** That is what the thing is, and it is also *less* code: git shells out to
   `ssh`, which picks up the conventional identity automatically, so `core.sshCommand` and its
@@ -230,7 +240,12 @@ unregistered, and confirm the output names the key and the consequence.
 - **FR-012**: The HTTPS + token push path and the outbound `known_hosts` channel (which verifies the
   **remote**, not the container) MUST be unaffected.
 - **FR-013**: Clone-on-start over an **SSH** URL MUST become two-phase: the container starts, generates
-  its key, does **not** clone, and states the key and the next command. This relaxes FR-014's
+  its key, does **not** clone, and states the key and the next command. The invocation MUST exit
+  **non-zero** with a **distinct code** meaning *pending registration*, so an automated caller can tell
+  it from a real failure. Because a non-zero exit invites an automated caller to tear the environment
+  down and retry — which would destroy the very key awaiting registration and make every retry
+  generate a new one — the output MUST state that tearing down destroys the key and that the recovery
+  is **register, then `redeploy`**, never recreate. This relaxes FR-014's
   empty-workspace refusal for **this case only** — the container is deliberately pending and says so,
   which serves that refusal's intent rather than defeating it. HTTPS clone-on-start is unchanged.
 
@@ -256,6 +271,9 @@ unregistered, and confirm the output names the key and the consequence.
   **zero** manual reformatting.
 - **SC-005**: A deploy that will push over SSH with an unregistered key states the consequence —
   **zero** silent setups that fail at first push.
+- **SC-010**: A deferred clone exits with the distinct *pending registration* code and names the
+  register-then-redeploy recovery — **zero** occurrences of an operator or agent being left to infer
+  that recreating the environment is the fix.
 - **SC-006**: Obtaining the public key succeeds for a stopped environment and for an unreachable host —
   **100%**.
 - **SC-007**: Every removed channel fails with an explanatory message — **zero** bare
