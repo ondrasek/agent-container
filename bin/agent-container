@@ -603,6 +603,18 @@ EXIT_CODES = (
         "pending registration: started, key not registered, nothing cloned",
     ),
 )
+# Feature 013 reuses the three above rather than defining DOCTOR_EXIT_* aliases with
+# the same values. A second namespace for one command is how `doctor`'s 2 and the
+# tool-wide 2 drift apart in meaning, and 019 made this tuple the single source that
+# `--help` is built from. What `doctor` adds is a READING of each code, not a code:
+#   0 = a deploy would succeed (advisories and unknowns permitted)
+#   1 = a BLOCKING check FAILED — never merely `unknown`, which cannot carry that
+#       assertion (FR-011a)
+#   2 = `doctor` itself could not run. Nothing above 2 is available: 3 is taken.
+# Feature 013 FR-012a: the building CLI stamps its own version here, and `doctor`
+# reads it back locally. An OCI-standard label rather than an `ENV`, because
+# reading it must not start a container.
+IMAGE_VERSION_LABEL = "org.opencontainers.image.version"
 INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
 INJECT_APIKEY_DIR = "/run/agent-container/apikeys"
 INJECT_CONFIG_DIR = "/run/agent-container/config"
@@ -2418,6 +2430,616 @@ def do_ssh_key_rotate(name: str, yes: bool, as_json: bool) -> None:
     # Newline-terminated: `$(...)` strips it anyway, and without it a terminal
     # glues the shell prompt onto the end of the key the operator is copying.
     print_shell(pub + "\n")
+
+
+# --- Feature 013: `doctor` — preflight validation ----------------------------
+# Nothing here is persisted. This feature's defining property is that it writes
+# NOTHING (FR-002), so every structure below lives for one command and then goes.
+#
+# THE HARD PART IS NOT THE CHECKS, IT IS WHAT THIS CODE MAY CALL. The helpers a
+# deploy runs first are the ones that mutate — `migrate_flat_state()` opens
+# `do_up`/`do_redeploy`/`do_list`, relocates files on disk, is idempotent, and
+# documents itself as "safe to call repeatedly". It reads as harmless and is
+# exactly what SC-002 measures. So the read-only guarantee is enforced by
+# composition from pure readers, not by a flag threaded through shared code where
+# each new caller can forget it (research R1).
+
+DOCTOR_STATUSES = ("pass", "fail", "unknown")
+DOCTOR_SEVERITIES = ("blocking", "advisory")
+DOCTOR_SCOPES = ("environment", "project", "machine")
+# SC-007: a threshold, not "one screen". Screen height is not a property of the
+# tool, and a criterion nothing can fail is not a criterion.
+DOCTOR_BRIEF_LINES = 24
+
+
+@dataclass(frozen=True)
+class Finding:
+    """The result of a check that did not pass.
+
+    `remedy` is REQUIRED, not conventionally-filled: SC-003 wants zero findings
+    that state only a symptom, and a field that is merely usually present produces
+    exactly the finding that is not. A check unable to name a remedy has not
+    finished being designed.
+
+    Where a deploy already reports the condition, `remedy` is the SAME STRING from
+    the same producer — never a restatement (SC-008, R8). Two strings that agree
+    today drift the moment one is edited, and both still read correctly alone.
+
+    `observed` names the DECLARATION for credential checks — source, variable,
+    path, resolver binary — never a value. By R3's design no value is retrieved at
+    all, which is stronger than not printing one (FR-010).
+    """
+
+    check_id: str
+    severity: str
+    observed: str
+    remedy: str
+    entity: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.severity not in DOCTOR_SEVERITIES:
+            raise ValueError(f"severity must be one of {DOCTOR_SEVERITIES}")
+        if not self.remedy.strip():
+            raise ValueError(
+                f"finding {self.check_id!r} has no remedy: every finding must name the "
+                f"action that resolves it (FR-004/SC-003), not only the symptom"
+            )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "check_id": self.check_id,
+            "severity": self.severity,
+            "observed": self.observed,
+            "remedy": self.remedy,
+            "entity": self.entity,
+        }
+
+
+@dataclass(frozen=True)
+class Check:
+    """One question, asked once. Three states — `unknown` is FIRST-CLASS (FR-006).
+
+    A check that cannot complete and reports `pass` is worse than no check at all,
+    because it stops the operator looking. One that reports `fail` invents work.
+
+    Severity belongs to the CHECK, not to the run: deciding it per-run from the
+    observed outcome would make the same condition blocking on Tuesday and
+    advisory on Wednesday.
+    """
+
+    id: str
+    title: str
+    scope: str
+    severity: str
+    status: str
+    finding: Finding | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in DOCTOR_STATUSES:
+            raise ValueError(f"status must be one of {DOCTOR_STATUSES}")
+        if self.severity not in DOCTOR_SEVERITIES:
+            raise ValueError(f"severity must be one of {DOCTOR_SEVERITIES}")
+        if (self.status == "pass") != (self.finding is None):
+            raise ValueError(f"check {self.id!r}: a finding is present exactly when status != pass")
+
+    @property
+    def blocks_deploy(self) -> bool:
+        """Only a FAILED blocking check asserts that a deploy would not work.
+
+        An `unknown` never does, however severe the check (FR-011a). Exit 1 makes
+        that assertion, and `unknown` is precisely the state in which it cannot be
+        made — so failing the run on one would break `doctor && up` for anyone
+        whose secondary host happened to be slow, and a diagnostic people stop
+        chaining is a diagnostic nobody runs.
+        """
+        return self.status == "fail" and self.severity == "blocking"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "scope": self.scope,
+            "severity": self.severity,
+            "status": self.status,
+            "finding": self.finding.as_dict() if self.finding else None,
+        }
+
+
+def doctor_exit_code(checks: list[Check]) -> int:
+    """0 / 1 / 2 — and never above 2 (FR-011, R4).
+
+    `3` is *pending registration* tool-wide, documented in `--help` and pinned by a
+    test, so a `doctor` returning it would tell an automated caller something false
+    about an SSH key.
+    """
+    return EXIT_FAILURE if any(c.blocks_deploy for c in checks) else EXIT_OK
+
+
+def doctor_finding_from_fatal(
+    check_id: str, severity: str, probe: Callable[[], None], *, entity: str | None = None
+) -> Check:
+    """Run an existing validator; turn its `Fatal` into a finding (R8, R9).
+
+    Reuse the WORDING, discard the CONTROL FLOW. Every validator in this tool
+    `die()`s on the first problem — correct for a deploy, fatal for FR-003's "report
+    all of them in one pass". And the message must be the validator's own string,
+    because SC-008 measures divergence at zero and two strings that agree today
+    drift invisibly.
+
+    An UNEXPECTED exception becomes `unknown`, never a crash: the registry has to
+    survive a check author's mistake, or one bad check silences every other (C10).
+    """
+    try:
+        probe()
+    except Fatal as e:
+        return Check(
+            id=check_id,
+            title=check_id,
+            scope="project",
+            severity=severity,
+            status="fail",
+            finding=Finding(
+                check_id=check_id,
+                severity=severity,
+                observed=str(e),
+                remedy=str(e),  # the validator's own words — never a paraphrase
+                entity=entity,
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 - a check must not be able to end the run
+        return doctor_unknown(
+            check_id,
+            severity,
+            f"the check itself failed: {e}",
+            remedy="this is a defect in doctor, not in your project — report it with the message "
+            "above",
+            entity=entity,
+        )
+    return Check(id=check_id, title=check_id, scope="project", severity=severity, status="pass")
+
+
+def doctor_unknown(
+    check_id: str,
+    severity: str,
+    observed: str,
+    *,
+    remedy: str | None = None,
+    entity: str | None = None,
+) -> Check:
+    """A check that could not be answered. NEVER `pass` (FR-006, C5).
+
+    `remedy` is required in spirit even here: FR-004 admits no exception for
+    *unknown*, and a generic "check by hand" tells the operator nothing they did not
+    already know — it turns the unknown into a dead end instead of a next step. Each
+    caller passes the action that WOULD settle the question; the fallback exists only
+    so a new caller cannot construct a remedy-less finding, and it names the command
+    rather than the check id.
+    """
+    return Check(
+        id=check_id,
+        title=check_id,
+        scope="project",
+        severity=severity,
+        status="unknown",
+        finding=Finding(
+            check_id=check_id,
+            severity=severity,
+            observed=observed,
+            remedy=remedy
+            or f"verify by hand — `agent-container doctor --json` shows what {check_id} looked at",
+            entity=entity,
+        ),
+    )
+
+
+def doctor_order(checks: list[Check]) -> list[Check]:
+    """Blocking failures, then advisory failures, then unknowns, then passes.
+
+    STABLE within each group: a report whose order changes between runs cannot be
+    diffed, and diffing two runs is how an operator confirms they fixed something.
+    """
+    rank = {("fail", "blocking"): 0, ("fail", "advisory"): 1}
+    return sorted(
+        checks,
+        key=lambda c: (
+            rank.get((c.status, c.severity), 2 if c.status == "unknown" else 3),
+            c.id,
+        ),
+    )
+
+
+def doctor_ok(check_id: str, severity: str, scope: str = "project") -> Check:
+    return Check(id=check_id, title=check_id, scope=scope, severity=severity, status="pass")
+
+
+def doctor_fail(
+    check_id: str,
+    severity: str,
+    observed: str,
+    remedy: str,
+    *,
+    entity: str | None = None,
+    scope: str = "project",
+) -> Check:
+    return Check(
+        id=check_id,
+        title=check_id,
+        scope=scope,
+        severity=severity,
+        status="fail",
+        finding=Finding(
+            check_id=check_id,
+            severity=severity,
+            observed=observed,
+            remedy=remedy,
+            entity=entity,
+        ),
+    )
+
+
+def doctor_scope(name: str | None, root: Path | None) -> str:
+    """`environment` / `project` / `machine` (data-model §3, FR-007).
+
+    `machine` is a SUCCESS state, not an error. Outside a project `doctor` reports
+    what it can and says so — failing there would make the command useless in the
+    case US3 exists for, which is a new machine before anything is set up.
+    """
+    if name:
+        return "environment"
+    return "project" if root is not None else "machine"
+
+
+def doctor_check_layout(name: str, root: Path) -> Check:
+    """Pre-011 layout — the single most likely real finding.
+
+    Reuses `refuse_superseded_layout` through the Fatal adapter so the remedy is
+    that function's own string. SC-008 measures divergence between what `doctor`
+    says and what a deploy says at ZERO, and sharing the producer makes divergence
+    impossible rather than unlikely.
+    """
+    return doctor_finding_from_fatal(
+        "layout", "blocking", lambda: refuse_superseded_layout(name, root), entity=name
+    )
+
+
+def doctor_check_credential(cred: dict, env_name: str) -> Check:
+    """Is this credential RESOLVABLE — asked without resolving it (R3, C8, C9).
+
+    For `keychain`/`onepassword`/`bitwarden`/`command`, resolving IS the prompt: the
+    resolver runs `op read` / `bw get` / the operator's own argv, and an
+    approval-gated item raises a system dialog. FR-009 forbids exactly that as a
+    side effect of asking a question, and resolving would pull a secret into memory
+    for no reason (FR-010).
+
+    So: check what is free, and report *unknown* for the rest. The binary-on-PATH
+    check is not a consolation prize — "the tool that would resolve this is not
+    installed" is the most common real failure on a new machine, which is US3's
+    scenario exactly.
+    """
+    cid, src, cname = "credentials", cred.get("source"), cred.get("name", "?")
+    entity = f"{env_name}/{cname}"
+    if src == "env":
+        var = cred.get("var", "?")
+        if os.environ.get(var) is None:
+            return doctor_fail(
+                cid,
+                "blocking",
+                f"credential {cname}: ${var} is not set",
+                f"export {var}=… in the environment the CLI runs in",
+                entity=entity,
+            )
+        return doctor_ok(cid, "blocking")
+    if src == "file":
+        p = Path(str(cred.get("path", ""))).expanduser()
+        if not p.is_file():
+            return doctor_fail(
+                cid,
+                "blocking",
+                f"credential {cname}: {p} does not exist",
+                f"create {p}, or point the declaration at the real path",
+                entity=entity,
+            )
+        return doctor_ok(cid, "blocking")
+    # A manager source. The most we can learn without side effects is whether the
+    # thing that would do the resolving exists.
+    try:
+        binary = resolver_argv(cred)[0]
+    except Exception:  # noqa: BLE001 - a malformed declaration is US1's business
+        return doctor_unknown(
+            cid,
+            "blocking",
+            f"credential {cname}: unreadable declaration",
+            remedy=f"fix the {cname} credential's fields in the spec — a manager source needs its "
+            f"vault/item/field (or argv for `command`)",
+            entity=entity,
+        )
+    if shutil.which(binary) is None:
+        return doctor_fail(
+            cid,
+            "blocking",
+            f"credential {cname}: resolver {binary!r} is not on PATH",
+            f"install {binary}, or change the credential's source",
+            entity=entity,
+        )
+    return doctor_unknown(
+        cid,
+        "blocking",
+        f"credential {cname}: {binary!r} is present; resolvability NOT verified "
+        f"(resolving it would prompt, which this command must never do)",
+        remedy=f"if you want certainty, resolve it yourself once: `{binary} ...` — "
+        f"a successful deploy is the other proof",
+        entity=entity,
+    )
+
+
+def doctor_check_host(host_name: str, host_rec: dict) -> Check:
+    """Is this host reachable? Bounded, and `unknown` when it cannot answer.
+
+    Never `pass` on a timeout (C5/C12): a host reported healthy because the probe
+    gave up is the failure mode that stops an operator looking further.
+    """
+    if host_rec.get("driver") not in ("docker", "podman"):
+        return doctor_unknown(
+            "host-reachability",
+            "advisory",
+            f"host {host_name}: attach-only; not queryable",
+            remedy="nothing to do — an attach-only host is reached over ssh, not a runtime "
+            "socket, so there is no daemon here to probe",
+            entity=host_name,
+        )
+    try:
+        err = probe_host_runtime(host_rec)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        return doctor_unknown(
+            "host-reachability",
+            "advisory",
+            f"host {host_name}: {e or 'unreachable'}",
+            remedy="check the host answers: `agent-container host ls`, then `docker --context "
+            "<ctx> version`",
+            entity=host_name,
+        )
+    if err is not None:
+        return doctor_fail(
+            "host-reachability",
+            "advisory",
+            f"host {host_name} is UNREACHABLE: {err}",
+            "check the host is up and its context resolves: agent-container host ls",
+            entity=host_name,
+        )
+    return doctor_ok("host-reachability", "advisory")
+
+
+def doctor_check_port(host_name: str, host_rec: dict, name: str) -> Check:
+    """Is this environment's derived port free — or held by ITS OWN container?
+
+    Held by its own container is a PASS (R10, C14). The port derives from the name
+    (Constitution IV), so a running environment always occupies "its" port, and
+    reporting that as a conflict would fail `doctor` on every healthy deployment —
+    a diagnostic that cries wolf on the normal case is one nobody runs.
+    """
+    port = read_state_port(host_name, name) or str(port_for_name(name))
+    cname = container_name(name)
+    try:
+        running = cname in host_container_names(host_rec, include_stopped=False)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        return doctor_unknown(
+            "port-availability",
+            "blocking",
+            f"{name}: cannot tell who holds :{port} ({e})",
+            remedy=f"the host did not answer, so this says nothing about port {port} — fix host "
+            f"reachability first and re-run",
+            entity=name,
+        )
+    if running:
+        return doctor_ok("port-availability", "blocking")
+    if port_free(int(port)):
+        return doctor_ok("port-availability", "blocking")
+    return doctor_fail(
+        "port-availability",
+        "blocking",
+        f"{name}: port {port} is held by something that is not {cname}",
+        f"free port {port}, or deploy under a different name (the port derives from it)",
+        entity=name,
+    )
+
+
+def doctor_check_image_freshness(host_rec: dict, tag: str) -> Check:
+    """Is the image as new as the CLI that would deploy it? (FR-012a/b, C13)
+
+    Compared LOCALLY against a label — no network, no container registry. NO label
+    means the image predates stamping: **unknown**, never fresh and never stale
+    (FR-012b). Reporting it stale would nag every operator into a rebuild they may
+    not need; reporting it fresh would assert something unknown.
+    """
+    cid = "image-freshness"
+    argv = driver_runtime_argv(host_rec) + [
+        "image",
+        "inspect",
+        tag,
+        "--format",
+        "{{index .Config.Labels " + f'"{IMAGE_VERSION_LABEL}"' + "}}",
+    ]
+    try:
+        r = query(argv)
+    except (OSError, subprocess.SubprocessError) as e:
+        return doctor_unknown(
+            cid,
+            "advisory",
+            f"image {tag}: {e}",
+            remedy="the runtime did not answer — fix host reachability, then re-run",
+            entity=tag,
+        )
+    if r.returncode != 0:
+        return doctor_fail(
+            cid,
+            "advisory",
+            f"image {tag} is not present on this host",
+            "build it: agent-container build",
+            entity=tag,
+        )
+    stamped = (r.stdout or "").strip()
+    if not stamped or stamped == "<no value>":
+        return doctor_unknown(
+            cid,
+            "advisory",
+            f"image {tag} carries no version stamp — it predates stamping",
+            remedy="rebuild to start stamping it: agent-container build. Until then freshness is "
+            "genuinely unknown — reporting it stale would nag you into a rebuild you may not need",
+            entity=tag,
+        )
+    installed = _resolve_version()
+    if stamped == installed:
+        return doctor_ok(cid, "advisory")
+    return doctor_fail(
+        cid,
+        "advisory",
+        f"image {tag} was built by {stamped}; the installed CLI is {installed}",
+        "rebuild so the image matches the tool: agent-container build",
+        entity=tag,
+    )
+
+
+def doctor_collect(name: str | None, host: str | None) -> tuple[str, list[Check]]:
+    """Every check, each independent, none able to end the run (FR-003, FR-008).
+
+    READ-ONLY BY COMPOSITION. This function deliberately does NOT call
+    `migrate_flat_state()`, `drain_host_records()` or `record_inventory_creation()`,
+    however convenient they are on the deploy path — see R1 and the module comment.
+    `ensure_tunnel()` IS permitted (R2): it creates none of the artifact kinds
+    FR-002 names and does not outlive the command, and without it every provisioned
+    host reads *unreachable*, which is a false negative on the check FR-012 asks for.
+    """
+    root = find_project_root()
+    scope = doctor_scope(name, root)
+    checks: list[Check] = []
+
+    hosts = registry_hosts(load_registry())
+    try:
+        host_name, host_rec = resolve_deploy_host(host)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        host_name, host_rec = "local", {}
+        checks.append(
+            doctor_unknown(
+                "host-resolution",
+                "blocking",
+                f"cannot resolve a host: {e}",
+                remedy="register one: agent-container host add local --docker-context <ctx>",
+            )
+        )
+
+    if host_rec:
+        with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
+            ensure_tunnel(host_rec)  # permitted: outlives nothing (R2)
+        checks.extend(
+            (
+                doctor_check_host(host_name, host_rec),
+                doctor_check_image_freshness(host_rec, IMAGE_NAME),
+            )
+        )
+    for hname, hrec in sorted(hosts.items()):
+        if hname != host_name:
+            # Every host individually — one unreachable host must not suppress the
+            # others, and must never be silently absent (C10/C12, SC-005).
+            checks.append(doctor_check_host(hname, hrec))
+
+    if root is None:
+        return scope, checks
+
+    # Per-environment. A malformed spec is ONE finding, not a crash: load_project_spec
+    # dies on the first problem, which is right for `apply` and wrong here (R9).
+    envs: list[dict] = []
+    try:
+        envs = load_project_spec(root, skip_unknown=True)
+    except Fatal as e:
+        checks.append(
+            doctor_fail(
+                "project-spec",
+                "blocking",
+                str(e),
+                str(e),  # the loader's own words (SC-008's principle, applied here too)
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - never let one check end the run
+        checks.append(
+            doctor_unknown(
+                "project-spec",
+                "blocking",
+                f"the check itself failed: {e}",
+                remedy="this is a defect in doctor, not in your project — report it with the "
+                "message above",
+            )
+        )
+
+    wanted = [e for e in envs if not name or e.get("name") == name]
+    if name and not wanted:
+        checks.append(
+            doctor_fail(
+                "environment-declared",
+                "blocking",
+                f"{name} is not declared in {root / PROJECT_MARKER}",
+                f"declare {name} in {root / PROJECT_MARKER}/environments.yaml, "
+                f"or run doctor without a name to see what is declared",
+                entity=name,
+            )
+        )
+    for env in wanted:
+        ename = str(env.get("name") or "?")
+        checks.append(doctor_check_layout(ename, root))
+        if host_rec:
+            checks.append(doctor_check_port(host_name, host_rec, ename))
+        for cred in env.get("credentials") or []:
+            checks.append(doctor_check_credential(cred, ename))
+    return scope, checks
+
+
+def do_doctor(name: str | None, host: str | None, as_json: bool) -> None:
+    """Would a deploy work, and if not, why — WITHOUT performing one (FR-001).
+
+    Exit 0/1/2 and never above (FR-011). An `unknown` never yields 1: exit 1 asserts
+    that a deploy would not work, and `unknown` is the state in which that assertion
+    cannot be made (FR-011a).
+    """
+    if name:
+        validate_name(name)
+    scope, checks = doctor_collect(name, host)
+    ordered = doctor_order(checks)
+    code = doctor_exit_code(ordered)
+
+    if as_json:
+        emit_json(
+            {
+                "scope": scope,
+                "exit_code": code,
+                # EVERY check, passes included: a consumer that cannot see which
+                # checks ran cannot tell "checked and fine" from "never asked".
+                "checks": [c.as_dict() for c in ordered],
+                "findings": [c.finding.as_dict() for c in ordered if c.finding],
+            }
+        )
+        raise typer.Exit(code)
+
+    if scope == "machine":
+        # A success state, not an error (FR-007) — US3's whole scenario is a new
+        # machine, before any project exists.
+        log("no project found here — reporting machine-level checks only")
+    # Pair each check with its finding, so the narrowing is visible rather than
+    # implied by the filter — the invariant is enforced in Check.__post_init__.
+    problems = [(c, c.finding) for c in ordered if c.finding is not None]
+    for c, f in problems:
+        mark = (
+            "unknown"
+            if c.status == "unknown"
+            else ("BLOCKS" if c.severity == "blocking" else "advisory")
+        )
+        where = f" [{f.entity}]" if f.entity else ""
+        eprint(f"[{mark}]{where} {f.observed}")
+        eprint(f"          -> {f.remedy}")
+    # FR-014/SC-007: brief. One line for the passes rather than a wall of green.
+    passed = len(ordered) - len(problems)
+    log(f"{len(ordered)} checks: {passed} pass, {len(problems)} to look at (scope: {scope})")
+    if code == EXIT_OK and not problems:
+        log("a deploy would work")
+    raise typer.Exit(code)
 
 
 def do_inventory_list(as_json: bool) -> None:
@@ -5111,7 +5733,20 @@ def do_build(tag: str, context: Path | None = None) -> None:
     rt = detect_runtime()
     log(f"building image '{tag}' with {rt} from {ctx}")
     # Inherited stdio: layer progress must stream, never capture.
-    rc = run_child([rt, "build", "-t", tag, str(ctx)]).returncode
+    # FR-012a/FR-012b: stamp the building CLI's version, and OMIT the arg entirely
+    # when it cannot be resolved. `_resolve_version()` returns "0.0.0+unknown" in that
+    # case, and stamping that would assert a version nobody has — an unstamped image
+    # is honestly *unknown*, which is what `doctor` reports.
+    argv = [rt, "build", "-t", tag]
+    version = _resolve_version()
+    if version and not version.endswith("+unknown"):
+        argv += ["--build-arg", f"AGENT_CONTAINER_VERSION={version}"]
+    else:
+        warn(
+            f"building without a version stamp ({version}) — `doctor` will report this "
+            f"image's freshness as unknown, which is correct rather than unfortunate"
+        )
+    rc = run_child(argv + [str(ctx)]).returncode
     if rc != 0:
         die(f"build failed (exit {rc})")
 
@@ -13998,6 +14633,21 @@ def apply(
     set_json_mode(as_json)
     do_aac_apply(host, yes, skip_unknown_files)
     emit_action("apply", host=host)
+
+
+@app.command()
+def doctor(
+    name: str | None = typer.Argument(None, help="Narrow to one environment."),
+    host: str | None = typer.Option(None, "--host", help="Override the host to check."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Report whether a deploy would work — WITHOUT performing one. Changes nothing.
+
+    Exits 0 when a deploy would succeed (advisories and unknowns permitted), 1 when a
+    blocking check failed, 2 when doctor itself could not run.
+    """
+    set_json_mode(as_json)
+    do_doctor(name, host, as_json)
 
 
 @app.command()

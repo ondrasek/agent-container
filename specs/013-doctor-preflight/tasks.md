@@ -27,21 +27,21 @@ pass whatever exists (R1).
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Add the `Check` / `Finding` / `Scope` model to `bin/agent-container` per data-model
+- [X] T001 Add the `Check` / `Finding` / `Scope` model to `bin/agent-container` per data-model
       §1–§3 — three statuses (`pass`/`fail`/`unknown`), severity on the CHECK not the outcome, and
       `remedy` **required at construction** so a remedy-less finding cannot be built (FR-004, C3,
       SC-003)
-- [ ] T002 [P] **Reuse** the existing `EXIT_OK` / `EXIT_FAILURE` / `EXIT_REFUSED` (0/1/2) in
+- [X] T002 [P] **Reuse** the existing `EXIT_OK` / `EXIT_FAILURE` / `EXIT_REFUSED` (0/1/2) in
       `bin/agent-container` for `doctor`'s three outcomes, and record doctor's reading of each in the
       existing `EXIT_CODES` table (FR-011, R4). **Do NOT add `DOCTOR_EXIT_*` aliases**: they would
       duplicate the same three values under a second name, and a second namespace is precisely how
       doctor's `2` and the tool-wide `2` drift apart in meaning. Feature 019 made that table the
       single source and pinned `--help` to it; keep it that way
-- [ ] T003 [P] Register the `doctor` command skeleton in `bin/agent-container` — `[NAME]`,
+- [X] T003 [P] Register the `doctor` command skeleton in `bin/agent-container` — `[NAME]`,
       `--host`, `--json` — returning an empty report, so the surface exists before any check does.
       The name is **`doctor`**, never `status`, which is already an alias of `plan` answering a
       different question (FR-001, R6)
-- [ ] T004 [P] Add `doctor` to the command list in `completions/agent-container.bash` and
+- [X] T004 [P] Add `doctor` to the command list in `completions/agent-container.bash` and
       `completions/agent-container.zsh`; the sibling test pins the completions' list to the CLI's
       and fails until both are updated (FR-001)
 
@@ -53,7 +53,7 @@ pass whatever exists (R1).
 
 **These block every user story. T005 and T006 are the two that make the rest trustworthy.**
 
-- [ ] T005 **THE GATE: acceptance S1** in `bin/tests/test_acceptance.py` — snapshot the project,
+- [X] T005 **THE GATE: acceptance S1** in `bin/tests/test_acceptance.py` — snapshot the project,
       state and user-config trees (**naming `hosts.conf` and the inventory explicitly**, not merely
       "the config dir"), plus containers, volumes and images, around a `doctor` run, and assert
       **byte-identical** (C1, FR-002, SC-002).
@@ -65,11 +65,11 @@ pass whatever exists (R1).
       T038, T045, T048), and a task is not done until it is green with that check present. A gate
       that cannot fail on the day it is written is the exact defect this feature exists to prevent,
       reproduced inside the guard against it
-- [ ] T006 [P] Extend T005 to a project on the **pre-011 layout** — the path where a deploy would
+- [X] T006 [P] Extend T005 to a project on the **pre-011 layout** — the path where a deploy would
       call `migrate_flat_state()`, which relocates files, is idempotent, and documents itself as
       *"safe to call repeatedly"*. It is the trap R1 exists to name, and the only deploy-path
       helper that looks harmless
-- [ ] T007 [P] Hermetic test in `bin/tests/test_doctor.py` asserting the `doctor` code path
+- [X] T007 [P] Hermetic test in `bin/tests/test_doctor.py` asserting the `doctor` code path
       references none of `migrate_flat_state`, `drain_host_records`, `record_inventory_creation`
       (R1). Structural, because T005 catches a mutation only when the test project happens to
       trigger it — an unused-but-reachable call passes T005 and fails here.
@@ -77,19 +77,19 @@ pass whatever exists (R1).
       the transitive closure of `__code__.co_names` from the `doctor` command object and assert the
       forbidden names are absent from it. A grep over the whole file would pass or fail for reasons
       unrelated to `doctor`
-- [ ] T008 Add the check REGISTRY to `bin/agent-container`: an ordered collection of named checks,
+- [X] T008 Add the check REGISTRY to `bin/agent-container`: an ordered collection of named checks,
       each invoked independently, each returning a `Check`. **No check may call `die()`** (C2, R9)
-- [ ] T009 Add the `Fatal`-trapping adapter in `bin/agent-container` that runs an existing
+- [X] T009 Add the `Fatal`-trapping adapter in `bin/agent-container` that runs an existing
       validator and converts its `Fatal` into a `Finding`, preserving the message VERBATIM (R8, R9)
-- [ ] T010 [P] Hermetic test for T009: a raising validator becomes a finding, the run continues,
+- [X] T010 [P] Hermetic test for T009: a raising validator becomes a finding, the run continues,
       and the finding's `remedy` is the validator's own string — not a paraphrase (C4)
-- [ ] T011 [P] Hermetic test that a check raising an **unexpected** exception becomes `unknown`
+- [X] T011 [P] Hermetic test that a check raising an **unexpected** exception becomes `unknown`
       rather than propagating (C10). The registry must survive a check author's mistake, or one
       bad check silences every other
-- [ ] T012 Assemble the `Report` (data-model §4) and wire `--json` through the Feature 009
+- [X] T012 Assemble the `Report` (data-model §4) and wire `--json` through the Feature 009
       envelope; confirm `NO_JSON_COMMANDS` still reads `{host env, completions, attach, menu}`
       (C-Command, R7)
-- [ ] T013 [P] Hermetic test that `--json` carries **every** check including passes — a consumer
+- [X] T013 [P] Hermetic test that `--json` carries **every** check including passes — a consumer
       that cannot see which checks ran cannot tell "checked and fine" from "never asked"
       (data-model §4)
 
@@ -107,37 +107,37 @@ one pass, with remedies, having changed nothing.
 
 ### Tests for User Story 1
 
-- [ ] T014 [P] [US1] Acceptance S2 in `bin/tests/test_acceptance.py` — break three things at once
+- [X] T014 [P] [US1] Acceptance S2 in `bin/tests/test_acceptance.py` — break three things at once
       (pre-011 layout, a credential pointing at a nonexistent file, an unreachable host) and assert
       all three appear in ONE run (C2, FR-003, SC-001)
-- [ ] T015 [P] [US1] Acceptance S3 — `doctor --json` yields **zero** findings with a null or empty
+- [X] T015 [P] [US1] Acceptance S3 — `doctor --json` yields **zero** findings with a null or empty
       `remedy` (C3, SC-003)
-- [ ] T016 [P] [US1] Acceptance S4 — the layout remedy is **byte-identical** to the one a deploy
+- [X] T016 [P] [US1] Acceptance S4 — the layout remedy is **byte-identical** to the one a deploy
       prints (C4, SC-008). Assert the identity, not a substring match: two strings that agree today
       drift the moment one is edited, and both still read correctly alone
 
 ### Implementation for User Story 1
 
-- [ ] T017 [US1] The **layout** check in `bin/agent-container` — reuses `refuse_superseded_layout`
+- [X] T017 [US1] The **layout** check in `bin/agent-container` — reuses `refuse_superseded_layout`
       through T009's adapter so the remedy is the same producer's string (C4, R8) — **re-run T005**
-- [ ] T018 [P] [US1] The **per-environment configuration resolution** check — parses
+- [X] T018 [P] [US1] The **per-environment configuration resolution** check — parses
       `.agent-container/environments.yaml` with `yaml.safe_load` (never a regex) and reports each
       environment's resolution independently (FR-012, C17) — **re-run T005**
-- [ ] T019 [P] [US1] The **credential resolvability** check per R3: `env` → is the variable set;
+- [X] T019 [P] [US1] The **credential resolvability** check per R3: `env` → is the variable set;
       `file` → does the path exist and is it git-tracked plaintext; manager sources → is the
       resolver binary on `PATH`, else **unknown**. **Never calls `resolve_credential_value()`**
       (C8, C9) — **re-run T005**
-- [ ] T020 [P] [US1] The **host reachability** check — each registered host independently, bounded
+- [X] T020 [P] [US1] The **host reachability** check — each registered host independently, bounded
       per host, `unknown` on timeout (C5, C10, C12) — **re-run T005**
-- [ ] T021 [P] [US1] The **port availability** check — a **blocking** finding only when the port is
+- [X] T021 [P] [US1] The **port availability** check — a **blocking** finding only when the port is
       held by something that is NOT this environment's own container (C14, R10) — **re-run T005**
-- [ ] T022 [US1] Order the report: blocking, then advisory, then unknown; stable within each group,
+- [X] T022 [US1] Order the report: blocking, then advisory, then unknown; stable within each group,
       so two runs can be diffed and an operator can confirm they fixed something (data-model §4)
-- [ ] T023 [P] [US1] Hermetic tests for T019's classification table — one case per source, and one
+- [X] T023 [P] [US1] Hermetic tests for T019's classification table — one case per source, and one
       proving `resolve_credential_value` and `_run_resolver` are **unreachable** from the check
       (FR-009, FR-010, C8, C9). This is the machine-checkable half of "never prompts"; the other
       half is T053a, because a prompt is a UI event no assertion can observe
-- [ ] T024 [P] [US1] Hermetic test for T021 asserting a RUNNING environment's own port is `pass`
+- [X] T024 [P] [US1] Hermetic test for T021 asserting a RUNNING environment's own port is `pass`
       (C14, R10). Without it, `doctor` fails on every healthy deployment — the port derives from the
       name
 
@@ -155,29 +155,29 @@ and by a program, and the advisory-only run exits 0.
 
 - [ ] T025 [P] [US2] Acceptance S6 — advisory-only exits **0** and `doctor && up` **proceeds**;
       a blocking failure exits **1** (C6, C7, FR-011, SC-004)
-- [ ] T026 [P] [US2] Hermetic test of the full status×severity → exit mapping (data-model §1),
+- [X] T026 [P] [US2] Hermetic test of the full status×severity → exit mapping (data-model §1),
       including the two that are easy to get wrong: an advisory `fail` contributes nothing, and an
       **`unknown` never yields 1** (FR-011a, SC-004a)
-- [ ] T027 [P] [US2] Hermetic test that **no** input combination produces an exit above **2**
+- [X] T027 [P] [US2] Hermetic test that **no** input combination produces an exit above **2**
       (SC-004a, S7, R4). `3` is *pending registration* tool-wide — a `doctor` returning it tells an
       automated caller something false about an SSH key
-- [ ] T028 [P] [US2] Acceptance S14 — a healthy run's human output is **≤ 24 lines** (the threshold
+- [X] T028 [P] [US2] Acceptance S14 — a healthy run's human output is **≤ 24 lines** (the threshold
       SC-007 now pins) while `--json` still carries every check (C16, FR-014, SC-007). Assert the
       number: "fits one screen" is unfalsifiable, and a criterion nothing can fail is not a criterion
 
 ### Implementation for User Story 2
 
-- [ ] T029 [US2] Assign a severity to every check from Phase 3, declared BY THE CHECK, not derived
+- [X] T029 [US2] Assign a severity to every check from Phase 3, declared BY THE CHECK, not derived
       per-run from the outcome (C6, FR-005) — the same condition must not be blocking on Tuesday
       and advisory on Wednesday
-- [ ] T030 [US2] The exit mapping in `bin/agent-container` per data-model §1: blocking `fail` → 1;
+- [X] T030 [US2] The exit mapping in `bin/agent-container` per data-model §1: blocking `fail` → 1;
       advisory `fail` → 0; `unknown` → **never 1** (FR-011, FR-011a)
-- [ ] T031 [US2] Exit **2** with a message naming the *command* as the thing that failed, never
+- [X] T031 [US2] Exit **2** with a message naming the *command* as the thing that failed, never
       presented as a finding about the environment (C15, FR-013)
-- [ ] T032 [P] [US2] Hermetic test for T031: a `doctor` that cannot run is distinguishable from a
+- [X] T032 [P] [US2] Hermetic test for T031: a `doctor` that cannot run is distinguishable from a
       `doctor` reporting an unhealthy environment — assert on both the code and the wording (FR-013,
       C15)
-- [ ] T033 [US2] The brief all-clear output: findings plus a one-line summary of passes, not a wall
+- [X] T033 [US2] The brief all-clear output: findings plus a one-line summary of passes, not a wall
       of green (C16, FR-014)
 
 **Checkpoint**: the report is readable by a human and branchable by a program.
@@ -192,21 +192,21 @@ fail.
 
 ### Tests for User Story 3
 
-- [ ] T034 [P] [US3] Acceptance S11 — outside a project, machine-level checks report, the output
+- [X] T034 [P] [US3] Acceptance S11 — outside a project, machine-level checks report, the output
       says plainly that no project was found, and the exit is **0** when the machine is fine
       (C11, FR-007). Failing here would make the command useless in the case US3 exists for
 - [ ] T035 [P] [US3] Acceptance S10 — with one reachable and one unreachable host, **both** are
       listed; neither suppresses the other and the unreachable one is never silently absent
       (C10, C12, FR-008, SC-005)
-- [ ] T036 [P] [US3] Hermetic test that `Scope` resolves to `environment` / `project` / `machine`
+- [X] T036 [P] [US3] Hermetic test that `Scope` resolves to `environment` / `project` / `machine`
       from the invocation and cwd, and that the report states which (data-model §3)
 
 ### Implementation for User Story 3
 
-- [ ] T037 [US3] Scope resolution in `bin/agent-container`: a NAME narrows to one environment; in a
+- [X] T037 [US3] Scope resolution in `bin/agent-container`: a NAME narrows to one environment; in a
       project with no name, every declared environment; outside a project, `machine` — **a success
       state, not an error** (FR-007, C11)
-- [ ] T038 [P] [US3] Machine-level checks: registered hosts, user configuration, the installed tool
+- [X] T038 [P] [US3] Machine-level checks: registered hosts, user configuration, the installed tool
       itself (FR-007, FR-012) — **re-run T005**
 - [ ] T039 [US3] Per-host isolation — one unreachable host must not extend the run past its bound
       nor suppress the others (C10, FR-008)
@@ -221,21 +221,21 @@ fail.
 
 **Both halves land together, or the check reports `unknown` forever.**
 
-- [ ] T041 Add an `ARG` + `LABEL org.opencontainers.image.version` to `image/Dockerfile` (R5, C13)
-- [ ] T042 Pass the build arg from `build` in `bin/agent-container`, sourced from
+- [X] T041 Add an `ARG` + `LABEL org.opencontainers.image.version` to `image/Dockerfile` (R5, C13)
+- [X] T042 Pass the build arg from `build` in `bin/agent-container`, sourced from
       `_resolve_version()` — currently `[rt, "build", "-t", tag, ctx]` with no args (FR-012a, C13)
-- [ ] T043 **OMIT the label when the version is unresolvable** rather than stamp `0.0.0+unknown`
+- [X] T043 **OMIT the label when the version is unresolvable** rather than stamp `0.0.0+unknown`
       (R5). A meaningless value that looks like an answer is worse than the absence FR-012b already
       handles correctly
-- [ ] T044 [P] Hermetic test for T043: an unresolvable version produces build argv with **no**
+- [X] T044 [P] Hermetic test for T043: an unresolvable version produces build argv with **no**
       version arg — not one carrying the sentinel (FR-012b, C13, R5)
-- [ ] T045 The **image freshness** check in `bin/agent-container` — `image inspect` for the label,
+- [X] T045 The **image freshness** check in `bin/agent-container` — `image inspect` for the label,
       compared LOCALLY against the installed version; no network, no container registry (C13,
       FR-012a). A label rather than an `ENV` precisely because reading it must not start a container.
       **Name which image**: the tag the environment under check would deploy, per environment; in
       `machine` scope, the default tag. A project declaring several environments may pin several
       tags, so "the image" is undefined without this rule — **re-run T005**
-- [ ] T046 [P] An image with **no** label reports `unknown` — never fresh, never stale (C13,
+- [X] T046 [P] An image with **no** label reports `unknown` — never fresh, never stale (C13,
       FR-012b). Reporting it stale nags every operator into a rebuild they may not need; reporting
       it fresh asserts something unknown
 - [ ] T047 [P] Acceptance S12 — an image built before stamping reports `unknown`; after
@@ -246,7 +246,7 @@ fail.
 
 ## Phase 7: The honest edges
 
-- [ ] T048 A check that times out or errors reports `unknown` with a remedy naming the manual
+- [X] T048 A check that times out or errors reports `unknown` with a remedy naming the manual
       check (C5, FR-006) — *unknown* must still be actionable, not a shrug — **re-run T005**
 - [ ] T049 [P] Acceptance S5 — a host at an unroutable address yields `unknown` for reachability,
       **never `pass`** (C5). The scenario the feature exists to get right: a diagnostic reporting

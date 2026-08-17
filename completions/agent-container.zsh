@@ -127,7 +127,8 @@ _agent-container() {
         'runs:Durable run records (list, show) — survives teardown'
         'egress:Durable record of undeclared egress — survives teardown'
         'inventory:Durable record of every environment created — survives its host'
-        'ssh-key:The agent'"'"'s own SSH key pair (show, rotate) — private half never leaves'
+        'doctor:Would a deploy work? Read-only preflight report'
+                'ssh-key:The agent'"'"'s own SSH key pair (show, rotate) — private half never leaves'
         'panic:KILL SWITCH — stop everything, everywhere, and report what it could not reach'
         'plan:Show the plan for the declarative spec (no mutation)'
         'apply:Converge the declarative spec'
@@ -221,6 +222,12 @@ _agent-container() {
                         '--egress[Read the egress boundary log, where refusals are recorded]' \
                         '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names_local'
+                    ;;
+                doctor)
+                    _arguments \
+                        '--host[Override the host to check]:host:' \
+                        '--json[Machine-readable report]' \
+                        '*:container:__agent_container_names'
                     ;;
                 ssh-key)
                     _arguments '1:command:(show rotate)' \

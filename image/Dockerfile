@@ -11,6 +11,18 @@
 
 FROM debian:12-slim
 
+# Feature 013 FR-012a: the version of the CLI that built this image, so `doctor` can
+# tell locally whether the image is older than the tool — no network, no registry
+# round-trip. A LABEL rather than an ENV because reading it must not start a
+# container.
+#
+# The default is EMPTY, deliberately. `build` omits the arg when it cannot resolve a
+# version, and an empty label reads as "no stamp" — which FR-012b maps to *unknown*.
+# Stamping a sentinel like 0.0.0+unknown would be worse: a meaningless value that
+# looks like an answer.
+ARG AGENT_CONTAINER_VERSION=
+LABEL org.opencontainers.image.version="${AGENT_CONTAINER_VERSION}"
+
 # Fail fast on any unhandled error inside RUN blocks.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 

@@ -17,6 +17,7 @@ Codifies the manual verification performed during the SSH-identity work.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -4577,3 +4578,231 @@ def test_an_ssh_clone_on_start_is_two_phase(acc):
         assert cloned.stdout.strip() != "0", "registering and redeploying did not clone"
     finally:
         _drop(names)
+
+
+# --- Feature 013: `doctor` — preflight validation ----------------------------
+# The load-bearing property is an ABSENCE (nothing changed), and an absence is the
+# one thing a working report never demonstrates. T005 below is the gate; it lands
+# before the checks and is re-run behind each one.
+
+
+def _doctor_snapshot(acc) -> list[str]:
+    """Everything FR-002 forbids `doctor` from touching.
+
+    Names `hosts.conf` and the inventory explicitly rather than trusting a sweep of
+    "the config dir" — FR-002's *host-registry entry* is exactly what a generic
+    directory walk is most likely to miss, and a snapshot that misses the thing the
+    requirement names is a gate that cannot fail for the reason it exists.
+    """
+    lines: list[str] = []
+    roots = [
+        acc.state_dir,
+        _config_dir_of(acc.state_dir),
+        acc.state_dir / "xdgdata" / "agent-container" / "inventory",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                lines.append(f"{p}:{hashlib.sha256(p.read_bytes()).hexdigest()}")
+    for kind in ("ps -a", "volume ls", "image ls"):
+        r = subprocess.run(
+            [RUNTIME, *kind.split(), "--format", "{{.Name}}{{.Names}}{{.ID}}"],
+            capture_output=True,
+            text=True,
+        )
+        lines += sorted((r.stdout or "").splitlines())
+    return lines
+
+
+def _doctor(acc, *args, cwd=None):
+    return acc.cli(["doctor", *args], cwd=cwd)
+
+
+def test_doctor_changes_NOTHING(acc):
+    """T005, THE GATE — S1/C1/FR-002/SC-002.
+
+    Runs over a project with real problems AND a deployed environment, so the checks
+    have something to look at; a gate exercised only against an empty project proves
+    almost nothing.
+    """
+    proj = acc.tmp / "docproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc1\n    host: local\n"
+        "    container:\n      agent: claude\n"
+        "    credentials:\n"
+        "      - { name: gone, source: file, path: /nonexistent/key }\n"
+    )
+    (proj / ".agent-container" / "accdoc1.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    acc.up("accdoc1")  # a real container, so the port and host checks do real work
+
+    before = _doctor_snapshot(acc)
+    r = _doctor(acc, cwd=proj)
+    after = _doctor_snapshot(acc)
+    assert before == after, (
+        "doctor mutated observable state — the one thing FR-002 forbids:\n"
+        + "\n".join(f"  {ln}" for ln in set(after) ^ set(before))
+    )
+    assert r.returncode in (0, 1), r.stderr  # never 2: doctor itself ran fine
+
+
+def test_doctor_changes_nothing_on_a_PRE_011_project(acc):
+    """T006 — the path where a deploy calls `migrate_flat_state()`, which relocates
+    files, is idempotent, and documents itself as "safe to call repeatedly". It is the
+    only deploy-path helper that looks harmless, which is what makes it the trap."""
+    proj = acc.tmp / "olddoc"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "agent-container.accdoc2.env").write_text("GH_TOKEN=x\n")
+    (proj / "agent-container.accdoc2.anthropic.key").write_text("sk-ant-OLD\n")
+
+    before = _doctor_snapshot(acc)
+    before_proj = sorted(p.name for p in proj.iterdir())
+    r = _doctor(acc, "accdoc2", cwd=proj)
+    assert _doctor_snapshot(acc) == before
+    assert sorted(p.name for p in proj.iterdir()) == before_proj, "the project tree moved"
+    assert r.returncode in (0, 1), r.stderr
+
+
+def test_doctor_reports_ALL_problems_in_one_pass(acc):
+    """T014 — S2/C2/FR-003/SC-001. Three independent problems, one run. Not the first,
+    and not one per run."""
+    proj = acc.tmp / "multiproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc3\n    host: local\n"
+        "    container:\n      agent: claude\n"
+        "    credentials:\n"
+        "      - { name: gone, source: file, path: /nonexistent/key }\n"
+        "      - { name: unset, source: env, var: ACC_DOCTOR_NEVER_SET }\n"
+        "      - { name: nomgr, source: command, argv: [definitely-not-installed-xyz, get] }\n"
+    )
+    r = _doctor(acc, "--json", cwd=proj)
+    payload = json.loads(r.stdout)["data"]
+    observed = " ".join(f["observed"] for f in payload["findings"])
+    assert "/nonexistent/key" in observed
+    assert "ACC_DOCTOR_NEVER_SET" in observed
+    assert "definitely-not-installed-xyz" in observed
+    assert r.returncode == 1  # blocking failures present
+
+
+def test_every_doctor_finding_names_a_remedy(acc):
+    """T015 — S3/C3/SC-003: zero findings that state only a symptom."""
+    proj = acc.tmp / "remproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc4\n    host: local\n"
+        "    container:\n      agent: claude\n"
+        "    credentials:\n      - { name: gone, source: file, path: /nope/key }\n"
+    )
+    payload = json.loads(_doctor(acc, "--json", cwd=proj).stdout)["data"]
+    assert payload["findings"], "nothing to assert against"
+    assert all(f["remedy"].strip() for f in payload["findings"])
+
+
+def test_the_layout_remedy_is_the_deploys_OWN_STRING(acc):
+    """T016 — S4/C4/SC-008. Byte identity, not a substring match: two strings that
+    agree today drift the moment one is edited, and both still read correctly alone."""
+    proj = acc.tmp / "layoutproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc5\n    host: local\n    container:\n      agent: claude\n"
+    )
+    (proj / "agent-container.accdoc5.env").write_text("GH_TOKEN=x\n")  # pre-011 offender
+
+    payload = json.loads(_doctor(acc, "accdoc5", "--json", cwd=proj).stdout)["data"]
+    layout = [f for f in payload["findings"] if f["check_id"] == "layout"]
+    assert layout, f"no layout finding: {payload['findings']}"
+    doctor_remedy = layout[0]["remedy"]
+
+    deploy = acc.cli(["up", "accdoc5"], cwd=proj)
+    assert deploy.returncode != 0
+    # The deploy's refusal must CONTAIN doctor's remedy verbatim.
+    assert doctor_remedy.splitlines()[0] in deploy.stderr, (
+        f"doctor and the deploy diverged.\ndoctor: {doctor_remedy[:200]}\n"
+        f"deploy: {deploy.stderr[:400]}"
+    )
+
+
+def test_doctor_outside_a_project_SUCCEEDS(acc):
+    """T034 — S11/C11/FR-007. US3's whole scenario is a new machine, before any
+    project exists; failing here would make the command useless in the case it exists
+    for."""
+    outside = acc.tmp / "notaproject"
+    outside.mkdir(parents=True, exist_ok=True)
+    r = _doctor(acc, "--json", cwd=outside)
+    payload = json.loads(r.stdout)["data"]
+    assert payload["scope"] == "machine"
+    assert r.returncode == 0, r.stderr
+    plain = _doctor(acc, cwd=outside)
+    assert "no project found" in plain.stderr
+
+
+def test_doctor_never_exceeds_exit_2(acc):
+    """T027 — S7/SC-004a/R4. `3` is *pending registration* tool-wide."""
+    proj = acc.tmp / "codeproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc6\n    host: local\n"
+        "    container:\n      agent: claude\n"
+        "    credentials:\n      - { name: gone, source: file, path: /nope/k }\n"
+    )
+    for args in ([], ["accdoc6"], ["--json"], ["no-such-env"]):
+        rc = _doctor(acc, *args, cwd=proj).returncode
+        assert rc <= 2, f"doctor {args} exited {rc}"
+
+
+def test_a_healthy_doctor_run_is_BRIEF(acc):
+    """T028 — S14/C16/FR-014/SC-007. The threshold is a number because "one screen" is
+    unfalsifiable and screen height is not a property of the tool."""
+    proj = acc.tmp / "briefproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc7\n    host: local\n    container:\n      agent: claude\n"
+    )
+    (proj / ".agent-container" / "accdoc7.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    r = _doctor(acc, "accdoc7", cwd=proj)
+    lines = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.strip()]
+    limit = _load_cli().DOCTOR_BRIEF_LINES
+    assert len(lines) <= limit, f"{len(lines)} lines > {limit}:\n" + "\n".join(lines)
+    # And --json still carries every check, passes included.
+    payload = json.loads(_doctor(acc, "accdoc7", "--json", cwd=proj).stdout)["data"]
+    assert any(c["status"] == "pass" for c in payload["checks"])
+
+
+def test_doctor_leaks_no_credential_VALUE(acc):
+    """T050 — S9/C9/FR-010/SC-006, against a real file's contents."""
+    secret = "sk-ant-ACCEPTANCE-DOCTOR-MUST-NOT-PRINT"
+    keyfile = acc.tmp / "doctor.key"
+    keyfile.write_text(secret + "\n")
+    proj = acc.tmp / "leakproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdoc8\n    host: local\n"
+        "    container:\n      agent: claude\n"
+        f"    credentials:\n      - {{ name: k, source: file, path: {keyfile} }}\n"
+    )
+    r = _doctor(acc, "--json", cwd=proj)
+    assert secret not in r.stdout and secret not in r.stderr
+    plain = _doctor(acc, cwd=proj)
+    assert secret not in plain.stdout and secret not in plain.stderr
+
+
+def test_the_image_stamp_is_real_and_freshness_passes_after_a_build(acc, _image):
+    """T047 — S12/C13/FR-012a. The `_image` fixture already built with the current CLI,
+    so the label must be present and the check must pass."""
+    label = subprocess.run(
+        [RUNTIME, "image", "inspect", _image, "--format",
+         '{{index .Config.Labels "org.opencontainers.image.version"}}'],
+        capture_output=True, text=True,
+    ).stdout.strip()  # fmt: skip
+    assert label, "the image carries no version stamp"
+    assert not label.endswith("+unknown"), f"a sentinel was stamped: {label}"
+    payload = json.loads(_doctor(acc, "--json").stdout)["data"]
+    fresh = [c for c in payload["checks"] if c["id"] == "image-freshness"]
+    assert fresh and fresh[0]["status"] == "pass", fresh
