@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.29.0 (2026-08-17)
+
+### Features
+
+- **redeploy**: Inherit the clone URL unless told otherwise
+  ([#019](https://github.com/ondrasek/agent-container/pull/19),
+  [`3215bd4`](https://github.com/ondrasek/agent-container/commit/3215bd43d18c2a791d93678cab10bdb5ca1e8d0c))
+
+### Breaking Changes
+
+- **redeploy**: `redeploy` no longer drops the clone-on-start URL when `--repo` is omitted. A script
+  relying on the old reset must now pass `--no-repo`. Note the asymmetry this leaves, and it is
+  deliberate rather than overlooked: `--mode`, `--agent` and `--workspace` still fall back to their
+  defaults when omitted. Only the clone URL is carried over, because only it was asked for —
+  widening the rule to the rest is a separate decision with its own surprises.
+
+
 ## v0.28.1 (2026-08-16)
 
 
