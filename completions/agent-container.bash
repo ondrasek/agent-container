@@ -184,7 +184,12 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --mount --env-file --authorized-key --agent --mode --workspace" -- "${cur}") )
+                # --no-repo is redeploy-only: it drops the INHERITED clone URL, and
+                # `up` has nothing to inherit from. Offering it there would complete
+                # to a flag that does not exist.
+                _ac_flags="--host --mount --env-file --authorized-key --agent --mode --workspace --repo"
+                [[ "${sub}" == "redeploy" ]] && _ac_flags="${_ac_flags} --no-repo"
+                COMPREPLY=( $(compgen -W "${_ac_flags}" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names       # arbitrary name; union is fine

@@ -7447,13 +7447,13 @@ def compose_up_exec(
             f"{name}: the workspace was NOT cloned — the agent's SSH key is not "
             f"registered on the remote yet. Register it:\n"
             f"  agent-container ssh-key show {name}\n"
-            # `--repo` is REQUIRED here, not decoration. A bare `redeploy` starts from
-            # an empty ExecSpec by design (Feature 004: a redeploy may CHANGE
-            # mode/agent/workspace/repo), so it would not set the clone URL and the
-            # recovery would silently do nothing — leaving an empty workspace and no
-            # explanation, at the end of the one instruction this message exists to
-            # give. Measured against a real container.
-            f"then: agent-container redeploy {name}{hflag} --repo {spec.repo}\n"
+            # A bare `redeploy` is enough: it INHERITS the clone URL from the running
+            # container. It did not always — an empty spec silently unset the URL, so
+            # this very instruction did nothing and left an empty workspace with no
+            # explanation. Naming the flag here papered over that; the fix belongs in
+            # `redeploy`, so the command an operator would naturally type is the
+            # command that works.
+            f"then: agent-container redeploy {name}{hflag}\n"
             f"DO NOT tear this environment down to retry — that destroys the key you "
             f"are about to register, and the replacement will be a different one."
         )
@@ -7792,11 +7792,23 @@ def do_redeploy(
     authorized_keys: list[Path] | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
+    drop_repo: bool = False,
 ) -> None:
     """Redeploy (FR-008/FR-010): rebuild the image on the host and recreate the
     container, preserving its volumes. Deliberately NON-idempotent — always
     recreates even with no change, since the operator explicitly asked to rebuild.
-    A redeploy may also change mode/agent/workspace/repo (Feature 004)."""
+    A redeploy may also change mode/agent/workspace/repo (Feature 004).
+
+    THE CLONE URL IS INHERITED unless `--repo` replaces it or `--no-repo` drops it.
+    A bare `redeploy` used to start from an empty spec, which read as "unchanged" and
+    was not: it silently unset the clone URL, so Feature 019's pending-clone recovery
+    — register the key, then redeploy — did nothing, leaving an empty workspace and no
+    explanation. Inheriting makes the common invocation mean what it looks like it
+    means, and dropping the repo stays possible by SAYING so.
+
+    Only the imperative path reaches here; `apply` deploys through `do_up` with the
+    spec file as its source of truth, so nothing inherited can override a declaration.
+    """
     validate_name(name)
     spec = spec or ExecSpec()
     spec.validate()
@@ -7810,6 +7822,15 @@ def do_redeploy(
     drain_host_records(host_name, host_rec, [name])
     if container_name(name) not in host_container_names(host_rec, include_stopped=True):
         warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
+    # Read BEFORE the recreate — the live container is the only record of what this
+    # deployment was told to clone, and it is about to be replaced.
+    if spec.repo is None and not drop_repo:
+        if inherited := (env_live_config(host_rec, name) or {}).get("repo"):
+            spec.repo = inherited
+            # Said out loud: an inherited value the operator did not type is exactly
+            # the kind of thing that is infuriating to debug when it is wrong, and
+            # the line names its own opt-out.
+            log(f"{name}: keeping --repo {inherited} (use --no-repo to drop it)")
     try:
         # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
         # never gets a half-configured environment built from files we no longer read.
@@ -13337,7 +13358,10 @@ def redeploy(
     workspace_dir: str | None = typer.Option(
         None, "--workspace-dir", help="Host dir for a bind workspace (as for `up`)."
     ),
-    repo: str | None = typer.Option(None, "--repo", help="Clone-on-start URL (as for `up`)."),
+    repo: str | None = typer.Option(
+        None, "--repo", help="Clone-on-start URL (as for `up`). Inherited when omitted."
+    ),
+    no_repo: bool = typer.Option(False, "--no-repo", help="Drop the inherited clone-on-start URL."),
     foreground: bool = typer.Option(
         False, "--foreground", help="Headless: stream the run attached (as for `up`)."
     ),
@@ -13345,8 +13369,14 @@ def redeploy(
 ) -> None:
     """Rebuild the image and recreate agent-container-NAME, preserving its volumes.
     Deliberately non-idempotent: always rebuilds + recreates, even with no change.
-    May change mode/agent/workspace/repo."""
+    May change mode/agent/workspace/repo. The clone URL is KEPT unless --repo
+    replaces it or --no-repo drops it."""
     set_json_mode(as_json)
+    if repo is not None and no_repo:
+        # Contradictory rather than merely redundant, and guessing which one was meant
+        # gets it wrong half the time — on the half where the operator wanted the repo
+        # gone, keeping it re-clones into a workspace they were clearing.
+        raise typer.BadParameter("--repo and --no-repo are mutually exclusive")
     if push_key is not None:
         refuse_removed_push_key("redeploy --push-key")
     if host_key is not None:
@@ -13371,6 +13401,7 @@ def redeploy(
         authorized_key or [],
         known_hosts,
         spec=spec,
+        drop_repo=no_repo,
     )
 
 

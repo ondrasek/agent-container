@@ -158,6 +158,13 @@ _agent-container() {
                         '1:tag:'
                     ;;
                 up|redeploy)
+                    # --no-repo is redeploy-only: it drops the INHERITED clone URL,
+                    # and `up` has nothing to inherit from.
+                    local -a _ac_repo_opts
+                    _ac_repo_opts=('--repo[Clone-on-start URL]:url:')
+                    [[ "${words[2]}" == "redeploy" ]] && _ac_repo_opts+=(
+                        '--no-repo[Drop the inherited clone-on-start URL]'
+                    )
                     _arguments \
                         "--agent[Primary agent to run]:agent:(${_agent_container_agents})" \
                         '--mode[Execution mode]:mode:(interactive headless)' \
@@ -166,6 +173,7 @@ _agent-container() {
                         '*--mount[Bind-mount a host dir read-write]:directory:_files -/' \
                         '--env-file[Bypass env-file resolution; path must exist]:file:_files' \
                         '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
+                        "${_ac_repo_opts[@]}" \
                         '*:container:__agent_container_names'
                     ;;
                 host)

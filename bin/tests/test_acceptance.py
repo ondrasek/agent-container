@@ -4566,15 +4566,13 @@ def test_an_ssh_clone_on_start_is_two_phase(acc):
         # Register it, then redeploy — the recovery the message names, and the only
         # one that does not destroy the key.
         _register_on(names[0], _agent_pub(acc, "acc019pend"))
-        # Exactly the command the message printed — including `--repo`, without which
-        # a bare redeploy starts from an empty spec and clones nothing. Asserting the
-        # message CONTAINS this command is what stops the two drifting apart.
-        assert f"redeploy acc019pend --repo {url}" in r.stderr, r.stderr
-        r2 = acc.cli(
-            ["redeploy", "acc019pend", "--repo", url,
-             "--env-file", str(acc.tmp / "acc019pend.env")]
-        )  # fmt: skip
+        # Exactly the command the message printed — BARE, no --repo. That works only
+        # because redeploy inherits the clone URL; asserting the message contains the
+        # command this test then runs is what stops the two from drifting apart.
+        assert "redeploy acc019pend\n" in r.stderr, r.stderr
+        r2 = acc.cli(["redeploy", "acc019pend", "--env-file", str(acc.tmp / "acc019pend.env")])
         assert r2.returncode == 0, r2.stderr
+        assert "keeping --repo" in r2.stderr, "the redeploy did not inherit the repo"
         cloned = _exec("acc019pend", ["sh", "-c", "ls -A /workspace | wc -l"])
         assert cloned.stdout.strip() != "0", "registering and redeploying did not clone"
     finally:

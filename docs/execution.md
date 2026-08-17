@@ -161,13 +161,12 @@ Phase 2 — register the key, then `redeploy`. The clone runs.
 ```sh
 agent-container up two-phase --repo git@github.com:you/test.git   # exits 3
 agent-container ssh-key show two-phase                            # register this
-agent-container redeploy two-phase --repo git@github.com:you/test.git   # now it clones
+agent-container redeploy two-phase                                # now it clones
 ```
 
-**`--repo` is required on the redeploy**, and the tool prints the whole line for you.
-A bare `redeploy` starts from an empty spec by design — it is also how you *change* a
-deployment's mode, agent, workspace or repo — so without the flag it sets no clone URL
-and the recovery silently does nothing.
+The bare `redeploy` is enough because **it inherits the clone URL** from the running
+container, and says so. It did not always: an empty spec silently unset the URL, so
+this exact instruction did nothing and left an empty workspace with no explanation.
 
 > **Do not tear the environment down to retry.** `down --purge` destroys the key
 > you were about to register, and the replacement is a *different* key — so a
@@ -179,6 +178,25 @@ and the recovery silently does nothing.
 This is the one case where the empty-workspace refusal is relaxed. Every other
 one stands, and a test pins that: the container here is *pending and says so*,
 not silently useless.
+
+### `redeploy` keeps the repo
+
+`redeploy` reads the clone URL from the running container, so the invocation that
+looks like "same thing, rebuilt" is exactly that:
+
+```sh
+agent-container redeploy acme                 # keeps whatever it was cloning
+agent-container redeploy acme --repo <other>  # changes it
+agent-container redeploy acme --no-repo       # drops it
+```
+
+`--repo` and `--no-repo` together are refused rather than resolved by precedence:
+guessing gets it wrong half the time, and on the half where the operator wanted the
+repo gone, keeping it re-clones into a workspace they were clearing.
+
+Note the asymmetry: `--mode`, `--agent` and `--workspace` are **not** inherited — they
+fall back to their defaults (interactive / claude / persistent) when omitted. Only the
+clone URL is carried over.
 
 ## Exit codes
 

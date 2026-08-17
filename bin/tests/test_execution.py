@@ -320,8 +320,12 @@ def test_the_entrypoint_records_a_pending_clone_instead_of_dying(wiz):
     assert ".clone_pending" in block
     assert ".clone_done" in block  # both outcomes marked, or the CLI cannot tell
     assert "Do NOT tear this environment down" in block
-    # The recovery must carry the URL: a bare redeploy starts from an empty spec.
-    assert "--repo ${CLONE_URL}" in block
+    # A BARE redeploy, deliberately: it inherits the clone URL. This assertion pinned
+    # `--repo ${CLONE_URL}` for exactly one commit, when the message worked around a
+    # redeploy that silently unset the URL. Fixing redeploy made the workaround the
+    # wrong contract to pin.
+    assert "redeploy <name>" in block
+    assert "--repo" not in block
 
 
 def test_driver_up_argv_detached_default(wiz):

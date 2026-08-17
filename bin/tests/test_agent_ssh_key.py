@@ -7,6 +7,7 @@ follows guards removals rather than behaviour.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 from pathlib import Path
@@ -273,18 +274,114 @@ def test_a_registered_key_stops_the_nagging(wiz, monkeypatch, capsys):
 # --- the destructive reactions, forbidden in words ---------------------------
 
 
-def test_the_recovery_command_CARRIES_THE_REPO(wiz):
-    """The defect a real container found: `redeploy <name>` alone starts from an empty
-    ExecSpec by design (Feature 004 — a redeploy may CHANGE the repo), so it sets no
-    clone URL and the recovery does nothing. The operator registers the key, runs the
-    one command this message exists to give, and gets an empty workspace and silence.
+def test_the_recovery_COMMAND_IS_THE_ONE_THAT_WORKS(wiz, monkeypatch, capsys):
+    """The defect a real container found, fixed where it belonged.
 
-    Asserting the flag is in the printed line is the cheap half; the acceptance test
-    runs that exact line and checks the clone lands, which is what stops the two from
-    drifting apart."""
+    `redeploy <name>` used to start from an empty ExecSpec, so it set no clone URL and
+    this recovery did nothing — an empty workspace and silence, at the end of the one
+    instruction the message exists to give. Naming `--repo` in the message papered
+    over that; `redeploy` now INHERITS the URL, so the command an operator would
+    naturally type is the command that works.
+
+    Asserted on both halves, because either alone can pass while the pair is broken:
+    the message names a bare redeploy, AND a bare redeploy keeps the repo.
+    """
     src = Path(wiz.__file__).read_text()
     block = src[src.index("the workspace was NOT cloned") :][:900]
-    assert "redeploy {name}{hflag} --repo {spec.repo}" in block
+    assert "redeploy {name}{hflag}\\n" in block  # bare — no --repo appended
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": "git@forge:o/r.git"})
+    spec = wiz.ExecSpec()
+    assert _redeploy_repo(wiz, monkeypatch, spec) == "git@forge:o/r.git"
+
+
+def _redeploy_repo(wiz, monkeypatch, spec, drop_repo=False):
+    """Run only do_redeploy's inheritance step and report the resulting spec.repo.
+
+    Everything after it recreates a container, so the deploy is cut off at the lock —
+    the alternative is a test that needs a runtime to assert a pure decision.
+    """
+    monkeypatch.setattr(wiz, "migrate_flat_state", lambda: None)
+    monkeypatch.setattr(wiz, "resolve_deploy_host", lambda _h: ("local", HOST))
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda _h: None)
+    monkeypatch.setattr(wiz, "drain_host_records", lambda *_a: None)
+    monkeypatch.setattr(wiz, "host_container_names", lambda *_a, **_k: [wiz.container_name("acme")])
+    monkeypatch.setattr(wiz, "refuse_superseded_layout", lambda _n: None)
+
+    class Stop(Exception):
+        pass
+
+    def stop(*_a, **_kw):
+        raise Stop
+
+    monkeypatch.setattr(wiz, "_resolve_env_files", stop)
+    with contextlib.suppress(Stop, wiz.Fatal):
+        wiz.do_redeploy("acme", spec=spec, drop_repo=drop_repo)
+    return spec.repo
+
+
+def test_redeploy_KEEPS_the_repo_by_default(wiz, monkeypatch, capsys):
+    """A bare redeploy reads as "the same thing, rebuilt" and now is: silently unsetting
+    the clone URL was a change the invocation did not look like it was making."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": "git@forge:o/r.git"})
+    assert _redeploy_repo(wiz, monkeypatch, wiz.ExecSpec()) == "git@forge:o/r.git"
+    # Said out loud, and the line names its own opt-out: an inherited value the
+    # operator never typed is infuriating to debug when it is the wrong one.
+    err = capsys.readouterr().err
+    assert "keeping --repo git@forge:o/r.git" in err
+    assert "--no-repo" in err
+
+
+def test_an_explicit_repo_WINS_over_the_inherited_one(wiz, monkeypatch):
+    """Inheritance must not defeat the flag — `redeploy --repo` is how you CHANGE it."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": "git@forge:old.git"})
+    spec = wiz.ExecSpec(repo="git@forge:new.git")
+    assert _redeploy_repo(wiz, monkeypatch, spec) == "git@forge:new.git"
+
+
+def test_no_repo_DROPS_it(wiz, monkeypatch, capsys):
+    """Opting out has to be possible or inheritance becomes a trap: an operator
+    clearing a workspace would have it re-cloned under them."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": "git@forge:o/r.git"})
+    assert _redeploy_repo(wiz, monkeypatch, wiz.ExecSpec(), drop_repo=True) is None
+    assert "keeping --repo" not in capsys.readouterr().err  # and silent about it
+
+
+def test_nothing_to_inherit_is_not_an_error(wiz, monkeypatch):
+    """An unreachable or absent container yields None, and a redeploy that CREATES the
+    environment fresh has nothing to carry over — neither is a failure."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: None)
+    assert _redeploy_repo(wiz, monkeypatch, wiz.ExecSpec()) is None
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": None})
+    assert _redeploy_repo(wiz, monkeypatch, wiz.ExecSpec()) is None
+
+
+def _func_body(src: str, name: str) -> str:
+    """A function's source, sliced to the next top-level `def` rather than a fixed
+    character count — a magic window silently shrinks the assertion every time the
+    code grows, which has already cost this suite two false failures."""
+    i = src.index(f"\ndef {name}(")
+    j = src.index("\ndef ", i + 1)
+    return src[i:j]
+
+
+def test_repo_and_no_repo_together_are_REFUSED(wiz):
+    """Contradictory rather than redundant. Resolving it by precedence gets it wrong
+    half the time, and on the half where the operator wanted the repo gone, keeping it
+    re-clones into the workspace they were clearing."""
+    body = _func_body(Path(wiz.__file__).read_text(), "redeploy")
+    assert '"--no-repo"' in body
+    assert "mutually exclusive" in body
+
+
+def test_the_declarative_path_cannot_inherit(wiz):
+    """`apply` must stay authoritative: a spec that declares no repo means NO repo, and
+    an inherited one would let a DELETED declaration keep taking effect. Structural,
+    because the protection is that the declarative path never reaches do_redeploy at
+    all — it deploys through do_up, whose spec is the file."""
+    src = Path(wiz.__file__).read_text()
+    assert src.count("do_redeploy(") == 2  # the definition and the ONE CLI caller
+    assert "do_redeploy(" not in _func_body(src, "do_aac_apply")
+    assert "do_up(" in _func_body(src, "do_aac_apply")
 
 
 def test_the_pending_report_forbids_the_teardown(wiz):

@@ -150,17 +150,16 @@ otherwise `down` and retry — regenerating the very key it was about to registe
 Register it, then:
 
 ```sh
-agent-container redeploy two-phase --repo git@github.com:you/test.git
+agent-container redeploy two-phase
 agent-container exec two-phase -- ls /workspace
 ```
 
 **Expect**: now cloned. The first step deliberately relaxes the empty-workspace refusal for this case
 only — the container is *pending and says so*, not silently useless.
 
-**`--repo` is not optional here**, and the tool prints the full line rather than leaving it to be
-inferred: a bare `redeploy` starts from an empty spec (that is also how a deployment's mode, agent,
-workspace or repo gets *changed*), so it would set no clone URL and the recovery would do nothing —
-at the end of the one instruction this message exists to give.
+The bare `redeploy` suffices because it **inherits** the clone URL from the running container (and
+logs that it did). It did not always: an empty spec silently unset the URL, so this exact instruction
+did nothing — at the end of the one message that exists to give it. `--no-repo` opts out.
 
 ## S13 — `~/.ssh/config` is written once, not clobbered (C13, FR-014a)
 
