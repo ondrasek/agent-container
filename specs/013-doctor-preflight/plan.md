@@ -31,11 +31,11 @@ what it does. Same for `drain_host_records()` (starts a container per environmen
 So the read-only guarantee is enforced by **what the command is allowed to call**, not by a flag
 threaded through shared code where each new caller can forget it. See R1 for the full table.
 
-**One deliberate exception**: an SSH socket-forward for a provisioned host (R2). It creates none
-of the five artifact kinds FR-002 names and does not outlive the command, and without it every
-provisioned host reads *unreachable* — a false negative on the check being asked for. The line is
-**nothing that outlives the command**, and it is recorded as a judgment call rather than an
-oversight.
+**One deliberate exception, now settled**: an SSH socket-forward for a provisioned host (R2). It
+creates none of the artifact kinds FR-002 names and does not outlive the command, and without it
+every provisioned host reads *unreachable* — a false negative on the check being asked for. The line
+is **nothing that outlives the command**. Decided rather than deferred, so no implementation task
+carries the question; reversible if the operator prefers reporting those hosts as *unknown*.
 
 ### 2. Credential *resolvability* is not credential *resolution*
 
@@ -101,7 +101,8 @@ exceptions into findings; no check calls `die()`.
 **Testing**: hermetic pytest for check classification, severity, exit-code mapping, the
 non-prompting credential logic and the shared-wording identity; acceptance for what only a real
 environment shows — the zero-side-effect gate, an unreachable host, and freshness against a real
-built image.
+built image. The zero-side-effect gate is a **regression** gate: it lands first, and it is re-run
+behind every check, because on the day it is written there is nothing yet that could mutate.
 
 **Target Platform**: macOS + Linux operator machines; Docker and Podman hosts.
 
@@ -112,7 +113,8 @@ cheap"). Host reachability is the only network cost and is bounded per host; one
 not extend the run past that bound (FR-008).
 
 **Constraints**:
-- **Zero observable side effects** (FR-002 / SC-002) — the defining constraint.
+- **Zero observable side effects** (FR-002 / SC-002) — the defining constraint. "Registry" there
+  means the tool's **host** registry (`hosts.conf`, the inventory), never a container registry.
 - **No interactive prompt** as a side effect of any check (FR-009).
 - **No credential value** printed, logged or held (FR-010, Constitution III).
 - **Exit 0/1/2 only**, and an *unknown* never exits 1 (FR-011, FR-011a).

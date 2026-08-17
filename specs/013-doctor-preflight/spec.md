@@ -87,8 +87,8 @@ project reports cleanly.
    **all** of them are reported in one pass — not the first, and not one per run.
 3. **Given** any reported problem, **When** the operator reads it, **Then** it names the action
    that resolves it, not merely the symptom.
-4. **Given** any run, **When** it completes, **Then** no file, container, volume or registry
-   entry has been created, modified or removed.
+4. **Given** any run, **When** it completes, **Then** no file, container, volume, image or
+   **host-registry entry** has been created, modified or removed.
 
 ---
 
@@ -163,7 +163,9 @@ user-level configuration without erroring about a missing project.
   succeed, **without performing one**. The name MUST NOT be `status`, which is already an alias
   of `plan` and answers a different question — whether a declared spec has converged.
 - **FR-002**: The command MUST be **strictly read-only**: no file, container, volume, image or
-  registry entry may be created, modified or removed by running it.
+  **host-registry entry** (`hosts.conf`, the durable inventory) may be created, modified or removed
+  by running it. *"Host registry" throughout this spec means the tool's own record of deployment
+  hosts — never a container registry, which appears only in FR-012a's "no registry round-trip".*
 - **FR-003**: A single run MUST report **all** detected problems, not stop at the first.
 - **FR-004**: Every reported problem MUST name the **action that resolves it**, not only the
   symptom.
@@ -220,7 +222,8 @@ user-level configuration without erroring about a missing project.
 - **SC-001**: For a project with N deliberate problems, one run reports **all N** — no run
   reports fewer.
 - **SC-002**: Running the command leaves **zero** observable side effects — verified by comparing
-  filesystem, container, volume and registry state before and after.
+  filesystem (project, state and user-config trees, including `hosts.conf` and the inventory),
+  container, volume and image state before and after.
 - **SC-003**: Every finding names a remedy — **zero** findings that state only a symptom.
 - **SC-004**: A blocking and an advisory finding are distinguishable by a program without parsing
   prose — **100%** of runs — and an advisory-only result exits **0**, so `doctor && up` proceeds.
@@ -230,7 +233,9 @@ user-level configuration without erroring about a missing project.
 - **SC-005**: An unreachable host is reported as unreachable, never as healthy or absent —
   **100%** of runs.
 - **SC-006**: No credential value appears in any output — **100%** of runs.
-- **SC-007**: A healthy setup produces a report an operator can assess in **one screen**.
+- **SC-007**: A healthy setup produces a report an operator can assess in one screen — **≤ 24
+  lines** of human output. A threshold rather than "one screen": a criterion nothing can fail is
+  not a criterion, and screen height is not a property of the tool.
 - **SC-008**: A project on the pre-011 layout is reported with the same remedy a deploy would
   give — **zero** divergence between the two messages.
 

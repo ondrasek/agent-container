@@ -15,17 +15,23 @@ The gate. Land it before any check is built out, or it gets written later to pas
 
 ```sh
 cd <a project with .agent-container/>
-find . ~/.local/state/agent-container ~/.config/agent-container -type f -exec shasum {} \; \
-  | sort > /tmp/before
+# Names hosts.conf and the inventory explicitly — FR-002's "host-registry entry" is what a
+# generic "config dir" sweep is most likely to miss.
+find . ~/.local/state/agent-container ~/.config/agent-container \
+     ~/.config/agent-container/hosts.conf ~/.local/share/agent-container/inventory \
+     -type f -exec shasum {} \; 2>/dev/null | sort > /tmp/before
 docker ps -a --format '{{.Names}}' | sort >> /tmp/before
 docker volume ls --format '{{.Name}}' | sort >> /tmp/before
+docker image ls --format '{{.Repository}}:{{.Tag}}' | sort >> /tmp/before
 
 agent-container doctor
 
-find . ~/.local/state/agent-container ~/.config/agent-container -type f -exec shasum {} \; \
-  | sort > /tmp/after
+find . ~/.local/state/agent-container ~/.config/agent-container \
+     ~/.config/agent-container/hosts.conf ~/.local/share/agent-container/inventory \
+     -type f -exec shasum {} \; 2>/dev/null | sort > /tmp/after
 docker ps -a --format '{{.Names}}' | sort >> /tmp/after
 docker volume ls --format '{{.Name}}' | sort >> /tmp/after
+docker image ls --format '{{.Repository}}:{{.Tag}}' | sort >> /tmp/after
 diff /tmp/before /tmp/after && echo "CLEAN"
 ```
 
@@ -90,7 +96,7 @@ agent-container doctor; echo "blocking exit=$?"     # expect 1
 
 **Expect**: `0` then `1`. `doctor && up` must stay viable, or the command stops being run.
 
-## S7 — Exit codes never exceed 2 (C7, R4)
+## S7 — Exit codes never exceed 2 (C7, SC-004a, R4)
 
 ```sh
 for scenario in healthy advisory blocking broken-invocation; do : ; done
@@ -181,10 +187,12 @@ agent-container doctor demo --json | jq -r '.data.checks[] | select(.id=="port-a
 ## S14 — All clear is brief (C16, FR-014, SC-007)
 
 ```sh
-agent-container doctor | wc -l
+test "$(agent-container doctor | wc -l)" -le 24 && echo "within budget"
 ```
 
-**Expect**: one screen. Findings plus a one-line summary of the passes — not a wall of green.
+**Expect**: `within budget`. SC-007 pins **≤ 24 lines** rather than "one screen" — screen height is
+not a property of the tool, and a criterion nothing can fail is not a criterion. Findings plus a
+one-line summary of the passes, not a wall of green.
 The `--json` view still carries every check, including passes, because a program cannot otherwise
 tell "checked and fine" from "never asked".
 

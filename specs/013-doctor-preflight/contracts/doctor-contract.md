@@ -21,7 +21,8 @@ agent-container doctor [NAME] [--host <host>] [--json]
 ## C1 — Strictly read-only
 
 Running `doctor`, in any scope, with any outcome, MUST leave **zero** observable change to files,
-containers, volumes, images or registry entries (FR-002, SC-002).
+containers, volumes, images or **host-registry entries** — `hosts.conf` and the durable inventory
+(FR-002, SC-002). A *container* registry appears in this feature only in C13's "no round-trip".
 
 **Permitted**: an SSH socket-forward for a provisioned host, which outlives nothing (R2).
 **Forbidden by construction**: `migrate_flat_state()`, `drain_host_records()`,
@@ -116,7 +117,8 @@ Never as healthy, never as absent (SC-005). Each host is reported individually.
 
 The image carries an `org.opencontainers.image.version` label stamped at build from the building
 CLI's version; `doctor` compares it against the installed version with **no network and no
-registry round-trip** (FR-012a).
+container-registry round-trip** (FR-012a). **Which image**: the tag the environment under check
+would deploy; in `machine` scope, the default tag.
 
 An image with **no** label reports `unknown` — never fresh, never stale (FR-012b).
 When `_resolve_version()` cannot determine a version, `build` MUST **omit** the label rather than
@@ -140,8 +142,8 @@ finding about the environment.
 
 ## C16 — All clear is brief
 
-A fully healthy run produces output an operator assesses at a glance — findings and a one-line
-summary of what passed, not a wall of green (FR-014, SC-007). The `--json` view still carries
+A fully healthy run produces output an operator assesses at a glance — **≤ 24 lines** of human
+output, findings plus a one-line summary of what passed, not a wall of green (FR-014, SC-007). The `--json` view still carries
 **every** check, including passes.
 
 ## C17 — The minimum check set

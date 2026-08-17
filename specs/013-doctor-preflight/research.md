@@ -36,6 +36,11 @@ feature. Composition from pure readers keeps it structural.
 state tree is worth more than any number of per-check tests, and it must exist before the checks
 are built out — otherwise it is written to pass whatever was implemented.
 
+**And it must be RE-RUN behind each check.** Authored before any check exists it passes trivially —
+`doctor` mutates nothing because it does nothing — so on its own day it cannot fail. That is the
+same defect shape as everything else in this file, sitting inside the guard against it, which is why
+T005 names the tasks that must re-run it and each of those tasks says so.
+
 ---
 
 ## R2 — An SSH tunnel is permitted; a container is not
@@ -48,10 +53,15 @@ negative on the exact check FR-012 asks for, and worse than not checking at all.
 creates no file, container, volume, image or registry entry (the closed list FR-002 names), it is
 scoped to the process, and it disappears when the command exits.
 
-**This is a judgment call and it is recorded as one.** A stricter reading of "changes nothing"
-would forbid spawning any process. The line drawn here is: **nothing that outlives the command**.
-If the operator disagrees, the fallback is to report provisioned hosts as *unknown* with a remedy
-naming the manual check — which is honest, just much less useful.
+**This was a judgment call and it is now SETTLED (2026-08-17, operator-confirmed).** A stricter
+reading of "changes nothing" would forbid spawning any process. The line drawn is: **nothing that
+outlives the command**, and `ensure_tunnel()` is permitted under it.
+
+Closed deliberately rather than left open, because the alternative was an implementation task
+carrying a decision — which means whoever happens to run it decides, and the reasoning is nowhere.
+T052 now states the behaviour and T053 pins it in a test. Reversible: the fallback is reporting
+provisioned hosts as *unknown* with a remedy naming the manual check — honest, just much less
+useful.
 
 ---
 
