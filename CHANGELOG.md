@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v0.31.0 (2026-08-17)
+
+### Documentation
+
+- **specs**: Close every analyze finding for 013
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`2889c61`](https://github.com/ondrasek/agent-container/commit/2889c612577b074360f03d769b1a01a8ece2a405))
+
+- **specs**: Generate tasks for 013 — 61 tasks, gate before checks
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`d51cb5b`](https://github.com/ondrasek/agent-container/commit/d51cb5bfd57b44faf3f52a0d794a76d55a482856))
+
+- **specs**: Narrow FR-011's exit range and define the unknown case
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`37a9765`](https://github.com/ondrasek/agent-container/commit/37a9765e1a48bfc0e0c7ac7d78986425a868668b))
+
+### Features
+
+- **doctor**: Machine-level checks, scope reporting, and the docs
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`21a2e3f`](https://github.com/ondrasek/agent-container/commit/21a2e3ff95278f6822301447aeb55b0c3a9f11b7))
+
+- **doctor**: Read-only preflight validation
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`8e96045`](https://github.com/ondrasek/agent-container/commit/8e96045e177c585fa4d7843cd30d33015ec8237e))
+
+
 ## v0.30.0 (2026-08-17)
 
 
