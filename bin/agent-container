@@ -7010,6 +7010,15 @@ class ExecSpec:
         return env
 
 
+# What a bare `redeploy` carries over, and what it deliberately does not.
+#
+# `task` is excluded because it is a one-shot INSTRUCTION, not deployment state: a
+# headless run's job re-executing on every rebuild is the kind of surprise that
+# rewrites files or opens pull requests nobody asked for. `foreground` is excluded
+# because it describes THIS invocation's terminal, not the environment.
+INHERITABLE = frozenset({"mode", "agent", "repo", "workspace"})
+
+
 def resolve_task(task: str | None) -> str | None:
     """Resolve --task: a bare string is the task text; a leading '@' reads a LOCAL
     file whose whole content is the task (research R2). Delivered later as an
@@ -7793,25 +7802,40 @@ def do_redeploy(
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
     drop_repo: bool = False,
+    inherit: frozenset[str] = frozenset(),
 ) -> None:
     """Redeploy (FR-008/FR-010): rebuild the image on the host and recreate the
     container, preserving its volumes. Deliberately NON-idempotent — always
     recreates even with no change, since the operator explicitly asked to rebuild.
     A redeploy may also change mode/agent/workspace/repo (Feature 004).
 
-    THE CLONE URL IS INHERITED unless `--repo` replaces it or `--no-repo` drops it.
-    A bare `redeploy` used to start from an empty spec, which read as "unchanged" and
-    was not: it silently unset the clone URL, so Feature 019's pending-clone recovery
-    — register the key, then redeploy — did nothing, leaving an empty workspace and no
-    explanation. Inheriting makes the common invocation mean what it looks like it
-    means, and dropping the repo stays possible by SAYING so.
+    THE EXECUTION SPEC IS INHERITED from the running container for every field the
+    operator did not type. A bare `redeploy` used to start from an empty spec, which
+    read as "the same thing, rebuilt" and was not: a headless codex environment came
+    back interactive claude, and the clone URL was silently unset — which is what broke
+    Feature 019's pending-clone recovery, since "register the key, then redeploy" then
+    cloned nothing.
+
+    `--no-repo` drops the URL; the other fields have defaults, so passing the flag
+    explicitly (`--mode interactive`) is how you reset one. Two fields are deliberately
+    NOT inherited — see INHERITABLE.
+
+    `inherit` defaults to NOTHING rather than to INHERITABLE, so the unsafe direction
+    has to be asked for. Only the caller knows which fields the operator actually
+    typed; a caller that forgot to work that out and got INHERITABLE by default would
+    have its explicit values silently overwritten by the live container — the same
+    class of silent-override this parameter exists to prevent.
 
     Only the imperative path reaches here; `apply` deploys through `do_up` with the
     spec file as its source of truth, so nothing inherited can override a declaration.
     """
     validate_name(name)
     spec = spec or ExecSpec()
-    spec.validate()
+    # Validated AFTER inheritance, not here. `--foreground` is headless-only, and the
+    # mode it must agree with may be the one we are about to inherit — checking first
+    # would reject `redeploy --foreground` on a headless environment, which is both
+    # legal and the obvious thing to type. Nothing below mutates the deployment before
+    # the check runs.
     migrate_flat_state()
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     host_name, host_rec = resolve_deploy_host(host)
@@ -7822,15 +7846,17 @@ def do_redeploy(
     drain_host_records(host_name, host_rec, [name])
     if container_name(name) not in host_container_names(host_rec, include_stopped=True):
         warn(f"no existing container '{name}' on {host_name} — redeploy will create it fresh")
-    # Read BEFORE the recreate — the live container is the only record of what this
-    # deployment was told to clone, and it is about to be replaced.
-    if spec.repo is None and not drop_repo:
-        if inherited := (env_live_config(host_rec, name) or {}).get("repo"):
-            spec.repo = inherited
-            # Said out loud: an inherited value the operator did not type is exactly
-            # the kind of thing that is infuriating to debug when it is wrong, and
-            # the line names its own opt-out.
-            log(f"{name}: keeping --repo {inherited} (use --no-repo to drop it)")
+    # Read BEFORE the recreate — the live container is the only record of how this
+    # deployment was configured, and it is about to be replaced.
+    if drop_repo:
+        inherit = inherit - {"repo"}
+    if kept := inherit_live_spec(host_rec, name, spec, inherit):
+        # Said out loud, one line, listing only what actually differs from the
+        # defaults: an inherited value the operator never typed is exactly the kind of
+        # thing that is infuriating to debug when it is the wrong one. Fields already
+        # at their default are omitted because naming them says nothing.
+        log(f"{name}: keeping {', '.join(kept)} (pass the flag to change, --no-repo to drop)")
+    spec.validate()  # an inherited value must clear the same bar a typed one does
     try:
         # FR-004: refuse a pre-011 layout BEFORE anything is created, so an operator
         # never gets a half-configured environment built from files we no longer read.
@@ -12282,6 +12308,74 @@ def env_live_config(host_rec: dict, name: str) -> dict[str, str | None] | None:
     }
 
 
+def live_workspace(host_rec: dict, name: str) -> tuple[str, str | None] | None:
+    """The running container's workspace mode and bind dir, or None if unreadable.
+
+    Read from the MOUNTS rather than an env var, because the mounts are what the
+    workspace mode IS — `resolve_workspace` has no other output — and because every
+    container that already exists predates any env var we could add now. Inferring
+    from a marker we started writing today would silently reset the workspace of every
+    environment deployed before this release, which is the exact defect this whole
+    change is fixing.
+
+    The three modes are distinguishable without ambiguity: a named volume at
+    /workspace is `persistent`, a bind is `bind` (and carries its host dir), and no
+    /workspace mount at all is `ephemeral` — the container's own layer.
+    """
+    argv = driver_runtime_argv(host_rec) + [
+        "inspect",
+        container_name(name),
+        "--format",
+        "{{json .Mounts}}",
+    ]
+    try:
+        r = query(argv)
+    except OSError, subprocess.SubprocessError:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        mounts = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError, ValueError:
+        return None
+    for m in mounts or []:
+        if str(m.get("Destination")) != "/workspace":
+            continue
+        if m.get("Type") == "bind":
+            return ("bind", str(m.get("Source") or "") or None)
+        return ("persistent", None)
+    return ("ephemeral", None)
+
+
+def inherit_live_spec(
+    host_rec: dict, name: str, spec: ExecSpec, inherit: frozenset[str]
+) -> list[str]:
+    """Fill `spec`'s un-typed fields from the running container. Returns what changed.
+
+    Only fields the operator did NOT pass are considered — an explicit flag always
+    wins, since `redeploy` is also how a deployment is CHANGED. A field with nothing
+    to inherit keeps its default, which is the pre-inheritance behaviour and the right
+    answer when the container is gone or unreachable.
+    """
+    changed: list[str] = []
+    live = env_live_config(host_rec, name) or {}
+    for key in ("mode", "agent", "repo"):
+        if key in inherit and (value := live.get(key)):
+            if getattr(spec, key) != value:
+                changed.append(f"--{key} {value}")
+            setattr(spec, key, value)
+    if "workspace" in inherit and (ws := live_workspace(host_rec, name)) is not None:
+        mode, bind_dir = ws
+        if spec.workspace != mode:
+            changed.append(
+                f"--workspace {mode}" + (f" --workspace-dir {bind_dir}" if bind_dir else "")
+            )
+        spec.workspace = mode
+        if bind_dir and spec.workspace_dir is None:
+            spec.workspace_dir = bind_dir
+    return changed
+
+
 def env_desired_config(spec: ExecSpec, egress: object = None) -> dict[str, str | None]:
     """The declared agent-config in the same shape env_live_config returns — the
     clone URL only applies to a non-bind workspace (mirrors compose_environment).
@@ -13342,8 +13436,15 @@ def redeploy(
     known_hosts: Path | None = typer.Option(
         None, "--known-hosts", help="Inject known_hosts for the push remote (as for `up`)."
     ),
-    mode: str = typer.Option("interactive", "--mode", help="Execution mode (as for `up`)."),
-    agent: str = typer.Option("claude", "--agent", help="Primary agent (as for `up`)."),
+    # None-defaulted, unlike `up`: the default has to mean "not typed" so it can be
+    # told apart from an explicit `--mode interactive`, which is how a field gets RESET
+    # rather than inherited. The ExecSpec default fills in when there is nothing live.
+    mode: str | None = typer.Option(
+        None, "--mode", help="Execution mode (as for `up`). Inherited when omitted."
+    ),
+    agent: str | None = typer.Option(
+        None, "--agent", help="Primary agent (as for `up`). Inherited when omitted."
+    ),
     # Restated, not delegated to `up`: this is a second place a task is typed, and
     # "as for `up`" is not read by someone who is about to paste one here.
     task: str | None = typer.Option(
@@ -13352,8 +13453,8 @@ def redeploy(
         help="Initial/headless task (as for `up`). RECORDED VERBATIM in the run "
         "record, which outlives the container — never put a credential in it.",
     ),
-    workspace: str = typer.Option(
-        "persistent", "--workspace", help="Workspace mode (as for `up`)."
+    workspace: str | None = typer.Option(
+        None, "--workspace", help="Workspace mode (as for `up`). Inherited when omitted."
     ),
     workspace_dir: str | None = typer.Option(
         None, "--workspace-dir", help="Host dir for a bind workspace (as for `up`)."
@@ -13384,12 +13485,18 @@ def redeploy(
     for _ef in env_file or []:  # FR-001d: each named file must exist — fail fast
         if not _ef.is_file():
             raise typer.BadParameter(f"--env-file {_ef} does not exist")
+    # What the operator did NOT type is what may be inherited. Computed here, where
+    # "typed" is still knowable — one layer down every field already has a value and
+    # the distinction is gone.
+    typed = {f for f, v in (("mode", mode), ("agent", agent), ("workspace", workspace),
+                            ("repo", repo)) if v is not None}  # fmt: skip
+    defaults = ExecSpec()
     spec = ExecSpec(
-        mode=mode,
-        agent=agent,
+        mode=mode or defaults.mode,
+        agent=agent or defaults.agent,
         task=resolve_task(task),
         repo=repo,
-        workspace=workspace,
+        workspace=workspace or defaults.workspace,
         workspace_dir=workspace_dir,
         foreground=foreground,
     )
@@ -13402,6 +13509,7 @@ def redeploy(
         known_hosts,
         spec=spec,
         drop_repo=no_repo,
+        inherit=INHERITABLE - typed,
     )
 
 

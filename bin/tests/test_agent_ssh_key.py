@@ -294,7 +294,7 @@ def test_the_recovery_COMMAND_IS_THE_ONE_THAT_WORKS(wiz, monkeypatch, capsys):
     assert _redeploy_repo(wiz, monkeypatch, spec) == "git@forge:o/r.git"
 
 
-def _redeploy_repo(wiz, monkeypatch, spec, drop_repo=False):
+def _redeploy_repo(wiz, monkeypatch, spec, drop_repo=False, inherit=None):
     """Run only do_redeploy's inheritance step and report the resulting spec.repo.
 
     Everything after it recreates a container, so the deploy is cut off at the lock —
@@ -314,8 +314,10 @@ def _redeploy_repo(wiz, monkeypatch, spec, drop_repo=False):
         raise Stop
 
     monkeypatch.setattr(wiz, "_resolve_env_files", stop)
+    # Mirrors the CLI: what the operator did NOT type is what may be inherited.
+    kw = {"inherit": wiz.INHERITABLE if inherit is None else inherit}
     with contextlib.suppress(Stop, wiz.Fatal):
-        wiz.do_redeploy("acme", spec=spec, drop_repo=drop_repo)
+        wiz.do_redeploy("acme", spec=spec, drop_repo=drop_repo, **kw)
     return spec.repo
 
 
@@ -332,10 +334,22 @@ def test_redeploy_KEEPS_the_repo_by_default(wiz, monkeypatch, capsys):
 
 
 def test_an_explicit_repo_WINS_over_the_inherited_one(wiz, monkeypatch):
-    """Inheritance must not defeat the flag — `redeploy --repo` is how you CHANGE it."""
+    """Inheritance must not defeat the flag — `redeploy --repo` is how you CHANGE it.
+
+    A typed field is excluded from `inherit`, exactly as the CLI computes it. That the
+    exclusion is the whole mechanism is why the parameter defaults to inheriting
+    NOTHING: a caller that forgets would overwrite what the operator just typed."""
     monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": "git@forge:old.git"})
     spec = wiz.ExecSpec(repo="git@forge:new.git")
-    assert _redeploy_repo(wiz, monkeypatch, spec) == "git@forge:new.git"
+    typed = wiz.INHERITABLE - {"repo"}
+    assert _redeploy_repo(wiz, monkeypatch, spec, inherit=typed) == "git@forge:new.git"
+
+
+def test_inheriting_NOTHING_is_the_default(wiz, monkeypatch):
+    """The unsafe direction must be asked for: a caller that does not work out which
+    fields were typed gets the old behaviour, not silent clobbering."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"repo": "git@forge:o/r.git"})
+    assert _redeploy_repo(wiz, monkeypatch, wiz.ExecSpec(), inherit=frozenset()) is None
 
 
 def test_no_repo_DROPS_it(wiz, monkeypatch, capsys):
@@ -371,6 +385,111 @@ def test_repo_and_no_repo_together_are_REFUSED(wiz):
     body = _func_body(Path(wiz.__file__).read_text(), "redeploy")
     assert '"--no-repo"' in body
     assert "mutually exclusive" in body
+
+
+def _redeploy_spec(wiz, monkeypatch, spec, inherit=None, mounts=None):
+    """As _redeploy_repo, but hands back the whole spec after the inheritance step."""
+    monkeypatch.setattr(wiz, "live_workspace", lambda *_a: mounts if mounts is not None else None)
+    _redeploy_repo(wiz, monkeypatch, spec, inherit=inherit)
+    return spec
+
+
+def test_mode_and_agent_are_inherited(wiz, monkeypatch):
+    """The same silent reset as the repo, and louder in its consequences: a bare
+    redeploy of a headless codex environment came back interactive claude, so a
+    long-running job was replaced by an idle shell running a different agent."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"mode": "headless", "agent": "codex"})
+    spec = _redeploy_spec(wiz, monkeypatch, wiz.ExecSpec())
+    assert (spec.mode, spec.agent) == ("headless", "codex")
+
+
+def test_the_workspace_is_read_from_the_MOUNTS(wiz, monkeypatch):
+    """Not from an env marker: the mounts ARE the workspace mode, and every container
+    that already exists predates any marker we could start writing now — inferring
+    from one would silently reset every environment deployed before this release,
+    which is the exact defect this change is fixing."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {})
+    spec = _redeploy_spec(wiz, monkeypatch, wiz.ExecSpec(), mounts=("ephemeral", None))
+    assert spec.workspace == "ephemeral"
+
+
+def test_a_bind_workspace_carries_its_directory(wiz, monkeypatch):
+    """Inheriting `bind` without the dir would die on `--workspace bind requires
+    --workspace-dir` — a redeploy that refuses itself."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {})
+    spec = _redeploy_spec(wiz, monkeypatch, wiz.ExecSpec(), mounts=("bind", "/src/proj"))
+    assert (spec.workspace, spec.workspace_dir) == ("bind", "/src/proj")
+
+
+@pytest.mark.parametrize(
+    ("mounts", "expect"),
+    [
+        ([{"Destination": "/workspace", "Type": "volume"}], ("persistent", None)),
+        ([{"Destination": "/workspace", "Type": "bind", "Source": "/s"}], ("bind", "/s")),
+        ([{"Destination": "/home/dev/.ssh", "Type": "volume"}], ("ephemeral", None)),
+        ([], ("ephemeral", None)),
+    ],
+)
+def test_live_workspace_reads_the_three_modes(wiz, monkeypatch, mounts, expect):
+    monkeypatch.setattr(
+        wiz, "query", lambda *a, **k: subprocess.CompletedProcess([], 0, json.dumps(mounts), "")
+    )
+    assert wiz.live_workspace(HOST, "acme") == expect
+
+
+def test_an_unreadable_container_yields_no_workspace(wiz, monkeypatch):
+    """None, not a guess — and None leaves the default, which is the pre-inheritance
+    behaviour rather than a wrong claim about what the environment was."""
+    monkeypatch.setattr(
+        wiz, "query", lambda *a, **k: subprocess.CompletedProcess([], 1, "", "no such object")
+    )
+    assert wiz.live_workspace(HOST, "acme") is None
+
+
+def test_the_TASK_is_never_inherited(wiz):
+    """A task is a one-shot INSTRUCTION, not deployment state. Re-executing a headless
+    job on every rebuild is the kind of surprise that rewrites files or opens pull
+    requests nobody asked for — and unlike the other fields, repeating it has EFFECTS
+    rather than just a wrong setting."""
+    assert "task" not in wiz.INHERITABLE
+
+
+def test_FOREGROUND_is_never_inherited(wiz):
+    """It describes this invocation's terminal, not the environment. Inherited, a
+    detached redeploy would block on a stream nobody is watching."""
+    assert "foreground" not in wiz.INHERITABLE
+
+
+def test_foreground_is_validated_AFTER_inheritance(wiz, monkeypatch):
+    """`--foreground` is headless-only, and the mode it must agree with may be the one
+    being inherited. Validating first would reject `redeploy --foreground` on a
+    headless environment — legal, and the obvious thing to type."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"mode": "headless"})
+    spec = _redeploy_spec(wiz, monkeypatch, wiz.ExecSpec(foreground=True))
+    assert spec.mode == "headless"
+    spec.validate()  # no Fatal: the inherited mode satisfies the guard
+
+
+def test_an_inherited_value_still_has_to_be_VALID(wiz, monkeypatch):
+    """A container carrying a mode this build no longer supports must fail loudly
+    rather than be waved through for having come from the runtime instead of a flag."""
+    monkeypatch.setattr(wiz, "env_live_config", lambda *_a: {"mode": "bogus"})
+    spec = _redeploy_spec(wiz, monkeypatch, wiz.ExecSpec())
+    with pytest.raises(wiz.Fatal, match="--mode must be one of"):
+        spec.validate()
+
+
+def test_the_kept_line_lists_only_what_DIFFERS(wiz, monkeypatch, capsys):
+    """Naming a field already at its default says nothing, and a line that reports
+    four unchanged settings on every redeploy is one nobody reads."""
+    monkeypatch.setattr(
+        wiz, "env_live_config", lambda *_a: {"mode": "interactive", "agent": "codex"}
+    )
+    _redeploy_spec(wiz, monkeypatch, wiz.ExecSpec(), mounts=("persistent", None))
+    err = capsys.readouterr().err
+    assert "--agent codex" in err
+    assert "--mode" not in err  # already the default
+    assert "--workspace" not in err  # already the default
 
 
 def test_the_declarative_path_cannot_inherit(wiz):

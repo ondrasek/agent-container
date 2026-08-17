@@ -179,24 +179,37 @@ This is the one case where the empty-workspace refusal is relaxed. Every other
 one stands, and a test pins that: the container here is *pending and says so*,
 not silently useless.
 
-### `redeploy` keeps the repo
+### `redeploy` keeps the deployment's settings
 
-`redeploy` reads the clone URL from the running container, so the invocation that
-looks like "same thing, rebuilt" is exactly that:
+`redeploy` reads the execution spec off the running container before recreating it, so
+the invocation that looks like "same thing, rebuilt" is exactly that:
 
 ```sh
-agent-container redeploy acme                 # keeps whatever it was cloning
-agent-container redeploy acme --repo <other>  # changes it
-agent-container redeploy acme --no-repo       # drops it
+agent-container redeploy acme                  # keeps mode, agent, workspace, repo
+agent-container redeploy acme --agent codex    # changes one; the rest still carry over
+agent-container redeploy acme --mode interactive   # explicit flag = reset that field
+agent-container redeploy acme --no-repo        # drops the clone URL
 ```
+
+**Any field you pass wins**; the rest are inherited. Since `--mode`, `--agent` and
+`--workspace` all have defaults, passing the flag explicitly is how you reset one —
+only the clone URL needs `--no-repo`, because "no repo" is not a value you can type.
+The tool logs what it kept, listing only fields that differ from the defaults.
+
+Where each value comes from: `mode` and `agent` from the container's environment;
+`workspace` (and a bind's directory) from its **mounts**, because the mounts *are* the
+workspace mode and every container that already exists predates any marker we could
+have started writing. Nothing readable means the field falls back to its default,
+which is the pre-inheritance behaviour rather than a wrong claim.
+
+**Two fields are never inherited.** `--task` is a one-shot instruction, not deployment
+state: re-executing a headless job on every rebuild rewrites files and opens pull
+requests nobody asked for, and unlike a wrong setting, repeating it has *effects*.
+`--foreground` describes the terminal you are typing into, not the environment.
 
 `--repo` and `--no-repo` together are refused rather than resolved by precedence:
 guessing gets it wrong half the time, and on the half where the operator wanted the
 repo gone, keeping it re-clones into a workspace they were clearing.
-
-Note the asymmetry: `--mode`, `--agent` and `--workspace` are **not** inherited — they
-fall back to their defaults (interactive / claude / persistent) when omitted. Only the
-clone URL is carried over.
 
 ## Exit codes
 
