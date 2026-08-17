@@ -57,6 +57,35 @@ was captured — one per direction:
 `null`, never `""` — a JSON consumer must be able to tell *never captured* from a
 captured value.
 
+## `doctor --json`: every check, not only the problems
+
+The report carries `scope`, `scope_target`, `exit_code`, `checks_run`, `checks` and `findings`.
+
+**`checks` lists every check that ran, passes included.** A consumer that sees only failures cannot
+tell *"checked and fine"* from *"never asked"* — and those call for opposite reactions. `checks_run`
+is the same information as a flat list of ids, for a caller that only wants to know coverage.
+
+```json
+{"scope": "project", "scope_target": "/src/acme", "exit_code": 1,
+ "checks_run": ["credentials", "host-reachability", "layout", "runtime-present"],
+ "checks": [{"id": "layout", "scope": "project", "severity": "blocking",
+             "status": "fail", "finding": {"check_id": "layout", "severity": "blocking",
+             "observed": "…", "remedy": "…", "entity": "acme"}}],
+ "findings": [{"check_id": "layout", "…": "…"}]}
+```
+
+**Branch on `status` and `severity`, never on prose.** `status` is `pass` / `fail` / **`unknown`** —
+three values, because a check that could not be answered is not a pass. `severity` is `blocking` or
+`advisory`, and it describes the CHECK rather than the run.
+
+**`exit_code` is 0, 1 or 2 and never more.** An `unknown` never yields 1: exit 1 asserts that a
+deploy would not work, which is exactly what `unknown` cannot assert. See
+[`docs/doctor.md`](./doctor.md).
+
+**No credential value ever appears here** — `doctor` never retrieves one. `observed` names the
+declaration (source, variable, path, resolver binary), which is what makes the absence structural
+rather than a filter someone has to maintain.
+
 **Only ever public halves.** Neither private key exists outside the container: 018
 removed the host key from the operator's disk, 019 removed the agent key. There is
 no field, and no command, that would hand one back.

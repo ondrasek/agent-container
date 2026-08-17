@@ -427,8 +427,7 @@ def test_a_clean_validator_passes(wiz):
 
 def test_the_layout_check_reuses_the_deploys_producer(wiz):
     """SC-008: the same producer, so divergence is impossible rather than unlikely."""
-    src = Path(wiz.__file__).read_text()
-    block = src[src.index("def doctor_check_layout") :][:800]
+    block = _func_src(wiz, "doctor_check_layout")
     assert "refuse_superseded_layout" in block
 
 
@@ -436,3 +435,62 @@ def test_doctor_is_in_the_json_set(wiz):
     """FR-011's machine-readable half, enforced by machinery that already exists."""
     assert "doctor" not in wiz.NO_JSON_COMMANDS
     assert wiz.NO_JSON_COMMANDS == frozenset({"host env", "completions", "attach", "menu"})
+
+
+# --- machine-level checks ----------------------------------------------------
+
+
+def _func_src(wiz, name: str) -> str:
+    """A function's source, sliced to the next top-level `def`.
+
+    Not a fixed character count: a magic window silently shrinks the assertion every
+    time the code grows, and that has already produced three false failures across
+    this project. The boundary is the next definition, so it cannot rot.
+    """
+    src = Path(wiz.__file__).read_text()
+    i = src.index(f"\ndef {name}(")
+    j = src.index("\ndef ", i + 1)
+    return src[i:j]
+
+
+def test_a_missing_runtime_BLOCKS(wiz, monkeypatch):
+    """Nothing deploys without one, so this is the one machine-level check that is
+    blocking rather than advisory."""
+    monkeypatch.setattr(wiz.shutil, "which", lambda _b: None)
+    c = wiz.doctor_check_runtime()
+    assert c.status == "fail" and c.severity == "blocking"
+
+
+def test_an_unresolvable_tool_version_is_unknown_and_EXPLAINS_the_knock_on(wiz, monkeypatch):
+    """Running from a checkout without readable metadata is legitimate, so not a
+    failure — but it is why freshness reports unknown, and saying so here saves the
+    operator correlating two findings."""
+    monkeypatch.setattr(wiz, "_resolve_version", lambda: "0.0.0+unknown")
+    c = wiz.doctor_check_tool()
+    assert c.status == "unknown"
+    assert "freshness" in c.finding.remedy
+
+
+def test_an_ABSENT_user_config_is_a_pass_not_a_finding(wiz, monkeypatch, tmp_path):
+    """A fresh machine has none and nothing is wrong with that. Reporting it would put
+    a permanent item on the checklist of every operator who never needed one, and a
+    checklist with a permanent entry is one people learn to skip."""
+    monkeypatch.setattr(wiz, "CONFIG_DIR", tmp_path / "nope")
+    assert wiz.doctor_check_user_config().status == "pass"
+
+
+def test_machine_checks_run_in_EVERY_scope(wiz):
+    """A project reported clean while the runtime is missing would be a lie of
+    omission — the deploy depends on both."""
+    block = _func_src(wiz, "doctor_collect")
+    assert "doctor_check_runtime()" in block
+    # ...and before the early return for a project-less run.
+    assert block.index("doctor_check_runtime()") < block.index("if root is None:")
+
+
+def test_the_report_says_what_it_CHECKED(wiz):
+    """T040. A narrow run that reads as a clean one is how an operator concludes more
+    was checked than was."""
+    block = _func_src(wiz, "do_doctor")
+    assert '"checks_run": covered' in block
+    assert 'log(f"checked: ' in block

@@ -2899,6 +2899,60 @@ def doctor_check_image_freshness(host_rec: dict, tag: str) -> Check:
     )
 
 
+def doctor_check_tool() -> Check:
+    """The installed tool itself (FR-007/FR-012's machine level).
+
+    A version of `0.0.0+unknown` is not a failure — running from a checkout without
+    readable package metadata is legitimate — but it IS why image freshness will
+    report *unknown*, so saying it here saves the operator correlating two findings.
+    """
+    version = _resolve_version()
+    if version.endswith("+unknown"):
+        return doctor_unknown(
+            "tool-version",
+            "advisory",
+            f"the CLI cannot determine its own version ({version})",
+            remedy="install the wheel, or run from a checkout with a readable "
+            "pyproject.toml — until then image freshness cannot be judged either",
+        )
+    return doctor_ok("tool-version", "advisory", scope="machine")
+
+
+def doctor_check_runtime() -> Check:
+    """Is a container runtime present at all? Blocking — nothing deploys without one."""
+    for rt in ("docker", "podman"):
+        if shutil.which(rt):
+            return doctor_ok("runtime-present", "blocking", scope="machine")
+    return doctor_fail(
+        "runtime-present",
+        "blocking",
+        "neither docker nor podman is on PATH",
+        "install one — Podman is this project's reference runtime (ADR 0001)",
+        scope="machine",
+    )
+
+
+def doctor_check_user_config() -> Check:
+    """User-level configuration: present and readable, or absent (which is fine).
+
+    Absent is a PASS, not a finding. A fresh machine has no user config and nothing
+    is wrong with that — reporting it would put a permanent item on the checklist of
+    every operator who never needed one, and a checklist with a permanent entry is
+    one people learn to skip.
+    """
+    if not CONFIG_DIR.exists():
+        return doctor_ok("user-config", "advisory", scope="machine")
+    if not os.access(CONFIG_DIR, os.R_OK):
+        return doctor_fail(
+            "user-config",
+            "blocking",
+            f"{CONFIG_DIR} exists but is not readable",
+            f"fix its permissions: chmod u+rx {CONFIG_DIR}",
+            scope="machine",
+        )
+    return doctor_ok("user-config", "advisory", scope="machine")
+
+
 def doctor_collect(name: str | None, host: str | None) -> tuple[str, list[Check]]:
     """Every check, each independent, none able to end the run (FR-003, FR-008).
 
@@ -2926,6 +2980,8 @@ def doctor_collect(name: str | None, host: str | None) -> tuple[str, list[Check]
                 remedy="register one: agent-container host add local --docker-context <ctx>",
             )
         )
+
+    checks.extend((doctor_check_runtime(), doctor_check_tool(), doctor_check_user_config()))
 
     if host_rec:
         with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
@@ -3005,11 +3061,16 @@ def do_doctor(name: str | None, host: str | None, as_json: bool) -> None:
     ordered = doctor_order(checks)
     code = doctor_exit_code(ordered)
 
+    covered = sorted({c.id for c in ordered})
     if as_json:
         emit_json(
             {
                 "scope": scope,
+                "scope_target": name or (str(find_project_root() or "") or None),
                 "exit_code": code,
+                # What was asked. A consumer cannot tell "checked and fine" from
+                # "never asked" without it, and neither can an operator.
+                "checks_run": covered,
                 # EVERY check, passes included: a consumer that cannot see which
                 # checks ran cannot tell "checked and fine" from "never asked".
                 "checks": [c.as_dict() for c in ordered],
@@ -3036,7 +3097,12 @@ def do_doctor(name: str | None, host: str | None, as_json: bool) -> None:
         eprint(f"          -> {f.remedy}")
     # FR-014/SC-007: brief. One line for the passes rather than a wall of green.
     passed = len(ordered) - len(problems)
-    log(f"{len(ordered)} checks: {passed} pass, {len(problems)} to look at (scope: {scope})")
+    target = name or (find_project_root() or "this machine")
+    log(
+        f"{len(ordered)} checks: {passed} pass, {len(problems)} to look at "
+        f"(scope: {scope} — {target})"
+    )
+    log(f"checked: {', '.join(covered)}")
     if code == EXIT_OK and not problems:
         log("a deploy would work")
     raise typer.Exit(code)

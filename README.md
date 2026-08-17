@@ -634,6 +634,26 @@ optional. `GH_TOKEN` and git identity remain required.)
 > on macOS). That's an accepted trade-off — see [`docs/credentials.md`](docs/credentials.md).
 > `down --purge` deletes it.
 
+### Preflight — `doctor` (Feature 013)
+
+Ask whether a deploy would work, without attempting one and **without changing anything**:
+
+```bash
+agent-container doctor                 # this project's environments + the machine
+agent-container doctor acme --json     # one environment, machine-readable
+agent-container doctor && agent-container up acme
+```
+
+Every check reports **pass / fail / unknown** — three states, because a check that cannot complete
+and reports *pass* is worse than no check at all. Every finding names the action that fixes it, and
+one run reports **all** problems rather than stopping at the first. Exit `0` when a deploy would
+succeed (advisories and unknowns permitted), `1` on a blocking failure, `2` if `doctor` itself could
+not run.
+
+It reads credential *declarations* but never **resolves** one — for a manager source, resolving is
+the prompt — so no secret value is retrieved at all. Full contract:
+[`docs/doctor.md`](docs/doctor.md).
+
 ### Credential model (the agent's SSH key, API keys, canonical config)
 
 Beyond interactive login, `up`/`redeploy` inject an agent's credentials and

@@ -4806,3 +4806,85 @@ def test_the_image_stamp_is_real_and_freshness_passes_after_a_build(acc, _image)
     payload = json.loads(_doctor(acc, "--json").stdout)["data"]
     fresh = [c for c in payload["checks"] if c["id"] == "image-freshness"]
     assert fresh and fresh[0]["status"] == "pass", fresh
+
+
+def test_doctor_lists_EVERY_host_individually(acc):
+    """T035 — S10/C10/C12/FR-008/SC-005. One unreachable host must not suppress the
+    others, and must never be silently absent — absent reads as "fine"."""
+    dead = acc.tmp / "deadhost"
+    dead.mkdir(parents=True, exist_ok=True)
+    r = acc.cli(["host", "add", "accdocdead", "--driver", "docker", "--docker-context", "nope-xyz"])
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(_doctor(acc, "--json").stdout)["data"]
+    hosts = [c for c in payload["checks"] if c["id"] == "host-reachability"]
+    entities = {c["finding"]["entity"] for c in hosts if c["finding"]} | {
+        None for c in hosts if not c["finding"]
+    }
+    assert len(hosts) >= 2, f"only {len(hosts)} host checks: {hosts}"
+    assert any(c["finding"] and c["finding"]["entity"] == "accdocdead" for c in hosts), (
+        f"the dead host is not reported at all: {entities}"
+    )
+
+
+def test_an_unroutable_host_is_never_reported_as_PASS(acc):
+    """T049 — S5/C5. The scenario the feature exists to get right: a diagnostic
+    reporting healthy is what stops an operator looking further."""
+    r = acc.cli(
+        ["host", "add", "accdocunroutable", "--driver", "docker",
+         "--docker-context", "ssh://root@10.255.255.1"]
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(_doctor(acc, "--json").stdout)["data"]
+    hosts = [
+        c
+        for c in payload["checks"]
+        if c["id"] == "host-reachability"
+        and c["finding"]
+        and c["finding"]["entity"] == "accdocunroutable"
+    ]
+    assert hosts, "the unroutable host was not reported"
+    assert hosts[0]["status"] in ("fail", "unknown"), hosts[0]
+    assert hosts[0]["status"] != "pass"
+
+
+def test_a_running_environments_own_port_is_not_a_conflict(acc):
+    """T051 — S13/C14/R10, against a really-deployed container. The port derives from
+    the name, so a running environment always holds "its" port — reporting that as a
+    conflict would fail `doctor` on every healthy deployment."""
+    proj = acc.tmp / "portproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdocport\n    host: local\n    container:\n      agent: claude\n"
+    )
+    (proj / ".agent-container" / "accdocport.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    acc.up("accdocport")
+    payload = json.loads(_doctor(acc, "accdocport", "--json", cwd=proj).stdout)["data"]
+    port = [c for c in payload["checks"] if c["id"] == "port-availability"]
+    assert port and port[0]["status"] == "pass", port
+
+
+def test_advisory_only_exits_zero_and_chains(acc):
+    """T025 — S6/C6/C7/FR-011/SC-004. `doctor && up` must stay viable, or the command
+    stops being run — which is the reasoning the spec's own exit-status clarification
+    rests on."""
+    proj = acc.tmp / "advproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdocadv\n    host: local\n    container:\n      agent: claude\n"
+    )
+    (proj / ".agent-container" / "accdocadv.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    clean = _doctor(acc, "accdocadv", "--json", cwd=proj)
+    payload = json.loads(clean.stdout)["data"]
+    blocking = [
+        c for c in payload["checks"] if c["status"] == "fail" and c["severity"] == "blocking"
+    ]
+    assert not blocking, f"expected no blocking failures: {blocking}"
+    assert clean.returncode == 0, clean.stderr
+
+    # Now a blocking problem in the same project: exit must become 1.
+    (proj / "agent-container.accdocadv.env").write_text("GH_TOKEN=x\n")  # pre-011 offender
+    assert _doctor(acc, "accdocadv", cwd=proj).returncode == 1

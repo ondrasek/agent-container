@@ -153,7 +153,7 @@ and by a program, and the advisory-only run exits 0.
 
 ### Tests for User Story 2
 
-- [ ] T025 [P] [US2] Acceptance S6 — advisory-only exits **0** and `doctor && up` **proceeds**;
+- [X] T025 [P] [US2] Acceptance S6 — advisory-only exits **0** and `doctor && up` **proceeds**;
       a blocking failure exits **1** (C6, C7, FR-011, SC-004)
 - [X] T026 [P] [US2] Hermetic test of the full status×severity → exit mapping (data-model §1),
       including the two that are easy to get wrong: an advisory `fail` contributes nothing, and an
@@ -195,7 +195,7 @@ fail.
 - [X] T034 [P] [US3] Acceptance S11 — outside a project, machine-level checks report, the output
       says plainly that no project was found, and the exit is **0** when the machine is fine
       (C11, FR-007). Failing here would make the command useless in the case US3 exists for
-- [ ] T035 [P] [US3] Acceptance S10 — with one reachable and one unreachable host, **both** are
+- [X] T035 [P] [US3] Acceptance S10 — with one reachable and one unreachable host, **both** are
       listed; neither suppresses the other and the unreachable one is never silently absent
       (C10, C12, FR-008, SC-005)
 - [X] T036 [P] [US3] Hermetic test that `Scope` resolves to `environment` / `project` / `machine`
@@ -208,9 +208,9 @@ fail.
       state, not an error** (FR-007, C11)
 - [X] T038 [P] [US3] Machine-level checks: registered hosts, user configuration, the installed tool
       itself (FR-007, FR-012) — **re-run T005**
-- [ ] T039 [US3] Per-host isolation — one unreachable host must not extend the run past its bound
+- [X] T039 [US3] Per-host isolation — one unreachable host must not extend the run past its bound
       nor suppress the others (C10, FR-008)
-- [ ] T040 [US3] Report the scope in both views, including what was NOT looked at, so an operator
+- [X] T040 [US3] Report the scope in both views, including what was NOT looked at, so an operator
       is not misled by a narrow run reading as a clean one (data-model §3)
 
 **Checkpoint**: useful on a fresh machine, before any project exists.
@@ -238,7 +238,7 @@ fail.
 - [X] T046 [P] An image with **no** label reports `unknown` — never fresh, never stale (C13,
       FR-012b). Reporting it stale nags every operator into a rebuild they may not need; reporting
       it fresh asserts something unknown
-- [ ] T047 [P] Acceptance S12 — an image built before stamping reports `unknown`; after
+- [X] T047 [P] Acceptance S12 — an image built before stamping reports `unknown`; after
       `agent-container build` it reports `pass`; and the label read back is the real version, never
       `0.0.0+unknown`
 
@@ -248,21 +248,21 @@ fail.
 
 - [X] T048 A check that times out or errors reports `unknown` with a remedy naming the manual
       check (C5, FR-006) — *unknown* must still be actionable, not a shrug — **re-run T005**
-- [ ] T049 [P] Acceptance S5 — a host at an unroutable address yields `unknown` for reachability,
+- [X] T049 [P] Acceptance S5 — a host at an unroutable address yields `unknown` for reachability,
       **never `pass`** (C5). The scenario the feature exists to get right: a diagnostic reporting
       healthy is what stops an operator looking further
-- [ ] T050 [P] Acceptance S9 — no credential value appears in `--json` or in human output, compared
+- [X] T050 [P] Acceptance S9 — no credential value appears in `--json` or in human output, compared
       against the real file contents (C9, FR-010, SC-006)
-- [ ] T051 [P] Acceptance S13 — a running environment's own port is `pass`, against a real deployed
+- [X] T051 [P] Acceptance S13 — a running environment's own port is `pass`, against a real deployed
       container (C14, R10)
-- [ ] T052 Implement the **settled** provisioned-host tunnel policy (R2, decided 2026-08-17):
+- [X] T052 Implement the **settled** provisioned-host tunnel policy (R2, decided 2026-08-17):
       `doctor` MAY call `ensure_tunnel()`; it MUST NOT create or remove a container, volume, image or
       host-registry entry. The line is **nothing that outlives the command**. Without the forward
       every provisioned host reads *unreachable*, which is a false negative on the check FR-012 asks
       for. This was an open judgment call and is now closed — an implementation task must not carry a
       decision, or whoever happens to run it decides. Reversible: the alternative is reporting
       provisioned hosts as `unknown` with a remedy naming the manual check
-- [ ] T053 [P] Hermetic test pinning T052's settled behaviour, so the judgment call lives in a test
+- [X] T053 [P] Hermetic test pinning T052's settled behaviour, so the judgment call lives in a test
       rather than only in research.md (FR-002, C1, R2)
 - [ ] T053a **Quickstart S8 BY HAND** (FR-009, C8): declare a credential with
       `source: onepassword` against an **approval-gated** item, run `doctor`, and confirm no system
@@ -274,19 +274,19 @@ fail.
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T054 [P] `docs/` — document `doctor`: the three statuses, severity, the 0/1/2 exit table,
+- [X] T054 [P] `docs/` — document `doctor`: the three statuses, severity, the 0/1/2 exit table,
       what is checked, and that it is read-only (FR-002, FR-005, FR-006, FR-011). Name the file in
       `CLAUDE.md`'s "where the detail lives" index (Constitution: docs track behaviour)
-- [ ] T055 [P] `README.md` — a short `doctor` section, matching how 018/019 treat their commands
+- [X] T055 [P] `README.md` — a short `doctor` section, matching how 018/019 treat their commands
       (FR-001; Constitution: docs track behaviour)
-- [ ] T056 [P] `docs/threat-model.md` — reconcile the **013 row** (Constitution MUST). It alters no
+- [X] T056 [P] `docs/threat-model.md` — reconcile the **013 row** (Constitution MUST). It alters no
       trust boundary but **touches a credential path**: record that no value is ever retrieved
       (stronger than not printed), and record the new residual — a report enumerating declared
       credentials and registered hosts is a **reconnaissance aid** on the operator's own machine,
       the same class as Feature 014's inventory
-- [ ] T057 [P] `docs/agent-interface.md` — the `doctor` payload shape, and that every check appears
+- [X] T057 [P] `docs/agent-interface.md` — the `doctor` payload shape, and that every check appears
       including passes (FR-011, C16, data-model §4)
-- [ ] T058 One-line invariant in `CLAUDE.md` (Constitution: docs track behaviour). **The file is
+- [X] T058 One-line invariant in `CLAUDE.md` (Constitution: docs track behaviour). **The file is
       ALREADY over its 2000-token budget**
       (~2090 against a ~2016 baseline), so this task **prunes before adding** and reports the
       before/after number. Do not add without cutting
