@@ -75,8 +75,9 @@ An advisory failure MUST NOT produce non-zero (FR-011). An `unknown` MUST NOT pr
 (data-model §1).
 
 > **`3` and above are unavailable.** Feature 019 shipped a tool-wide table where `3` means
-> *pending registration*, documented in `--help` and pinned by a test. FR-011's "2 or greater"
-> predates it (R4). The spec wording should be narrowed to *exactly 2*.
+> *pending registration*, documented in `--help` and pinned by a test. FR-011's original
+> "2 or greater" predated it (R4) and now reads **exactly 2**; **FR-011a** pins the `unknown`
+> case and **SC-004a** measures both.
 
 ## C8 — No prompt, ever
 

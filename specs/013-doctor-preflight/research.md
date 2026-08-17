@@ -103,9 +103,11 @@ automated caller that an environment is awaiting SSH-key registration.
 simultaneously — a `doctor` that could not run *is* a case of "could not proceed", and `2` is
 already documented as a shared, non-unique code. Nothing above 2 is available.
 
-**Spec follow-up (not applied here — this command is read-only w.r.t. the spec):** FR-011's
-"2 or greater" should be narrowed to "exactly 2". The open-ended range is now a trap for whoever
-implements it. Raise via `/speckit-clarify 013` or a direct spec edit before `/speckit-tasks`.
+**Spec follow-up — APPLIED (2026-08-17).** FR-011 now reads "exactly 2" and forbids anything
+above it; a Clarifications entry records why, so "why exactly 2" is answered where an implementer
+will look rather than only here. The same pass added **FR-011a** (an *unknown* never produces exit
+1) and **SC-004a** — the original spec defined the exit status in terms of pass and fail only,
+leaving the third state undefined at exactly the boundary where a program consumes it.
 
 ---
 

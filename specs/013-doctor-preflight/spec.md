@@ -39,12 +39,31 @@ are attached to something stale.
   installed version. No network and no registry round-trip, so it belongs in the default pass —
   and it answers the question actually being asked.
 - Q: What does the exit status mean? → A: **0** when a deploy would work (advisories permitted),
-  **1** when a blocking finding would prevent it, **2 or more** when `doctor` itself could not
-  run. This makes `doctor && up` the natural idiom, and keeps advisories from failing scripts —
-  a diagnostic people stop chaining is a diagnostic nobody runs.
+  **1** when a blocking finding would prevent it, **2** when `doctor` itself could not run — see
+  the 2026-08-17 correction below, which narrows the original "2 or more". This makes
+  `doctor && up` the natural idiom, and keeps advisories from failing scripts — a diagnostic
+  people stop chaining is a diagnostic nobody runs.
 - Q: What does a bare invocation check? → A: **This project plus the machine** — every environment
   declared in the project you are standing in, plus hosts, user configuration and the tool
   itself. A name narrows it to one environment; outside a project it degrades to machine-level.
+
+### Session 2026-08-17
+
+Both entries correct FR-011 against a contract that did not exist when this spec was written.
+Recorded as a correction rather than an edit, because the original reasoning was sound and only
+its environment changed — and because "why is this exactly 2" is the question an implementer will
+otherwise re-open.
+
+- Q: `doctor` failing was specified as "**2 or more**". Is any code above 2 still available?
+  → A: **No — exactly 2.** Feature 019 shipped a tool-wide exit-code table after this spec was
+  written, in which **`3` means *pending registration***; it is documented in `--help` and pinned
+  by a test that builds the help text from the constants. A `doctor` returning `3` would tell an
+  automated caller that an environment is awaiting SSH-key registration. `2` is already the shared
+  "could not proceed" code and satisfies the original intent, so the range closes at 2.
+- Q: What exit code does an **unknown** produce? → A: **Never 1** (new FR-011a). Exit `1` asserts
+  that a deploy would not work; *unknown* is the state in which that assertion cannot be made. The
+  original spec defined the exit status in terms of pass and fail only, leaving the third state
+  — the one FR-006 makes first-class — undefined at the boundary where a program consumes it.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -161,9 +180,17 @@ user-level configuration without erroring about a missing project.
 - **FR-010**: No credential value may be printed, logged or otherwise exposed (Constitution III).
 - **FR-011**: The result MUST be available through the existing machine-readable interface, and
   the **exit status** MUST be actionable without parsing prose: **0** when a deploy would succeed
-  (advisories permitted), **1** when a blocking finding would prevent it, **2 or greater** when
-  `doctor` itself could not run. Advisories MUST NOT produce a non-zero status — chaining
-  `doctor && up` must remain viable, or the command stops being run.
+  (advisories and unknowns permitted), **1** when a blocking check **failed**, and **exactly 2**
+  when `doctor` itself could not run. **No code above 2 may be used** — the tool-wide table
+  (Feature 019) assigns `3` to *pending registration*, documented in `--help` and pinned by a
+  test, so a `doctor` returning `3` would tell an automated caller something false about an SSH
+  key. Advisories MUST NOT produce a non-zero status — chaining `doctor && up` must remain
+  viable, or the command stops being run.
+- **FR-011a**: An **unknown** result MUST NOT produce exit **1**. Exit `1` asserts that a deploy
+  would not work, and *unknown* (FR-006) is precisely the state in which that assertion cannot be
+  made. The unknown MUST still be reported prominently — it simply is not a verdict. Failing the
+  run on it would break `doctor && up` for anyone whose secondary host happened to be slow, which
+  is how a diagnostic stops being chained and therefore stops being run.
 - **FR-012**: The checks MUST include, at minimum: project layout validity, per-environment
   configuration resolution, credential resolvability, host reachability, image freshness relative
   to the installed tool, and port availability.
@@ -197,6 +224,9 @@ user-level configuration without erroring about a missing project.
 - **SC-003**: Every finding names a remedy — **zero** findings that state only a symptom.
 - **SC-004**: A blocking and an advisory finding are distinguishable by a program without parsing
   prose — **100%** of runs — and an advisory-only result exits **0**, so `doctor && up` proceeds.
+- **SC-004a**: An **unknown-only** result exits **0**, and no run ever exits above **2** — **100%**
+  of runs. Measures FR-011/FR-011a, whose failure is silent: a program branching on `3` reads it
+  from the tool-wide table as *pending registration*.
 - **SC-005**: An unreachable host is reported as unreachable, never as healthy or absent —
   **100%** of runs.
 - **SC-006**: No credential value appears in any output — **100%** of runs.

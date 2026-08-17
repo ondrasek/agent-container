@@ -49,18 +49,20 @@ That is not a consolation prize: "`op` is not installed" is the most common real
 machine, which is US3's scenario exactly. Full reasoning and the rejected `--no-prompt` approach
 are in R3.
 
-### 3. Exit codes: exactly 0, 1 or 2 — the spec's range is now a trap
+### 3. Exit codes: exactly 0, 1 or 2
 
-FR-011 says "**2 or greater** when `doctor` itself could not run". That was written before Feature
-019 shipped a tool-wide table in which **`3` means *pending registration***, documented in `--help`
-and pinned by a test. A `doctor` returning 3 would tell an automated caller something false about
-an SSH key.
+FR-011 originally said "**2 or greater** when `doctor` itself could not run" — written before
+Feature 019 shipped a tool-wide table in which **`3` means *pending registration***, documented in
+`--help` and pinned by a test. A `doctor` returning 3 would have told an automated caller something
+false about an SSH key.
 
-`2` satisfies both: FR-011's letter includes it, and `2` is already the shared "could not proceed"
-code. **Nothing above 2 is available.**
+`2` satisfies both readings: it was always within FR-011's range, and it is already the shared
+"could not proceed" code. **Nothing above 2 is available**, and the spec now says so.
 
-> **Spec follow-up, not applied here.** FR-011's open-ended range should be narrowed to *exactly
-> 2* before `/speckit-tasks`. `/speckit-plan` does not edit the spec.
+> **Applied to the spec (2026-08-17).** FR-011 now reads *exactly 2* and forbids anything above
+> it, and the correction is recorded in Clarifications. The same pass added **FR-011a**: an
+> *unknown* never produces exit `1`, because exit `1` asserts a deploy would fail and *unknown* is
+> the state where that cannot be asserted. `SC-004a` makes both measurable.
 
 ### 4. Image freshness is a build-time change with a diagnostic payoff
 
@@ -113,7 +115,7 @@ not extend the run past that bound (FR-008).
 - **Zero observable side effects** (FR-002 / SC-002) — the defining constraint.
 - **No interactive prompt** as a side effect of any check (FR-009).
 - **No credential value** printed, logged or held (FR-010, Constitution III).
-- **Exit 0/1/2 only** (FR-011 as narrowed by R4).
+- **Exit 0/1/2 only**, and an *unknown* never exits 1 (FR-011, FR-011a).
 - **Unknown never reported as pass** (FR-006).
 
 **Scale/Scope**: one project's declared environments plus machine-level state; tens of
