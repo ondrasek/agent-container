@@ -294,7 +294,7 @@ fail.
       before/after number. Do not add without cutting
 - [X] T059 Confirm the commit is `feat` — MINOR (Constitution VII). A new command plus an additive
       image label; nothing removed, no flag changes meaning
-- [ ] T060 Run `scripts/quality-gate.sh` **unpiped** (read its exit code, never through `| tail`),
+- [X] T060 Run `scripts/quality-gate.sh` **unpiped** (read its exit code, never through `| tail`),
       then the full acceptance tier with **no `-k` selection**, then walk quickstart S1–S14 by
       hand. **Do not edit the tree while the acceptance tier runs** — it reads
       `bin/agent-container` from disk on every invocation, so a mid-edit run measures nothing (this
