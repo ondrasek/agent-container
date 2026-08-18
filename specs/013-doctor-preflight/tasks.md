@@ -292,7 +292,7 @@ fail.
       ALREADY over its 2000-token budget**
       (~2090 against a ~2016 baseline), so this task **prunes before adding** and reports the
       before/after number. Do not add without cutting
-- [ ] T059 Confirm the commit is `feat` — MINOR (Constitution VII). A new command plus an additive
+- [X] T059 Confirm the commit is `feat` — MINOR (Constitution VII). A new command plus an additive
       image label; nothing removed, no flag changes meaning
 - [ ] T060 Run `scripts/quality-gate.sh` **unpiped** (read its exit code, never through `| tail`),
       then the full acceptance tier with **no `-k` selection**, then walk quickstart S1–S14 by
