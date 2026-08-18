@@ -88,6 +88,11 @@ No check may trigger an interactive prompt (FR-009). Manager-source credentials 
 > *Fails without this*: `op read` against an approval-gated item raises a system dialog. A
 > diagnostic that makes the operator approve a secret access to answer "is this configured" is one
 > they will not run twice.
+>
+> **Measured as non-invocation, not as absence-of-dialog.** A `command` resolver that records having
+> run must never record. A dialog is one consequence of invoking a resolver — an unlocked manager
+> shows none while still having run — so the dialog is the reason for this clause, not the test for
+> it.
 
 ## C9 — No credential value is retrieved, let alone printed
 

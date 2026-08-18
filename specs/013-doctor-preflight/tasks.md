@@ -264,11 +264,13 @@ fail.
       provisioned hosts as `unknown` with a remedy naming the manual check
 - [X] T053 [P] Hermetic test pinning T052's settled behaviour, so the judgment call lives in a test
       rather than only in research.md (FR-002, C1, R2)
-- [ ] T053a **Quickstart S8 BY HAND** (FR-009, C8): declare a credential with
-      `source: onepassword` against an **approval-gated** item, run `doctor`, and confirm no system
-      dialog appears. Its own task rather than a line inside T060, because it is the one
-      requirement whose failure is invisible to the test suite — the operator's screen is the
-      instrument, and a requirement verified only inside a catch-all is a requirement nobody checks
+- [X] T053a **Quickstart S8, AUTOMATED** (FR-009, C8): a `command` credential pointing at a script
+      that records its own execution; assert the marker is absent after `doctor` runs, plus a
+      hermetic sibling proving `resolve_credential_value` DOES create it, so the sentinel is known
+      to fire. Originally specified as a by-hand check for a 1Password dialog — wrong instrument:
+      the property is *the resolver was never invoked*, of which a dialog is merely one consequence,
+      and an unlocked manager would show no dialog while still having run. This version is
+      deterministic, needs nothing installed, and is not gated on an operator's attention
 
 ---
 

@@ -107,19 +107,28 @@ agent-container doctor --json | jq -r '.data.exit_code'
 019, in `--help` and pinned by a test). A `doctor` returning 3 tells an automated caller something
 false about an SSH key.
 
-## S8 — No prompt (C8, FR-009)
+## S8 — The resolver is never INVOKED (C8, FR-009)
 
-Declare a credential with `source: onepassword` against an **approval-gated** item.
+Point a `command` credential at a script that records having run:
 
 ```sh
+printf '#!/bin/sh\ntouch /tmp/resolver-ran\necho secret\n' > /tmp/fake-resolver.sh
+chmod +x /tmp/fake-resolver.sh
+rm -f /tmp/resolver-ran
+# declare it:  credentials: [{ name: gated, source: command, argv: [/tmp/fake-resolver.sh] }]
 agent-container doctor
+test ! -e /tmp/resolver-ran && echo "never invoked"
 ```
 
-**Expect**: it returns without any system dialog. The credential check reports the resolver
-binary's presence, and *unknown* beyond that.
+**Expect**: `never invoked`, and the credential reported as **unknown** with the resolver's presence
+noted — not `pass`, which would assert something unverified.
 
-**Watch the screen, not just the exit code** — this is the one scenario whose failure is a UI
-event a test cannot see.
+**Why a sentinel rather than watching for a dialog.** The property is not *"no dialog appeared"*, it
+is *"the resolver was never invoked"* — a dialog is one consequence of the invocation, and a manager
+that happens to be unlocked would show none while still having run. The sentinel is deterministic,
+needs no manager installed, and is asserted by the test suite rather than by an operator's
+attention. The prompt this protects against (`op read` on an approval-gated item) is the *reason*,
+not the *measurement*.
 
 ## S9 — No credential value anywhere (C9, FR-010, SC-006)
 

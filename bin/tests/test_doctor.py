@@ -494,3 +494,23 @@ def test_the_report_says_what_it_CHECKED(wiz):
     block = _func_src(wiz, "do_doctor")
     assert '"checks_run": covered' in block
     assert 'log(f"checked: ' in block
+
+
+def test_the_non_invocation_guard_CAN_fail(wiz, tmp_path, monkeypatch):
+    """The other half of T053a: prove the sentinel would notice.
+
+    `resolve_credential_value` on the same declaration DOES run the script, so a
+    marker-based assertion is looking at something real rather than at a script that
+    never runs for an unrelated reason.
+    """
+    marker = tmp_path / "ran"
+    script = tmp_path / "r.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\necho v\n")
+    script.chmod(0o755)
+    cred = {"name": "c", "source": "command", "argv": [str(script)]}
+
+    wiz.doctor_check_credential(cred, "e")
+    assert not marker.exists(), "the doctor check invoked the resolver"
+
+    wiz.resolve_credential_value(cred, tmp_path)
+    assert marker.exists(), "the sentinel never fires — the guard proves nothing"

@@ -4897,3 +4897,46 @@ def test_advisory_only_exits_zero_and_chains(acc):
     # Now a blocking problem in the same project: exit must become 1.
     (proj / "agent-container.accdocadv.env").write_text("GH_TOKEN=x\n")  # pre-011 offender
     assert _doctor(acc, "accdocadv", cwd=proj).returncode == 1
+
+
+def test_doctor_never_INVOKES_a_credential_resolver(acc):
+    """T053a — S8/C8/FR-009, automated rather than watched.
+
+    The original scenario asked a human to declare a 1Password credential against an
+    approval-gated item and confirm no system dialog appeared. That needs a manager
+    installed, and it makes the operator's screen the instrument.
+
+    But the property is not "no dialog appeared" — it is **the resolver was never
+    invoked**. A `command` source pointing at a script that records its own execution
+    proves exactly that, deterministically, on any machine, with nothing installed.
+    A dialog is merely one consequence of the invocation this asserts cannot happen.
+    """
+    marker = acc.tmp / "resolver-ran.marker"
+    script = acc.tmp / "fake-resolver.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\necho secret-value\n")
+    script.chmod(0o755)
+
+    proj = acc.tmp / "promptproj"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        "environments:\n  - name: accdocprompt\n    host: local\n"
+        "    container:\n      agent: claude\n"
+        "    credentials:\n"
+        f"      - {{ name: gated, source: command, argv: [{script}] }}\n"
+    )
+
+    r = _doctor(acc, "--json", cwd=proj)
+    assert not marker.exists(), (
+        "doctor RAN the credential resolver — for a real manager that is the prompt "
+        "FR-009 forbids, and it pulls a secret into memory against FR-010"
+    )
+    # ...and it still said something useful about the credential rather than skipping it.
+    payload = json.loads(r.stdout)["data"]
+    cred = [
+        c
+        for c in payload["checks"]
+        if c["id"] == "credentials" and c["finding"] and "gated" in (c["finding"]["entity"] or "")
+    ]
+    assert cred and cred[0]["status"] == "unknown", cred
+    assert "NOT verified" in cred[0]["finding"]["observed"]
+    assert "secret-value" not in r.stdout and "secret-value" not in r.stderr
