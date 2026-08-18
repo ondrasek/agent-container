@@ -81,6 +81,17 @@ and it is why FR-004 and FR-008 exist.
   the operator authorises the new public key and withdraws the old, which is the revocation flow
   FR-008 already requires.
 
+### Session 2026-08-18
+
+- Q: FR-003a settles push-vs-pull, but pulls the inventory from **where**? Feature 014's inventory
+  is a durable file on the operator's machine, which a container on a VPS cannot read.
+  → A: **It queries the permitted hosts live on connect; the live view IS its truth.** No new
+  channel is needed — the control plane's key already grants exactly the daemon access required —
+  and syncing the operator's file would need a laptop→container path that FR-003a rules out and a
+  locked control plane could not receive anyway. **Consequence accepted:** the control plane cannot
+  show an environment whose host is unreachable or gone, which the laptop's durable inventory can.
+  SC-002 narrows accordingly rather than pretending the two views are identical.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Manage from a device that has nothing installed (Priority: P1)
@@ -101,7 +112,8 @@ configuring anything on arrival.
 1. **Given** a deployed control plane, **When** the operator SSHes in from an unconfigured
    device, **Then** the CLI is present, configured, and knows their registered hosts.
 2. **Given** the session, **When** the operator lists environments, **Then** they see the same
-   environments their laptop would show.
+   environments their laptop would show **for every permitted host that answers**, and any host that
+   did not answer is named as unreachable rather than omitted.
 3. **Given** the session, **When** the operator stops an environment on another host, **Then** it
    stops, and the outcome is recorded as it would be from the laptop.
 4. **Given** a small screen, **When** the operator works, **Then** the experience is usable —
@@ -167,6 +179,9 @@ regarding its own container is defined and safe.
 - **A control plane deployed to a host it also manages** — must be coherent.
 - **Credential exposure inside the container** — anyone with the session has whatever it holds;
   this is the feature's central risk and must be stated, not implied.
+- **A permitted host that does not answer** — the live view is the control plane's only source
+  (FR-003a), so an unreachable host means a genuinely incomplete list. It must be named as
+  unreachable, never omitted silently: a short list that looks complete is worse than an error.
 - **A stale control plane** — one whose tool version predates the environments it manages, or
   whose host registry has drifted.
 - **Loss of the SSH key** to the control plane — recovery must not require rebuilding every
@@ -189,9 +204,12 @@ regarding its own container is defined and safe.
   installed and no configuration**, and find a working, configured CLI.
 - **FR-003**: The control plane MUST be able to enumerate and act on the operator's environments
   across the hosts it is permitted to reach.
-- **FR-003a**: It MUST obtain the inventory by **pulling on connect**, never by receiving pushes.
-  A locked control plane cannot receive, and making it receivable would require agent containers
-  to hold credentials into it — inverting the trust direction.
+- **FR-003a**: It MUST obtain its environment list by **querying the permitted hosts live on
+  connect**, never by receiving pushes and never by syncing the operator's durable inventory file.
+  A locked control plane cannot receive, and making it receivable would require agent containers to
+  hold credentials into it — inverting the trust direction. The live view is the control plane's
+  truth; it therefore CANNOT report an environment whose host is unreachable or gone, and MUST say
+  which permitted hosts did not answer rather than presenting a partial list as complete.
 - **FR-004**: The control plane's reach MUST be **declared and visible**, and constrainable to a
   subset of hosts. Scope is defined by **where its public key is authorised** — an enforceable
   boundary outside the container, not a setting the container could ignore.
@@ -259,7 +277,8 @@ regarding its own container is defined and safe.
 - **SC-001**: An operator completes a full management task — list across hosts, then stop one —
   from a device with nothing installed, configuring nothing on arrival.
 - **SC-002**: The environments listed from a control plane match those listed from the operator's
-  own machine — **zero** divergence for hosts in scope.
+  own machine — **zero** divergence for hosts that are both **in scope and reachable**. A host that
+  did not answer MUST be reported as such, so an incomplete list is never mistaken for an empty one.
 - **SC-003**: An out-of-scope host is unreachable from the control plane — **zero** successful
   out-of-scope actions.
 - **SC-004**: The permitted scope is visible before deployment — **100%** of deployments.
