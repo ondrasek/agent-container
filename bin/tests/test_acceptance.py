@@ -4811,19 +4811,28 @@ def test_the_image_stamp_is_real_and_freshness_passes_after_a_build(acc, _image)
 def test_doctor_lists_EVERY_host_individually(acc):
     """T035 — S10/C10/C12/FR-008/SC-005. One unreachable host must not suppress the
     others, and must never be silently absent — absent reads as "fine"."""
-    dead = acc.tmp / "deadhost"
-    dead.mkdir(parents=True, exist_ok=True)
-    r = acc.cli(["host", "add", "accdocdead", "--driver", "docker", "--docker-context", "nope-xyz"])
-    assert r.returncode == 0, r.stderr
+    # TWO hosts, deliberately: registering one makes it the default, so a single-host
+    # version cannot tell "reported both" from "reported the only one there is". The
+    # first run of this test failed for exactly that reason — the dead host WAS
+    # reported correctly, and the assertion was wrong.
+    live = acc.cli(
+        ["host", "add", "accdoclive", "--driver", RUNTIME,
+         "--docker-context", "default", "--default"]
+    )  # fmt: skip
+    assert live.returncode == 0, live.stderr
+    dead = acc.cli(
+        ["host", "add", "accdocdead", "--driver", "docker", "--docker-context", "nope-xyz"]
+    )
+    assert dead.returncode == 0, dead.stderr
+
     payload = json.loads(_doctor(acc, "--json").stdout)["data"]
     hosts = [c for c in payload["checks"] if c["id"] == "host-reachability"]
-    entities = {c["finding"]["entity"] for c in hosts if c["finding"]} | {
-        None for c in hosts if not c["finding"]
-    }
+    named = {c["finding"]["entity"] for c in hosts if c["finding"]}
     assert len(hosts) >= 2, f"only {len(hosts)} host checks: {hosts}"
-    assert any(c["finding"] and c["finding"]["entity"] == "accdocdead" for c in hosts), (
-        f"the dead host is not reported at all: {entities}"
-    )
+    # The unreachable one must be NAMED. Silence would read as health.
+    assert "accdocdead" in named, f"the unreachable host is absent from the report: {hosts}"
+    bad = [c for c in hosts if c["finding"] and c["finding"]["entity"] == "accdocdead"]
+    assert bad[0]["status"] != "pass", bad[0]
 
 
 def test_an_unroutable_host_is_never_reported_as_PASS(acc):
