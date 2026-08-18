@@ -91,6 +91,15 @@ and it is why FR-004 and FR-008 exist.
   locked control plane could not receive anyway. **Consequence accepted:** the control plane cannot
   show an environment whose host is unreachable or gone, which the laptop's durable inventory can.
   SC-002 narrows accordingly rather than pretending the two views are identical.
+- Q: Nested control planes were listed as "prevented or deliberately supported, not accidental" —
+  which? → A: **Deliberately supported, unconstrained.** A control plane is just another
+  environment, so it may deploy one. The edge case demanded a DECISION rather than a particular
+  answer, and recording it here is what makes nesting deliberate instead of accidental.
+  **Why this is safer than it first looks:** FR-007b already requires authorising a public key to be
+  an explicit act, never implicit in deployment — so a nested control plane starts with **zero
+  reach**. Deploying one is not granting it anything; someone with existing access must still
+  authorise its key. What nesting adds is the ability to MINT a standing key from inside a control
+  plane, which is why FR-014a requires it to be visible as such.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -192,7 +201,12 @@ regarding its own container is defined and safe.
   motivating case.
 - **An interrupted mobile connection** mid-operation — must not corrupt state; the session ends,
   the operation's outcome must still be knowable.
-- **Nested control planes** — must be prevented or deliberately supported, not accidental.
+- **Nested control planes** — supported deliberately (FR-014a). A nested one inherits **no** reach:
+  it mints its own key and gains capability only where that key is authorised. What it does add is
+  key-minting from inside a session, so the count and provenance of standing keys must be visible.
+- **A control plane reached by hopping through another** — stopping the intermediate ends the
+  session mid-operation. Governed by FR-013 (the outcome must stay knowable), but worth naming: it
+  is the one nesting arrangement where an action can cut the operator's own path back.
 
 ## Requirements *(mandatory)*
 
@@ -244,6 +258,13 @@ regarding its own container is defined and safe.
 - **FR-013**: An interrupted session MUST NOT corrupt state, and the outcome of an in-flight
   operation MUST remain knowable afterwards.
 - **FR-014**: Multiple control planes MUST be individually identifiable and MUST NOT conflict.
+- **FR-014a**: A control plane MAY deploy another control plane; nesting is **supported, not
+  refused**. A nested control plane is an ordinary environment in every respect — it mints its own
+  keypair (FR-007) and gains reach only where its public key is explicitly authorised (FR-007b), so
+  it begins with **no** access and none is inherited from its parent. Because nesting means a
+  standing key can be minted from inside a control plane rather than only from the operator's own
+  machine, the inventory listing (FR-009) MUST make the parent-child relationship visible, so the
+  operator can see how many standing keys exist and where each came from.
 - **FR-015**: The image MUST remain **rootless and immutable at runtime**; the control plane adds
   no privileges (Constitution II).
 - **FR-015a**: The control plane MUST run a **narrower image** than agent containers — the CLI,
@@ -294,6 +315,9 @@ regarding its own container is defined and safe.
   built image, not by reading its build definition.
 - **SC-010**: A stop-everything action invoked from inside reports its own container as
   **excluded** — **zero** runs in which the control plane's own outcome is unknown.
+- **SC-011**: Every control plane in the listing shows whether it was deployed from the operator's
+  machine or from another control plane, and which — **100%**. Nesting makes the number of standing
+  keys grow from inside the system, and a count nobody can see is a count nobody audits.
 
 ## Assumptions
 
