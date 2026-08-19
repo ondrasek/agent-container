@@ -113,6 +113,15 @@ and it is why FR-004 and FR-008 exist.
   Feature 013's severity split exists to avoid. (013's own `image-freshness` DOES use equality,
   deliberately — "was this image built by exactly this CLI" is a different question from "can these
   two versions interoperate".)
+- Q: What is the off-box destination, concretely? → A: **OTLP — OpenTelemetry — and nothing below
+  it.** A standard rather than a vendor API, so any compatible collector is valid and none is baked
+  in. The dependency is accepted **on condition the tool stays at the OTel level**: no
+  backend-specific package, ever. Noted in FR-009d: OTLP/HTTP+JSON is a POST of a JSON document and
+  needs **no** dependency at all, so the standard can be met without touching the four-package floor
+  — the SDK is permitted, not preferred.
+  And **without** a declared destination the trail is local-only, so the tool owes a **dedicated
+  command to collect logs from each host** (FR-009e) rather than leaving the operator to rely on an
+  incidental drain or to walk the hosts by hand.
 - Q: Are actions attributable to the control plane that performed them, and does that include
   reads? → A: **Yes, both — written where the action lands, then DRAINED to the operator's durable
   store.** Every management action a control plane performs, mutating or read-only, records which
@@ -295,6 +304,20 @@ regarding its own container is defined and safe.
   FR-009c so that no operator free text — the T15 class — ever leaves the operator's machines.
   Export MUST be **fail-open**: an unreachable destination degrades to the local trail and reports
   the gap, never blocks the action.
+
+  **The protocol is OTLP** (OpenTelemetry) — a standard rather than a vendor's API, so any
+  OTel-compatible collector or backend is a valid destination and none is baked in, which is what
+  keeps "operator-declared" meaningful.
+
+  **Prefer OTLP over HTTP with JSON encoding, which needs no dependency at all**: it is a POST of a
+  JSON document, so the standard is met with **zero** additions to the four packages the project has
+  (Constitution VI intact). The `opentelemetry-sdk` and its exporters are permitted — OTel has been
+  accepted as a dependency worth having — but MUST NOT be reached for before the dependency-free
+  encoding is shown insufficient, and **no backend-specific package may be added at all**: staying at
+  the OTel level is the condition under which this dependency was accepted.
+
+  The endpoint is outbound traffic, so a Feature 012 declaration MUST permit it. An enforced boundary
+  with an undeclared collector MUST report the export gap rather than appear to export successfully.
 - **FR-009b**: A host that cannot be written to MUST NOT fail the action. The attribution gap MUST
   be reported instead — the operator asked a question, and refusing to answer because bookkeeping
   failed inverts the priority. An unrecorded action MUST be visible as unrecorded, never silently
@@ -308,6 +331,12 @@ regarding its own container is defined and safe.
   explicitly — naming how the operator can stop it instead (from their own machine, or another
   control plane). The control plane is the one container whose stopping makes the report
   undeliverable, so self-exclusion is what makes "the outcome is never unknown" achievable at all.
+- **FR-009e**: With **no** destination declared the trail lives only on the hosts, and the tool MUST
+  provide a **dedicated command to collect it from each host on demand** — the operator neither waits
+  for an incidental drain nor visits N hosts by hand. This is the local-only path's answer to
+  FR-009a's window: a deliberate pull that can be run before destroying a host, rather than a side
+  effect of some other command. It MUST name every host it could not reach, since a collection that
+  silently skipped one reads as a complete trail.
 - **FR-011**: Output MUST be usable on a **narrow screen** — the motivating case is a phone.
 - **FR-012**: A stopped or rebooted control plane MUST be usable again **without
   reconfiguration**: its key persists on its volume, and the operator supplies the passphrase on
@@ -390,6 +419,12 @@ regarding its own container is defined and safe.
 - **SC-013**: Every action performed from a control plane is attributable to it after the fact —
   **100%** of actions, read and mutating. **Zero** actions absent from the trail without being marked
   unrecorded.
+- **SC-015**: With no destination declared, one command collects the trail from every reachable host
+  and **names every host it could not reach** — **zero** collections that omit a host silently. A
+  partial trail presented as complete is the failure this measures.
+- **SC-016**: The tool adds **no backend-specific dependency** — verified against the installed
+  package set, not the import list — and the export works against **at least two** different
+  OTel-compatible collectors, which is what proves the destination is really operator-chosen.
 - **SC-014**: With a destination declared, the trail survives **both** the destruction of the host
   acted on **and** deletion attempts from inside the control plane — **zero** exported entries a
   control plane can remove. Measured by destroying the host and by attempting removal from a session,
@@ -427,14 +462,15 @@ regarding its own container is defined and safe.
 ## Out of Scope
 
 - A web UI, an HTTP API, or any non-SSH surface.
-- **A vendored telemetry SDK, or exporting run records.** FR-009d requires an off-box destination
+- **A backend-specific telemetry package, or exporting run records.** FR-009d requires an off-box destination
   for the *attribution* trail, because a trail the audited party can rewrite is not evidence — but
-  the shape is deliberately narrow. **In scope for FR-009d**: an operator-declared endpoint, a
-  generic protocol, no client library (Constitution VI), and only FR-009c's closed field set.
+  the shape is deliberately narrow. **In scope for FR-009d**: an operator-declared **OTLP**
+  endpoint and only FR-009c's closed field set, with the dependency-free HTTP+JSON encoding
+  preferred over the SDK.
   **Out of scope**: shipping Feature 016's run records, whose `task` field is the one place a
   credential can arrive (threat model T15) — exporting those would convert a bounded local risk into
-  an exported one (Constitution III). Also out of scope: any vendor-specific integration, and any
-  destination the tool chooses rather than the operator.
+  an exported one (Constitution III). Also out of scope: any backend-specific package or vendor
+  integration below the OTel level, and any destination the tool chooses rather than the operator.
 - Multi-user or multi-tenant access control — single operator remains assumed.
 - Running agents inside the control plane — enforced by FR-015a's narrower image, not merely
   declared here.
