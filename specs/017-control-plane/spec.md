@@ -100,6 +100,19 @@ and it is why FR-004 and FR-008 exist.
   reach**. Deploying one is not granting it anything; someone with existing access must still
   authorise its key. What nesting adds is the ability to MINT a standing key from inside a control
   plane, which is why FR-014a requires it to be visible as such.
+- Q: FR-016 said a version-mismatched control plane "MUST behave predictably" — which is
+  unfalsifiable. What does it do, and is the comparison semver-aware? → A: **Semver precedence, and
+  the asymmetric case is refused.** `major_on_zero = false`, so **pre-1.0 a breaking change lands as
+  MINOR** — that is the channel that matters, and PATCH differences (plus post-1.0 minor) are
+  ignored entirely, not even warned about. A breaking-channel difference is **advisory** when the
+  control plane is NEWER (the normal state after any upgrade) and **REFUSED** when the environment
+  is newer than the control plane, which is where interfaces it does not know about may exist.
+  Unreadable version on either side ⇒ **unknown**, never assumed compatible.
+  Comparing by precedence rather than equality is what makes this usable: an equality check would
+  fire on every patch bump and become noise, and a warning nobody reads is the failure mode
+  Feature 013's severity split exists to avoid. (013's own `image-freshness` DOES use equality,
+  deliberately — "was this image built by exactly this CLI" is a different question from "can these
+  two versions interoperate".)
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -191,8 +204,13 @@ regarding its own container is defined and safe.
 - **A permitted host that does not answer** — the live view is the control plane's only source
   (FR-003a), so an unreachable host means a genuinely incomplete list. It must be named as
   unreachable, never omitted silently: a short list that looks complete is worse than an error.
-- **A stale control plane** — one whose tool version predates the environments it manages, or
-  whose host registry has drifted.
+- **A stale control plane** — one whose tool version predates the environments it manages. Refused
+  for those environments (FR-016), not for all work: a control plane stale against one environment
+  may be current for the rest, and blanket refusal would strand the operator.
+- **A control plane one PATCH behind** — must be silent. This is the common case after any `fix`
+  release, and reporting it would train the operator to ignore the report that matters.
+- **A host registry that has drifted** — distinct from a version mismatch and not covered by
+  FR-016; the live query (FR-003a) is what reconciles it.
 - **Loss of the SSH key** to the control plane — recovery must not require rebuilding every
   managed host; withdrawing and re-authorising a public key is enough (FR-008).
 - **Loss of the passphrase** — no recovery by design (FR-017); redeploy and re-authorise. Stated
@@ -276,8 +294,20 @@ regarding its own container is defined and safe.
   obtain the key without the passphrase. Recovery is **redeploy** — a fresh keypair, its public
   half authorised, the previous one withdrawn via FR-008. The tool MUST state this at deploy time,
   when the passphrase is printed, rather than leaving an operator to discover it after the loss.
-- **FR-016**: A control plane whose tool version differs from what an environment was created
-  with MUST behave predictably and say so.
+- **FR-016**: A control plane MUST compare its own tool version against the version an environment
+  was created with **by semver precedence, never by equality**, and act on the difference:
+  - a **PATCH** difference (and, once past 1.0, a MINOR one) is **ignored** — not reported at all,
+    because it cannot carry a breaking change and a warning nobody needs is one nobody reads;
+  - a **breaking-channel** difference (MINOR while pre-1.0, MAJOR after) is **advisory** when the
+    control plane is the newer side — the normal state after any upgrade — and MUST NOT block;
+  - the same difference in the other direction, where the **environment is newer than the control
+    plane**, MUST be **refused**: that is the only case where the environment may carry interfaces
+    the control plane does not know about, and it is the one the operator cannot detect by eye;
+  - an unreadable version on either side MUST be reported **unknown** and MUST NOT be treated as
+    compatible.
+
+  The refusal MUST name the remedy — redeploy the control plane from the newer CLI — since the
+  operator reading it is on a phone and cannot investigate.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -318,6 +348,10 @@ regarding its own container is defined and safe.
 - **SC-011**: Every control plane in the listing shows whether it was deployed from the operator's
   machine or from another control plane, and which — **100%**. Nesting makes the number of standing
   keys grow from inside the system, and a count nobody can see is a count nobody audits.
+- **SC-012**: A control plane one PATCH version from an environment reports **nothing** about
+  versions — **zero** advisories. A breaking-channel difference in the risky direction (environment
+  newer) is refused — **100%**, with the remedy named. Both halves are measured, because a rule that
+  only ever warns and a rule that only ever refuses are equally wrong and each passes half a test.
 
 ## Assumptions
 
