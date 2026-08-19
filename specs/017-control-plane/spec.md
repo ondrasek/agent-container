@@ -122,6 +122,21 @@ and it is why FR-004 and FR-008 exist.
   And **without** a declared destination the trail is local-only, so the tool owes a **dedicated
   command to collect logs from each host** (FR-009e) rather than leaving the operator to rely on an
   incidental drain or to walk the hosts by hand.
+- Q: Why is the design bending around credentials in `task` at all? Credentials must be injected by
+  the CLI — env file or a declared credential source — the SSH key pair being the one exception.
+  → A: **Correct, and the spec now says so (FR-009f0).** That invariant was implied by the tool's
+  behaviour and warned about at the flag, but stated nowhere: credentials reach a container by
+  injection, except the SSH keys the container generates itself and whose private halves the tool
+  never handles. A credential in a task is **operator error, not a supported path**.
+  **This reverses the export decision.** By contract a task carries no credential, so withholding it
+  would design around a mistake the tool already provides the correct alternative for — and it would
+  defeat the motivating case, since an operator on a phone should not have to resolve a run id against
+  a laptop they are not sitting at. The task text is now exported **by default**.
+  What the tool cannot know is **where the collector lives**: a personal one on the operator's own VPS
+  is the same trust domain as the records already, a shared organisational backend is not. So the task
+  text may be **excluded by declaration** — a named field-level include/exclude, never a
+  pattern-matching redactor, because a filter that misses one value converts caution into false
+  confidence while omitting a named field either happens or does not.
 - Q: FR-009d exported only the control-plane attribution trail, which does not meet "centralise logs
   from all control planes AND agents". Widen it, or split telemetry into its own feature? → A:
   **Widen it inside 017.** Export now covers the attribution trail, Feature 016's run records and
@@ -343,19 +358,36 @@ regarding its own container is defined and safe.
   declaration MUST permit it. An enforced boundary with an undeclared collector MUST report the export
   gap rather than appear to export successfully — otherwise egress enforcement silently produces an
   empty collector, which looks exactly like a quiet system.
-- **FR-009f**: **What is exported is a closed set, and `task` is never in it.** The export carries
-  identifiers, coordinates and outcomes — environment, host, agent, run id, timings, exit status,
-  usage, egress decision, and the FR-009a attribution — and MUST NOT carry Feature 016's `task`
-  field, nor any other operator free text.
+- **FR-009f0**: **A task is not a credential channel.** Credentials reach a container by
+  **injection** — the env file, or a declared credential with a `file`/`keychain`/`command`/
+  `onepassword`/`bitwarden` source — with the single exception of the SSH keys the container
+  **generates itself** (the host key, Feature 018; the agent key, Feature 019), whose private halves
+  the tool never handles at all.
 
-  `task` is the one field a credential can arrive in (threat model T15), which is why 016 bounds it
-  by a closed field set rather than by a filter. Exporting it would convert a bounded local risk into
-  an exported one (Constitution III), and a redaction filter is the wrong instrument: it must be right
-  every time, forever, against text nobody has seen yet.
+  A credential typed into a `--task` is therefore **operator error, not a supported path**. The tool
+  cannot prevent it — the field is free text and Feature 016 records it verbatim by requirement — and
+  it MUST keep warning where a task is typed. But the spec MUST NOT treat the task field as a
+  credential-bearing channel, because doing so would design around a mistake the tool already
+  provides a correct alternative for, and would imply the injection channels are optional.
+- **FR-009f**: **What is exported is a closed set.** The export carries identifiers, coordinates and
+  outcomes — environment, host, agent, run id, timings, exit status, usage, egress decision, the
+  FR-009a attribution — **and the task text**, which is the single most useful field for answering
+  "this run failed, what was it doing" without leaving the collector.
 
-  **The run id IS exported, which is what makes the omission cheap.** An operator who needs the task
-  text reads it in the local record the id points at; correlation survives, the free text does not
-  leave. A record that arrives at the collector MUST be enough to find its local counterpart.
+  Exporting it follows from FR-009f0: by contract a task carries no credential, so treating it as
+  secret would contradict the invariant the tool already enforces by providing injection. Withholding
+  it would also defeat the motivating case — an operator on a phone should not have to resolve a run
+  id against a laptop they are not sitting at.
+
+  **The one variable the tool cannot know is where the collector lives.** A personal collector on the
+  operator's own VPS is the same trust domain as the records already; a shared organisational backend
+  is not. So the operator MAY exclude the task text by declaration. That is a field-level
+  include/exclude, **never a pattern-matching redactor** — a filter that misses one value converts
+  caution into false confidence (threat model T12/T15), whereas omitting a named field either happens
+  or does not.
+
+  The **run id** MUST be exported regardless, so a record at the collector can always be matched to
+  its local counterpart.
 - **FR-009g**: Each container exports its **own** telemetry directly, so an agent's records reach the
   collector whether or not a control plane exists and whether or not the operator's machine is awake.
   The dependency-free OTLP/HTTP+JSON encoding (FR-009d) is a POST of a JSON document, which the image
@@ -368,7 +400,10 @@ regarding its own container is defined and safe.
   be reported instead — the operator asked a question, and refusing to answer because bookkeeping
   failed inverts the priority. An unrecorded action MUST be visible as unrecorded, never silently
   absent from the trail.
-- **FR-009c**: Attribution MUST NOT introduce a new field that can carry operator free text.
+- **FR-009c**: Attribution MUST NOT introduce a **second** operator-free-text field.
+  `RECORD_FIELD_PROVENANCE` maps all fourteen record fields to `tool`/`git`/`agent`/`operator` and has
+  exactly **one** `operator` row; a test asserts the table itself, because adding a second would
+  falsify the closure while every other test still passed.
   Feature 016's `task` is already the one field a credential can arrive in (threat model T15), and
   that exemption is bounded by a closed field set; the control-plane identifier MUST be drawn from
   the same closed vocabulary — a name and a host, nothing an operator types.
@@ -468,10 +503,11 @@ regarding its own container is defined and safe.
 - **SC-015**: With no destination declared, one command collects the trail from every reachable host
   and **names every host it could not reach** — **zero** collections that omit a host silently. A
   partial trail presented as complete is the failure this measures.
-- **SC-017**: **Zero** occurrences of Feature 016's `task` text — or any operator free text — in
-  anything sent to the collector, verified by planting a distinctive string in a `--task` and grepping
-  the collector's received payloads. Verified at the RECEIVER, not by reading the export code: a
-  filter that is asserted rather than observed is the T15 exposure with extra steps.
+- **SC-017**: With the task text **excluded by declaration**, **zero** occurrences of it reach the
+  collector — verified by planting a distinctive string in a `--task` and grepping what the collector
+  actually received. Verified at the RECEIVER, not by reading the export code: an exclusion that is
+  asserted rather than observed is the T15 exposure with extra steps. With the default (included), the
+  same string MUST be present, so the test proves the switch does something in both positions.
 - **SC-018**: An agent container's run record reaches the collector **with no control plane deployed**
   — **100%**. This is the half that would be missed if the export were built as control-plane
   plumbing, which is exactly what widening 017 risks.
@@ -523,16 +559,16 @@ regarding its own container is defined and safe.
 ## Out of Scope
 
 - A web UI, an HTTP API, or any non-SSH surface.
-- **A backend-specific telemetry package, or exporting operator free text.** FR-009d requires an off-box destination
+- **A backend-specific telemetry package, or a pattern-matching redactor.** FR-009d requires an off-box destination
   for the *attribution* trail, because a trail the audited party can rewrite is not evidence — but
   the shape is deliberately narrow. **In scope for FR-009d**: an operator-declared **OTLP**
   endpoint and only FR-009c's closed field set, with the dependency-free HTTP+JSON encoding
   preferred over the SDK.
-  **Out of scope**: Feature 016's `task` field and any other operator free text — the one place a
-  credential can arrive (threat model T15), so exporting it would convert a bounded local risk into an
-  exported one (Constitution III). The run id is exported in its place (FR-009f). Also out of scope:
-  any backend-specific package or vendor integration below the OTel level, and any destination the
-  tool chooses rather than the operator.
+  **Out of scope**: any **pattern-matching redaction** of exported fields. A filter that misses one
+  value converts an operator's caution into false confidence (threat model T12/T15); the task text is
+  either exported or excluded by name (FR-009f), never scrubbed. Also out of scope: any
+  backend-specific package or vendor integration below the OTel level, and any destination the tool
+  chooses rather than the operator.
 - Multi-user or multi-tenant access control — single operator remains assumed.
 - Running agents inside the control plane — enforced by FR-015a's narrower image, not merely
   declared here.

@@ -30,8 +30,8 @@ re-summarise them here.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv, or
   printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a missing
   referenced file must `die` **before** compose. On-volume `auth.json` is
-  **operator-interactive-login only**. Rotate = edit locally + `redeploy`. **`/run` covers INJECTED
-  material only** — no private SSH key is injected at all: host (018) and agent (019) are
+  **operator-interactive-login only**; a `--task` is **not** a credential channel. **`/run` covers
+  INJECTED material only** — no private SSH key is injected at all: host (018) and agent (019) are
   container-**generated**, the agent's persisting on the `ssh` volume, so `--purge`/`ssh-key rotate`
   is the revocation boundary and both must say so.
 - **The supported-agent list is single-sourced** (`AGENTS`); a test pins the completions' to the
