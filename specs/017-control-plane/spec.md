@@ -278,11 +278,23 @@ regarding its own container is defined and safe.
 - **FR-009**: The control plane MUST appear in the inventory, identified as a control plane
   rather than an agent environment.
 - **FR-009a**: Every management action performed from a control plane — **mutating and read-only
-  alike** — MUST record **which control plane performed it**. The record is appended where the
-  action lands (the control plane holds no durable store of its own, FR-003a) and MUST be **drained
-  to the operator's durable store on next contact**, by the same mechanism Feature 016 already uses
-  for run records. A trail that lives only on the hosts dies with them, which is the problem Feature
-  014 exists to solve.
+  alike** — MUST record **which control plane performed it**. The record is appended where the action
+  lands, since the control plane holds no durable store of its own (FR-003a).
+
+  **The drain narrows the window; it does not close it.** Feature 016's mechanism is a *pull* — the
+  CLI on the operator's machine reads pending records on next contact, so no endpoint on that machine
+  is required — but an undrained record sits on its host's volume until that contact happens. A host
+  destroyed first takes the record with it, and an operator working only from a phone may not make
+  contact for weeks. This requirement therefore delivers **attribution**, not **durability**; the
+  durable, tamper-evident half is FR-009d.
+- **FR-009d**: The attribution trail MUST be exportable to a destination the control plane itself
+  **cannot rewrite**. A trail stored anywhere the control plane can write is one a thief holding its
+  standing key can erase — and answering "what did it do after it was stolen" is the entire purpose
+  of FR-009a. The destination MUST be **operator-declared**, reached over a **generic protocol** with
+  **no vendored client library** (Constitution VI), and MUST carry only the closed field set of
+  FR-009c so that no operator free text — the T15 class — ever leaves the operator's machines.
+  Export MUST be **fail-open**: an unreachable destination degrades to the local trail and reports
+  the gap, never blocks the action.
 - **FR-009b**: A host that cannot be written to MUST NOT fail the action. The attribution gap MUST
   be reported instead — the operator asked a question, and refusing to answer because bookkeeping
   failed inverts the priority. An unrecorded action MUST be visible as unrecorded, never silently
@@ -376,9 +388,13 @@ regarding its own container is defined and safe.
   machine or from another control plane, and which — **100%**. Nesting makes the number of standing
   keys grow from inside the system, and a count nobody can see is a count nobody audits.
 - **SC-013**: Every action performed from a control plane is attributable to it after the fact —
-  **100%** of actions, read and mutating — and the trail survives the destruction of the host the
-  action was performed on, because it is drained to the operator's store. **Zero** actions that are
-  absent from the trail without being marked unrecorded.
+  **100%** of actions, read and mutating. **Zero** actions absent from the trail without being marked
+  unrecorded.
+- **SC-014**: With a destination declared, the trail survives **both** the destruction of the host
+  acted on **and** deletion attempts from inside the control plane — **zero** exported entries a
+  control plane can remove. Measured by destroying the host and by attempting removal from a session,
+  not by inspecting the export code: a trail the audited party can rewrite is not evidence, and only
+  the negative case proves it.
 - **SC-012**: A control plane one PATCH version from an environment reports **nothing** about
   versions — **zero** advisories. A breaking-channel difference in the risky direction (environment
   newer) is refused — **100%**, with the remedy named. Both halves are measured, because a rule that
@@ -411,13 +427,14 @@ regarding its own container is defined and safe.
 ## Out of Scope
 
 - A web UI, an HTTP API, or any non-SSH surface.
-- **An external or cloud-hosted telemetry destination.** Attribution drains to the operator's own
-  machine (FR-009a). Shipping it off-box would export the one record class that can contain
-  operator-typed text — threat model T15 — turning a bounded, accepted risk into an exported one
-  (Constitution III), and would be the largest dependency the project has ever taken
-  (Constitution VI). It also crosses a new trust boundary, which the Constitution requires
-  reconciling in the threat model, so it belongs in a feature of its own rather than as a clause
-  here. Noted as a candidate, not deferred silently.
+- **A vendored telemetry SDK, or exporting run records.** FR-009d requires an off-box destination
+  for the *attribution* trail, because a trail the audited party can rewrite is not evidence — but
+  the shape is deliberately narrow. **In scope for FR-009d**: an operator-declared endpoint, a
+  generic protocol, no client library (Constitution VI), and only FR-009c's closed field set.
+  **Out of scope**: shipping Feature 016's run records, whose `task` field is the one place a
+  credential can arrive (threat model T15) — exporting those would convert a bounded local risk into
+  an exported one (Constitution III). Also out of scope: any vendor-specific integration, and any
+  destination the tool chooses rather than the operator.
 - Multi-user or multi-tenant access control — single operator remains assumed.
 - Running agents inside the control plane — enforced by FR-015a's narrower image, not merely
   declared here.
