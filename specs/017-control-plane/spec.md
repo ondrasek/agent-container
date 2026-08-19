@@ -113,6 +113,19 @@ and it is why FR-004 and FR-008 exist.
   Feature 013's severity split exists to avoid. (013's own `image-freshness` DOES use equality,
   deliberately — "was this image built by exactly this CLI" is a different question from "can these
   two versions interoperate".)
+- Q: Are actions attributable to the control plane that performed them, and does that include
+  reads? → A: **Yes, both — written where the action lands, then DRAINED to the operator's durable
+  store.** Every management action a control plane performs, mutating or read-only, records which
+  control plane performed it. It is appended on the affected host, because the control plane
+  deliberately keeps no durable store of its own (FR-003a).
+  **But appended-on-the-host is not where it ends.** A trail that lives only on the hosts dies with
+  them, which is the exact problem Feature 014 was created to solve — an entry must outlive its
+  host. So attribution rides the drain Feature 016 already built: written locally, ingested by the
+  CLI on next contact, durable on the operator's machine. That centralises the trail without any
+  new store and without it leaving the operator's own machines.
+  Accepted cost: read attribution means write traffic on every enumeration, and a host that cannot
+  be written to must degrade to reporting the gap rather than failing the read — the operator asked
+  a question, and refusing to answer it because bookkeeping failed would be the wrong trade.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -264,6 +277,20 @@ regarding its own container is defined and safe.
   them from a single command — the operator does not edit N hosts by hand.
 - **FR-009**: The control plane MUST appear in the inventory, identified as a control plane
   rather than an agent environment.
+- **FR-009a**: Every management action performed from a control plane — **mutating and read-only
+  alike** — MUST record **which control plane performed it**. The record is appended where the
+  action lands (the control plane holds no durable store of its own, FR-003a) and MUST be **drained
+  to the operator's durable store on next contact**, by the same mechanism Feature 016 already uses
+  for run records. A trail that lives only on the hosts dies with them, which is the problem Feature
+  014 exists to solve.
+- **FR-009b**: A host that cannot be written to MUST NOT fail the action. The attribution gap MUST
+  be reported instead — the operator asked a question, and refusing to answer because bookkeeping
+  failed inverts the priority. An unrecorded action MUST be visible as unrecorded, never silently
+  absent from the trail.
+- **FR-009c**: Attribution MUST NOT introduce a new field that can carry operator free text.
+  Feature 016's `task` is already the one field a credential can arrive in (threat model T15), and
+  that exemption is bounded by a closed field set; the control-plane identifier MUST be drawn from
+  the same closed vocabulary — a name and a host, nothing an operator types.
 - **FR-010**: An action invoked from inside a control plane that would stop or destroy **its own
   container** MUST **refuse to act on itself**, exclude it from the run, and report that exclusion
   explicitly — naming how the operator can stop it instead (from their own machine, or another
@@ -348,6 +375,10 @@ regarding its own container is defined and safe.
 - **SC-011**: Every control plane in the listing shows whether it was deployed from the operator's
   machine or from another control plane, and which — **100%**. Nesting makes the number of standing
   keys grow from inside the system, and a count nobody can see is a count nobody audits.
+- **SC-013**: Every action performed from a control plane is attributable to it after the fact —
+  **100%** of actions, read and mutating — and the trail survives the destruction of the host the
+  action was performed on, because it is drained to the operator's store. **Zero** actions that are
+  absent from the trail without being marked unrecorded.
 - **SC-012**: A control plane one PATCH version from an environment reports **nothing** about
   versions — **zero** advisories. A breaking-channel difference in the risky direction (environment
   newer) is refused — **100%**, with the remedy named. Both halves are measured, because a rule that
@@ -380,6 +411,13 @@ regarding its own container is defined and safe.
 ## Out of Scope
 
 - A web UI, an HTTP API, or any non-SSH surface.
+- **An external or cloud-hosted telemetry destination.** Attribution drains to the operator's own
+  machine (FR-009a). Shipping it off-box would export the one record class that can contain
+  operator-typed text — threat model T15 — turning a bounded, accepted risk into an exported one
+  (Constitution III), and would be the largest dependency the project has ever taken
+  (Constitution VI). It also crosses a new trust boundary, which the Constitution requires
+  reconciling in the threat model, so it belongs in a feature of its own rather than as a clause
+  here. Noted as a candidate, not deferred silently.
 - Multi-user or multi-tenant access control — single operator remains assumed.
 - Running agents inside the control plane — enforced by FR-015a's narrower image, not merely
   declared here.
