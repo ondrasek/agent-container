@@ -198,6 +198,12 @@ and it is why FR-004 and FR-008 exist.
   exporter, which the project avoids for the same reason Feature 012's boundary runs no refresher.
   Accepted cost: one request per record, and a collector that sees data in near-real-time rather than
   in batches.
+- Q: At which config level is the OTLP endpoint declared? → A: **Both levels, project winning** — the
+  tool's existing two-level contract (user configuration and project configuration, same filename in
+  both, project overriding). No new mechanism, and an operator already knows the precedence rule from
+  every other setting. A machine-wide collector is the default; a project that needs its own says so.
+  User-level-only would make per-project isolation impossible; project-level-only would leave an agent
+  deployed outside any project with no endpoint at all.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -377,8 +383,12 @@ regarding its own container is defined and safe.
   to an agent container as much as to a control plane; the control plane is merely the case with the
   largest blast radius.
 
-  The destination MUST be **operator-declared** and reached over a **generic protocol** with **no
-  vendored client library** (Constitution VI). What may and may not be exported is FR-009f.
+  The destination MUST be **operator-declared** at either config level — **user configuration or
+  project configuration, project winning**, the tool's existing two-level contract with the same
+  filename in both — and reached over a **generic protocol** with **no vendored client library**
+  (Constitution VI). A machine-wide collector is the default; a project needing its own overrides it.
+  An environment deployed **outside** any project therefore still has an endpoint, which
+  project-level-only declaration would deny it. What may and may not be exported is FR-009f.
   Export MUST be **fail-open**: an unreachable destination degrades to the local record and reports
   the gap, never blocks the work.
 
