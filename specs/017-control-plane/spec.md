@@ -165,6 +165,15 @@ and it is why FR-004 and FR-008 exist.
   be written to must degrade to reporting the gap rather than failing the read — the operator asked
   a question, and refusing to answer it because bookkeeping failed would be the wrong trade.
 
+### Session 2026-08-20
+
+- Q: FR-009d names three record classes; FR-009e says "the trail". Does the local leg carry the same
+  three? → A: **Identical payloads, defined once.** Both legs carry the attribution trail, Feature
+  016's run records and Feature 012's egress events, from a **single** field-set definition.
+  `collect` downloads exactly what export would have sent. Anything else makes "the two legs are
+  independent, not alternatives" false in practice, and makes "do they agree?" unanswerable — agree
+  about *what*, if they carry different things?
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Manage from a device that has nothing installed (Priority: P1)
@@ -371,7 +380,10 @@ regarding its own container is defined and safe.
   it MUST keep warning where a task is typed. But the spec MUST NOT treat the task field as a
   credential-bearing channel, because doing so would design around a mistake the tool already
   provides a correct alternative for, and would imply the injection channels are optional.
-- **FR-009f**: **What is exported is a closed set.** The export carries identifiers, coordinates and
+- **FR-009f**: **What is carried is a closed set, defined ONCE for both legs.** The same definition
+  governs the OTLP export and the local trail `collect` retrieves (FR-009e); there is no second,
+  divergent list. Two payload definitions would drift, and the drift would be invisible — each leg
+  would still look correct on its own. The export carries identifiers, coordinates and
   outcomes — environment, host, agent, run id, timings, exit status, usage, egress decision, the
   FR-009a attribution — **and the task text**, which is the single most useful field for answering
   "this run failed, what was it doing" without leaving the collector.
@@ -415,7 +427,10 @@ regarding its own container is defined and safe.
   control plane). The control plane is the one container whose stopping makes the report
   undeliverable, so self-exclusion is what makes "the outcome is never unknown" achievable at all.
 - **FR-009e**: The tool MUST provide a **dedicated command to collect the trail from each host on
-  demand**, and that command MUST work **whether or not** an export destination is declared. The
+  demand**, and that command MUST work **whether or not** an export destination is declared. **It
+  collects the same three record classes FR-009d exports** — the attribution trail, Feature 016's run
+  records and Feature 012's egress events — from the **same single field-set definition** (FR-009f),
+  so what is downloaded is exactly what export would have sent. The
   local record exists unconditionally (FR-009a), so its retrieval must be unconditional too —
   otherwise declaring a collector would leave the operator with logs and no defined way to download
   them.
