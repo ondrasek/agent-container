@@ -171,10 +171,21 @@ It is Feature 016's `drain` **generalised**, not a second mechanism (research R1
 
 Exported by default, because a task is **not a credential channel** (FR-009f0) — credentials arrive
 by injection, the SSH keys being container-generated. Excludable **by name**, never by a
-pattern-matching redactor. `run_id` exports regardless, so correlation always survives.
+pattern-matching redactor.
 
 > *Fails without this*: a redactor that misses one value converts caution into false confidence
 > (T12/T15). **SC-017 tests both positions** — a switch verified in one position may not be wired.
+
+**What makes the exclusion cheap is C18f**, not this clause: correlation survives it.
+
+## C18f — `run_id` always exports, whatever the task setting
+
+A record at the collector can always be matched to its local counterpart (FR-009f, SC-019).
+Unconditional — it does not depend on whether the task text was excluded.
+
+> *Fails without this*: excluding the task text stops being a cheap privacy choice and becomes a
+> lossy one. A collector record you cannot trace back to its local counterpart removes the reason to
+> look at it, so the exclusion in C18a would cost far more than it appears to.
 
 ## C18b — Export adds no dependency, and none may be added
 

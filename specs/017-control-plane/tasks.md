@@ -282,7 +282,7 @@ and the drift would be invisible because each leg still looks correct alone.
       be wired at all
 
 - [ ] T065 [P] Acceptance S15 — **`run_id` exports regardless of the task setting**, so a collector
-      record can always be matched to its local counterpart (SC-019, C18a). Correlation is what makes
+      record can always be matched to its local counterpart (SC-019, C18f). Correlation is what makes
       excluding the task text cheap rather than lossy: without it, the exclusion removes the reason to
       look at the record at all
 
