@@ -1,8 +1,11 @@
 # Phase 0 Research: Control-Plane Container
 
-Every finding below was checked against the code as it exists. **Two contradict the spec**, and one
-of those inverts a stated consequence — the spec predicts a test will fail, and it will silently
-pass instead, which is worse.
+Regenerated 2026-08-20, after two clarification sessions moved the spec from 20 FR / 10 SC to
+**32 FR / 22 SC** and added the dual-stack observability. **R2 and R3 are carried through verbatim**
+— both are discoveries about the codebase rather than inferences re-derivable from the spec, and
+re-deriving them would risk losing the finding.
+
+Every other decision below was re-checked against the code as it stands.
 
 ---
 
@@ -60,6 +63,8 @@ image-level check catches one that arrives some other way.
 
 ---
 
+---
+
 ## R3 — The passphrase is the one place the tool touches a secret, and the spec does not say how
 
 **Finding**: FR-007 requires the tool to print a passphrase "exactly once" and never store it. But
@@ -88,9 +93,11 @@ is true and beside the point.
 
 ---
 
+---
+
 ## R4 — The registry is configuration, not a credential, so it rides an existing channel
 
-**Finding**: the control plane must know *which* hosts to query (R6/Q1's live enumeration needs
+**Finding**: the control plane must know *which* hosts to query (FR-003a's live enumeration needs
 targets). Host records live in the registry on the operator's machine — names, drivers, contexts,
 addresses. None of that is secret; the **capability** is the authorised key, not the list.
 
@@ -114,7 +121,9 @@ zero additions to the image. The `opentelemetry-sdk` is permitted by FR-009d but
 because the dependency-free path is sufficient — which is the condition FR-009d set.
 
 **Consequence**: export is shell-level in the entrypoint, so it works in the agent image and the
-control-plane image alike without either carrying Python telemetry code.
+control-plane image alike without either carrying Python telemetry code. It is also what makes
+FR-009g's **write-time** trigger natural rather than imposed: a `curl` POST has no long-lived
+process to flush, so there is nothing to batch.
 
 ---
 
@@ -148,8 +157,8 @@ the degraded one, on the device the feature exists for.
 
 ## R8 — Nesting needs no enforcement code, only visibility
 
-**Finding**: Q2 settled that nesting is supported and that a nested control plane inherits **no**
-reach, because FR-007b makes authorising a key an explicit act. So there is nothing to prevent.
+**Finding**: nesting is supported and a nested control plane inherits **no** reach, because FR-007b
+makes authorising a key an explicit act. So there is nothing to prevent.
 
 **Decision**: no gate. The work is FR-014a's **visibility** — the listing must show provenance
 (operator machine vs which control plane), which is a field on the inventory entry, not a check.
@@ -157,6 +166,90 @@ reach, because FR-007b makes authorising a key an explicit act. So there is noth
 **What this rules out**: any "subset scope" enforcement. Scope is where the key is authorised, which
 lives outside the container by design (FR-004), so a parent cannot constrain a child even in
 principle — and pretending otherwise in code would be a control that does not control.
+
+---
+
+## R9 — `accepted` is the strongest claim the client can make, and 2xx is not it
+
+**Finding, and the reason FR-009h reads as it does**: end-to-end ingestion is **not observable** to
+an exporting container. Establishing that a backend indexed a record requires querying that
+backend's own API — the vendor coupling FR-009d forbids ("no backend-specific package, ever"). And
+"sent" is nearly worthless: a POST that was refused is still sent.
+
+**Decision**: `accepted` means **the configured endpoint returned success for that record**, and the
+spec says explicitly it must not be read or named as arrival at a backend.
+
+**The trap, stated because it would otherwise be implemented wrong**: OTLP's export response carries
+a **`partial_success`** field with a rejected-record count, so a receiver may return **200 while
+refusing records**. Treating 2xx as acceptance marks those `accepted` — a check that passes while the
+thing it names is broken. An implementation must subtract the rejected count first.
+
+*Confidence: high that OTLP defines `partial_success` on export responses; the exact field shape is
+version-dependent and should be pinned against the OTLP version targeted at implementation time.*
+
+**Consequence for testing**: only a collector **configured to refuse** a subset exposes the naive
+implementation. A compliant collector passes either way, which is why SC-021 specifies a refusing
+one rather than "a collector".
+
+---
+
+## R10 — `rejected` and `failed` must stay distinct, because they decide whether to retry
+
+**Finding**: the two failure modes call for opposite responses. An explicitly refused record will be
+refused again unchanged — retrying is waste. An unreachable endpoint may simply be back later —
+retrying is the whole recovery path.
+
+**Decision**: four states, not three. `pending` · `accepted` · `rejected` · `failed`, with
+`collect` retrying **`pending` and `failed`** only (FR-009h). Collapsing them into one "not
+delivered" state would either retry forever against a refusal or abandon a recoverable record.
+
+**Provenance**: the export state is `tool`-provenance, so it does **not** touch FR-009c's
+single-`operator`-row closure. That closure is the whole of the no-credentials claim, and a test
+asserts the table itself.
+
+---
+
+## R11 — One payload definition, or the two legs drift invisibly
+
+**Finding**: FR-009e and FR-009d both carry the attribution trail, Feature 016's run records and
+Feature 012's egress events. Two lists that agree today drift the moment one is edited, **and the
+drift is invisible** — each leg still looks correct on its own.
+
+**Decision**: a single field-set definition that both legs read, asserted on the shared constant
+rather than by comparing two lists. It is also the precondition for SC-020: "do the legs agree?" has
+no answer if they carry different things.
+
+---
+
+## R12 — Reconciliation needs a defined window, and `pending` is outside it
+
+**Finding**: SC-020 compares the locally-`accepted` set against the collector's. Two ways that
+fails for the wrong reason: an undefined window makes the comparison unexecutable, and counting
+`pending` records as divergence makes it fail against a healthy system that simply has exports in
+flight.
+
+**Decision**: the window is **since the last successful `collect`, or an operator-supplied range**,
+and `pending` records are **outside** it. Both now stated in SC-020 rather than left to an
+implementer.
+
+---
+
+## R13 — `drain` and `collect` are the same act, and only one should exist
+
+**Finding**: Feature 016's `drain_host_records` already *"ingests pending records for `<names>` on
+`<host>`"* — a pull from host volumes into the operator's store. `telemetry collect` (FR-009e) is
+that, generalised to three record classes and made an explicit operator-invoked command.
+
+**Decision**: **`collect` is `drain` generalised.** One mechanism, wider scope, invocable directly.
+`drain`'s existing incidental-on-contact behaviour stays as-is for run records; `collect` is the
+deliberate, complete, all-classes pull with per-host reporting.
+
+**Why not two**: two pullers of the same volumes will diverge on which records they consider
+pending, and the divergence surfaces as records that one path collects and the other does not —
+diagnosable only by reading both implementations.
+
+*Open in analyze as finding F6; recorded here as the decision, so the implementation does not have to
+rediscover it.*
 
 ---
 
@@ -170,3 +263,8 @@ principle — and pretending otherwise in code would be a control that does not 
 6. Reimplement `panic`'s verification to add self-exclusion (R6).
 7. Ship a six-column table to a phone (R7).
 8. Write scope-enforcement code that cannot enforce (R8).
+9. **Treat a 2xx as acceptance** (R9) — `partial_success` must be subtracted first.
+10. **Collapse `rejected` and `failed`** (R10) — they decide whether retrying helps.
+11. **Define the payload twice** (R11) — the drift would be invisible.
+12. **Reconcile without a window, or count `pending` as divergence** (R12).
+13. **Build a second puller alongside `drain`** (R13).

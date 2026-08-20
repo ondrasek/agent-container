@@ -101,22 +101,88 @@ The control-plane image installs the CLI, ssh, tmux and git, and **no agent CLIs
 > would be *invisible* to it — the suite stays green while the container holding keys to everything
 > goes unchecked. The spec predicted a failing test; the real risk is a passing one.
 
-## C13 — Telemetry export: closed set, `task` included by default, excludable by name
+## C13 — Two legs, one payload definition
 
-Exports attribution, run records and egress events over **OTLP** to an operator-declared endpoint
-(FR-009d–g). `task` is exported by default because a task is **not** a credential channel (FR-009f0),
-and may be excluded **by name** — never by a pattern-matching redactor.
+The local trail and the OTLP export carry **identical payloads from a single field-set definition**
+(FR-009f): the attribution trail, Feature 016's run records, Feature 012's egress events.
+
+> *Fails without this*: two lists that agree today drift the moment one is edited, and **the drift is
+> invisible** — each leg still looks correct alone. It also makes C17's reconciliation
+> unexpressible: "do they agree?" has no answer if they carry different things.
+
+## C14 — `accepted` means endpoint-accepted, and 2xx is not enough
+
+Every record carries an export state: `pending` · `accepted` · `rejected` · `failed` (FR-009h).
+**`accepted` means the configured endpoint returned success for that record and nothing more** — it
+MUST NOT be read or named as arrival at a backend.
+
+OTLP's export response carries **`partial_success`** with a rejected-record count. An implementation
+MUST subtract those before marking anything `accepted`.
+
+> *Fails without this*: a receiver returning 200 while refusing records gets its refusals recorded as
+> deliveries — a check that passes while the thing it names is broken. **Verified against a collector
+> configured to REFUSE a subset** (SC-021): a compliant collector passes either way, so only a
+> refusing one exposes it.
+
+## C15 — `rejected` and `failed` stay distinct
+
+They decide whether retrying helps: a refusal will be refused again unchanged; an unreachable
+endpoint may be back later. `collect` retries **`pending` and `failed`** only (FR-009h).
+
+Both are derived from the response, **never from the fact that an export was attempted** (FR-009i) —
+distinguishing attempt from outcome is the state's entire purpose. `accepted` and `rejected` are
+terminal.
+
+## C16 — Export fires at write time, per record
+
+Not batched at exit, not on a timer (FR-009g). Verified by **`SIGKILL`** on a running container:
+every record whose export **completed** before the kill is at the collector (SC-022).
+
+> *Fails without this*: anything held for later is lost exactly when a container is killed, which is
+> the case an audit trail exists for. And a **graceful** stop would pass against an exit-time batch —
+> the implementation this clause rejects — so the test must kill.
+
+A record POSTed whose response has not arrived stays `pending`. That is correct, not a loss;
+`collect`'s retry settles it.
+
+## C17 — The two legs reconcile, over a defined window
+
+Over a window — **since the last successful `collect`, or an operator-supplied range** — the set of
+locally-`accepted` records equals the collector's, **or the difference is reported** (SC-020).
+**`pending` records are outside the window.**
+
+> *Fails without this*: a dual stack whose halves can silently diverge is two unreliable stacks. And
+> counting `pending` as divergence would fail the criterion against a healthy system with exports in
+> flight.
+
+## C18 — `collect` is always available, lands in the durable store, and is the only puller
+
+Available **whether or not** an endpoint is declared (FR-009e) — the local record exists
+unconditionally, so its retrieval must too. Records land in `$XDG_DATA_HOME/agent-container/`
+(`0600`) where `runs`/`egress` already read, with **per-host ingest counts** and **every unreachable
+host named**.
+
+It is Feature 016's `drain` **generalised**, not a second mechanism (research R13).
+
+> *Fails without this*: a collection that silently skipped a host reads as a complete trail; and two
+> pullers of the same volumes diverge on what they consider pending, diagnosable only by reading both.
+
+## C18a — The task text: exported by default, excluded by name
+
+Exported by default, because a task is **not a credential channel** (FR-009f0) — credentials arrive
+by injection, the SSH keys being container-generated. Excludable **by name**, never by a
+pattern-matching redactor. `run_id` exports regardless, so correlation always survives.
 
 > *Fails without this*: a redactor that misses one value converts caution into false confidence
-> (T12/T15). Omitting a named field either happens or it does not, and SC-017 tests **both**
-> positions — a switch verified in one position may not be wired.
+> (T12/T15). **SC-017 tests both positions** — a switch verified in one position may not be wired.
 
-## C14 — Export adds no dependency and no privilege
+## C18b — Export adds no dependency, and none may be added
 
-OTLP/HTTP+JSON is a POST of a JSON document and `curl` already ships in the image (research R5).
-**Zero** Python packages added; **no** backend-specific package, ever (FR-009d).
+OTLP/HTTP+JSON is a POST of a JSON document and `curl` already ships (research R5). **Zero** Python
+packages; **no backend-specific package, ever** (FR-009d) — the condition the OTel dependency was
+accepted under. The endpoint is declared at **either config level, project winning**.
 
-## C15 — Export is fail-open, and the gap is reported
+## C18c — Export is fail-open, and the gap is reported
 
 An unreachable or undeclared collector degrades to the local record and **reports the gap**; it never
 blocks the work (FR-009d).
@@ -124,22 +190,17 @@ blocks the work (FR-009d).
 > *Fails without this*: under enforced egress an undeclared collector produces an **empty** collector,
 > which reads exactly like a quiet system — the most misleading outcome an audit trail can have.
 
-## C16 — Each container exports its own
+## C18d — Each container exports its own
 
 An agent's records reach the collector with **no control plane deployed** (FR-009g, SC-018).
 
 > *Fails without this*: export gets built as control-plane plumbing, which is what widening 017
-> risks and what the spec explicitly warns against.
+> risked and what the spec explicitly warns against.
 
-## C17 — Correlation always survives
+## C18e — No second operator-free-text field
 
-`run_id` is exported regardless of the `task` setting, so a collector record can always be matched to
-its local counterpart (FR-009f, SC-019).
-
-## C18 — No second operator-free-text field
-
-`RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row across fourteen fields, asserted by a test
-on the table itself (FR-009c).
+`RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row, asserted on the table itself (FR-009c).
+The export state is `tool`-provenance and does not touch it.
 
 > *Fails without this*: a second free-text field falsifies the no-credentials closure while every
 > other test still passes.

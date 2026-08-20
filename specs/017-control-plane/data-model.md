@@ -79,36 +79,86 @@ concrete: withdraw the key (FR-008).
 
 ---
 
-## 6. `Telemetry record`
+## 6. `Record` — the one payload both legs carry
 
-What leaves a container for the operator-declared OTLP endpoint (FR-009d–g). A **closed** set.
+**Defined ONCE.** The same field set governs the OTLP export and the local trail `collect` retrieves
+(FR-009f). Two definitions would drift the moment one is edited, and **the drift would be invisible**
+— each leg still looks correct on its own.
 
-| Exported | Source |
-|---|---|
-| `environment`, `host`, `agent`, `kind`, `run_id`, `started_at`, `ended_at`, `outcome`, `exit_code` | tool |
-| `repository` | git (SHAs and paths) |
-| `usage` | agent — numbers under identifier-shaped keys only |
-| `task` | **operator** — exported **by default** (FR-009f), excludable **by name** |
-| `attribution` | which control plane performed the action (FR-009a) |
-| `egress_decision` | Feature 012 events |
+Three classes, one shape: the **attribution trail** (FR-009a), Feature 016's **run records**, and
+Feature 012's **egress events**.
+
+| Field | Provenance | Notes |
+|---|---|---|
+| `environment`, `host`, `agent`, `kind`, `run_id`, `started_at`, `ended_at`, `outcome`, `exit_code` | `tool` | |
+| `repository` | `git` | SHAs and paths |
+| `usage` | `agent` | numbers under identifier-shaped keys only |
+| `task` | **`operator`** | exported **by default**; excludable **by name** (§7) |
+| `attribution` | `tool` | which control plane performed the action (FR-009a) |
+| `egress_decision` | `tool` | Feature 012 events |
+| **`export_state`** | `tool` | §7 — `tool` provenance, so it does **not** touch FR-009c's single `operator` row |
 
 **`task` is exported because a task is not a credential channel** (FR-009f0). Credentials arrive by
-injection; the only exception is the SSH keys a container generates itself. Withholding the field
-would design around operator error the tool already provides the correct alternative for — and it is
-the single most useful field for *"this run failed, what was it doing"*, on a phone, without a laptop
-to correlate against.
-
-**The exclusion is by NAME, never by pattern.** A redactor that misses one value converts caution into
-false confidence (T12/T15); omitting a named field either happens or it does not. The switch exists
-because the tool cannot know whether the collector is the operator's own VPS or a shared corporate
-backend — trust domains the operator can distinguish and the tool cannot.
-
-**`run_id` is always exported**, so a record at the collector can always be matched to its local
-counterpart — which is what makes the optional exclusion cheap rather than lossy.
+injection; the only exception is the SSH keys a container generates itself. Withholding it would
+design around operator error the tool already provides the correct alternative for — and it is the
+single most useful field for *"this run failed, what was it doing"*, on a phone, with no laptop to
+correlate against.
 
 **No second free-text field may be added** (FR-009c). `RECORD_FIELD_PROVENANCE` has exactly one
-`operator` row across fourteen fields and a test asserts the table, because that closure *is* the
-no-credentials claim: a second free-text field falsifies it while every other test still passes.
+`operator` row and a test asserts the table, because that closure *is* the no-credentials claim: a
+second free-text field falsifies it while every other test still passes.
+
+**`run_id` is always exported**, whatever the `task` setting, so a record at the collector can always
+be matched to its local counterpart — which is what makes the optional exclusion cheap rather than
+lossy.
+
+---
+
+## 7. `Export state`
+
+Four values on every record (FR-009h). Export is fail-open and always on, so **partial export is a
+designed-in condition, not an error**.
+
+| Value | Means | Retry? |
+|---|---|---|
+| `pending` | written; not yet resolved with the endpoint | **yes** |
+| `accepted` | the **configured endpoint** returned success **for this record** | no |
+| `rejected` | the endpoint explicitly refused it | **no** — it will refuse again unchanged |
+| `failed` | unreachable, or an error | **yes** — it may be back later |
+
+**`accepted` means endpoint-accepted and NOTHING MORE.** It must not be read, or named, as arrival at
+a backend: establishing that requires querying the backend's own API — the vendor coupling FR-009d
+forbids. The state claims only what the client can see.
+
+**A 2xx response is not acceptance.** OTLP's export response carries `partial_success` with a
+rejected-record count, so a receiver may return success while refusing records. An implementation
+**must subtract those** before marking anything `accepted`, or it marks refused records as delivered.
+
+**`rejected` and `failed` are distinct because they decide whether retrying helps.** Collapsing them
+would either retry forever against a refusal or abandon a recoverable record.
+
+**Derived from the response, never from the attempt** (FR-009i). Distinguishing attempt from outcome
+is the entire purpose of having the state.
+
+**State transitions**: `pending` → `accepted` | `rejected` | `failed`. `failed` → `pending` on a
+`collect` retry. **`accepted` and `rejected` are terminal** — re-exporting an accepted record would
+duplicate it at the collector, and re-exporting a rejected one repeats a refusal.
+
+---
+
+## 8. Reconciliation
+
+Not an entity — a comparison, modelled here because its scope is the part that gets wrong.
+
+Over a **defined window** — since the last successful `collect`, or an operator-supplied range — the
+set of records marked `accepted` locally equals the set the collector holds, **or the difference is
+reported** (SC-020).
+
+**`pending` records are OUTSIDE the window.** They have not finished being exported; counting not-yet
+as disagreement would make the criterion fail against a healthy system.
+
+This comparison is only expressible because both legs carry identical payloads (§6). *"Do they
+agree?"* has no answer when they carry different things.
 
 ---
 
@@ -120,4 +170,8 @@ no-credentials claim: a second free-text field falsifies it while every other te
   drift from the operator's, and 014 deliberately has one.
 - **Subset-scope inheritance for nested control planes.** Scope is where the key is authorised, so a
   parent cannot constrain a child even in principle (research R8).
-- **A redaction filter.** See §6.
+- **A redaction filter.** The task text is exported or excluded **by name** (§6). A filter that misses
+  one value converts caution into false confidence; omitting a named field either happens or it does
+  not.
+- **An "ingested" or "confirmed" state.** Not observable without querying a backend (§7).
+- **A second puller.** `collect` is `drain` generalised, not a parallel mechanism (research R13).
