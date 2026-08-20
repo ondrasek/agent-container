@@ -187,14 +187,20 @@ agent-container runs show "$RID" | grep -c MARKER-9f3a
 **Expect**: `1` locally. The run id always exports, so omitting the task text costs nothing but the
 convenience of seeing it in the dashboard.
 
-## S16 — Collect with no endpoint declared (C-command, FR-009e, SC-015)
+## S16 — Collect works with AND without an endpoint (C-command, FR-009e, SC-015)
 
 ```sh
 agent-container telemetry collect          # no endpoint configured
+# then declare an endpoint and repeat:
+agent-container telemetry collect          # endpoint configured
 ```
 
-**Expect**: the trail gathered from every reachable host, and **every unreachable host named**. A
-collection that silently skipped one reads as complete.
+**Expect**: both times — the trail gathered from every reachable host, and **every unreachable host
+named**. A collection that silently skipped one reads as complete.
+
+**Run it in both configurations, deliberately.** The local record exists unconditionally (FR-009a),
+so its retrieval must too; a `collect` that only works without an endpoint would leave an operator
+who configured OTLP holding logs with no way to download them.
 
 ---
 

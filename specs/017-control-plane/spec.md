@@ -119,9 +119,11 @@ and it is why FR-004 and FR-008 exist.
   backend-specific package, ever. Noted in FR-009d: OTLP/HTTP+JSON is a POST of a JSON document and
   needs **no** dependency at all, so the standard can be met without touching the four-package floor
   — the SDK is permitted, not preferred.
-  And **without** a declared destination the trail is local-only, so the tool owes a **dedicated
-  command to collect logs from each host** (FR-009e) rather than leaving the operator to rely on an
-  incidental drain or to walk the hosts by hand.
+  And the tool owes a **dedicated command to collect logs from each host** (FR-009e) rather than
+  leaving the operator to rely on an incidental drain or to walk the hosts by hand. *(Corrected
+  2026-08-20: first written as the answer for when no destination is declared. The local record exists
+  unconditionally, so its retrieval is unconditional too — the two legs are independent, not
+  alternatives.)*
 - Q: Why is the design bending around credentials in `task` at all? Credentials must be injected by
   the CLI — env file or a declared credential source — the SSH key pair being the one exception.
   → A: **Correct, and the spec now says so (FR-009f0).** That invariant was implied by the tool's
@@ -412,11 +414,20 @@ regarding its own container is defined and safe.
   explicitly — naming how the operator can stop it instead (from their own machine, or another
   control plane). The control plane is the one container whose stopping makes the report
   undeliverable, so self-exclusion is what makes "the outcome is never unknown" achievable at all.
-- **FR-009e**: With **no** destination declared the trail lives only on the hosts, and the tool MUST
-  provide a **dedicated command to collect it from each host on demand** — the operator neither waits
-  for an incidental drain nor visits N hosts by hand. This is the local-only path's answer to
-  FR-009a's window: a deliberate pull that can be run before destroying a host, rather than a side
-  effect of some other command. It MUST name every host it could not reach, since a collection that
+- **FR-009e**: The tool MUST provide a **dedicated command to collect the trail from each host on
+  demand**, and that command MUST work **whether or not** an export destination is declared. The
+  local record exists unconditionally (FR-009a), so its retrieval must be unconditional too —
+  otherwise declaring a collector would leave the operator with logs and no defined way to download
+  them.
+
+  **The two legs are independent, not alternatives.** The local trail is the durable baseline: it is
+  written where the action lands regardless of any endpoint, and this command is how the operator
+  gets it. OTLP export (FR-009d) is an **additional, active** path — it never replaces retrieval, and
+  its absence never removes it.
+
+  The command is a deliberate pull the operator can run **before destroying a host**, rather than a
+  side effect of some other command, and it neither waits for an incidental drain nor makes the
+  operator visit N hosts by hand. It MUST name every host it could not reach, since a collection that
   silently skipped one reads as a complete trail.
 - **FR-011**: Output MUST be usable on a **narrow screen** — the motivating case is a phone.
 - **FR-012**: A stopped or rebooted control plane MUST be usable again **without

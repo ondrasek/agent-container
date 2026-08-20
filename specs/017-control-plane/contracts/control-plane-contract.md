@@ -10,7 +10,7 @@ Each clause is testable and names the failure it prevents.
 agent-container up <name> --role control-plane [--hosts a,b] [--json]
 agent-container ssh-key show <name>              # the public half to authorise (019, reused)
 agent-container revoke <name> [--json]           # withdraw its key everywhere (FR-008)
-agent-container telemetry collect [--host H]     # the no-endpoint path (FR-009e)
+agent-container telemetry collect [--host H]     # always available (FR-009e)
 ```
 
 `doctor`, `list`, `runs`, `panic` and `inventory` all work **inside** a control plane; that is the

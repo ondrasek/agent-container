@@ -238,8 +238,10 @@ this as control-plane plumbing** — an agent must export with no control plane 
       remove. Measured by destroying and by attempting deletion, never by inspecting the export code:
       a trail the audited party can rewrite is not evidence, and only the negative case proves it.
       **This is the property that justified off-box export at all**, and it had no task
-- [ ] T055 `telemetry collect` for the no-endpoint case: gather from every reachable host and **name
-      every host it could not reach** (FR-009e, SC-015)
+- [ ] T055 `telemetry collect`, available **whether or not** an endpoint is declared (FR-009e): gather
+      from every reachable host and **name every host it could not reach** (SC-015). Not the
+      "no-endpoint path" — the local record exists unconditionally (FR-009a), so its retrieval must
+      too, or declaring a collector leaves the operator with logs and no way to download them
 - [ ] T056 [P] Acceptance S16 for T055, asserting the naming — a collection that silently skipped a
       host reads as complete
 
