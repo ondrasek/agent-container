@@ -2,8 +2,10 @@
 
 **Feature**: `017-control-plane` | **Spec**: [spec.md](./spec.md) | **Plan**: [plan.md](./plan.md)
 
-**Input**: spec.md (30 FR, 19 SC), plan.md, research.md (R1–R8), data-model.md,
-contracts/control-plane-contract.md (C1–C19), quickstart.md (S1–S16)
+**Input**: spec.md, plan.md, research.md, data-model.md, contracts/control-plane-contract.md,
+quickstart.md — **all of each**, deliberately without counts or ranges. Four stale counts accumulated
+here across two clarification sessions and a re-plan; a reference that has to be maintained in step
+with another file is one that will be wrong, and wrong quietly.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -340,9 +342,11 @@ and the drift would be invisible because each leg still looks correct alone.
 - [ ] T079 Confirm the commit is `feat` - MINOR (Constitution VII). Additive: a command, a second
       image, an export path; nothing removed and no flag changes meaning
 - [ ] T080 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`**,
-      then walk quickstart S1-S16 by hand. **Do not edit the tree while the tier runs** - it re-reads
-      the CLI per invocation, so a mid-edit run measures nothing (this invalidated three runs earlier
-      in this project)
+      then walk **every scenario in `quickstart.md`** by hand — named as a file rather than a range,
+      because a range silently narrows the moment a scenario is added, and the scenarios added last
+      are the ones each described as the only check that catches its failure.
+      **Do not edit the tree while the tier runs** - it re-reads the CLI per invocation, so a mid-edit
+      run measures nothing (this invalidated three runs earlier in this project)
 
 ---
 
