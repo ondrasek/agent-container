@@ -173,6 +173,17 @@ and it is why FR-004 and FR-008 exist.
   `collect` downloads exactly what export would have sent. Anything else makes "the two legs are
   independent, not alternatives" false in practice, and makes "do they agree?" unanswerable — agree
   about *what*, if they carry different things?
+- Q: Does a record track whether it was exported — and does "exported" mean sent, accepted by the
+  endpoint, or ingested by the remote backend? → A: **A per-record state, and it means ACCEPTED BY
+  THE CONFIGURED ENDPOINT — nothing more.** `pending` / `accepted` / `rejected` / `failed`.
+  End-to-end ingestion is **not observable to the client**: asking whether a backend indexed a record
+  means querying that backend's API, which is the vendor coupling FR-009d forbids. And "sent" is
+  nearly worthless — a POST that was refused is still sent.
+  **A 2xx is NOT acceptance.** OTLP's export response carries `partial_success` with a rejected-record
+  count, so a receiver can return success while refusing records; treating 2xx as acceptance would
+  mark those `accepted` — a check that passes while the thing it names is broken.
+  `rejected` and `failed` are kept apart because they decide whether retrying helps: an explicit
+  refusal will be refused again unchanged, an unreachable endpoint will not.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -410,6 +421,27 @@ regarding its own container is defined and safe.
   FR-009e's collect command remains the answer for a deployment with **no** declared endpoint, and
   MUST also serve as the recovery path for records whose export failed while the collector was
   unreachable.
+- **FR-009h**: Every record MUST carry an **export state**: `pending` · `accepted` · `rejected` ·
+  `failed`. Export is fail-open (FR-009d) and always on, so **partial export is a designed-in state,
+  not an error** — and without this, *"exported and lost"* is indistinguishable from *"never
+  exported"*, two situations calling for opposite responses.
+
+  **`accepted` means the CONFIGURED ENDPOINT returned success for that record, and nothing more.** It
+  MUST NOT be read, or named, as arrival at a backend: end-to-end ingestion is not observable to the
+  client, since establishing it requires querying a backend's own API — the vendor coupling FR-009d
+  forbids. The state claims only what the client can see.
+
+  **A 2xx response is not sufficient.** OTLP's export response carries `partial_success` with a
+  rejected-record count; a receiver may return success while refusing records. An implementation MUST
+  subtract those before marking anything `accepted`, or it will mark rejected records as delivered.
+
+  **`rejected` and `failed` are distinct**, because they decide whether a retry is worth attempting:
+  an explicitly refused record will be refused again unchanged, whereas an unreachable endpoint may
+  simply be back later. `collect` (FR-009e) MUST be able to retry `pending` and `failed` records,
+  which is what makes it the recovery path rather than only a downloader.
+- **FR-009i**: The export state MUST be derived from the endpoint's response, never assumed. A record
+  MUST NOT be marked `accepted` because an export was *attempted* — the whole point of the state is
+  distinguishing attempt from outcome.
 - **FR-009b**: A host that cannot be written to MUST NOT fail the action. The attribution gap MUST
   be reported instead — the operator asked a question, and refusing to answer because bookkeeping
   failed inverts the priority. An unrecorded action MUST be visible as unrecorded, never silently
@@ -543,6 +575,14 @@ regarding its own container is defined and safe.
 - **SC-016**: The tool adds **no backend-specific dependency** — verified against the installed
   package set, not the import list — and the export works against **at least two** different
   OTel-compatible collectors, which is what proves the destination is really operator-chosen.
+- **SC-020**: For any window, the set of records marked `accepted` locally equals the set the
+  collector holds, **or the difference is explicitly reported** — **zero** silent divergence between
+  the two legs. This is the criterion that makes the dual stack one system rather than two hopeful
+  ones, and it is only expressible because both legs carry identical payloads (FR-009f).
+- **SC-021**: **Zero** records marked `accepted` that the endpoint actually rejected — verified by
+  pointing at a collector configured to refuse a subset and confirming those records read `rejected`,
+  not `accepted`. A receiver returning 200 with `partial_success` is the case a naive implementation
+  gets wrong, and only a refusing collector exposes it.
 - **SC-014**: With a destination declared, the trail survives **both** the destruction of the host
   acted on **and** deletion attempts from inside the control plane — **zero** exported entries a
   control plane can remove. Measured by destroying the host and by attempting removal from a session,
