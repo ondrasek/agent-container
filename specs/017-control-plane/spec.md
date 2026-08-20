@@ -184,6 +184,12 @@ and it is why FR-004 and FR-008 exist.
   mark those `accepted` — a check that passes while the thing it names is broken.
   `rejected` and `failed` are kept apart because they decide whether retrying helps: an explicit
   refusal will be refused again unchanged, an unreachable endpoint will not.
+- Q: Where does `collect` put what it downloads? FR-009e named no destination. → A: **Into the
+  operator's existing durable store** — `$XDG_DATA_HOME/agent-container/`, `0600`, the same place
+  Feature 016's drain already ingests to. Three reasons it is not a file: the trail becomes queryable
+  with `runs`/`egress` immediately rather than needing a new reader; the export state (FR-009h) has
+  somewhere to live; and retrying `pending`/`failed` records has something to update. A stream or a
+  loose directory would make `collect` a viewer rather than a collector.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -472,6 +478,13 @@ regarding its own container is defined and safe.
   gets it. OTLP export (FR-009d) is an **additional, active** path — it never replaces retrieval, and
   its absence never removes it.
 
+  **Collected records land in the operator's existing durable store** —
+  `$XDG_DATA_HOME/agent-container/`, mode `0600` — the same destination Feature 016's drain already
+  ingests to, so a downloaded trail is immediately readable with `runs` and `egress` rather than
+  needing a new reader. That is also what gives the export state (FR-009h) a home and lets a retry
+  update something. The command MUST report per-host counts of what it ingested, so "collected
+  nothing" is distinguishable from "collected nothing **from that host**".
+
   The command is a deliberate pull the operator can run **before destroying a host**, rather than a
   side effect of some other command, and it neither waits for an incidental drain nor makes the
   operator visit N hosts by hand. It MUST name every host it could not reach, since a collection that
@@ -558,8 +571,9 @@ regarding its own container is defined and safe.
 - **SC-013**: Every action performed from a control plane is attributable to it after the fact —
   **100%** of actions, read and mutating. **Zero** actions absent from the trail without being marked
   unrecorded.
-- **SC-015**: With no destination declared, one command collects the trail from every reachable host
-  and **names every host it could not reach** — **zero** collections that omit a host silently. A
+- **SC-015**: One command collects the trail from every reachable host — with or without an export
+  destination declared — lands it in the operator's durable store where `runs`/`egress` can read it,
+  reports per-host ingest counts, and **names every host it could not reach** — **zero** collections that omit a host silently. A
   partial trail presented as complete is the failure this measures.
 - **SC-017**: With the task text **excluded by declaration**, **zero** occurrences of it reach the
   collector — verified by planting a distinctive string in a `--task` and grepping what the collector
