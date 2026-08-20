@@ -295,6 +295,9 @@ regarding its own container is defined and safe.
 - **An agent container under enforced egress with an undeclared collector** — export fails, and the
   failure must be reported (FR-009d's fail-open). Silence here produces an empty collector that reads
   as a quiet system, which is the most misleading possible outcome for an audit trail.
+- **A record in flight when the container dies** — POSTed, no response received. It stays `pending`,
+  which is neither a loss nor a success, and `collect`'s retry is what settles it. Distinct from the
+  case below: this is about one record's state, not about the trail surviving.
 - **A container killed mid-run** — records written before the kill are already exported (FR-009g's
   write-time trigger); nothing is held to be lost. What is lost is only the record for work that never
   completed, which is the outcome, not the trail.
@@ -614,14 +617,27 @@ regarding its own container is defined and safe.
 - **SC-016**: The tool adds **no backend-specific dependency** — verified against the installed
   package set, not the import list — and the export works against **at least two** different
   OTel-compatible collectors, which is what proves the destination is really operator-chosen.
-- **SC-020**: For any window, the set of records marked `accepted` locally equals the set the
-  collector holds, **or the difference is explicitly reported** — **zero** silent divergence between
-  the two legs. This is the criterion that makes the dual stack one system rather than two hopeful
-  ones, and it is only expressible because both legs carry identical payloads (FR-009f).
-- **SC-022**: A container killed with `SIGKILL` mid-run has **every record written before the kill**
-  at the collector — **zero** records lost to the kill. Measured by killing a running container, not
-  by stopping one gracefully: a graceful stop would pass against an exit-time batch, which is the
-  implementation this criterion exists to reject.
+- **SC-020**: Over a **defined window**, the set of records marked `accepted` locally equals the set
+  the collector holds, **or the difference is explicitly reported** — **zero** silent divergence
+  between the two legs. This is the criterion that makes the dual stack one system rather than two
+  hopeful ones, and it is only expressible because both legs carry identical payloads (FR-009f).
+
+  **The window is: since the last successful `collect`, or an operator-supplied range.** Naming it
+  matters — "any window" cannot be executed, because an implementer cannot tell which records are in
+  scope and a test cannot fail deterministically. Records still `pending` at the moment of comparison
+  are **outside** the window rather than counted as divergence: they have not finished being
+  exported, and treating not-yet as disagreement would make the criterion fail against a healthy
+  system.
+- **SC-022**: A container killed with `SIGKILL` mid-run has **every record whose export COMPLETED
+  before the kill** at the collector — **zero** completed exports lost to the kill. Measured by
+  killing a running container, not by stopping one gracefully: a graceful stop would pass against an
+  exit-time batch, which is the implementation this criterion exists to reject.
+
+  **Scoped to completed exports on purpose.** A record POSTed whose response had not yet arrived is
+  neither `accepted` nor `failed` — it stays `pending`, and that is correct rather than a loss. Held
+  to "every record written", the criterion would fail intermittently against a perfectly good
+  implementation, purely on the timing of the kill; `collect`'s retry of `pending` records (FR-009h)
+  is what recovers it.
 - **SC-021**: **Zero** records marked `accepted` that the endpoint actually rejected — verified by
   pointing at a collector configured to refuse a subset and confirming those records read `rejected`,
   not `accepted`. A receiver returning 200 with `partial_success` is the case a naive implementation
