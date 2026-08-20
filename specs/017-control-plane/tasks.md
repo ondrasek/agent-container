@@ -200,73 +200,142 @@ that is visible before deploying.
 
 ---
 
-## Phase 6: Telemetry export (FR-009a–g)
+## Phase 6: Dual-stack observability (FR-009a-i)
 
 **Widest-reaching and least coupled to the control plane. The spec warns explicitly: do NOT build
-this as control-plane plumbing** — an agent must export with no control plane deployed.
+this as control-plane plumbing** - an agent must export with no control plane deployed.
 
-- [ ] T044 Attribution on every management action, mutating and read-only, recording **which** control
-      plane performed it, appended where the action lands (FR-009a, SC-013)
-- [ ] T045 [P] A host that cannot be written to MUST NOT fail the action — report the gap, and mark the
-      action **unrecorded** rather than leaving it absent (FR-009b)
+**Two legs, one payload.** The local trail is the durable baseline, written where the action lands
+regardless of any endpoint; OTLP export is an additional active path. They are **independent, not
+alternatives**, and carry **identical payloads from a single definition** - two lists would drift,
+and the drift would be invisible because each leg still looks correct alone.
+
+### The shared payload
+
+- [ ] T044 **One field-set definition serving both legs** in `bin/agent-container` (FR-009f,
+      data-model §6) - the attribution trail, Feature 016's run records and Feature 012's egress
+      events. `collect` retrieves exactly what export would have sent
+- [ ] T045 [P] Hermetic test that there is **exactly one** definition and both legs read it - assert on
+      the shared constant, not on two lists that happen to agree today (FR-009e, FR-009f)
 - [ ] T046 [P] Hermetic test that attribution adds **no second operator-free-text field**:
-      `RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row across fourteen fields, asserted on
-      the table itself (FR-009c, C18) — a second field falsifies the closure while every other test
-      passes
-- [ ] T047 OTLP/HTTP+JSON export from `image/entrypoint.sh` using **`curl`**, which already ships —
+      `RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row, asserted on the table itself
+      (FR-009c, C18) - a second field falsifies the closure while every other test passes
+- [ ] T047 Attribution on every management action, mutating and read-only, recording **which** control
+      plane performed it, appended where the action lands (FR-009a, SC-013)
+- [ ] T048 [P] A host that cannot be written to MUST NOT fail the action - report the gap and mark the
+      action **unrecorded** rather than leaving it absent (FR-009b)
+
+### The export state - what the client can actually observe
+
+- [ ] T049 **The export state on every record**: `pending` · `accepted` · `rejected` · `failed`
+      (FR-009h). Provenance is `tool`, so it does not touch FR-009c's single `operator` row
+- [ ] T050 **`accepted` means the CONFIGURED ENDPOINT returned success for that record - nothing
+      more** (FR-009h). It MUST NOT be read or named as arrival at a backend: establishing that would
+      require querying the backend's own API, the vendor coupling FR-009d forbids
+- [ ] T051 **Honour OTLP `partial_success`**: subtract rejected records from the response before
+      marking anything `accepted` (FR-009h). **A 2xx is not acceptance** - a receiver may return
+      success while refusing records, and treating 2xx as success marks refused records as delivered
+- [ ] T052 [P] **Acceptance SC-021 - point at a collector configured to REFUSE a subset** and confirm
+      those records read `rejected`, not `accepted`. Only a refusing receiver exposes the naive
+      2xx-means-success implementation; a compliant collector would pass either way
+- [ ] T053 Derive the state from the response, **never** from the fact that an export was attempted
+      (FR-009i) - distinguishing attempt from outcome is the whole point of having the state
+- [ ] T054 [P] Hermetic test that `rejected` and `failed` stay distinct, since they decide whether a
+      retry is worth attempting: a refusal will be refused again unchanged, an unreachable endpoint may
+      simply be back later (FR-009h)
+
+### Export mechanics
+
+- [ ] T055 OTLP/HTTP+JSON export from `image/entrypoint.sh` using **`curl`**, which already ships -
       **zero** Python packages and zero image additions (FR-009d, FR-009g, C14, R5)
-- [ ] T048 [P] Hermetic test that **no** backend-specific dependency is added, checked against the
-      installed package set rather than the import list (SC-016)
-- [ ] T049 The exported field set per data-model §6, with **`task` included by default** because a task
-      is not a credential channel (FR-009f0, FR-009f, C13)
-- [ ] T050 Exclusion of the task text **by name**, never by pattern (FR-009f). The tool cannot know
+- [ ] T056 **Export fires at WRITE TIME, per record** - not batched at exit, not on a timer (FR-009g).
+      Anything held for later is lost exactly when a container is killed, which is the case an audit
+      trail exists for; and it needs no resident exporter, which the project avoids on the same
+      grounds Feature 012's boundary runs no refresher
+- [ ] T057 [P] **Acceptance SC-022 - kill a running container with `SIGKILL`** and confirm every record
+      written before the kill is at the collector. **Not a graceful stop**: a graceful stop would pass
+      against an exit-time batch, which is the implementation this rejects
+- [ ] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
+      the tool's existing two-level contract. An environment outside any project still has an endpoint,
+      which project-level-only declaration would deny it
+- [ ] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
+      project resolves the user-level endpoint (FR-009d)
+- [ ] T060 [P] Acceptance S12 - an agent container's record reaches a real collector with **no control
+      plane deployed** (SC-018, C16). The half that gets missed if export is built as control-plane
+      plumbing
+- [ ] T061 [P] Acceptance S14 - export is **fail-open**: an unreachable or undeclared collector degrades
+      to the local record, reports the gap, and never blocks the work (C15). Under enforced egress,
+      silence yields an empty collector that reads like a quiet system
+
+### The task text
+
+- [ ] T062 Export the task text **by default**, because a task is **not a credential channel** -
+      credentials arrive by injection, the SSH keys being container-generated (FR-009f0, FR-009f, C13)
+- [ ] T063 Exclusion of the task text **by name**, never by pattern (FR-009f). The tool cannot know
       whether the collector is the operator's own VPS or a shared backend; a redactor that misses once
       converts caution into false confidence
-- [ ] T051 [P] Acceptance S13 — the planted marker is **present** by default and **absent** when
+- [ ] T064 [P] Acceptance S13 - the planted marker is **present** by default and **absent** when
       excluded (SC-017). **Both positions**, at the receiver: a switch verified in one position may not
       be wired at all
-- [ ] T052 [P] Acceptance S12 — an agent container's record reaches a real collector with **no control
-      plane deployed** (SC-018, C16)
-- [ ] T053 [P] Acceptance S14 — export is **fail-open**: an unreachable or undeclared collector
-      degrades to the local record, reports the gap, and never blocks the work (C15). Under enforced
-      egress, silence yields an empty collector that reads like a quiet system
-- [ ] T054 [P] Acceptance S15 — `run_id` exports regardless of the task setting, so a collector record
-      always matches its local counterpart (SC-019, C17)
-- [ ] T054a [P] **Acceptance SC-014 — the exported trail is TAMPER-EVIDENT.** Destroy the host an
-      action was performed on, and separately attempt to remove exported entries **from inside a
-      session**; the collector's copy must survive both — **zero** exported entries a control plane can
-      remove. Measured by destroying and by attempting deletion, never by inspecting the export code:
-      a trail the audited party can rewrite is not evidence, and only the negative case proves it.
-      **This is the property that justified off-box export at all**, and it had no task
-- [ ] T055 `telemetry collect`, available **whether or not** an endpoint is declared (FR-009e): gather
-      from every reachable host and **name every host it could not reach** (SC-015). Not the
-      "no-endpoint path" — the local record exists unconditionally (FR-009a), so its retrieval must
-      too, or declaring a collector leaves the operator with logs and no way to download them
-- [ ] T056 [P] Acceptance S16 for T055, asserting the naming — a collection that silently skipped a
-      host reads as complete
+
+- [ ] T065 [P] Acceptance S15 — **`run_id` exports regardless of the task setting**, so a collector
+      record can always be matched to its local counterpart (SC-019, C17). Correlation is what makes
+      excluding the task text cheap rather than lossy: without it, the exclusion removes the reason to
+      look at the record at all
+
+### Retrieval, and the two legs agreeing
+
+- [ ] T066 `telemetry collect`, available **whether or not** an endpoint is declared (FR-009e), landing
+      records in the operator's durable store (`$XDG_DATA_HOME/agent-container/`, `0600`) where
+      `runs`/`egress` can read them. Not the "no-endpoint path": the local record exists
+      unconditionally (FR-009a), so its retrieval must too
+- [ ] T067 [P] `collect` reports **per-host ingest counts** and **names every host it could not reach**
+      (FR-009e, SC-015) - so "collected nothing" is distinguishable from "collected nothing **from
+      that host**", and a skipped host never reads as a complete trail
+- [ ] T068 `collect` **retries `pending` and `failed`** records (FR-009h), which is what makes it the
+      recovery path rather than only a downloader
+- [ ] T069 [P] Acceptance S16 - `collect` works **with and without** an endpoint declared, in both
+      configurations deliberately. One that only worked without an endpoint would leave an operator who
+      configured OTLP holding logs with no way to download them
+- [ ] T070 **THE RECONCILIATION: acceptance SC-020** - for a window, the set of records marked
+      `accepted` locally equals the set the collector holds, **or the difference is explicitly
+      reported**. Zero silent divergence. This is what makes the dual stack one system rather than two
+      hopeful ones, and it is only expressible because both legs carry identical payloads (T044)
+- [ ] T071 [P] **Acceptance SC-014 - the exported trail is TAMPER-EVIDENT.** Destroy the host an action
+      was performed on, and separately attempt to remove exported entries **from inside a session**;
+      the collector's copy survives both - **zero** exported entries a control plane can remove.
+      Measured by destroying and by attempting deletion, never by inspecting the export code: a trail
+      the audited party can rewrite is not evidence, and only the negative case proves it
+- [ ] T072 [P] Hermetic test that **no backend-specific dependency** is added, checked against the
+      installed package set rather than the import list (SC-016)
 
 ---
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T057 [P] `docs/control-plane.md` — the surface, the passphrase contract and its **no-recovery**
-      rule, scope, revocation, the export (FR-006, FR-017; Constitution: docs track behaviour)
-- [ ] T058 [P] `docs/observability.md` — the export: what leaves, what never does, the declared
-      endpoint, and the `task` include/exclude with its reasoning (FR-009d, FR-009f)
-- [ ] T059 [P] `docs/agent-interface.md` — the control-plane fields on `list --json`, and the
-      telemetry payload shape (FR-009f, data-model §6)
-- [ ] T060 [P] `README.md` — a short control-plane section, matching how 018/019/013 treat theirs (FR-001; Constitution: docs track behaviour)
-- [ ] T061 **`docs/threat-model.md` — the 017 row. This feature INTRODUCES A NEW TRUST BOUNDARY**
+- [ ] T073 [P] `docs/control-plane.md` - the surface, the passphrase contract and its **no-recovery**
+      rule, scope, revocation (FR-006, FR-017; Constitution: docs track behaviour)
+- [ ] T074 [P] `docs/observability.md` - **the dual stack**: the local trail as durable baseline, OTLP
+      as the active path, that they are independent and carry identical payloads, the export state and
+      what `accepted` does **not** mean, and the `task` include/exclude with its reasoning
+      (FR-009d-i, FR-009f)
+- [ ] T075 [P] `docs/agent-interface.md` - the control-plane fields on `list --json`, the telemetry
+      payload shape, and the export state values (FR-009f, FR-009h, data-model §6)
+- [ ] T076 [P] `README.md` - a short control-plane section, matching how 018/019/013 treat theirs
+      (FR-001; Constitution: docs track behaviour)
+- [ ] T077 **`docs/threat-model.md` - the 017 row. This feature INTRODUCES A NEW TRUST BOUNDARY**
       (Constitution MUST). Record: the standing key spanning a sandbox shell and daemon access; the
       **passphrase transiting the tool** for one print (R3) as a stated narrow exception to
-      Constitution III; the export as a new outbound channel a Feature 012 declaration governs; and
-      the residual that a compromised control plane acts until its key is withdrawn
-- [ ] T062 One-line invariant in `CLAUDE.md`. The file is at **~1993 tokens with ~7 to spare**, so this
-      **DISPLACES** something — measure with a tokenizer, not `chars/4`, which understates by ~7% (Constitution: docs track behaviour)
-- [ ] T063 Confirm the commit is `feat` — MINOR (Constitution VII). Additive: a command, a second
+      Constitution III; the export as a new outbound channel a Feature 012 declaration governs; that
+      the exported payload carries the task text by default and what that means for a shared
+      collector; and the residual that a compromised control plane acts until its key is withdrawn
+- [ ] T078 One-line invariant in `CLAUDE.md` (Constitution: docs track behaviour). The file is at
+      **~1993 tokens with ~7 to spare**, so this **DISPLACES** something - measure with a tokenizer,
+      not `chars/4`, which understates by ~7%
+- [ ] T079 Confirm the commit is `feat` - MINOR (Constitution VII). Additive: a command, a second
       image, an export path; nothing removed and no flag changes meaning
-- [ ] T064 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`**,
-      then walk quickstart S1–S16 by hand. **Do not edit the tree while the tier runs** — it re-reads
+- [ ] T080 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`**,
+      then walk quickstart S1-S16 by hand. **Do not edit the tree while the tier runs** - it re-reads
       the CLI per invocation, so a mid-edit run measures nothing (this invalidated three runs earlier
       in this project)
 
@@ -276,78 +345,93 @@ this as control-plane plumbing** — an agent must export with no control plane 
 
 ### Phase Dependencies
 
-- **Phase 1 (Setup)** → no dependencies
-- **Phase 2 (Foundational)** → blocks everything. **T007 before T009**; **T010/T011 before T012**
-- **Phase 3 (US1)** → needs Phase 2
-- **Phase 4 (US2)** → needs Phase 3's deploy path; **US1 must not ship without US2**
-- **Phase 5 (US3)** → needs Phase 3; independent of Phase 4
-- **Phase 6 (telemetry)** → needs Phase 2 only. Deliberately **not** downstream of US1–US3, because
-  an agent must export with no control plane deployed
-- **Phase 7** → last
+- **Phase 1 (Setup)** -> no dependencies
+- **Phase 2 (Foundational)** -> blocks everything. **T007 before T009**; **T010/T011 before T012**
+- **Phase 3 (US1)** -> needs Phase 2
+- **Phase 4 (US2)** -> needs Phase 3's deploy path; **US1 must not ship without US2**
+- **Phase 5 (US3)** -> needs Phase 3; independent of Phase 4
+- **Phase 6 (observability)** -> needs Phase 2 only. Deliberately **not** downstream of US1-US3,
+  because an agent must export with no control plane deployed (SC-018)
+- **Phase 7** -> last
+
+### Within Phase 6
+
+**T044 first.** Both legs read one payload definition; every later task assumes it, and SC-020's
+reconciliation is unexpressible without it - "do they agree?" has no answer if the legs carry
+different things.
+
+**T049-T051 before T052.** The state must exist and honour `partial_success` before a refusing
+collector can be pointed at it.
+
+**T056 before T057.** The `SIGKILL` test is meaningless until the write-time trigger is what is being
+killed.
 
 ### User Story Dependencies
 
-- **US1** — the MVP, but **not shippable alone**: it puts a standing key in a container before US2
-  makes that bounded and revocable. The spec says shipping US1 without US2 trades a real security
-  property for convenience.
-- **US2** — makes US1 safe. No new surface; it bounds the existing one.
-- **US3** — coherence and recursion; independent of US2.
+- **US1** - the MVP, but **not shippable alone**: it puts a standing key in a container before US2
+  makes that bounded and revocable.
+- **US2** - makes US1 safe. No new surface; it bounds the existing one.
+- **US3** - coherence and recursion; independent of US2.
 
 ### Parallel Opportunities
 
 - T002/T003/T005/T006 together
-- T008/T009 after T007; T013/T015 alongside
-- T016/T017/T018 together — three independent acceptance scenarios
+- T016/T017/T018 together - three independent acceptance scenarios
 - T024/T025/T026/T027 together
 - T035/T036/T037 together
-- T045/T046/T048/T051/T052/T053/T054 together — independent test files and regions
-- T057/T058/T059/T060 together — four different documents
+- T045/T046/T048 together, after T044
+- T052/T054/T057/T059/T060/T061/T064/T069/T071/T072 together - independent test files and regions
+- T073/T074/T075/T076 together - four different documents
 
-## Parallel Example: User Story 2
+## Parallel Example: Phase 6 export state
 
 ```text
-# The four acceptance scenarios first, together:
-T024  deploying grants nothing        <- the quiet load-bearer
-T025  key encrypted, none on disk
-T026  revoke ends access in one command
-T027  locked after reboot, usable with the passphrase
+# After T049-T051 land the state and the partial_success handling:
+T052  refusing collector -> records read `rejected`   <- catches 2xx-as-success
+T054  `rejected` vs `failed` stay distinct
+T057  SIGKILL -> everything written is at the collector
+T061  unreachable collector -> fail-open, gap reported
 ```
 
 ## Implementation Strategy
 
 ### MVP scope
 
-Phases 1–3 give a reachable, configured CLI. **But do not stop there.** US1 alone puts a standing key
-in a long-lived container without US2's bounding and revocation — which the spec names as trading a
-security property for convenience. **The shippable increment is Phases 1–4.**
+Phases 1-3 give a reachable, configured CLI. **But do not stop there.** US1 alone puts a standing key
+in a long-lived container without US2's bounding and revocation - which the spec names as trading a
+security property for convenience. **The shippable increment is Phases 1-4.**
 
 ### Incremental Delivery
 
-1. **Phases 1–2** → both images build, the census covers both and can fail, the passphrase provably
+1. **Phases 1-2** -> both images build, the census covers both and can fail, the passphrase provably
    exists nowhere
-2. **Phase 3** → US1: a configured CLI on arrival
-3. **Phase 4** → US2: bounded, revocable, consequences stated. **Ship here, not earlier**
-4. **Phase 5** → US3: identity, self-exclusion, the semver rule
-5. **Phase 6** → telemetry, for every container
-6. **Phase 7** → docs, the threat-model row, the gates
+2. **Phase 3** -> US1: a configured CLI on arrival
+3. **Phase 4** -> US2: bounded, revocable, consequences stated. **Ship here, not earlier**
+4. **Phase 5** -> US3: identity, self-exclusion, the semver rule
+5. **Phase 6** -> the dual stack, for every container
+6. **Phase 7** -> docs, the threat-model row, the gates
 
 ### Ordering that is deliberate rather than conventional
 
 **T007 before anything that adds an image.** The existing census reads a hardcoded
-`image/Dockerfile`, so a second image is invisible to it — the suite would stay green while the
+`image/Dockerfile`, so a second image is invisible to it - the suite would stay green while the
 container holding keys to everything went unchecked. The spec predicted this test would *fail* on a
-second image; it would silently *skip* it, which is the worse direction and the one this project has
-hit repeatedly.
+second image; it would silently *skip* it, which is the worse direction.
 
 **T012 immediately after T010/T011.** The passphrase's absence is the property, and an absence is
 never demonstrated by working output.
 
+**T044 before the rest of Phase 6.** One payload definition is the precondition for the two legs
+being comparable at all.
+
 ## Notes
 
-- **64 tasks.** US1: 8 · US2: 11 · US3: 9 · telemetry: 13 · setup/foundational: 15 · polish: 8
-- **The passphrase is the only secret this tool ever touches** (R3). Every task near it is written to
-  keep its durable copy nowhere but the operator's password manager
-- **Scope is where the key is authorised**, so no task enforces scope inside the container — that
+- **80 tasks.** US1: 8 · US2: 11 · US3: 9 · observability: 29 · setup/foundational: 15 · polish: 8
+- **`accepted` claims only what the client observes** (FR-009h). End-to-end ingestion is not
+  observable without querying a backend's API - the coupling FR-009d forbids
+- **A 2xx is not acceptance** (T051). OTLP's `partial_success` is the trap, and T052 is the only test
+  that catches it
+- **The passphrase is the only secret this tool ever touches** (R3). Every task near it keeps its
+  durable copy nowhere but the operator's password manager
+- **Scope is where the key is authorised**, so no task enforces scope inside the container - that
   would be a control that cannot control
-- **`task` IS exported** (FR-009f0): a task is not a credential channel, credentials arrive by
-  injection, and the SSH keys are container-generated
