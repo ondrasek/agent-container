@@ -214,12 +214,12 @@ and the drift would be invisible because each leg still looks correct alone.
 
 - [ ] T044 **One field-set definition serving both legs** in `bin/agent-container` (FR-009f,
       data-model §6) - the attribution trail, Feature 016's run records and Feature 012's egress
-      events. `collect` retrieves exactly what export would have sent
+      events. `collect` retrieves exactly what export would have sent (C13, R11)
 - [ ] T045 [P] Hermetic test that there is **exactly one** definition and both legs read it - assert on
       the shared constant, not on two lists that happen to agree today (FR-009e, FR-009f)
 - [ ] T046 [P] Hermetic test that attribution adds **no second operator-free-text field**:
       `RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row, asserted on the table itself
-      (FR-009c, C18) - a second field falsifies the closure while every other test passes
+      (FR-009c, C18e) - a second field falsifies the closure while every other test passes
 - [ ] T047 Attribution on every management action, mutating and read-only, recording **which** control
       plane performed it, appended where the action lands (FR-009a, SC-013)
 - [ ] T048 [P] A host that cannot be written to MUST NOT fail the action - report the gap and mark the
@@ -231,46 +231,47 @@ and the drift would be invisible because each leg still looks correct alone.
       (FR-009h). Provenance is `tool`, so it does not touch FR-009c's single `operator` row
 - [ ] T050 **`accepted` means the CONFIGURED ENDPOINT returned success for that record - nothing
       more** (FR-009h). It MUST NOT be read or named as arrival at a backend: establishing that would
-      require querying the backend's own API, the vendor coupling FR-009d forbids
+      require querying the backend's own API, the vendor coupling FR-009d forbids (C14, R9)
 - [ ] T051 **Honour OTLP `partial_success`**: subtract rejected records from the response before
       marking anything `accepted` (FR-009h). **A 2xx is not acceptance** - a receiver may return
       success while refusing records, and treating 2xx as success marks refused records as delivered
+      (C14, R9)
 - [ ] T052 [P] **Acceptance SC-021 - point at a collector configured to REFUSE a subset** and confirm
       those records read `rejected`, not `accepted`. Only a refusing receiver exposes the naive
-      2xx-means-success implementation; a compliant collector would pass either way
+      2xx-means-success implementation; a compliant collector would pass either way (S17)
 - [ ] T053 Derive the state from the response, **never** from the fact that an export was attempted
       (FR-009i) - distinguishing attempt from outcome is the whole point of having the state
 - [ ] T054 [P] Hermetic test that `rejected` and `failed` stay distinct, since they decide whether a
       retry is worth attempting: a refusal will be refused again unchanged, an unreachable endpoint may
-      simply be back later (FR-009h)
+      simply be back later (FR-009h, C15, R10, S20)
 
 ### Export mechanics
 
 - [ ] T055 OTLP/HTTP+JSON export from `image/entrypoint.sh` using **`curl`**, which already ships -
-      **zero** Python packages and zero image additions (FR-009d, FR-009g, C14, R5)
+      **zero** Python packages and zero image additions (FR-009d, FR-009g, C18b, R5)
 - [ ] T056 **Export fires at WRITE TIME, per record** - not batched at exit, not on a timer (FR-009g).
       Anything held for later is lost exactly when a container is killed, which is the case an audit
       trail exists for; and it needs no resident exporter, which the project avoids on the same
-      grounds Feature 012's boundary runs no refresher
+      grounds Feature 012's boundary runs no refresher (C16)
 - [ ] T057 [P] **Acceptance SC-022 - kill a running container with `SIGKILL`** and confirm every record
       written before the kill is at the collector. **Not a graceful stop**: a graceful stop would pass
-      against an exit-time batch, which is the implementation this rejects
+      against an exit-time batch, which is the implementation this rejects (S18)
 - [ ] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
       the tool's existing two-level contract. An environment outside any project still has an endpoint,
       which project-level-only declaration would deny it
 - [ ] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
       project resolves the user-level endpoint (FR-009d)
 - [ ] T060 [P] Acceptance S12 - an agent container's record reaches a real collector with **no control
-      plane deployed** (SC-018, C16). The half that gets missed if export is built as control-plane
+      plane deployed** (SC-018, C18d). The half that gets missed if export is built as control-plane
       plumbing
 - [ ] T061 [P] Acceptance S14 - export is **fail-open**: an unreachable or undeclared collector degrades
-      to the local record, reports the gap, and never blocks the work (C15). Under enforced egress,
+      to the local record, reports the gap, and never blocks the work (C18c). Under enforced egress,
       silence yields an empty collector that reads like a quiet system
 
 ### The task text
 
 - [ ] T062 Export the task text **by default**, because a task is **not a credential channel** -
-      credentials arrive by injection, the SSH keys being container-generated (FR-009f0, FR-009f, C13)
+      credentials arrive by injection, the SSH keys being container-generated (FR-009f0, FR-009f, C18a)
 - [ ] T063 Exclusion of the task text **by name**, never by pattern (FR-009f). The tool cannot know
       whether the collector is the operator's own VPS or a shared backend; a redactor that misses once
       converts caution into false confidence
@@ -279,7 +280,7 @@ and the drift would be invisible because each leg still looks correct alone.
       be wired at all
 
 - [ ] T065 [P] Acceptance S15 — **`run_id` exports regardless of the task setting**, so a collector
-      record can always be matched to its local counterpart (SC-019, C17). Correlation is what makes
+      record can always be matched to its local counterpart (SC-019, C18a). Correlation is what makes
       excluding the task text cheap rather than lossy: without it, the exclusion removes the reason to
       look at the record at all
 
@@ -288,19 +289,23 @@ and the drift would be invisible because each leg still looks correct alone.
 - [ ] T066 `telemetry collect`, available **whether or not** an endpoint is declared (FR-009e), landing
       records in the operator's durable store (`$XDG_DATA_HOME/agent-container/`, `0600`) where
       `runs`/`egress` can read them. Not the "no-endpoint path": the local record exists
-      unconditionally (FR-009a), so its retrieval must too
+      unconditionally (FR-009a), so its retrieval must too. `collect` is Feature 016's `drain`
+      GENERALISED, not a second puller (C18, R13)
 - [ ] T067 [P] `collect` reports **per-host ingest counts** and **names every host it could not reach**
       (FR-009e, SC-015) - so "collected nothing" is distinguishable from "collected nothing **from
       that host**", and a skipped host never reads as a complete trail
 - [ ] T068 `collect` **retries `pending` and `failed`** records (FR-009h), which is what makes it the
-      recovery path rather than only a downloader
+      recovery path rather than only a downloader (R10)
 - [ ] T069 [P] Acceptance S16 - `collect` works **with and without** an endpoint declared, in both
       configurations deliberately. One that only worked without an endpoint would leave an operator who
       configured OTLP holding logs with no way to download them
 - [ ] T070 **THE RECONCILIATION: acceptance SC-020** - for a window, the set of records marked
       `accepted` locally equals the set the collector holds, **or the difference is explicitly
       reported**. Zero silent divergence. This is what makes the dual stack one system rather than two
-      hopeful ones, and it is only expressible because both legs carry identical payloads (T044)
+      hopeful ones, and it is only expressible because both legs carry identical payloads (T044).
+      The window is **since the last successful `collect`** or an operator-supplied range, and
+      `pending` records are **outside** it — counting not-yet as divergence would fail this against a
+      healthy system (C17, R12, S19)
 - [ ] T071 [P] **Acceptance SC-014 - the exported trail is TAMPER-EVIDENT.** Destroy the host an action
       was performed on, and separately attempt to remove exported entries **from inside a session**;
       the collector's copy survives both - **zero** exported entries a control plane can remove.
