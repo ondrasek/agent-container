@@ -190,6 +190,14 @@ and it is why FR-004 and FR-008 exist.
   with `runs`/`egress` immediately rather than needing a new reader; the export state (FR-009h) has
   somewhere to live; and retrying `pending`/`failed` records has something to update. A stream or a
   loose directory would make `collect` a viewer rather than a collector.
+- Q: When does a container export — at write time, at exit, or periodically? → A: **At write time,
+  per record.** It is the only trigger that survives an abrupt kill, and a killed container is exactly
+  the case an audit trail exists for: batching at exit loses everything accumulated when the process
+  is `kill -9`'d, OOM-killed, or the host reboots. It also matches the mechanism already chosen — a
+  `curl` POST from the entrypoint, which has no long-lived process to flush — and needs no resident
+  exporter, which the project avoids for the same reason Feature 012's boundary runs no refresher.
+  Accepted cost: one request per record, and a collector that sees data in near-real-time rather than
+  in batches.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -281,6 +289,9 @@ regarding its own container is defined and safe.
 - **An agent container under enforced egress with an undeclared collector** — export fails, and the
   failure must be reported (FR-009d's fail-open). Silence here produces an empty collector that reads
   as a quiet system, which is the most misleading possible outcome for an audit trail.
+- **A container killed mid-run** — records written before the kill are already exported (FR-009g's
+  write-time trigger); nothing is held to be lost. What is lost is only the record for work that never
+  completed, which is the outcome, not the trail.
 - **A container that exports but whose local record write fails** — the export is not a substitute for
   the local record, nor the reverse; each gap is reported on its own terms.
 - **A permitted host that does not answer** — the live view is the control plane's only source
@@ -421,6 +432,10 @@ regarding its own container is defined and safe.
   its local counterpart.
 - **FR-009g**: Each container exports its **own** telemetry directly, so an agent's records reach the
   collector whether or not a control plane exists and whether or not the operator's machine is awake.
+  **Export fires at WRITE TIME, per record** — not batched at exit and not on a timer. A container
+  that is `kill -9`'d, OOM-killed or lost to a host reboot is precisely the case an audit trail exists
+  for, and anything held for later is lost exactly then. It also requires no resident exporter
+  process, which the project avoids on the same grounds Feature 012's boundary runs no refresher.
   The dependency-free OTLP/HTTP+JSON encoding (FR-009d) is a POST of a JSON document, which the image
   can already make — so this adds no runtime dependency to the container either.
 
@@ -593,6 +608,10 @@ regarding its own container is defined and safe.
   collector holds, **or the difference is explicitly reported** — **zero** silent divergence between
   the two legs. This is the criterion that makes the dual stack one system rather than two hopeful
   ones, and it is only expressible because both legs carry identical payloads (FR-009f).
+- **SC-022**: A container killed with `SIGKILL` mid-run has **every record written before the kill**
+  at the collector — **zero** records lost to the kill. Measured by killing a running container, not
+  by stopping one gracefully: a graceful stop would pass against an exit-time batch, which is the
+  implementation this criterion exists to reject.
 - **SC-021**: **Zero** records marked `accepted` that the endpoint actually rejected — verified by
   pointing at a collector configured to refuse a subset and confirming those records read `rejected`,
   not `accepted`. A receiver returning 200 with `partial_success` is the case a naive implementation
