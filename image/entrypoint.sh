@@ -615,6 +615,192 @@ EOF
         runs_note "could not place the record at ${final}"
         return 0
     fi
+    # FR-009g/C16: WRITE TIME, per record, and AFTER the record is durable. The
+    # order matters — exporting first would risk a record at the collector that
+    # the local leg never had, which is the one divergence SC-020 cannot explain.
+    #
+    # Never allowed to fail the run: `runs_otlp_export` returns 0 on every path,
+    # and the `|| true` states that here rather than relying on it.
+    runs_otlp_export "${final}" || true
+    return 0
+}
+
+# --- OTLP export (Feature 017 FR-009d/FR-009g/FR-009h, C16, R5) --------------
+#
+# THIS BLOCK LIVES IN THE AGENT ENTRYPOINT ONLY, and is deliberately NOT marked
+# as a shared block. The control-plane image writes no run records in shell —
+# its records are the attribution records the CLI writes inside it, in Python —
+# so a copy there would be dead code, and a SHARED-BLOCK sentinel around a block
+# that exists once would claim a guarantee no guard provides. That reads as
+# coverage, which is worse than saying nothing.
+#
+# A `curl` POST of a JSON document. ZERO Python packages and zero image
+# additions: `curl` and `jq` already ship. `opentelemetry-sdk` is permitted by
+# FR-009d but not reached for, because the dependency-free path is sufficient —
+# which is the condition FR-009d set. No backend-specific package, ever.
+#
+# FIRES AT WRITE TIME, PER RECORD. Not batched at exit, not on a timer: anything
+# held for later is lost exactly when a container is `kill -9`'d, which is the
+# circumstance under which someone later asks what happened. It also needs no
+# resident exporter — the project avoids those on the same grounds Feature 012's
+# boundary runs no refresher — and it is natural rather than imposed, because a
+# `curl` POST has nothing to flush.
+#
+# FAIL-OPEN, ALWAYS. Every failure path here returns 0 and leaves a note. An
+# export that could fail the run would make observability a reason for work not
+# to happen, and under enforced egress an undeclared collector would then break
+# every container instead of merely leaving the trail local.
+OTLP_TIMEOUT="${AGENT_CONTAINER_OTLP_TIMEOUT:-10}"
+
+# Rewrite one record's export_state in place. The state is DERIVED FROM THE
+# RESPONSE (FR-009i); this function is only the writer.
+runs_set_export_state() {
+    local path="$1" state="$2" tmp
+    tmp="${path}.state.$$.tmp"
+    if ! jq --arg s "${state}" '.export_state = $s' "${path}" > "${tmp}" 2>/dev/null; then
+        rm -f "${tmp}" 2>/dev/null
+        return 1
+    fi
+    ( umask 0077; cat "${tmp}" > "${path}" ) 2>/dev/null || { rm -f "${tmp}"; return 1; }
+    rm -f "${tmp}" 2>/dev/null
+    return 0
+}
+
+# The OTLP/HTTP+JSON logs payload for one record.
+#
+# `run_id` is an ATTRIBUTE, not only part of the body, because that is what makes
+# a collector record matchable to its local counterpart (C18f) — and it is
+# exported WHATEVER the task setting is, which is what makes excluding the task
+# cheap rather than lossy.
+#
+# THE TASK IS STRIPPED BY NAME (FR-009f). `del(.task)` — no regex, no entropy
+# heuristic, no "looks like a token" check. A redactor that misses one value
+# converts caution into false confidence; omitting a named field either happens
+# or it does not.
+runs_otlp_payload() {
+    local path="$1" include_task="$2" now_ns
+    # Nanoseconds since epoch. GNU date does %N; busybox/BSD do not, so a literal
+    # 'N' falls back to zero-padding — checked rather than assumed, because a
+    # malformed timestamp makes a collector reject the whole request and the
+    # record would read as `rejected` for a reason that is not the endpoint's.
+    now_ns="$(date +%s%N 2>/dev/null)"
+    case "${now_ns}" in
+        *[!0-9]*|"") now_ns="$(( $(date +%s) * 1000000000 ))" ;;
+    esac
+    local filter='.'
+    [[ "${include_task}" == "1" ]] || filter='del(.task)'
+    jq -c \
+        --arg ns "${now_ns}" \
+        "${filter}"' as $rec | {
+            resourceLogs: [{
+                resource: { attributes: [
+                    { key: "service.name", value: { stringValue: "agent-container" } },
+                    { key: "agent_container.run_id",
+                      value: { stringValue: ($rec.run_id // "unknown") } }
+                ] },
+                scopeLogs: [{
+                    scope: { name: "agent-container" },
+                    logRecords: [{
+                        timeUnixNano: $ns,
+                        observedTimeUnixNano: $ns,
+                        severityText: "INFO",
+                        body: { stringValue: ($rec | tostring) },
+                        attributes: [
+                            { key: "agent_container.run_id",
+                              value: { stringValue: ($rec.run_id // "unknown") } },
+                            { key: "agent_container.kind",
+                              value: { stringValue: ($rec.kind // "unknown") } }
+                        ]
+                    }]
+                }]
+            }]
+        }' "${path}" 2>/dev/null
+}
+
+# Export one record and record the OUTCOME on it.
+#
+# `accepted` means THE CONFIGURED ENDPOINT RETURNED SUCCESS FOR THIS RECORD and
+# nothing more. It is never read, or named, as arrival at a backend: establishing
+# that would require querying the backend's own API, the vendor coupling FR-009d
+# forbids.
+#
+# A 2xx IS NOT ACCEPTANCE. OTLP's export response carries `partialSuccess` with
+# a rejected-record count, so a receiver may return 200 while refusing records.
+# That count is SUBTRACTED before anything is marked accepted — otherwise refused
+# records are recorded as delivered, and the local leg claims a delivery the
+# collector never made, which is exactly the divergence SC-020 detects.
+runs_otlp_export() {
+    local path="$1" endpoint="${AGENT_CONTAINER_OTLP_ENDPOINT:-}" payload http body rejected state
+    # Undeclared endpoint: the local record IS the trail, and that is a complete
+    # outcome rather than a degraded one (C18c). Left `pending` deliberately —
+    # `telemetry collect` retries it, so declaring an endpoint later still exports
+    # what was written before it existed.
+    [[ -n "${endpoint}" ]] || return 0
+    [[ -f "${path}" ]] || return 0
+    if ! command -v curl > /dev/null 2>&1 || ! command -v jq > /dev/null 2>&1; then
+        runs_note "cannot export: curl or jq is missing from this image; the record is local only"
+        return 0
+    fi
+    payload="$(runs_otlp_payload "${path}" "${AGENT_CONTAINER_EXPORT_TASK:-1}")"
+    if [[ -z "${payload}" ]]; then
+        runs_note "could not build the OTLP payload for this record; it is local only"
+        return 0
+    fi
+    # Body and status in one call, separated by a sentinel the body cannot
+    # contain unescaped. A second request to learn the status would export twice.
+    body="$(printf '%s' "${payload}" | curl -sS -m "${OTLP_TIMEOUT}" \
+        -X POST "${endpoint}" \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
+        -w '\n__ACHTTP__%{http_code}' 2>/dev/null)"
+    http="${body##*__ACHTTP__}"
+    body="${body%$'\n'__ACHTTP__*}"
+    case "${http}" in
+        ""|000|*[!0-9]*)
+            # No response at all: unreachable, DNS failure, timeout. RETRYABLE —
+            # the endpoint may simply be back later, which is why this is
+            # `failed` and not `rejected`.
+            #
+            # `000` IS THE UNREACHABLE CASE, and it has to be named explicitly:
+            # curl writes 000 to %{http_code} when it never got a status line, and
+            # 000 is all digits, so the numeric guard above does NOT catch it. It
+            # fell through to the catch-all and was marked `rejected` — TERMINAL,
+            # never retried — so a collector that was merely down would have
+            # permanently discarded every record written while it was down. Found
+            # by pointing the exporter at a closed port and reading the state,
+            # which is the only way this surfaces: the export "worked" either way.
+            state="failed"
+            runs_note "the telemetry endpoint did not answer; this record is local only and marked failed (retryable by 'agent-container telemetry collect')"
+            ;;
+        2*)
+            # THE SUBTRACTION. `partialSuccess.rejectedLogRecords` — absent means
+            # zero, and a non-zero count with one record in the request means THIS
+            # record was refused.
+            rejected="$(printf '%s' "${body}" \
+                | jq -r '.partialSuccess.rejectedLogRecords // 0' 2>/dev/null)"
+            case "${rejected}" in
+                ""|*[!0-9]*) rejected=0 ;;
+            esac
+            if [[ "${rejected}" -gt 0 ]]; then
+                state="rejected"
+                runs_note "the telemetry endpoint returned success but REFUSED this record (partialSuccess.rejectedLogRecords=${rejected}); a retry would be refused again"
+            else
+                state="accepted"
+            fi
+            ;;
+        408|429|5*)
+            state="failed"
+            runs_note "the telemetry endpoint returned ${http} (transient); this record is marked failed and is retryable"
+            ;;
+        *)
+            # The endpoint understood and refused. It will refuse again unchanged,
+            # so this is terminal and a retry would only repeat the refusal.
+            state="rejected"
+            runs_note "the telemetry endpoint refused this record with ${http}; a retry would be refused again"
+            ;;
+    esac
+    runs_set_export_state "${path}" "${state}" \
+        || runs_note "exported with outcome '${state}' but could not record it on the record"
     return 0
 }
 

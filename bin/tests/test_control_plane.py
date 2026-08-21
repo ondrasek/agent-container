@@ -305,6 +305,203 @@ def test_unknown_does_not_claim_compatibility(wiz):
     assert "not assumed compatible" in msg.lower()
 
 
+# --- export mechanics (FR-009d/FR-009g, C16, C18a-c, T055-T058, T062-T063) ---
+
+
+def _entrypoint(wiz, image="image"):
+    return (Path(wiz.__file__).parents[1] / image / "entrypoint.sh").read_text()
+
+
+def _code_lines(text: str) -> str:
+    """Shell source with comment lines removed.
+
+    These scans look for what the script DOES. The export block explains at
+    length what it deliberately does not do — it names `opentelemetry` and
+    "entropy" precisely to say they are not reached for — so scanning raw text
+    would fail on the documentation of the property being asserted.
+    """
+    return "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith("#"))
+
+
+def _otlp_block(wiz) -> str:
+    """The export block, BOUNDED. It sits before the authorized_keys shared block
+    in the file, so slicing to end-of-file would pull in unrelated sentinels."""
+    ep = _entrypoint(wiz)
+    start = ep.index("# --- OTLP export")
+    end = ep.index("# Complete the record.", start)
+    return ep[start:end]
+
+
+def test_export_is_curl_and_adds_no_python_package(wiz):
+    """C18b/R5: OTLP/HTTP+JSON is a POST of a JSON document, and curl already
+    ships. Zero Python packages, zero image additions — and NO backend-specific
+    package, ever, which is the condition the OTel dependency was accepted under.
+    """
+    ep = _entrypoint(wiz)
+    assert "curl -sS -m" in ep
+    # The export path must not reach for a telemetry SDK.
+    for banned in ("opentelemetry", "pip install", "npm i -g"):
+        assert banned not in _code_lines(_otlp_block(wiz)), (
+            f"the export path references {banned!r}; the dependency-free path is "
+            "the condition FR-009d set"
+        )
+
+
+def test_export_fires_at_WRITE_TIME_after_the_record_is_durable(wiz):
+    """FR-009g/C16. Not batched at exit, not on a timer: anything held for later
+    is lost exactly when a container is killed, which is the case an audit trail
+    exists for.
+
+    And AFTER the rename, not before — exporting first would risk a record at the
+    collector that the local leg never had, the one divergence SC-020 cannot
+    explain.
+    """
+    ep = _entrypoint(wiz)
+    body = ep[ep.index("runs_emit() {") : ep.index("# --- OTLP export")]
+    rename = body.index('mv -f "${tmp}" "${final}"')
+    export = body.index("runs_otlp_export")
+    assert rename < export, "export fires before the record is durable"
+
+
+def test_the_unreachable_case_is_RETRYABLE_not_terminal(wiz):
+    """curl writes 000 to %{http_code} when it never got a status line, and 000
+    is ALL DIGITS — so a numeric guard does not catch it.
+
+    It fell through to the catch-all and was marked `rejected`, which is
+    terminal: a collector that was merely down would have permanently discarded
+    every record written while it was down. Found by pointing the exporter at a
+    closed port and reading the state, which is the only way it surfaces — the
+    export "worked" either way.
+    """
+    ep = _entrypoint(wiz)
+    assert '""|000|*[!0-9]*)' in ep, (
+        "the no-response branch does not name 000, so an unreachable endpoint "
+        "falls through to the terminal branch and is never retried"
+    )
+
+
+def test_a_2xx_is_subtracted_before_anything_is_accepted(wiz):
+    """T051/C14/R9, asserted in the SHELL leg too. The Python helper honouring
+    partial_success says nothing about the exporter that actually runs."""
+    ep = _entrypoint(wiz)
+    assert "partialSuccess.rejectedLogRecords" in ep
+    accepted_at = ep.index('state="accepted"')
+    subtract_at = ep.index("partialSuccess.rejectedLogRecords")
+    assert subtract_at < accepted_at, (
+        "the rejected count is read AFTER the accepted state is set, so refused "
+        "records would be recorded as delivered"
+    )
+
+
+def test_export_never_fails_the_run(wiz):
+    """C18c: fail-open, always. An export that could fail the run would make
+    observability a reason for work not to happen — and under enforced egress an
+    undeclared collector would then break every container rather than merely
+    leaving the trail local."""
+    ep = _entrypoint(wiz)
+    fn = ep[ep.index("runs_otlp_export() {") :]
+    fn = fn[: fn.index("\n}\n")]
+    # Every exit from the exporter is a success. A `return 1` would propagate
+    # into runs_emit under `set -e`.
+    assert "return 1" not in fn
+    assert 'runs_otlp_export "${final}" || true' in ep
+
+
+def test_the_task_is_stripped_BY_NAME_never_by_pattern(wiz):
+    """FR-009f/T063. The tool cannot know whether the collector is the operator's
+    own VPS or a shared backend, and a redactor that misses one value converts
+    caution into false confidence — whereas omitting a named field either happens
+    or it does not."""
+    ep = _entrypoint(wiz)
+    assert "del(.task)" in ep
+    # No heuristic redaction anywhere near the export path.
+    export_path = _code_lines(_otlp_block(wiz))
+    for heuristic in ("entropy", "[A-Za-z0-9]{20", "ghp_", "sk-", "sed -E s/"):
+        assert heuristic not in export_path, (
+            f"the export path contains a pattern-based redactor ({heuristic!r})"
+        )
+
+
+def test_run_id_is_exported_whatever_the_task_setting(wiz):
+    """C18f/SC-019: correlation is what makes excluding the task cheap rather
+    than lossy. Without it the exclusion removes the reason to look at the record
+    at all."""
+    ep = _entrypoint(wiz)
+    payload = (
+        ep[ep.index("runs_otlp_payload() {") : ex]
+        if (ex := ep.index("runs_otlp_export() {"))
+        else ep
+    )
+    # run_id is read from the record AFTER the task filter is applied, so it
+    # survives the exclusion by construction rather than by a second copy.
+    assert "$rec.run_id" in payload
+    assert payload.index("del(.task)") < payload.index("$rec.run_id")
+
+
+def test_an_undeclared_endpoint_leaves_the_record_PENDING(wiz):
+    """Not `failed`. `pending` is what `telemetry collect` retries, so declaring
+    an endpoint later still exports what was written before it existed —
+    `failed` would be a claim that an attempt was made."""
+    ep = _entrypoint(wiz)
+    fn = ep[ep.index("runs_otlp_export() {") :]
+    guard = fn[: fn.index("payload=")]
+    assert '[[ -n "${endpoint}" ]] || return 0' in guard
+    assert 'state="failed"' not in guard
+
+
+def test_the_otlp_block_claims_no_drift_guard_it_does_not_have(wiz):
+    """A SHARED-BLOCK sentinel around a block that exists in ONE file would claim
+    a guarantee no guard provides, and that reads as coverage.
+
+    The control-plane image writes no run records in shell, so a copy there would
+    be dead code. The block says so instead of being marked shared.
+    """
+    assert "SHARED-BLOCK BEGIN" not in _otlp_block(wiz), (
+        "the export block carries a shared-block sentinel but exists in one file"
+    )
+    # And the block SAYS why, so the next reader does not add one.
+    assert "would be dead code" in _otlp_block(wiz)
+    assert "runs_otlp_export" not in _entrypoint(wiz, "image-control-plane")
+
+
+# --- the endpoint and the task switch, operator side (T058, T062) ------------
+
+
+def test_an_endpoint_without_a_scheme_is_REFUSED_not_prefixed(wiz, tmp_path, monkeypatch):
+    """Guessing the scheme would decide, on the operator's behalf, whether an
+    audit trail crosses the network in plaintext — and http:// is the guess that
+    silently does."""
+    proj = _settings(tmp_path, monkeypatch, wiz, project="otlp_endpoint: collector.example/v1\n")
+    with pytest.raises(wiz.Fatal, match="http:// or https://"):
+        wiz.resolve_otlp_endpoint(proj)
+
+
+def test_the_task_is_exported_by_DEFAULT(wiz, tmp_path, monkeypatch):
+    """FR-009f0/C18a: a task is not a credential channel."""
+    proj = _settings(tmp_path, monkeypatch, wiz)
+    assert wiz.export_task_text(proj) is True
+
+
+def test_the_task_switch_REFUSES_a_string(wiz, tmp_path, monkeypatch):
+    """ "false" as a STRING is truthy in Python, so a coercing reader would export
+    the task text for an operator who wrote the word false and believed they had
+    turned it off — a silent failure in the direction that discloses."""
+    proj = _settings(tmp_path, monkeypatch, wiz, project='export_task_text: "false"\n')
+    with pytest.raises(wiz.Fatal, match="must be true or false"):
+        wiz.export_task_text(proj)
+
+
+def test_the_task_switch_is_delivered_as_an_explicit_value(wiz):
+    """An ABSENT variable is indistinguishable from a deploy predating the switch,
+    and this is a field whose exposure the operator chose."""
+    # A METHOD, so it is indented — `_func_body` slices top-level defs only.
+    src = Path(wiz.__file__).read_text()
+    i = src.index("    def compose_environment(")
+    body = src[i : src.index("\nINHERITABLE = ", i)]
+    assert "AGENT_CONTAINER_EXPORT_TASK" in body
+    assert '"0" if not export_task_text() else "1"' in body
+
+
 # --- the two-level settings contract (FR-009d, T058/T059) -------------------
 
 

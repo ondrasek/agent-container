@@ -255,16 +255,16 @@ and the drift would be invisible because each leg still looks correct alone.
 
 ### Export mechanics
 
-- [ ] T055 OTLP/HTTP+JSON export from `image/entrypoint.sh` using **`curl`**, which already ships -
+- [X] T055 OTLP/HTTP+JSON export from `image/entrypoint.sh` using **`curl`**, which already ships -
       **zero** Python packages and zero image additions (FR-009d, FR-009g, C18b, R5)
-- [ ] T056 **Export fires at WRITE TIME, per record** - not batched at exit, not on a timer (FR-009g).
+- [X] T056 **Export fires at WRITE TIME, per record** - not batched at exit, not on a timer (FR-009g).
       Anything held for later is lost exactly when a container is killed, which is the case an audit
       trail exists for; and it needs no resident exporter, which the project avoids on the same
       grounds Feature 012's boundary runs no refresher (C16)
 - [ ] T057 [P] **Acceptance SC-022 - kill a running container with `SIGKILL`** and confirm every record
       written before the kill is at the collector. **Not a graceful stop**: a graceful stop would pass
       against an exit-time batch, which is the implementation this rejects (S18)
-- [ ] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
+- [X] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
       the tool's existing two-level contract (C18g). An environment outside any project still has an
       endpoint, which project-level-only declaration would deny it
 - [X] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
@@ -278,9 +278,9 @@ and the drift would be invisible because each leg still looks correct alone.
 
 ### The task text
 
-- [ ] T062 Export the task text **by default**, because a task is **not a credential channel** -
+- [X] T062 Export the task text **by default**, because a task is **not a credential channel** -
       credentials arrive by injection, the SSH keys being container-generated (FR-009f0, FR-009f, C18a)
-- [ ] T063 Exclusion of the task text **by name**, never by pattern (FR-009f). The tool cannot know
+- [X] T063 Exclusion of the task text **by name**, never by pattern (FR-009f). The tool cannot know
       whether the collector is the operator's own VPS or a shared backend; a redactor that misses once
       converts caution into false confidence
 - [ ] T064 [P] Acceptance S13 - the planted marker is **present** by default and **absent** when

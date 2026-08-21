@@ -155,7 +155,14 @@ def test_exec_spec_compose_environment(wiz):
         # Feature 017: always present, so `redeploy` can read the role back off a
         # running container rather than defaulting it.
         "AGENT_CONTAINER_ROLE": "agent",
+        # FR-009f: an EXPLICIT value, not presence-signalled. An absent variable
+        # is indistinguishable from a deploy predating the switch, and this is a
+        # field whose exposure the operator chose.
+        "AGENT_CONTAINER_EXPORT_TASK": "1",
     }
+    # No endpoint declared in this test's environment, so no endpoint is
+    # delivered — undeclared is not the same as declared-empty (C18c).
+    assert "AGENT_CONTAINER_OTLP_ENDPOINT" not in e
     # clone URL uses AGENT_CONTAINER_CLONE_URL, NOT AGENT_CONTAINER_REPO (H1).
     assert "AGENT_CONTAINER_REPO" not in e
     # The control plane's own NAME is set only for that role, and only when the

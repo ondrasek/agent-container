@@ -5513,6 +5513,80 @@ def resolve_settings_key(key: str, cwd: Path | None = None) -> object | None:
     return None
 
 
+def export_task_text(cwd: Path | None = None) -> bool:
+    """Whether the `task` field is exported (FR-009f0, FR-009f, contract C18a).
+
+    DEFAULT TRUE, and that is a decision with a reason rather than an oversight.
+    A task is NOT a credential channel: credentials reach a container by
+    injection, the single exception being the SSH keys a container generates
+    itself. Withholding the task would design around an operator error the tool
+    already provides the correct alternative for — and it is the single most
+    useful field for *"this run failed, what was it doing"*, on a phone, with no
+    laptop to correlate against.
+
+    EXCLUDED BY NAME, NEVER BY PATTERN. The tool cannot know whether the
+    collector is the operator's own VPS or a shared backend, and a redactor that
+    misses one value converts caution into false confidence — whereas omitting a
+    named field either happens or it does not. There is deliberately no regex, no
+    entropy heuristic and no "looks like a token" check.
+
+    `run_id` is exported regardless (C18f), so a record at the collector can
+    always be matched to its local counterpart. That is what makes this exclusion
+    cheap rather than lossy: without correlation, excluding the task removes the
+    reason to look at the record at all.
+    """
+    value = resolve_settings_key("export_task_text", cwd)
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        # Refused rather than coerced. "false" as a STRING is truthy in Python,
+        # so a coercing reader would export the task text for an operator who
+        # wrote the word false and believed they had turned it off — a silent
+        # failure in the direction that discloses.
+        die(
+            f"export_task_text must be true or false, not {type(value).__name__}",
+            remedy="use an unquoted true/false in settings.yaml",
+        )
+    return value
+
+
+def resolve_otlp_endpoint(cwd: Path | None = None) -> str | None:
+    """The OTLP endpoint, or None if undeclared (FR-009d, contract C18g).
+
+    Two-level, project winning, resolved from `settings.yaml` — the tool's
+    existing contract, so a machine-wide collector is the default and a project
+    that needs its own overrides it.
+
+    NOT per-environment. C18d requires EACH container to export its own records,
+    control plane or not, project or not, so an environment deployed outside any
+    project must still resolve the user-level endpoint. A per-environment key
+    would make "which endpoint does this container use" depend on a file the
+    container was not deployed from.
+
+    Returns None for undeclared, which is NOT the same as declared-empty: export
+    is fail-open (C18c), so an absent endpoint means the local trail is the only
+    leg and the gap is reported once at deploy rather than treated as an error.
+    """
+    value = resolve_settings_key("otlp_endpoint", cwd)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        die(
+            "otlp_endpoint must be a non-empty URL string",
+            remedy="fix settings.yaml in .agent-container/ or ~/.config/agent-container/",
+        )
+    endpoint = value.strip()
+    if not endpoint.startswith(("http://", "https://")):
+        # Refused rather than prefixed. Guessing the scheme would decide, on the
+        # operator's behalf, whether an audit trail crosses the network in
+        # plaintext — and http:// is the guess that silently does.
+        die(
+            f"otlp_endpoint must start with http:// or https:// (got {endpoint!r})",
+            remedy="name the scheme explicitly; it decides whether the trail is encrypted",
+        )
+    return endpoint
+
+
 def resolve_sidecar_override(name: str) -> Path | None:
     """The first existing sidecar override for <name>, validated, or None. A
     present-but-invalid override is fatal (FR-018) — never silently ignored."""
@@ -8327,6 +8401,21 @@ class ExecSpec:
         CLI's host-side build-context override)."""
         env = {"AGENT_CONTAINER_MODE": self.mode, "AGENT_CONTAINER_AGENT": self.agent}
         env["AGENT_CONTAINER_ROLE"] = self.role
+        # Feature 017 FR-009d/FR-009f. Non-secret: an endpoint URL is a
+        # destination, not a credential, so it rides the same channel `mode` and
+        # `agent` do rather than the injected-secret path.
+        #
+        # Resolved on the OPERATOR's side and delivered, because the container has
+        # no project to resolve from — it holds no `.agent-container/` and no
+        # `~/.config/agent-container/`. Resolving in-container would make every
+        # container's endpoint depend on a filesystem it does not have.
+        if (endpoint := resolve_otlp_endpoint()) is not None:
+            env["AGENT_CONTAINER_OTLP_ENDPOINT"] = endpoint
+        # FR-009f: the task text is exported BY DEFAULT and excluded BY NAME.
+        # Delivered as an explicit "0"/"1" rather than by the variable's presence:
+        # an absent variable is indistinguishable from a deploy that predates the
+        # switch, and this is a field whose exposure the operator chose.
+        env["AGENT_CONTAINER_EXPORT_TASK"] = "0" if not export_task_text() else "1"
         if self.role == ROLE_CONTROL_PLANE and name:
             # Feature 017 FR-010/FR-014a: the container has to know its OWN name,
             # because two things inside it read this and neither can derive it.
