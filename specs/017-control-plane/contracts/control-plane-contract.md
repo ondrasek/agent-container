@@ -191,7 +191,23 @@ Unconditional — it does not depend on whether the task text was excluded.
 
 OTLP/HTTP+JSON is a POST of a JSON document and `curl` already ships (research R5). **Zero** Python
 packages; **no backend-specific package, ever** (FR-009d) — the condition the OTel dependency was
-accepted under. The endpoint is declared at **either config level, project winning**.
+accepted under.
+
+> *Fails without this*: OTel was accepted **at the protocol level only**. A backend-specific package
+> would couple an audit path to one vendor's API, which is the coupling that made end-to-end
+> ingestion unobservable in the first place (C14).
+
+## C18g — The endpoint is declared at either config level, project winning
+
+User configuration or project configuration, same filename in both, **project overriding** — the
+tool's existing two-level contract (FR-009d). A machine-wide collector is the default; a project
+needing its own overrides it.
+
+An environment deployed **outside any project** still resolves the user-level endpoint.
+
+> *Fails without this*: project-level-only declaration would leave every container outside a project
+> with no endpoint at all — and C18d requires each container to export its own, control plane or not,
+> project or not. User-level-only would make per-project isolation impossible.
 
 ## C18c — Export is fail-open, and the gap is reported
 

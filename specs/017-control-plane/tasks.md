@@ -188,8 +188,10 @@ that is visible before deploying.
       only the report is checkable, and this is the one container whose stopping makes the report
       undeliverable
 - [ ] T040 [P] [US3] Role and `provenance` on the inventory entry — `operator` vs
-      `control-plane:<name>` (FR-009, FR-014a, data-model §1). Persisted, so a **stopped** control
-      plane is still identifiable
+      `control-plane:<name>` (FR-009, FR-014a, C8, R8, data-model §1). Persisted, so a **stopped**
+      control plane is still identifiable. **Visibility is the whole of the work** — nesting needs no
+      enforcement code, because scope is where the key is authorised and a parent cannot constrain a
+      child even in principle (R8); a gate here would be a control that cannot control
 - [ ] T041 [P] [US3] Acceptance SC-011 — every control plane shows whether it came from the operator's
       machine or another control plane, and which. Nesting lets standing keys grow from inside the
       system, and a count nobody can see is a count nobody audits
@@ -259,10 +261,10 @@ and the drift would be invisible because each leg still looks correct alone.
       written before the kill is at the collector. **Not a graceful stop**: a graceful stop would pass
       against an exit-time batch, which is the implementation this rejects (S18)
 - [ ] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
-      the tool's existing two-level contract. An environment outside any project still has an endpoint,
-      which project-level-only declaration would deny it
+      the tool's existing two-level contract (C18g). An environment outside any project still has an
+      endpoint, which project-level-only declaration would deny it
 - [ ] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
-      project resolves the user-level endpoint (FR-009d)
+      project resolves the user-level endpoint (FR-009d, C18g)
 - [ ] T060 [P] Acceptance S12 - an agent container's record reaches a real collector with **no control
       plane deployed** (SC-018, C18d). The half that gets missed if export is built as control-plane
       plumbing
