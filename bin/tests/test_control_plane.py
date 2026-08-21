@@ -1293,3 +1293,142 @@ def test_reconciliation_is_only_expressible_because_the_legs_share_a_payload(wiz
     task exclusion had removed correlation, this comparison would have nothing to
     join on — which is why run_id exports whatever the task setting is."""
     assert "run_id" in wiz.RECORD_PAYLOAD_FIELDS
+
+
+# --- narrow rendering (FR-011, C11, R7, SC-007, T021/T022) -------------------
+
+
+def test_narrowness_is_MEASURED_not_flagged(wiz):
+    """FR-011's motivating case is an operator on a phone. They are already
+    inconvenienced; requiring them to remember `--narrow` puts the work on the
+    person least able to do it, and one who forgets gets the unusable output the
+    flag existed to prevent."""
+    assert wiz.terminal_is_narrow(40) is True
+    assert wiz.terminal_is_narrow(80) is True
+    assert wiz.terminal_is_narrow(81) is False
+    # No flag exists to force it.
+    src = Path(wiz.__file__).read_text()
+    assert '"--narrow"' not in src
+
+
+def test_a_non_terminal_is_NOT_narrow(wiz):
+    """Piped output wants the stable column form. Switching shape based on whether
+    someone is watching is how a script breaks the day it is run by hand."""
+    assert wiz.terminal_is_narrow(0) is False
+    assert wiz.terminal_is_narrow(None) is False
+
+
+def test_no_line_exceeds_the_width_at_80_columns(wiz):
+    """SC-007, measured rather than asserted about the shape."""
+    rows = [
+        {
+            "name": "a-fairly-long-environment-name",
+            "host": "some-remote-vps-host",
+            "port": 2206,
+            "image": "localhost/agent-container:latest",
+            "status": "Up 3 days",
+            "uptime": "3 days",
+        }
+    ] * 3
+    lines = wiz.render_rows_narrow(rows, wiz.LIST_FIELDS)
+    over = [ln for ln in lines if len(ln) > wiz.NARROW_COLUMNS]
+    assert not over, f"lines exceed {wiz.NARROW_COLUMNS} columns: {over}"
+
+
+def test_every_field_gets_its_own_line(wiz):
+    """A form that inlined short values and blocked long ones would give the same
+    environment a different shape depending on its name length, and an operator
+    scanning for a field would have to find it somewhere new each time."""
+    lines = wiz.render_rows_narrow(
+        [{"name": "a", "host": "b"}], (("name", "NAME"), ("host", "HOST"))
+    )
+    assert lines == ["NAME: a", "HOST: b"]
+
+
+def test_rows_are_separated_so_two_do_not_read_as_one(wiz):
+    lines = wiz.render_rows_narrow([{"name": "a"}, {"name": "b"}], (("name", "NAME"),))
+    assert lines == ["NAME: a", "", "NAME: b"]
+
+
+def test_staleness_survives_the_loss_of_COLOUR(wiz):
+    """The wide form dims a stale row. At 80 columns the operator may be reading in
+    sunlight on a phone, and a colour distinction that is the ONLY carrier of a
+    fact is a fact that does not arrive — so staleness moves into the STATUS text.
+    """
+    body = _func_body(Path(wiz.__file__).read_text(), "do_list")
+    narrow = body[body.index("if terminal_is_narrow():") : body.index("table = Table(")]
+    assert "(stale)" in narrow
+    # CODE lines only: the block explains that dim styling is dropped, so scanning
+    # prose would fail on the documentation of the property being asserted.
+    code = "\n".join(ln for ln in narrow.splitlines() if not ln.strip().startswith("#"))
+    assert "dim" not in code, "the narrow form still relies on dim styling"
+
+
+def test_the_field_set_is_shared_between_both_forms(wiz):
+    """Two lists would drift, and the drift would be invisible: each form still
+    renders correctly on its own, and only an operator switching widths would
+    notice a column had gone."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_list")
+    narrow = body[body.index("if terminal_is_narrow():") : body.index("table = Table(")]
+    wide = body[body.index("table = Table(") :]
+    assert "LIST_FIELDS" in narrow and "LIST_FIELDS" in wide, (
+        "one of the two forms carries its own column list, which will drift"
+    )
+    # The literal the wide form used to hold must be gone, or it is still a second
+    # encoding regardless of what the narrow form reads.
+    assert '("NAME", "HOST", "PORT", "IMAGE", "STATUS", "UPTIME")' not in body
+
+
+# --- live enumeration (FR-003a, SC-002, T019/T020) ---------------------------
+
+
+def test_list_json_NAMES_the_hosts_that_did_not_answer(wiz, monkeypatch):
+    """SC-002: a short list that looks complete is worse than an error, because
+    the operator acts on absence.
+
+    The rows already carry status `unreachable`, but a consumer would have to scan
+    and infer. The explicit field is the difference between "there are no
+    containers there" and "nobody asked successfully".
+    """
+    rows = [
+        {"name": "-", "host": "dead-vps", "port": "-", "image": "-",
+         "status": "unreachable", "uptime": "-", "stale": False},
+        {"name": "agent-container-acme", "host": "local", "port": 2206, "image": "img",
+         "status": "Up", "uptime": "1h", "stale": False},
+    ]  # fmt: skip
+    monkeypatch.setattr(wiz, "gather_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(wiz, "migrate_flat_state", lambda: None)
+    monkeypatch.setattr(wiz, "detect_runtime", lambda: "docker")
+    captured: dict = {}
+    monkeypatch.setattr(wiz, "emit_json", lambda d=None, error=None: captured.update(d or {}))
+    wiz.do_list(as_json=True)
+    assert captured["unreachable_hosts"] == ["dead-vps"]
+    assert captured["complete"] is False
+
+
+def test_list_json_says_COMPLETE_when_every_host_answered(wiz, monkeypatch):
+    rows = [
+        {"name": "agent-container-acme", "host": "local", "port": 2206, "image": "img",
+         "status": "Up", "uptime": "1h", "stale": False}
+    ]  # fmt: skip
+    monkeypatch.setattr(wiz, "gather_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(wiz, "migrate_flat_state", lambda: None)
+    monkeypatch.setattr(wiz, "detect_runtime", lambda: "docker")
+    captured: dict = {}
+    monkeypatch.setattr(wiz, "emit_json", lambda d=None, error=None: captured.update(d or {}))
+    wiz.do_list(as_json=True)
+    assert captured["unreachable_hosts"] == []
+    assert captured["complete"] is True
+
+
+def test_enumeration_never_syncs_the_operators_inventory(wiz):
+    """FR-003a: the control plane queries permitted hosts LIVE and the live view IS
+    its truth. Syncing the operator's durable file would need a laptop-to-container
+    path FR-003a rules out, and a locked control plane could not receive it anyway.
+    """
+    body = _func_body(Path(wiz.__file__).read_text(), "gather_rows")
+    for durable in ("read_inventory_entries", "inventory_store_dir", "kill_read_inventory"):
+        assert durable not in body, (
+            f"gather_rows reads the durable inventory ({durable}); the control plane "
+            "cannot see that file and its live view is the truth"
+        )

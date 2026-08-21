@@ -10470,11 +10470,89 @@ def row_agent_ssh_public_key(row: dict[str, object]) -> str | None:
     return read_agent_ssh_pubkey(host, name[len(CONTAINER_PREFIX) :])
 
 
+# Feature 017 FR-011, contract C11, research R7. The width at or below which a
+# table stops being readable and the block form takes over.
+#
+# 80 is the criterion SC-007 names, and it is the width a phone terminal in
+# landscape typically reports. The table above needs six columns; at 80 columns
+# rich either truncates cells or wraps them mid-value, and a truncated container
+# name is worse than a longer output because the operator cannot tell which
+# environment a row describes.
+NARROW_COLUMNS = 80
+
+
+def terminal_is_narrow(width: int | None = None) -> bool:
+    """Whether to use the block form — DECIDED BY MEASUREMENT, NOT A FLAG.
+
+    FR-011's motivating case is an operator on a phone. They are already
+    inconvenienced; requiring them to remember `--narrow` puts the work on the
+    person least able to do it, and an operator who forgets it gets the unusable
+    output the flag existed to prevent.
+
+    A width of 0 or None means "not a terminal" — piped, redirected, or a CI log.
+    That is NOT narrow: a consumer reading piped output wants the stable
+    column form, and switching shape based on whether someone is watching is how
+    a script breaks when it is run by hand.
+
+    >>> terminal_is_narrow(200), terminal_is_narrow(80), terminal_is_narrow(40)
+    (False, True, True)
+    >>> terminal_is_narrow(0), terminal_is_narrow(None)
+    (False, False)
+    """
+    if width is None:
+        width = shutil.get_terminal_size(fallback=(0, 0)).columns if sys.stdout.isatty() else 0
+    return 0 < width <= NARROW_COLUMNS
+
+
+def render_rows_narrow(rows: list[dict], fields: tuple[tuple[str, str], ...]) -> list[str]:
+    """One block per row, `LABEL: value` per line — the shape that survives 80
+    columns because nothing has to share a line with anything else.
+
+    Rows are separated by a blank line rather than a rule: a rule costs a full
+    line of width and adds nothing a blank line does not.
+
+    Every value is rendered on its OWN line even when short. A form that inlined
+    short values and blocked long ones would give the same environment a different
+    shape depending on its name length, and an operator scanning for a field would
+    have to find it somewhere new each time.
+
+    >>> render_rows_narrow([{"name": "acme", "host": "vps"}], (("name", "NAME"), ("host", "HOST")))
+    ['NAME: acme', 'HOST: vps']
+    """
+    out: list[str] = []
+    for i, row in enumerate(rows):
+        if i:
+            out.append("")
+        out += [f"{label}: {row.get(key, '')}" for key, label in fields]
+    return out
+
+
+LIST_FIELDS: tuple[tuple[str, str], ...] = (
+    ("name", "NAME"),
+    ("host", "HOST"),
+    ("port", "PORT"),
+    ("image", "IMAGE"),
+    ("status", "STATUS"),
+    ("uptime", "UPTIME"),
+)
+
+
 def do_list(as_json: bool, local_only: bool = False) -> None:
     migrate_flat_state()
     rt = detect_runtime()
     rows = gather_rows(rt, local_only)
     if as_json:
+        # FR-003a/SC-002/T020: the hosts that did not answer, NAMED, as their own
+        # field. They are already present as rows with status `unreachable`, but a
+        # consumer would have to scan and infer — and the failure being guarded is
+        # a consumer that reads a short list as a complete one. An explicit field
+        # is the difference between "there are no containers there" and "nobody
+        # asked successfully".
+        #
+        # The control plane enumerates LIVE (FR-003a) and holds no durable
+        # inventory, so an unreachable host is the one thing it cannot see past.
+        # SC-002 narrows to naming it rather than pretending otherwise.
+        unreachable = sorted({str(r["host"]) for r in rows if r.get("status") == "unreachable"})
         emit_json(
             {
                 "containers": [
@@ -10484,26 +10562,35 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
                         "agent_ssh_public_key": row_agent_ssh_public_key(row),
                     }
                     for row in rows
-                ]
+                ],
+                "unreachable_hosts": unreachable,
+                # False the moment a host is missed. A consumer acting on absence
+                # needs to know absence was not established.
+                "complete": not unreachable,
             }
         )
         return
     if hint := inventory_disagreement_hint():
         warn(hint)  # FR-005a: one line, no classification — that is reconcile's job
+    if terminal_is_narrow():
+        # FR-011/C11: the block form, chosen by measured width. The `stale` dim
+        # styling is dropped here deliberately — at this width the operator may be
+        # reading in bright sunlight on a phone, and a colour distinction that is
+        # the ONLY carrier of a fact is a fact that does not arrive. The staleness
+        # rides in the STATUS value instead.
+        for line in render_rows_narrow(
+            [row | {"status": f"{row['status']} (stale)" if row["stale"] else row["status"]}
+             for row in rows],
+            LIST_FIELDS,
+        ):  # fmt: skip
+            console.print(line, highlight=False)
+        return
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
-    for col in ("NAME", "HOST", "PORT", "IMAGE", "STATUS", "UPTIME"):
+    for _key, col in LIST_FIELDS:
         table.add_column(col)
     for row in rows:
         style = "dim" if row["stale"] else None
-        table.add_row(
-            str(row["name"]),
-            str(row["host"]),
-            str(row["port"]),
-            str(row["image"]),
-            str(row["status"]),
-            str(row["uptime"]),
-            style=style,
-        )
+        table.add_row(*(str(row[key]) for key, _col in LIST_FIELDS), style=style)
     console.print(table)
 
 

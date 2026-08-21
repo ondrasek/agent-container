@@ -111,13 +111,13 @@ cannot fail:
 
 ### Implementation for User Story 1
 
-- [ ] T019 [US1] Live host enumeration on connect in `bin/agent-container` — query the permitted
+- [X] T019 [US1] Live host enumeration on connect in `bin/agent-container` — query the permitted
       hosts, never sync the operator's durable inventory (FR-003a, C2)
-- [ ] T020 [US1] Report which permitted hosts did not answer, in both the human and `--json` views
+- [X] T020 [US1] Report which permitted hosts did not answer, in both the human and `--json` views
       (FR-003a, SC-002)
-- [ ] T021 [P] [US1] Narrow rendering for management commands, selected by **measured width** rather
+- [X] T021 [P] [US1] Narrow rendering for management commands, selected by **measured width** rather
       than a flag (FR-011, C11, R7) — the operator is already on a phone; a flag puts the work on them
-- [ ] T022 [P] [US1] Hermetic test for T021: at 80 columns the renderer emits the block form, and no
+- [X] T022 [P] [US1] Hermetic test for T021: at 80 columns the renderer emits the block form, and no
       line exceeds the width (FR-011, SC-007)
 - [ ] T023 [US1] Verify the in-container CLI reads the injected registry and resolves hosts without
       any on-arrival configuration (FR-002, C1)
