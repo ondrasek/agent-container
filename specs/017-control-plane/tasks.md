@@ -149,9 +149,9 @@ that is visible before deploying.
 
 - [ ] T028 [US2] Declared scope on the environment, **visible before deploy** (FR-004, SC-004) — a
       declaration of intent, not an enforcement point; reach is where the key is authorised
-- [ ] T029 [US2] `revoke <name>` in `bin/agent-container`: withdraw the public key from every host and
+- [X] T029 [US2] `revoke <name>` in `bin/agent-container`: withdraw the public key from every host and
       container that trusts it, in one command (FR-008, C7)
-- [ ] T030 [P] [US2] Hermetic tests for T029's target set — which hosts and containers are visited,
+- [X] T030 [P] [US2] Hermetic tests for T029's target set — which hosts and containers are visited,
       and that a failure on one is reported rather than silently skipped (FR-008, C7)
 - [ ] T031 [US2] Interactive-only enforcement: the key stays **locked** whenever no operator is
       attached; the passphrase is supplied **on connect** (FR-007a, C5)

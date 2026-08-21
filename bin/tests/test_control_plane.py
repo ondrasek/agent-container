@@ -942,3 +942,81 @@ def test_telemetry_is_offered_by_BOTH_completions(wiz):
         assert "collect" in body and "retry" in body, (
             f"{fname} offers `telemetry` but not its subcommands"
         )
+
+
+# --- revocation (FR-008, C7, SC-005, T029/T030) ------------------------------
+
+
+def test_revoke_targets_EVERY_registered_host_not_the_declared_scope(wiz):
+    """The declaration is intent; the key may have been authorised anywhere.
+
+    Revoking only where the tool BELIEVES the key was authorised would leave
+    exactly the authorisation an operator forgot about — the one revocation
+    exists for.
+    """
+    reg = {"hosts": {"a": {}, "b": {}, "c": {}}}
+    assert [h for h, _ in wiz.revoke_targets(reg)] == ["a", "b", "c"]
+    # An empty registry still yields the implicit local host, or a single-host
+    # operator could not revoke at all.
+    assert [h for h, _ in wiz.revoke_targets({"hosts": {}})] == [wiz.DEFAULT_HOST]
+
+
+def test_a_host_with_no_shell_path_is_UNSUPPORTED_not_success(wiz):
+    """The tool holds an SSH identity only for hosts it PROVISIONED. For a host
+    registered by handing over a docker context it can start containers and
+    cannot log in — so the key may still be trusted there.
+
+    Reporting that as done would be the exact false guarantee this command
+    exists to prevent.
+    """
+    with pytest.raises(wiz.NoShellPath):
+        wiz.host_shell_argv({"driver": "docker", "context": "", "address": "localhost"})
+
+
+def test_the_shell_path_uses_the_automation_key_not_the_operators(wiz):
+    """An unattended path must never involve an approval-gated personal key:
+    IdentitiesOnly and IdentityAgent=none, with the key named explicitly."""
+    rec = {
+        "driver": "docker",
+        "context": "agent-container-vps1",
+        "address": "203.0.113.9",
+        "provisioning": {"connection": "ssh-forward"},
+    }
+    argv = wiz.host_shell_argv(rec)
+    assert "-o" in argv and "IdentitiesOnly=yes" in argv
+    assert "IdentityAgent=none" in argv
+    assert "BatchMode=yes" in argv
+    assert argv[-1] == "root@203.0.113.9"
+
+
+def test_unsupported_and_undetermined_BOTH_fail_the_run(wiz):
+    """ "Mostly revoked" is worthless: an operator who believes a key is gone
+    while a host still trusts it stops looking."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_revoke")
+    assert '("undetermined", "unsupported")' in body
+    assert "raise typer.Exit(1)" in body
+
+
+def test_revoke_matches_the_KEY_MATERIAL_not_the_whole_line(wiz):
+    """ssh-keygen writes a comment (`dev@<container-id>`) that differs between
+    the file and the captured copy, so a whole-line comparison would find
+    nothing and report a successful revocation that removed no access."""
+    body = _func_body(Path(wiz.__file__).read_text(), "withdraw_key_from_host")
+    assert 'material = f"{parts[0]} {parts[1]}"' in body
+    # And it must VERIFY a line went, rather than trusting grep's exit status.
+    assert "before" in body and "after" in body
+
+
+def test_revoke_reads_the_public_half_from_LOCAL_state(wiz):
+    """The container may be gone. A revocation that required the thing being
+    revoked to be alive would be useless exactly when it is needed."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_revoke")
+    assert "read_agent_ssh_pubkey(" in body
+
+
+def test_revoke_leaves_the_CONTAINER_alone(wiz):
+    """Revoking access and destroying an environment are different decisions;
+    doing both here would make the safe action expensive."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_revoke")
+    for destructive in ("do_purge", "do_destroy", "compose_down", '"rm"'):
+        assert destructive not in body

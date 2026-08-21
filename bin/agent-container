@@ -5751,6 +5751,181 @@ def do_telemetry_retry(host: str | None, name: str | None, as_json: bool) -> Non
     )
 
 
+def revoke_targets(reg: dict) -> list[tuple[str, dict]]:
+    """Every host whose authorized_keys this tool may have to edit (FR-008, C7).
+
+    ALL registered hosts, not "the ones in the declared scope". The declaration
+    is intent; the key may have been authorised anywhere, and revoking only where
+    the tool believes it was authorised would leave exactly the authorisation an
+    operator forgot about — the one revocation exists for.
+    """
+    hosts = sorted(reg.get("hosts", {}).items())
+    return hosts or [(DEFAULT_HOST, implicit_local_host())]
+
+
+def do_revoke(name: str, yes: bool, as_json: bool) -> None:
+    """`revoke <name>` — withdraw a control plane's public key fleet-wide.
+
+    ONE COMMAND, NOT N HOSTS (FR-008, C7, SC-005). Revocation that meant editing
+    authorized_keys on every host by hand is revocation an operator does
+    partially, under pressure, and believes they finished.
+
+    THE KEY IS THE BOUNDARY, so this is the only concrete narrowing there is.
+    `control_plane_hosts` is a declaration of intent and cannot constrain reach;
+    withdrawing the authorised public half is what actually removes access.
+
+    A HOST THAT COULD NOT BE REACHED IS A FAILURE, NAMED, and the command exits
+    non-zero. This is the one place where "mostly done" is worthless: an operator
+    who believes a key is revoked while one host still trusts it is worse off than
+    one who knows the revocation is incomplete, because the first stops looking.
+    """
+    pub = None
+    reg = load_registry()
+    targets = revoke_targets(reg)
+    # The public half is read from LOCAL state, never from the container: the
+    # container may be gone, and a revocation that required the thing being
+    # revoked to be alive would be useless exactly when it is needed.
+    for host_name, _rec in targets:
+        if (found := read_agent_ssh_pubkey(host_name, name)) is not None:
+            pub = found
+            break
+    if pub is None:
+        die(
+            f"no captured public key for '{name}' — nothing to withdraw",
+            remedy=(
+                "the key is captured at deploy; if this environment predates that, "
+                "remove the entry from each host's authorized_keys by hand, or "
+                "`purge` the environment to destroy the key itself"
+            ),
+        )
+    if not yes:
+        if not is_tty():
+            die("refusing to revoke without -y/--yes on a non-TTY")
+        if not questionary.confirm(
+            f"withdraw {name}'s key from {len(targets)} host(s)? It will lose all access.",
+            default=False,
+        ).ask():
+            log("aborted")
+            return
+    results: list[dict] = []
+    for host_name, rec in targets:
+        try:
+            removed = withdraw_key_from_host(rec, pub)
+            results.append({"host": host_name, "outcome": "withdrawn" if removed else "absent"})
+        except NoShellPath:
+            # DISTINCT from undetermined, and it still fails the run. The tool can
+            # reach this host's daemon but cannot log in to edit authorized_keys,
+            # so the key may still be trusted there — and a fleet-wide revocation
+            # that quietly skipped it would be the exact false guarantee this
+            # command exists to prevent. The operator is told which hosts to do
+            # by hand, which is a usable answer; "done" would not be.
+            results.append(
+                {
+                    "host": host_name,
+                    "outcome": "unsupported",
+                    "detail": (
+                        "no shell path: the tool holds an SSH identity only for hosts it "
+                        "provisioned. Remove the key from ~/.ssh/authorized_keys here by hand"
+                    ),
+                }
+            )
+        except (Fatal, OSError, subprocess.SubprocessError) as e:
+            # `undetermined`, never `withdrawn`. The tool did not observe the key
+            # gone, and claiming it did is the failure this whole command exists
+            # to avoid.
+            results.append({"host": host_name, "outcome": "undetermined", "detail": str(e)})
+    unresolved = [r for r in results if r["outcome"] in ("undetermined", "unsupported")]
+    ok = not unresolved
+    if as_json:
+        emit_json({"name": name, "results": results, "ok": ok})
+    else:
+        for r in results:
+            log(f"{r['host']}: {r['outcome']}" + (f" ({r['detail']})" if r.get("detail") else ""))
+        if ok:
+            log(
+                f"{name}: key withdrawn fleet-wide. The container is untouched and still "
+                f"running — `stop`/`destroy` it separately if that is what you want"
+            )
+        else:
+            warn(
+                f"{name}: revocation is INCOMPLETE — could not confirm on: "
+                f"{', '.join(r['host'] for r in unresolved)}. Those hosts MAY STILL TRUST "
+                f"this key; each line above says whether to re-run or to edit by hand"
+            )
+    if not ok:
+        raise typer.Exit(1)
+
+
+class NoShellPath(Exception):
+    """The tool has a DAEMON path to this host but no shell on it.
+
+    Not a failure and not a success. `revoke` edits `~/.ssh/authorized_keys`,
+    which needs a shell, and the tool only holds an SSH identity for hosts it
+    PROVISIONED. For a host the operator registered by handing over a docker
+    context, the tool can start containers there and cannot log in — so the key
+    may still be authorised and the tool cannot say otherwise.
+    """
+
+
+def host_shell_argv(host_rec: dict) -> list[str]:
+    """An argv prefix that runs a command in a shell ON the host.
+
+    Provisioned hosts only, using the automation key the tool holds — the same
+    identity the docker socket-forward uses, stated as literal CLI args with no
+    ~/.ssh/config and no agent, so an operator's approval-gated key is never
+    involved in an unattended path.
+    """
+    prov = host_rec.get("provisioning") or {}
+    ip = host_rec.get("address")
+    name = host_name_from_context(host_rec.get("context") or "")
+    if prov.get("connection") != "ssh-forward" or not ip or not name:
+        raise NoShellPath
+    return [
+        shutil.which("ssh") or "ssh",
+        "-i", str(automation_key_path(name)),
+        "-o", "IdentitiesOnly=yes",
+        "-o", "IdentityAgent=none",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={Path.home() / '.ssh' / 'known_hosts'}",
+        "-o", "BatchMode=yes",
+        f"root@{ip}",
+    ]  # fmt: skip
+
+
+def withdraw_key_from_host(host_rec: dict, pubkey: str) -> bool:
+    """Remove `pubkey` from the host's authorized_keys. True if a line went.
+
+    Matched on the KEY MATERIAL — the type and base64 body — not on the whole
+    line. A comment differs between the file and the captured copy (ssh-keygen
+    writes `dev@<container-id>`), so a whole-line comparison would find nothing
+    and report a successful revocation that removed no access.
+    """
+    parts = pubkey.split()
+    if len(parts) < 2:
+        raise Fatal(f"captured public key is malformed: {pubkey[:32]!r}")
+    material = f"{parts[0]} {parts[1]}"
+    # awk over the file, in place via a temp + mv, so a partial write cannot
+    # leave an authorized_keys that locks the operator out of their own host.
+    script = (
+        'set -e; f="$HOME/.ssh/authorized_keys"; [ -f "$f" ] || exit 42; '
+        f"m={shlex.quote(material)}; "
+        't="$f.revoke.$$"; before=$(wc -l < "$f"); '
+        'grep -vF "$m" "$f" > "$t" || : ; after=$(wc -l < "$t"); '
+        'cat "$t" > "$f"; rm -f "$t"; '
+        '[ "$before" != "$after" ] || exit 43'
+    )
+    argv = host_shell_argv(host_rec) + ["bash", "-lc", script]
+    r = query(argv, timeout=KILL_HOST_TIMEOUT)
+    if r.returncode == 0:
+        return True
+    if r.returncode in (42, 43):
+        # 42: no authorized_keys at all. 43: the key was not in it. Both mean the
+        # host does not trust this key, which is the goal — reported as `absent`
+        # rather than as a failure, because a retry would change nothing.
+        return False
+    raise Fatal(f"could not edit authorized_keys (exit {r.returncode}): {r.stderr.strip()[:120]}")
+
+
 def do_telemetry_collect(hosts: list[str] | None, names: list[str] | None, as_json: bool) -> None:
     """`telemetry collect` — FR-009e, contract C18, research R13.
 
@@ -15505,6 +15680,31 @@ runs_app = typer.Typer(
     ),
 )
 app.add_typer(runs_app, name="runs")
+
+
+@app.command()
+def revoke(
+    name: str = typer.Argument(..., help="Control-plane environment whose key to withdraw."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Withdraw a control plane's public key from every host that trusts it.
+
+    ONE COMMAND, NOT N HOSTS (FR-008). The key IS the boundary — the declared
+    scope is intent and cannot constrain reach — so this is the only concrete
+    narrowing there is.
+
+    The container is left running and untouched: revoking access and destroying
+    an environment are different decisions, and doing both here would make the
+    safe action expensive.
+
+    Exits non-zero if ANY host could not be confirmed. "Mostly revoked" is
+    worthless: an operator who believes a key is gone while a host still trusts
+    it stops looking.
+    """
+    set_json_mode(as_json)
+    do_revoke(name, yes, as_json)
+
 
 telemetry_app = typer.Typer(
     no_args_is_help=True,

@@ -128,6 +128,7 @@ _agent-container() {
         'egress:Durable record of undeclared egress — survives teardown'
         'inventory:Durable record of every environment created — survives its host'
         'doctor:Would a deploy work? Read-only preflight report'
+        'revoke:Withdraw a control plane key from every host that trusts it'
         'telemetry:The observability trail (collect, retry) — two legs, one payload'
                 'ssh-key:The agent'"'"'s own SSH key pair (show, rotate) — private half never leaves'
         'panic:KILL SWITCH — stop everything, everywhere, and report what it could not reach'
@@ -228,6 +229,11 @@ _agent-container() {
                     _arguments \
                         '--host[Override the host to check]:host:' \
                         '--json[Machine-readable report]' \
+                        '*:container:__agent_container_names'
+                    ;;
+                revoke)
+                    _arguments '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
+                        '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names'
                     ;;
                 telemetry)
