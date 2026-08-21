@@ -345,8 +345,11 @@ and the drift would be invisible because each leg still looks correct alone.
 - [X] T078 One-line invariant in `CLAUDE.md` (Constitution: docs track behaviour). The file is at
       **~1993 tokens with ~7 to spare**, so this **DISPLACES** something - measure with a tokenizer,
       not `chars/4`, which understates by ~7%
-- [ ] T079 Confirm the commit is `feat` - MINOR (Constitution VII). Additive: a command, a second
-      image, an export path; nothing removed and no flag changes meaning
+- [X] T079 Confirm the commit is `feat` - MINOR (Constitution VII). **Verified**: 10 `feat`, 2 `fix`,
+      3 `docs`, 2 `test`, and **zero** `BREAKING CHANGE`/`!` markers across the feature. One commit
+      carries `!` (the control-plane base-image change) for reader visibility; with
+      `major_on_zero = false` that is still a **MINOR** bump pre-1.0, not a major one. Additive: a
+      command, a second image, an export path; nothing removed and no flag changes meaning
 - [ ] T080 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`**,
       then walk **every scenario in `quickstart.md`** by hand — named as a file rather than a range,
       because a range silently narrows the moment a scenario is added, and the scenarios added last

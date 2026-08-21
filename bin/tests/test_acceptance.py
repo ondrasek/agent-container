@@ -5254,6 +5254,37 @@ def test_deploying_a_control_plane_GRANTS_NOTHING(acc, _control_plane_image):
     assert port > 0
 
 
+# THE IN-CONTAINER CLI IS THE LAST RELEASED ONE, NOT THIS WORKING TREE.
+#
+# The control-plane image installs `agent_container` from PyPI at a pinned version
+# (research R1), because the build context is one image directory by construction
+# and the checkout is not reachable from it. So the CLI inside the container is
+# whatever was last PUBLISHED — and an acceptance test of in-container behaviour
+# therefore measures the released CLI, not the code under test.
+#
+# That is a chicken-and-egg for any feature still in development: the first run of
+# this test failed with `{'form': 'destroy', 'results': [], 'excluded': 0}` — an
+# envelope with no `self_excluded` key at all, exactly what an older CLI emits.
+# The property was correct and the test was measuring the wrong binary.
+#
+# So tests that exercise UNRELEASED in-container behaviour mount the working-tree
+# CLI over the installed one. The container already has Python 3.14 and the four
+# runtime dependencies (they are `agent_container`'s own), so the single-file
+# script runs directly.
+def _exec_working_tree_cli(cname: str, *args: str, env: dict | None = None, timeout: int = 300):
+    """Run THIS checkout's CLI inside `cname`.
+
+    Mounting rather than trusting the installed copy, so the test measures the
+    code under review. A test that silently exercised the released CLI would pass
+    or fail for reasons unrelated to the change in front of you.
+    """
+    argv = [RUNTIME, "exec"]
+    for k, v in (env or {}).items():
+        argv += ["-e", f"{k}={v}"]
+    argv += [cname, "python3", "/mnt/agent-container-under-test", *args]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
 def test_panic_from_inside_EXCLUDES_ITSELF_and_survives(acc, _control_plane_image):
     """T035 / S8 / C9 / SC-010 / SC-006.
 
@@ -5261,13 +5292,16 @@ def test_panic_from_inside_EXCLUDES_ITSELF_and_survives(acc, _control_plane_imag
     telling the truth about what it could not reach, and there is no report at all
     if the reporter is the first casualty.
     """
-    acc.up("hub6", role="control-plane")
+    acc.up(
+        "hub6", role="control-plane", mount=[f"{SCRIPT_PATH}:/mnt/agent-container-under-test:ro"]
+    )
     acc.up("victim", wait=False, mode="headless", task="sleep 300")
-    r = subprocess.run(
-        [RUNTIME, "exec", "-e", "AGENT_CONTAINER_CONTROL_PLANE_NAME=hub6",
-         "agent-container-hub6", "agent-container", "panic", "--destroy", "-y", "--json"],
-        capture_output=True, text=True, timeout=300,
+    r = _exec_working_tree_cli(
+        "agent-container-hub6",
+        "panic", "--destroy", "-y", "--json",
+        env={"AGENT_CONTAINER_CONTROL_PLANE_NAME": "hub6"},
     )  # fmt: skip
+    assert r.returncode in (0, 1), f"panic did not run inside the container:\n{r.stderr[-2000:]}"
     payload = json.loads(r.stdout)
     data = payload.get("data", payload)
     assert "hub6" in (data.get("self_excluded") or []), (
