@@ -332,7 +332,7 @@ and the drift would be invisible because each leg still looks correct alone.
       payload shape, and the export state values (FR-009f, FR-009h, data-model §6)
 - [ ] T076 [P] `README.md` - a short control-plane section, matching how 018/019/013 treat theirs
       (FR-001; Constitution: docs track behaviour)
-- [ ] T077 **`docs/threat-model.md` - the 017 row. This feature INTRODUCES A NEW TRUST BOUNDARY**
+- [X] T077 **`docs/threat-model.md` - the 017 row. This feature INTRODUCES A NEW TRUST BOUNDARY**
       (Constitution MUST). Record: the standing key spanning a sandbox shell and daemon access; the
       **passphrase transiting the tool** for one print (R3) as a stated narrow exception to
       Constitution III; the export as a new outbound channel a Feature 012 declaration governs; that
