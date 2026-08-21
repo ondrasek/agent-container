@@ -152,9 +152,19 @@ def test_exec_spec_compose_environment(wiz):
         "AGENT_CONTAINER_MODE": "headless",
         "AGENT_CONTAINER_AGENT": "pi",
         "AGENT_CONTAINER_CLONE_URL": "https://github.com/x/y",
+        # Feature 017: always present, so `redeploy` can read the role back off a
+        # running container rather than defaulting it.
+        "AGENT_CONTAINER_ROLE": "agent",
     }
     # clone URL uses AGENT_CONTAINER_CLONE_URL, NOT AGENT_CONTAINER_REPO (H1).
     assert "AGENT_CONTAINER_REPO" not in e
+    # The control plane's own NAME is set only for that role, and only when the
+    # caller passes one — `panic` self-exclusion and nested provenance both read
+    # it, and neither can derive it from inside the container.
+    assert "AGENT_CONTAINER_CONTROL_PLANE_NAME" not in e
+    cp = wiz.ExecSpec(role=wiz.ROLE_CONTROL_PLANE).compose_environment("hub")
+    assert cp["AGENT_CONTAINER_CONTROL_PLANE_NAME"] == "hub"
+    assert cp["AGENT_CONTAINER_ROLE"] == "control-plane"
 
 
 def test_compose_environment_skips_repo_for_bind(wiz):

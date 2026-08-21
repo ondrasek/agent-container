@@ -8321,11 +8321,25 @@ class ExecSpec:
         success exits and is not resurrected, a failure follows policy (FR-005)."""
         return "on-failure" if self.mode == "headless" else "unless-stopped"
 
-    def compose_environment(self) -> dict[str, str]:
+    def compose_environment(self, name: str | None = None) -> dict[str, str]:
         """The non-secret settings delivered as compose environment. The clone URL
         env is AGENT_CONTAINER_CLONE_URL — distinct from AGENT_CONTAINER_REPO (the
         CLI's host-side build-context override)."""
         env = {"AGENT_CONTAINER_MODE": self.mode, "AGENT_CONTAINER_AGENT": self.agent}
+        env["AGENT_CONTAINER_ROLE"] = self.role
+        if self.role == ROLE_CONTROL_PLANE and name:
+            # Feature 017 FR-010/FR-014a: the container has to know its OWN name,
+            # because two things inside it read this and neither can derive it.
+            # `panic` excludes this container by name (stopping itself would kill
+            # the process mid-operation and the report would never be delivered),
+            # and a nested deploy records `control-plane:<name>` as provenance so
+            # standing keys minted from inside remain countable.
+            #
+            # Without this the CLI in the container is indistinguishable from the
+            # operator's own: both features would be silently inert, and inert is
+            # exactly what they must not be — an absent exclusion reads as a
+            # `panic` that simply worked.
+            env["AGENT_CONTAINER_CONTROL_PLANE_NAME"] = name
         # Clone-on-start applies to persistent/ephemeral only — a bind workspace is
         # already present and is never cloned (data-model R4), so don't even set the
         # env for it.
@@ -8340,7 +8354,13 @@ class ExecSpec:
 # headless run's job re-executing on every rebuild is the kind of surprise that
 # rewrites files or opens pull requests nobody asked for. `foreground` is excluded
 # because it describes THIS invocation's terminal, not the environment.
-INHERITABLE = frozenset({"mode", "agent", "repo", "workspace"})
+#
+# `role` IS inheritable, and it has to be: a bare `redeploy` on a control plane
+# would otherwise deploy it as an ordinary agent environment — swapping the image,
+# losing the passphrase-protected key's reason for being there, and putting an
+# agent CLI in the container whose key reaches the fleet. The failure would look
+# like a successful redeploy.
+INHERITABLE = frozenset({"mode", "agent", "repo", "workspace", "role"})
 
 
 def resolve_task(task: str | None) -> str | None:
@@ -8660,7 +8680,7 @@ def compose_up_exec(
         mounts,
         injected_configs=injected,
         restart=spec.restart_policy(),
-        environment=spec.compose_environment() | _egress_env,
+        environment=spec.compose_environment(name) | _egress_env,
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
         egress_filter_body=egress_body,
@@ -13774,6 +13794,12 @@ def env_live_config(host_rec: dict, name: str) -> dict[str, str | None] | None:
         "mode": env.get("AGENT_CONTAINER_MODE"),
         "agent": env.get("AGENT_CONTAINER_AGENT"),
         "repo": env.get("AGENT_CONTAINER_CLONE_URL"),
+        # Feature 017. Absent means a container deployed before the role existed,
+        # which is an AGENT environment — the only thing this tool could deploy
+        # then. Defaulting to the control-plane role on absence would be the
+        # dangerous direction: it would swap in the narrower image on the next
+        # redeploy of every pre-017 environment.
+        "role": env.get("AGENT_CONTAINER_ROLE") or ROLE_AGENT,
     }
 
 
@@ -13816,6 +13842,33 @@ def live_workspace(host_rec: dict, name: str) -> tuple[str, str | None] | None:
     return ("ephemeral", None)
 
 
+def recorded_role(name: str, host: str | None = None) -> str | None:
+    """The role the INVENTORY recorded for `name`, or None if unrecorded.
+
+    A backstop for role inheritance, and the reason the role is persisted at all
+    (data-model §1). `inherit_live_spec` reads the role off the RUNNING container,
+    which is the right primary source — but a container that cannot be inspected
+    yields nothing, and the ExecSpec default is `agent`. A `redeploy` that fell
+    back to the default would swap the narrow image for the agent image, put an
+    agent CLI in the container whose key reaches the fleet, and report success.
+
+    Most recent active entry wins: a name may have been deployed more than once,
+    and the current deployment is the one being redeployed.
+    """
+    best: dict | None = None
+    for e in read_inventory_entries():
+        if e.get("name") != name:
+            continue
+        if host is not None and e.get("host") != host:
+            continue
+        if best is None or str(e.get("created_at") or "") > str(best.get("created_at") or ""):
+            best = e
+    if best is None:
+        return None
+    role = best.get("role")
+    return str(role) if role in ROLES else None
+
+
 def inherit_live_spec(
     host_rec: dict, name: str, spec: ExecSpec, inherit: frozenset[str]
 ) -> list[str]:
@@ -13828,11 +13881,25 @@ def inherit_live_spec(
     """
     changed: list[str] = []
     live = env_live_config(host_rec, name) or {}
-    for key in ("mode", "agent", "repo"):
+    for key in ("mode", "agent", "repo", "role"):
         if key in inherit and (value := live.get(key)):
             if getattr(spec, key) != value:
                 changed.append(f"--{key} {value}")
             setattr(spec, key, value)
+    # FR-001 backstop. If the live container said nothing about the role but the
+    # inventory recorded a control plane, believe the inventory and say so. The
+    # failure this prevents is silent and severe: a redeploy that swaps the narrow
+    # image for the agent image, and reports success.
+    if "role" in inherit and spec.role == ROLE_AGENT and not live.get("role"):
+        if (recorded := recorded_role(name)) == ROLE_CONTROL_PLANE:
+            warn(
+                f"{name}: the container could not be inspected for its role, but the "
+                f"inventory records it as a {recorded}. Keeping that role — redeploying "
+                f"it as an agent environment would swap in the image that installs an "
+                f"agent CLI"
+            )
+            spec.role = recorded
+            changed.append(f"--role {recorded}")
     if "workspace" in inherit and (ws := live_workspace(host_rec, name)) is not None:
         mode, bind_dir = ws
         if spec.workspace != mode:

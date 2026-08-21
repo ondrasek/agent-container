@@ -283,7 +283,17 @@ def test_env_live_config_parses_inspect_env(wiz, monkeypatch):
         wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 0, out, "")
     )
     cfg = wiz.env_live_config(LOCAL_HOST, "acme")
-    assert cfg == {"mode": "headless", "agent": "codex", "repo": None, "egress": None}
+    # Feature 017: an ABSENT role reads as `agent` — the only thing this tool
+    # could deploy before the role existed. Defaulting to control-plane would be
+    # the dangerous direction: the next redeploy of every pre-017 environment
+    # would swap in the narrower image.
+    assert cfg == {
+        "mode": "headless",
+        "agent": "codex",
+        "repo": None,
+        "egress": None,
+        "role": "agent",
+    }
     # a failed inspect → None (never a fabricated config)
     monkeypatch.setattr(
         wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 1, "", "no such")
