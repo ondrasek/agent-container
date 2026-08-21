@@ -134,6 +134,31 @@ RUN set -eux; \
     agent-container --help > /dev/null; \
     command -v agent-container
 
+# --- Layer 2b: a container runtime CLIENT --------------------------------------
+# WITHOUT THIS THE CONTROL PLANE CANNOT MANAGE ANYTHING, and the failure is not
+# subtle: `detect_runtime()` dies with "neither 'podman' nor 'docker' on PATH",
+# so every management command refuses. The first version of this image omitted it
+# and the acceptance test that SSHes in and runs `list` is what found it — no
+# amount of reading the Dockerfile would have, because nothing in it looks
+# missing.
+#
+# The CLIENT ONLY. No daemon, no dockerd, no podman machine: this container talks
+# to a REMOTE daemon over the operator's docker contexts (Feature 002), and a
+# daemon here would need privileges the whole design refuses (Constitution II).
+# `docker-cli` from Debian is the client binary alone.
+#
+# `podman-remote` is deliberately NOT installed. It would double the surface for
+# a case the control plane does not have: the hosts it manages are reached
+# through docker contexts, and `detect_runtime` prefers docker on any platform
+# where docker is present. A control plane whose hosts are podman-only can set
+# AGENT_CONTAINER_RUNTIME, and the honest answer then is that this image needs
+# podman-remote added — stated here rather than discovered.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends docker-cli \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version
+
 # --- Layer 3: user + ROOTLESS sshd config -----------------------------------
 # Identical posture to the agent image, and deliberately so: a control plane is
 # an ordinary environment (Constitution IV) with the same naming, ports and

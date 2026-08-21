@@ -217,23 +217,6 @@ def _wait_until(predicate, what: str, timeout: int = 60) -> None:
     pytest.fail(f"timed out after {timeout}s waiting for: {what}")
 
 
-def _wait_for_container_exit(cname: str, timeout: int = 120) -> None:
-    """Wait for a headless container to finish.
-
-    A record is written on the way out, so asserting on the trail before the
-    container has exited measures a race rather than the feature.
-    """
-
-    def gone() -> bool:
-        r = subprocess.run(
-            [RUNTIME, "inspect", "-f", "{{.State.Running}}", cname],
-            capture_output=True, text=True, timeout=30,
-        )  # fmt: skip
-        return r.returncode != 0 or r.stdout.strip() != "true"
-
-    _wait_until(gone, f"{cname} to exit", timeout=timeout)
-
-
 def _runs_store_of(state_dir: Path) -> Path:
     """The durable run store under the isolated XDG_DATA_HOME (see _cli_env).
 
@@ -4060,8 +4043,39 @@ def test_the_inventory_holds_no_free_text_field(acc):
         "created_at",
         "outcome",
         "outcome_at",
+        # Feature 017. This literal is the THIRD encoding of the field set — the
+        # constant, the hermetic test, and this one — and only the acceptance tier
+        # sees a REAL deployment, so only it can catch a field that the
+        # constructor closes and the writer then widens.
+        "role",
+        "provenance",
         "notes",
     }
+    # And the two new fields are CLOSED VOCABULARIES, checked on a real deploy.
+    # That is the substance of FR-010 here: `provenance` embeds a name, and an
+    # earlier version of `deploy_provenance` read it straight from an env var —
+    # so the field set stayed closed while its CONTENTS became operator-supplied
+    # free text. A set-of-keys assertion cannot see that.
+    assert entry["role"] in ("agent", "control-plane")
+    assert entry["provenance"] == "operator" or entry["provenance"].startswith("control-plane:")
+
+
+def test_the_inventory_provenance_cannot_be_made_free_text(acc):
+    """FR-010, the negative arm, against a real deployment.
+
+    `provenance` is the one inventory field whose value comes from the
+    environment rather than from the tool's own state, so it is the one place the
+    closed field set can be true while a credential still arrives. An invalid name
+    must be REFUSED and recorded as `control-plane:unknown`, never passed through.
+    """
+    marker = "ghp_notARealToken; rm -rf /"
+    acc.up("accinv5", env_extra=[])
+    r = acc.cli(
+        ["inventory", "list", "--json"],
+        extra_env={"AGENT_CONTAINER_CONTROL_PLANE_NAME": marker},
+    )
+    assert r.returncode == 0, r.stderr
+    assert marker not in r.stdout, "an env-supplied name reached the inventory verbatim"
 
 
 # --- Feature 015: the kill switch (`panic`) ----------------------------------
@@ -5166,7 +5180,17 @@ def test_THE_GATE_the_passphrase_exists_NOWHERE(acc, _control_plane_image, tmp_p
             )
 
     # 3. Not in any --json payload.
-    r = acc.cli([*AGENT_CONTAINER, "list", "--json"])
+    #
+    # RETURNCODE ASSERTED FIRST. The first version of this step double-prepended
+    # the CLI argv, so the command failed with a usage error and the absence
+    # assertion passed against that — a vacuous pass on the feature's
+    # load-bearing absence. An absence check must prove the thing that would
+    # contain the value actually ran.
+    r = acc.cli(["list", "--json"])
+    assert r.returncode == 0, (
+        f"`list --json` did not run, so its absence proves nothing:\n{r.stderr}"
+    )
+    assert '"containers"' in r.stdout, f"`list --json` produced no listing: {r.stdout[:300]}"
     assert passphrase not in r.stdout, "the passphrase is in `list --json`"
 
     # 4. Not in any run record the tool ingested.
@@ -5184,8 +5208,8 @@ def test_the_passphrase_is_printed_ONCE_not_on_every_boot(acc, _control_plane_im
     """
     first = acc.up_raw("hub2", role="control-plane")
     assert _extract_passphrase(first.stdout + first.stderr)
-    acc.cli([*AGENT_CONTAINER, "stop", "hub2"])
-    second = acc.cli([*AGENT_CONTAINER, "start", "hub2"])
+    acc.cli(["stop", "hub2"])
+    second = acc.cli(["start", "hub2"])
     assert not _extract_passphrase(second.stdout + second.stderr), (
         "a passphrase was printed on a restart — either the key was regenerated or "
         "the value is being stored somewhere"
@@ -5271,6 +5295,18 @@ def test_deploying_a_control_plane_GRANTS_NOTHING(acc, _control_plane_image):
 # CLI over the installed one. The container already has Python 3.14 and the four
 # runtime dependencies (they are `agent_container`'s own), so the single-file
 # script runs directly.
+# `--mount` takes a DIRECTORY, not a file — the CLI refuses a file path outright,
+# which is how the first version of these tests failed ("host path ... does not
+# exist or is not a directory"). So the CHECKOUT'S BIN DIRECTORY is mounted and
+# the script referenced inside it.
+_CLI_MOUNT_DIR = "/mnt/agent-container-src"
+_CLI_UNDER_TEST = f"{_CLI_MOUNT_DIR}/{SCRIPT_PATH.name}"
+
+
+def _cli_mount() -> str:
+    return f"{SCRIPT_PATH.parent}:{_CLI_MOUNT_DIR}:ro"
+
+
 def _exec_working_tree_cli(cname: str, *args: str, env: dict | None = None, timeout: int = 300):
     """Run THIS checkout's CLI inside `cname`.
 
@@ -5281,7 +5317,7 @@ def _exec_working_tree_cli(cname: str, *args: str, env: dict | None = None, time
     argv = [RUNTIME, "exec"]
     for k, v in (env or {}).items():
         argv += ["-e", f"{k}={v}"]
-    argv += [cname, "python3", "/mnt/agent-container-under-test", *args]
+    argv += [cname, "python3", _CLI_UNDER_TEST, *args]
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
@@ -5292,9 +5328,7 @@ def test_panic_from_inside_EXCLUDES_ITSELF_and_survives(acc, _control_plane_imag
     telling the truth about what it could not reach, and there is no report at all
     if the reporter is the first casualty.
     """
-    acc.up(
-        "hub6", role="control-plane", mount=[f"{SCRIPT_PATH}:/mnt/agent-container-under-test:ro"]
-    )
+    acc.up("hub6", role="control-plane", mount=[_cli_mount()])
     acc.up("victim", wait=False, mode="headless", task="sleep 300")
     r = _exec_working_tree_cli(
         "agent-container-hub6",
@@ -5403,6 +5437,29 @@ def _settings(acc, **keys) -> None:
     )
 
 
+def _headless_run(acc, name: str, marker: str = "hello") -> None:
+    """A headless run that ACTUALLY ENDS, using the suite's stand-in agent.
+
+    The first version of these tests passed a shell command as `--task` to the
+    real `claude` binary, which is uncredentialed here — so the container never
+    exited and seven tests died on a 120s timeout that read like an export
+    failure. `foreground=True` then removes the wait entirely: `up` returns when
+    the run completes, so there is no race left to poll for.
+    """
+    ws = _fake_agent(acc, name, f"echo {marker}; exit 0")
+    acc.up(
+        name,
+        mode="headless",
+        agent="claude",
+        task=marker,
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        foreground=True,
+        wait=False,
+    )
+
+
 def test_a_REFUSING_collector_makes_records_rejected_not_accepted(acc, tmp_path):
     """T052 / SC-021 / S17 — the naive-implementation catcher.
 
@@ -5414,9 +5471,8 @@ def test_a_REFUSING_collector_makes_records_rejected_not_accepted(acc, tmp_path)
     """
     with _collector("refuse", 9531):
         _settings(acc, otlp_endpoint=_collector_url(9531))
-        acc.up("expref", wait=False, mode="headless", task="echo hello")
-        _wait_for_container_exit("agent-container-expref")
-        acc.cli([*AGENT_CONTAINER, "telemetry", "collect"])
+        _headless_run(acc, "expref")
+        acc.cli(["telemetry", "collect"])
         states = _record_states(acc)
     assert states, "no records were collected at all"
     assert "accepted" not in states, (
@@ -5430,10 +5486,9 @@ def test_export_is_FAIL_OPEN_when_the_collector_is_unreachable(acc):
     """T061 / S14 / C18c. The work must not be blocked by its own observability,
     and the record must survive locally with the gap visible."""
     _settings(acc, otlp_endpoint="http://127.0.0.1:9599/v1/logs")  # nothing listening
-    r = acc.up("expopen", wait=False, mode="headless", task="echo still-works")
-    assert r.returncode == 0, f"an unreachable collector blocked the deploy:\n{r.stderr}"
-    _wait_for_container_exit("agent-container-expopen")
-    acc.cli([*AGENT_CONTAINER, "telemetry", "collect"])
+    # Fail-open is asserted by the run COMPLETING, which `_headless_run` requires.
+    _headless_run(acc, "expopen", "still-works")
+    acc.cli(["telemetry", "collect"])
     states = _record_states(acc)
     assert states, "the local record did not survive an unreachable collector"
     # RETRYABLE, not terminal — the collector may simply be back later. This is
@@ -5479,15 +5534,13 @@ def test_the_task_marker_is_present_by_default_and_absent_when_excluded(acc):
     marker = "TASKMARKER-9f2b-do-the-thing"
     with _collector("accept", 9533) as log:
         _settings(acc, otlp_endpoint=_collector_url(9533))
-        acc.up("exptask", wait=False, mode="headless", task=f"echo {marker}")
-        _wait_for_container_exit("agent-container-exptask")
+        _headless_run(acc, "exptask", marker)
         _wait_until(lambda: log.exists() and marker in log.read_text(errors="replace"),
                     f"the task marker {marker} at the collector")  # fmt: skip
 
     with _collector("accept", 9534) as log2:
         _settings(acc, otlp_endpoint=_collector_url(9534), export_task_text=False)
-        acc.up("exptask2", wait=False, mode="headless", task=f"echo {marker}")
-        _wait_for_container_exit("agent-container-exptask2")
+        _headless_run(acc, "exptask2", marker)
         _wait_until(lambda: log2.exists() and log2.stat().st_size > 0, "a record at the collector")
         body = log2.read_text(errors="replace")
     assert marker not in body, (
@@ -5506,8 +5559,7 @@ def test_an_agent_container_exports_with_NO_control_plane_deployed(acc):
     as control-plane plumbing."""
     with _collector("accept", 9535) as log:
         _settings(acc, otlp_endpoint=_collector_url(9535))
-        acc.up("expplain", wait=False, mode="headless", task="echo no-control-plane-here")
-        _wait_for_container_exit("agent-container-expplain")
+        _headless_run(acc, "expplain", "no-control-plane-here")
         _wait_until(lambda: log.exists() and log.stat().st_size > 0,
                     "a record from an ordinary agent container")  # fmt: skip
         body = log.read_text(errors="replace")
@@ -5527,18 +5579,16 @@ def test_collect_works_with_AND_without_an_endpoint(acc):
     """
     # WITHOUT.
     _settings(acc)
-    acc.up("collnone", wait=False, mode="headless", task="echo without-endpoint")
-    _wait_for_container_exit("agent-container-collnone")
-    r1 = acc.cli([*AGENT_CONTAINER, "telemetry", "collect", "--json"])
+    _headless_run(acc, "collnone", "without-endpoint")
+    r1 = acc.cli(["telemetry", "collect", "--json"])
     assert r1.returncode == 0, f"collect failed with no endpoint declared:\n{r1.stderr}"
     assert _record_states(acc), "collect retrieved nothing with no endpoint declared"
 
     # WITH.
     with _collector("accept", 9536):
         _settings(acc, otlp_endpoint=_collector_url(9536))
-        acc.up("collwith", wait=False, mode="headless", task="echo with-endpoint")
-        _wait_for_container_exit("agent-container-collwith")
-        r2 = acc.cli([*AGENT_CONTAINER, "telemetry", "collect", "--json"])
+        _headless_run(acc, "collwith", "with-endpoint")
+        r2 = acc.cli(["telemetry", "collect", "--json"])
     assert r2.returncode == 0, f"collect failed with an endpoint declared:\n{r2.stderr}"
     data = json.loads(r2.stdout).get("data", {})
     assert data.get("complete") is True, f"collect reported an incomplete trail: {data}"
@@ -5553,8 +5603,7 @@ def test_the_exported_trail_survives_the_destruction_of_its_host(acc):
     """
     with _collector("accept", 9537) as log:
         _settings(acc, otlp_endpoint=_collector_url(9537))
-        acc.up("tamper", wait=False, mode="headless", task="echo evidence-9f2b")
-        _wait_for_container_exit("agent-container-tamper")
+        _headless_run(acc, "tamper", "evidence-9f2b")
         _wait_until(lambda: log.exists() and "evidence-9f2b" in log.read_text(errors="replace"),
                     "the record at the collector")  # fmt: skip
         # DESTROY the source, volumes and all.
@@ -5595,8 +5644,8 @@ def test_an_unreachable_permitted_host_is_NAMED_never_omitted(acc, _control_plan
     acts on absence. Registers a host that cannot answer and asserts it is
     reported rather than dropped.
     """
-    acc.cli([*AGENT_CONTAINER, "host", "add", "deadvps", "--docker-context", "nonexistent-ctx-xyz"])
-    r = acc.cli([*AGENT_CONTAINER, "list", "--json"])
+    acc.cli(["host", "add", "deadvps", "--docker-context", "nonexistent-ctx-xyz"])
+    r = acc.cli(["list", "--json"])
     assert r.returncode == 0, f"`list` failed with an unreachable host registered:\n{r.stderr}"
     data = json.loads(r.stdout).get("data", {})
     assert "deadvps" in (data.get("unreachable_hosts") or []), (
@@ -5616,7 +5665,7 @@ def test_management_output_is_legible_at_80_COLUMNS(acc, _control_plane_image):
     """
     port = acc.up("hub8", role="control-plane",
                   authorized_key=[_gen_keypair(acc.tmp / "cols").with_suffix(".pub")],
-                  mount=[f"{SCRIPT_PATH}:/mnt/agent-container-under-test:ro"])  # fmt: skip
+                  mount=[_cli_mount()])  # fmt: skip
     key = acc.tmp / "cols"
     # `-tt` forces a pty, so the CLI measures a terminal rather than a pipe.
     #
@@ -5625,7 +5674,7 @@ def test_management_output_is_legible_at_80_COLUMNS(acc, _control_plane_image):
     # would measure the wrong binary (see _exec_working_tree_cli).
     r = _ssh(
         port, key,
-        "stty cols 80 2>/dev/null; COLUMNS=80 python3 /mnt/agent-container-under-test list",
+        f"stty cols 80 2>/dev/null; COLUMNS=80 python3 {_CLI_UNDER_TEST} list",
         tty=True,
     )  # fmt: skip
     assert r.returncode == 0, f"`list` failed at 80 columns:\n{r.stderr}"
@@ -5642,7 +5691,7 @@ def test_revoke_ends_access_with_no_per_host_reconfiguration(acc, _control_plane
     report success, because an operator who believes a key is gone stops looking.
     """
     acc.up("hub9", role="control-plane")
-    r = acc.cli([*AGENT_CONTAINER, "revoke", "hub9", "-y", "--json"])
+    r = acc.cli(["revoke", "hub9", "-y", "--json"])
     data = json.loads(r.stdout).get("data", {})
     outcomes = {row["host"]: row["outcome"] for row in data.get("results", [])}
     assert outcomes, f"revoke visited no hosts: {data}"
@@ -5670,8 +5719,8 @@ def test_after_stop_start_the_key_is_LOCKED_and_needs_no_reconfiguration(acc, _c
          "sha256sum /home/dev/.ssh/id_ed25519 | cut -d' ' -f1"],
         capture_output=True, text=True, timeout=120,
     )  # fmt: skip
-    acc.cli([*AGENT_CONTAINER, "stop", "hub10"])
-    acc.cli([*AGENT_CONTAINER, "start", "hub10"])
+    acc.cli(["stop", "hub10"])
+    acc.cli(["start", "hub10"])
     _wait_sshd(
         int((acc.state_dir / "agent-container" / "local" / "hub10.port").read_text().strip())
     )
@@ -5698,21 +5747,28 @@ def test_the_semver_rule_is_silent_advisory_or_REFUSED(acc, _control_plane_image
     Driven through the CLI's own resolver rather than by constructing versions in
     Python, so what is measured is the rule an operator meets.
     """
-    r = acc.cli([*AGENT_CONTAINER, "--self-test"])
+    r = acc.cli(["--self-test"])
     assert r.returncode == 0, f"the doctests covering the semver rule failed:\n{r.stdout[-2000:]}"
-    # And the three verdicts, through the installed CLI in the container — which is
-    # where FR-016 actually runs.
+    # The three verdicts, through the WORKING-TREE CLI running inside the
+    # control-plane image — which is where FR-016 actually executes.
+    #
+    # Not the installed copy: it is the last released CLI and has no
+    # `version_verdict`, so the first version of this probe was wrapped in
+    # `if probe.returncode == 0` and silently proved nothing. A tolerant probe
+    # that skips itself is worse than no probe, because it reads as coverage.
     probe = subprocess.run(
-        [RUNTIME, "run", "--rm", "--entrypoint", "python3", _control_plane_image, "-c",
-         "import runpy,sys;sys.argv=['x'];"
-         "m=runpy.run_path('/usr/local/bin/agent-container' if __import__('os').path.exists("
-         "'/usr/local/bin/agent-container') else __import__('shutil').which('agent-container'));"
+        [RUNTIME, "run", "--rm", "-v", _cli_mount(), "--entrypoint", "python3",
+         _control_plane_image, "-c",
+         f"import runpy;m=runpy.run_path({_CLI_UNDER_TEST!r});"
          "print(m['version_verdict']('0.32.0','0.32.5'),"
          "m['version_verdict']('0.33.0','0.32.0'),m['version_verdict']('0.32.0','0.33.0'))"],
         capture_output=True, text=True, timeout=180,
     )  # fmt: skip
-    if probe.returncode == 0:
-        assert probe.stdout.split() == ["ok", "advisory", "refused"], probe.stdout
+    assert probe.returncode == 0, (
+        f"the semver rule could not be evaluated inside the control-plane image, "
+        f"which is where FR-016 runs:\n{probe.stderr[-1500:]}"
+    )
+    assert probe.stdout.split() == ["ok", "advisory", "refused"], probe.stdout
 
 
 def test_run_id_exports_whatever_the_task_setting(acc):
@@ -5731,8 +5787,7 @@ def test_run_id_exports_whatever_the_task_setting(acc):
             else:
                 _settings(acc, otlp_endpoint=_collector_url(port))
             name = f"corr{port}"
-            acc.up(name, wait=False, mode="headless", task="echo correlate-me")
-            _wait_for_container_exit(f"agent-container-{name}")
+            _headless_run(acc, name, "correlate-me")
             _wait_until(lambda lg=log: lg.exists() and lg.stat().st_size > 0,
                         "a record at the collector")  # fmt: skip
             body = log.read_text(errors="replace")
@@ -5757,10 +5812,9 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
     """
     with _collector("accept", 9540) as log:
         _settings(acc, otlp_endpoint=_collector_url(9540))
-        acc.up("recon", wait=False, mode="headless", task="echo reconcile-me")
-        _wait_for_container_exit("agent-container-recon")
+        _headless_run(acc, "recon", "reconcile-me")
         _wait_until(lambda: log.exists() and log.stat().st_size > 0, "a record at the collector")
-        acc.cli([*AGENT_CONTAINER, "telemetry", "collect"])
+        acc.cli(["telemetry", "collect"])
         collector_ids = sorted(
             set(re.findall(r'"(\d{8}T\d{6}Z-[^"]+)"', log.read_text("utf-8", "replace")))
         )
@@ -5770,7 +5824,7 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
     ids_file.write_text("\n".join(collector_ids) + "\n")
 
     # AGREEMENT.
-    r = acc.cli([*AGENT_CONTAINER, "telemetry", "reconcile",
+    r = acc.cli(["telemetry", "reconcile",
                  "--collector-ids", str(ids_file), "--json"])  # fmt: skip
     data = json.loads(r.stdout).get("data", {})
     assert data.get("compared") is True, f"no comparison was made: {data}"
@@ -5784,7 +5838,7 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
     # to be REPORTED and to fail the run. Agreement alone would prove only that
     # the comparison executes.
     ids_file.write_text("\n".join(collector_ids[1:]) + "\n")
-    r2 = acc.cli([*AGENT_CONTAINER, "telemetry", "reconcile",
+    r2 = acc.cli(["telemetry", "reconcile",
                   "--collector-ids", str(ids_file), "--json"])  # fmt: skip
     data2 = json.loads(r2.stdout).get("data", {})
     assert data2.get("agree") is False, f"a removed record was not detected: {data2}"
