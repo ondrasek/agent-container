@@ -1,6 +1,23 @@
 <!--
 SYNC IMPACT REPORT
 ==================
+Version change: 2.2.0 → 2.3.0   (MINOR)
+
+- **Added Principle VIII — Defaults Belong at the Surface.** MINOR: a new
+  principle, additive, with no existing principle redefined or removed.
+- Ratified after a measured defect rather than on principle: `driver_reachable_address`
+  defaulted an absent host address to `localhost`, so `host_is_local` reported
+  True for a remote docker context, `gather_rows` classified it as a local alias,
+  and an unreachable host was never queried nor reported — the exact failure
+  SC-002 (Feature 017) exists to prevent, produced by a default nobody downstream
+  could see.
+- Consequences already applied: defaulting moved to registration and to the
+  registry-read boundary; `export_task_text` and `control_plane_hosts` report
+  `None` for undeclared so the surface can say which case an operator is in;
+  `DEFAULT_SSH_USER`, `DEFAULT_ATTACH_ADDRESS` and `EGRESS_ENFORCEMENT_DEFAULT`
+  name what were bare literals — the last of these appeared at five separate
+  decision sites, and the fifth was found by the new guard rather than by audit.
+
 Version change: 2.1.0 → 2.2.0   (MINOR)
 Bump rationale: Added a Development Workflow clause requiring
   `docs/threat-model.md` to be reconciled with every feature that alters a trust
@@ -234,6 +251,28 @@ stay green and releasable at all times; the gap between "merged" and "in users'
 hands" collapses to zero, and the version becomes a truthful, automatic record of
 what changed.
 
+### VIII. Defaults Belong at the Surface
+
+A default is a decision made on the operator's behalf, so it MUST be made where
+they can see it: at a flag, at the caller of a settings reader, at a record
+constructor — never substituted for absent data deep inside an implementation. A
+reader reports **absence**; the surface decides what absence means. Every default
+MUST be **named**, so that it is greppable, auditable, and changeable in exactly
+one place; an unnamed literal repeated across decision sites is a policy with no
+owner. **Absent, defaulted, and declared-empty are three different facts** and
+MUST stay distinguishable — a reader that collapses them destroys information
+only the caller can interpret. Rendering absence for a human (`?`, `-`, `unknown`)
+is not a default; that IS the surface.
+
+**Rationale:** a default buried in an implementation is invisible to everything
+downstream, and invisible decisions are the ones that turn out to be wrong at the
+worst moment. This principle was ratified after a concrete failure: an accessor
+answered `localhost` for a host record with no address, so a **remote** host was
+classified as local, never queried, and never reported unreachable — an operator
+would have read a complete-looking listing with a host silently missing. Nothing
+was broken except a policy nobody could see. Naming and surfacing defaults also
+makes them reviewable: what an operator can find, they can question.
+
 ## Platform & Interface Constraints
 
 - **Editor-agnostic, SSH + tmux only.** The canonical attach path is
@@ -286,4 +325,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.2.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-05
+**Version**: 2.3.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-21

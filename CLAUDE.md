@@ -31,11 +31,8 @@ re-summarise them here.
   `--task` is **not** a credential channel. **No private SSH key is injected at all** (see below).
 - **The supported-agent list is single-sourced** (`AGENTS`); tests pin the completions and every
   Dockerfile to it, failing on drift and naming what to update.
-- **DEFAULTS BELONG AT THE SURFACE, never in an implementation** — a flag default, a settings reader's
-  CALLER, a record constructor; each **named** (greppable, one owner). A reader reports **absence**.
-  Substituting deep down is invisible downstream and cost a real defect: an addressless host read as
-  local, so a remote one was never queried nor reported unreachable. Absent ≠ defaulted ≠
-  declared-empty. Display placeholders (`?`, `-`) are fine — that IS the surface.
+- **Defaults belong at the SURFACE** (Constitution VIII) — a flag, a reader's CALLER, a constructor;
+  each **named**. A reader reports **absence**; absent ≠ defaulted ≠ declared-empty.
 - **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates it
   `root:root` and rootless can't write it. Both images.
 - **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently (only `build`
@@ -97,11 +94,12 @@ Never bake host-specific orchestration into the image.
   script. It **excludes** the CI-authoritative acceptance tier (`pytest -m acceptance bin/tests`; on
   macOS+Lima the work dir must be Lima-shared). **Read its exit code unpiped.** **Never edit the tree
   while that tier runs** — it re-reads the CLI per invocation.
-- **Run the full suite** — a changed contract is exactly when an existing test pins the old shape.
+- **Run the full suite, not only your new tests** — a changed contract is exactly when a pre-existing
+  test still pins the old shape.
 - **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced by the local
   `commit-msg` hook (once per clone), the `commits` CI job, and a ruleset on `main`; `--no-verify`
   bypasses only the first.
-- **Every short flag needs a long one**; a test enforces it, and one proves it can fail.
+- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, and one proves it can fail.
 - **Keep this file under 2000 tokens** — `chars/4` UNDERSTATES by ~7%; measure with a tokenizer. New
   detail goes to `docs/`; **prune before adding**.
 
