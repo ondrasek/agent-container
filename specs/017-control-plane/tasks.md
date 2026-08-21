@@ -44,7 +44,7 @@ cannot fail:
       unresolvable — the FR-012b rule already applies to the agent image
 - [X] T005 [P] Add `--role control-plane` to `up` in `bin/agent-container`, selecting the second
       image and recording the role on the environment (FR-001, C8, data-model §1)
-- [ ] T006 [P] Add `doctor`, `revoke` and `telemetry` to the command list in
+- [X] T006 [P] Add `doctor`, `revoke` and `telemetry` to the command list in
       `completions/agent-container.{bash,zsh}`; the sibling test pins completions to the CLI's list
       and fails until both are updated (FR-001)
 
@@ -294,15 +294,15 @@ and the drift would be invisible because each leg still looks correct alone.
 
 ### Retrieval, and the two legs agreeing
 
-- [ ] T066 `telemetry collect`, available **whether or not** an endpoint is declared (FR-009e), landing
+- [X] T066 `telemetry collect`, available **whether or not** an endpoint is declared (FR-009e), landing
       records in the operator's durable store (`$XDG_DATA_HOME/agent-container/`, `0600`) where
       `runs`/`egress` can read them. Not the "no-endpoint path": the local record exists
       unconditionally (FR-009a), so its retrieval must too. `collect` is Feature 016's `drain`
       GENERALISED, not a second puller (C18, R13)
-- [ ] T067 [P] `collect` reports **per-host ingest counts** and **names every host it could not reach**
+- [X] T067 [P] `collect` reports **per-host ingest counts** and **names every host it could not reach**
       (FR-009e, SC-015) - so "collected nothing" is distinguishable from "collected nothing **from
       that host**", and a skipped host never reads as a complete trail
-- [ ] T068 `collect` **retries `pending` and `failed`** records (FR-009h), which is what makes it the
+- [X] T068 `collect` **retries `pending` and `failed`** records (FR-009h), which is what makes it the
       recovery path rather than only a downloader (R10)
 - [ ] T069 [P] Acceptance S16 - `collect` works **with and without** an endpoint declared, in both
       configurations deliberately. One that only worked without an endpoint would leave an operator who

@@ -3886,6 +3886,11 @@ EXPORT_STATES = (EXPORT_PENDING, EXPORT_ACCEPTED, EXPORT_REJECTED, EXPORT_FAILED
 # forever against a refusal or abandon a recoverable record.
 EXPORT_RETRYABLE = frozenset({EXPORT_PENDING, EXPORT_FAILED})
 
+# Bounded, and the SAME default the entrypoint uses. An unbounded export would
+# make `telemetry retry` hang on a collector that accepts connections and never
+# answers — the failure mode a timeout exists for.
+OTLP_TIMEOUT = 10.0
+
 # `accepted` and `rejected` are TERMINAL. Re-exporting an accepted record would
 # duplicate it at the collector; re-exporting a rejected one repeats a refusal
 # that will be refused again unchanged.
@@ -5548,6 +5553,292 @@ def export_task_text(cwd: Path | None = None) -> bool:
             remedy="use an unquoted true/false in settings.yaml",
         )
     return value
+
+
+def otlp_log_payload(rec: dict, *, include_task: bool) -> dict:
+    """The OTLP/HTTP+JSON logs document for one record.
+
+    THE SAME SHAPE THE ENTRYPOINT BUILDS, and the same rules: the task is
+    excluded BY NAME, `run_id` is exported regardless (C18f), and nothing else is
+    filtered. Two payload shapes would make a collector's records depend on which
+    leg sent them, and the reconciliation in SC-020 compares sets of records.
+
+    Only the fields in RECORD_PAYLOAD_FIELDS travel — the ONE definition both
+    legs read (FR-009f), so a field added to the provenance table reaches here
+    without a second edit.
+    """
+    body = {k: rec.get(k) for k in RECORD_PAYLOAD_FIELDS if k in rec}
+    if not include_task:
+        body.pop("task", None)
+    now_ns = str(int(time.time() * 1_000_000_000))
+    run_id = str(rec.get("run_id") or "unknown")
+    attrs = [
+        {"key": "agent_container.run_id", "value": {"stringValue": run_id}},
+        {
+            "key": "agent_container.kind",
+            "value": {"stringValue": str(rec.get("kind") or "unknown")},
+        },
+    ]
+    return {
+        "resourceLogs": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": "agent-container"}},
+                        {"key": "agent_container.run_id", "value": {"stringValue": run_id}},
+                    ]
+                },
+                "scopeLogs": [
+                    {
+                        "scope": {"name": "agent-container"},
+                        "logRecords": [
+                            {
+                                "timeUnixNano": now_ns,
+                                "observedTimeUnixNano": now_ns,
+                                "severityText": "INFO",
+                                "body": {"stringValue": json.dumps(body, sort_keys=True)},
+                                "attributes": attrs,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def export_record_via_endpoint(path: Path, endpoint: str) -> str:
+    """POST one stored record and write the resulting state back. Returns it.
+
+    Uses `urllib` from the standard library — the same "zero packages" rule the
+    entrypoint's `curl` obeys, from the side that has Python. No `requests`, no
+    OTel SDK, and no backend-specific client ever (FR-009d, C18b).
+
+    The verdict comes from `export_outcome_from_response`, the SAME helper the
+    hermetic tests pin — so the CLI leg and the shell leg cannot disagree about
+    what a 200-with-rejections means. They are two implementations of one rule,
+    and this is the rule.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        rec = json.loads(path.read_text())
+    except OSError, json.JSONDecodeError:
+        return EXPORT_FAILED
+    if not endpoint.startswith(("http://", "https://")):
+        # Checked AGAIN, here. `resolve_otlp_endpoint` already refuses any other
+        # scheme, but this function takes the endpoint as an argument and a
+        # future caller may not come through that resolver. A `file://` endpoint
+        # would turn an exporter into an arbitrary-file reader, so the scheme is
+        # constrained at the point of use as well as at the point of entry.
+        warn(f"refusing to export to a non-HTTP endpoint: {endpoint!r}")
+        return EXPORT_FAILED
+    payload = json.dumps(otlp_log_payload(rec, include_task=export_task_text())).encode()
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    # An opener that CANNOT open anything else. Handlers are allow-listed rather
+    # than the default set being used, so `file:`, `ftp:` and `data:` are not
+    # merely refused above — there is no handler installed that could serve them.
+    # Defence in depth for a function whose argument names a URL.
+    opener = urllib.request.build_opener(urllib.request.HTTPHandler, urllib.request.HTTPSHandler)
+    status: int | None = None
+    rejected = 0
+    try:
+        with opener.open(req, timeout=OTLP_TIMEOUT) as resp:
+            status = resp.status
+            raw = resp.read(MAX_RECORD_BYTES)
+        try:
+            rejected = int(
+                (json.loads(raw or b"{}").get("partialSuccess") or {}).get("rejectedLogRecords", 0)
+            )
+        except json.JSONDecodeError, ValueError, TypeError, AttributeError:
+            # A body we cannot parse is NOT taken as zero rejections. Zero would
+            # mark the record accepted on the strength of a response we did not
+            # understand, which is the same defect as treating 2xx as success.
+            rejected = 1
+    except urllib.error.HTTPError as e:
+        status = e.code
+    except urllib.error.URLError, OSError, ValueError:
+        status = None
+    state = export_outcome_from_response(status, rejected, records=1)
+    try:
+        rec["export_state"] = state
+        atomic_write_json(path.parent, path.name, rec)
+    except OSError, Fatal:
+        warn(f"{path.name}: exported with outcome '{state}' but could not record it")
+    return state
+
+
+def stored_record_paths(host: str | None = None, environment: str | None = None) -> list[Path]:
+    """Every durable record path, optionally narrowed to one host/environment.
+
+    Enumerated from the store rather than from a manifest: a manifest would be a
+    second thing to keep in step, and the store is already the authority every
+    other reader uses.
+    """
+    root = DATA_DIR / "runs"
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for host_dir in sorted(root.iterdir()):
+        if not host_dir.is_dir() or (host is not None and host_dir.name != host):
+            continue
+        for env_dir in sorted(host_dir.iterdir()):
+            if not env_dir.is_dir() or (environment is not None and env_dir.name != environment):
+                continue
+            out += sorted(p for p in env_dir.glob("*.json") if p.is_file())
+    return out
+
+
+def do_telemetry_retry(host: str | None, name: str | None, as_json: bool) -> None:
+    """Re-export `pending` and `failed` records (FR-009h, research R10).
+
+    THE STATE DECIDES, not the operator and not a flag. `accepted` and `rejected`
+    are terminal: re-exporting an accepted record would duplicate it at the
+    collector, and re-exporting a rejected one repeats a refusal that will be
+    refused again unchanged. Retrying everything would do both.
+
+    With no endpoint declared this is a NO-OP that says so, rather than an error.
+    Nothing is wrong: the local trail is the whole trail, and there is nothing to
+    re-export to.
+    """
+    endpoint = resolve_otlp_endpoint()
+    counts = {state: 0 for state in EXPORT_STATES}
+    counts["skipped"] = 0
+    eligible: list[Path] = []
+    for path in stored_record_paths(host, name):
+        try:
+            rec = json.loads(path.read_text())
+        except OSError, json.JSONDecodeError:
+            counts["skipped"] += 1
+            continue
+        state = rec.get("export_state")
+        if state not in EXPORT_STATES:
+            # An unknown state is not retried. A record written by a future
+            # version may mean something this one cannot act on, and guessing is
+            # how a terminal state gets re-exported.
+            counts["skipped"] += 1
+            continue
+        if not export_state_is_retryable(str(state)):
+            counts[str(state)] += 1
+            continue
+        eligible.append(path)
+    if endpoint is None:
+        msg = (
+            f"no telemetry endpoint is declared, so there is nothing to re-export to. "
+            f"{len(eligible)} record(s) are retryable and stay that way — declare "
+            f"`otlp_endpoint` and run this again"
+        )
+        if as_json:
+            emit_json({"endpoint": None, "retryable": len(eligible), "exported": 0, "ok": True})
+        else:
+            log(msg)
+        return
+    for path in eligible:
+        state = export_record_via_endpoint(path, endpoint)
+        counts[state] = counts.get(state, 0) + 1
+    if as_json:
+        emit_json({"endpoint": endpoint, "results": counts, "ok": True})
+        return
+    log(
+        f"re-exported {len(eligible)} record(s): "
+        + ", ".join(f"{k}={v}" for k, v in counts.items() if v)
+    )
+
+
+def do_telemetry_collect(hosts: list[str] | None, names: list[str] | None, as_json: bool) -> None:
+    """`telemetry collect` — FR-009e, contract C18, research R13.
+
+    `drain` GENERALISED, not a second puller. Feature 016's `drain_host_records`
+    already pulls pending records from host volumes into the operator's durable
+    store; this is that, made an explicit operator-invoked command over every
+    host. Two pullers of the same volumes would diverge on what they consider
+    pending, and the divergence would be diagnosable only by reading both
+    implementations.
+
+    AVAILABLE WHETHER OR NOT AN ENDPOINT IS DECLARED. Not the "no-endpoint path":
+    the local record exists unconditionally (FR-009a), so its retrieval must too.
+    A `collect` that only worked without an endpoint would leave an operator who
+    configured OTLP holding logs with no way to download them.
+
+    REPORTS PER-HOST COUNTS AND NAMES EVERY HOST IT COULD NOT REACH (SC-015), so
+    "collected nothing" is distinguishable from "collected nothing FROM THAT
+    HOST" — and a skipped host never reads as a complete trail. That distinction
+    is the whole reason this reports per host rather than a total.
+    """
+    reg = load_registry()
+    known = sorted(reg.get("hosts", {}))
+    if hosts:
+        unknown = [h for h in hosts if h not in known and h != DEFAULT_HOST]
+        if unknown:
+            die(f"unknown host(s): {', '.join(unknown)}", remedy="agent-container hosts list")
+        targets = list(hosts)
+    else:
+        # Every registered host, plus the implicit local one when the registry is
+        # empty — the same resolution every other fleet-wide command uses.
+        targets = known or [DEFAULT_HOST]
+    per_host: list[dict] = []
+    unreachable: list[str] = []
+    for host_name in targets:
+        rec = get_host(reg, host_name) or (
+            implicit_local_host() if host_name == DEFAULT_HOST else None
+        )
+        if rec is None:
+            unreachable.append(host_name)
+            continue
+        if rec.get("driver") not in ("docker", "podman"):
+            # An attach-only host cannot run the throwaway container a drain
+            # needs. Reported as its own outcome rather than folded into
+            # `unreachable`: the host is fine and nothing is wrong, but no
+            # records can come from it, and calling that "unreachable" would
+            # send the operator to debug a network.
+            per_host.append({"host": host_name, "ingested": 0, "status": "attach-only"})
+            continue
+        before = len(unreachable)
+        try:
+            ids = drain_host_records(host_name, rec, names)
+        except (Fatal, OSError, subprocess.SubprocessError) as e:
+            # NAMED, never swallowed. A host that could not be reached is the
+            # difference between an empty trail and an incomplete one.
+            warn(f"{host_name}: could not collect ({e})")
+            unreachable.append(host_name)
+            continue
+        if len(unreachable) == before:
+            per_host.append({"host": host_name, "ingested": len(ids), "status": "ok"})
+    total = sum(h["ingested"] for h in per_host)
+    if as_json:
+        emit_json(
+            {
+                "collected": total,
+                "hosts": per_host,
+                # A LIST, not a count. "2 hosts unreachable" is not actionable;
+                # the names are.
+                "unreachable": unreachable,
+                # False the moment ANY host could not be reached. An operator
+                # comparing this against a collector needs to know the local side
+                # is partial before concluding the collector is missing records.
+                "complete": not unreachable,
+            }
+        )
+        return
+    for h in per_host:
+        suffix = "" if h["status"] == "ok" else f" ({h['status']})"
+        log(f"{h['host']}: {h['ingested']} record(s){suffix}")
+    if unreachable:
+        # Deliberately not phrased as a total. A count that silently excluded
+        # unreachable hosts would read as a complete trail.
+        warn(
+            f"collected {total} record(s), but could NOT reach: "
+            f"{', '.join(unreachable)}. This trail is INCOMPLETE — records on "
+            f"those hosts are still on their volumes"
+        )
+    else:
+        log(f"collected {total} record(s) from {len(per_host)} host(s)")
 
 
 def resolve_otlp_endpoint(cwd: Path | None = None) -> str | None:
@@ -15214,6 +15505,58 @@ runs_app = typer.Typer(
     ),
 )
 app.add_typer(runs_app, name="runs")
+
+telemetry_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "The observability trail: attribution records, run records and egress events. "
+        "TWO LEGS, ONE PAYLOAD — the local trail is written where the action lands "
+        "regardless of any endpoint, and OTLP export is an additional active path. "
+        "They are independent, not alternatives, and carry identical payloads."
+    ),
+)
+app.add_typer(telemetry_app, name="telemetry")
+
+
+@telemetry_app.command("collect")
+def telemetry_collect(
+    host: list[str] | None = typer.Option(
+        None, "--host", help="Collect from these hosts only (repeatable). Default: every host."
+    ),
+    name: list[str] | None = typer.Option(
+        None,
+        "--name",
+        help="Collect for these environments only (repeatable). Default: every environment.",
+    ),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Download the trail from each host into the operator's durable store.
+
+    Works WHETHER OR NOT an export endpoint is declared: the local record exists
+    unconditionally, so its retrieval must too. Reports per-host counts and NAMES
+    every host it could not reach — a skipped host must never read as a complete
+    trail.
+    """
+    set_json_mode(as_json)
+    do_telemetry_collect(host or None, name or None, as_json)
+
+
+@telemetry_app.command("retry")
+def telemetry_retry(
+    host: str | None = typer.Option(None, "--host", help="Only records from this host."),
+    name: str | None = typer.Option(None, "--name", help="Only records for this environment."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Re-export records that are `pending` or `failed`.
+
+    This is what makes `collect` a RECOVERY path rather than only a downloader
+    (FR-009h, research R10). `accepted` and `rejected` are terminal and are never
+    retried: re-exporting an accepted record would duplicate it at the collector,
+    and re-exporting a rejected one repeats a refusal that will be refused again
+    unchanged.
+    """
+    set_json_mode(as_json)
+    do_telemetry_retry(host, name, as_json)
 
 
 @runs_app.command("list")

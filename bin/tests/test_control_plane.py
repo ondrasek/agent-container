@@ -814,3 +814,131 @@ def test_the_entrypoint_never_logs_the_passphrase(wiz):
         if "_cp_passphrase" in stripped:
             assert not stripped.startswith("log "), f"passphrase reaches log(): {stripped}"
             assert not stripped.startswith("log("), f"passphrase reaches log(): {stripped}"
+
+
+# --- collect and retry (FR-009e/FR-009h, C18, R10/R13, T066-T068) -----------
+
+
+def test_collect_is_drain_GENERALISED_not_a_second_puller(wiz):
+    """C18/R13. Two pullers of the same volumes would diverge on what they
+    consider pending, and the divergence would be diagnosable only by reading
+    both implementations."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_collect")
+    assert "drain_host_records(" in body, (
+        "collect does not go through Feature 016's drain, so it is a second puller"
+    )
+    # And it must not have grown its own extraction path.
+    for reimplemented in ("tarfile", "pending_records_from_tar", "ingest_records"):
+        assert reimplemented not in body, (
+            f"collect reimplements {reimplemented}; that is the second puller R13 forbids"
+        )
+
+
+def test_collect_reports_UNREACHABLE_HOSTS_BY_NAME(wiz):
+    """SC-015: so "collected nothing" is distinguishable from "collected nothing
+    FROM THAT HOST", and a skipped host never reads as a complete trail.
+
+    A LIST, not a count — "2 hosts unreachable" is not actionable, the names are.
+    """
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_collect")
+    assert '"unreachable": unreachable' in body
+    assert '"complete": not unreachable' in body, (
+        "the envelope has no completeness flag, so a consumer comparing against a "
+        "collector cannot tell the local side was partial"
+    )
+
+
+def test_collect_distinguishes_ATTACH_ONLY_from_unreachable(wiz):
+    """The host is fine and nothing is wrong, but no records can come from it.
+    Calling that "unreachable" would send the operator to debug a network."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_collect")
+    assert '"attach-only"' in body
+
+
+def test_retry_acts_only_on_RETRYABLE_states(wiz):
+    """R10/T068. `accepted` and `rejected` are terminal: re-exporting an accepted
+    record duplicates it at the collector, and re-exporting a rejected one repeats
+    a refusal. Retrying everything would do both."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_retry")
+    assert "export_state_is_retryable(" in body
+    # No override. A flag to force a terminal re-export is the duplication path.
+    assert "--force" not in body and "force" not in body
+
+
+def test_retry_SKIPS_an_unknown_state_rather_than_guessing(wiz):
+    """A record written by a future version may mean something this one cannot
+    act on, and guessing is how a terminal state gets re-exported."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_retry")
+    assert "state not in EXPORT_STATES" in body
+
+
+def test_retry_without_an_endpoint_is_a_NO_OP_that_says_so(wiz):
+    """Nothing is wrong: the local trail is the whole trail, and there is nothing
+    to re-export to. An error here would make a healthy configuration look broken.
+    """
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_retry")
+    assert "endpoint is None" in body
+    assert "nothing to re-export to" in body
+
+
+def test_an_unparseable_export_response_is_not_read_as_ZERO_rejections(wiz):
+    """Zero would mark the record accepted on the strength of a response we did
+    not understand — the same defect as treating 2xx as success."""
+    body = _func_body(Path(wiz.__file__).read_text(), "export_record_via_endpoint")
+    assert "rejected = 1" in body
+
+
+def test_both_legs_derive_the_state_from_ONE_rule(wiz):
+    """The CLI leg and the shell leg are two implementations; the verdict must be
+    one. `export_outcome_from_response` is the rule the hermetic tests pin, so
+    routing the CLI leg through it is what stops the two disagreeing about what a
+    200-with-rejections means."""
+    body = _func_body(Path(wiz.__file__).read_text(), "export_record_via_endpoint")
+    assert "export_outcome_from_response(" in body
+
+
+def test_the_cli_exporter_adds_no_package(wiz):
+    """C18b: stdlib urllib, from the side that has Python. No requests, no OTel
+    SDK, and no backend-specific client ever."""
+    body = _func_body(Path(wiz.__file__).read_text(), "export_record_via_endpoint")
+    assert "urllib.request" in body
+    for banned in ("import requests", "httpx", "opentelemetry"):
+        assert banned not in body
+
+
+def test_both_legs_build_the_SAME_payload_shape(wiz):
+    """SC-020 compares SETS of records. Two payload shapes would make a
+    collector's records depend on which leg sent them, and the comparison would
+    report divergence that came from the exporter rather than from delivery."""
+    py = _func_body(Path(wiz.__file__).read_text(), "otlp_log_payload")
+    sh = _otlp_block(wiz)
+    for key in (
+        "resourceLogs",
+        "scopeLogs",
+        "logRecords",
+        "observedTimeUnixNano",
+        "agent_container.run_id",
+        "agent_container.kind",
+        "service.name",
+    ):
+        assert key in py, f"the CLI payload lacks {key}"
+        assert key in sh, f"the shell payload lacks {key}"
+
+
+def test_the_cli_payload_carries_only_the_shared_field_set(wiz):
+    """FR-009f: the ONE definition. A field added to the provenance table must
+    reach the wire without a second edit here."""
+    body = _func_body(Path(wiz.__file__).read_text(), "otlp_log_payload")
+    assert "RECORD_PAYLOAD_FIELDS" in body
+
+
+def test_telemetry_is_offered_by_BOTH_completions(wiz):
+    """The cross-file guard already pins the command LIST; this pins the two
+    verbs, which the list check cannot see."""
+    root = Path(wiz.__file__).parents[1] / "completions"
+    for fname in ("agent-container.bash", "agent-container.zsh"):
+        body = (root / fname).read_text()
+        assert "telemetry" in body, f"{fname} does not offer `telemetry`"
+        assert "collect" in body and "retry" in body, (
+            f"{fname} offers `telemetry` but not its subcommands"
+        )

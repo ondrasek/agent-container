@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress inventory panic ssh-key doctor plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress telemetry inventory panic ssh-key doctor plan apply status destroy menu context skill commands completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -258,6 +258,21 @@ _agent_container() {
                 return 0
             fi
             __agent_container_add_names __agent_container_names
+            ;;
+        telemetry)
+            # `collect` and `retry` are the two verbs. The state decides what
+            # `retry` acts on, so there is no --force to offer: `accepted` and
+            # `rejected` are terminal, and a flag to override that would
+            # duplicate records at the collector or repeat a refusal.
+            if [[ ${COMP_CWORD} -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "collect retry" -- "${cur}") )
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--host --name --json" -- "${cur}") )
+                return 0
+            fi
+            return 0
             ;;
         ssh-key)
             local ksub="" k
