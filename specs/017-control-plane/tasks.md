@@ -217,7 +217,7 @@ and the drift would be invisible because each leg still looks correct alone.
 ### The shared payload
 
 - [ ] T044 **One field-set definition serving both legs** in `bin/agent-container` (FR-009f,
-      data-model §6) - the attribution trail, Feature 016's run records and Feature 012's egress
+      data-model §6) - the attribution records, Feature 016's run records and Feature 012's egress
       events. `collect` retrieves exactly what export would have sent (C13, R11)
 - [ ] T045 [P] Hermetic test that there is **exactly one** definition and both legs read it - assert on
       the shared constant, not on two lists that happen to agree today (FR-009e, FR-009f)

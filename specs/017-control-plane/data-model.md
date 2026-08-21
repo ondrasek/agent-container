@@ -85,7 +85,7 @@ concrete: withdraw the key (FR-008).
 (FR-009f). Two definitions would drift the moment one is edited, and **the drift would be invisible**
 — each leg still looks correct on its own.
 
-Three classes, one shape: the **attribution trail** (FR-009a), Feature 016's **run records**, and
+Three classes, one shape: the **attribution records** (FR-009a), Feature 016's **run records**, and
 Feature 012's **egress events**.
 
 | Field | Provenance | Notes |

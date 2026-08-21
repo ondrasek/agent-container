@@ -139,9 +139,9 @@ and it is why FR-004 and FR-008 exist.
   text may be **excluded by declaration** — a named field-level include/exclude, never a
   pattern-matching redactor, because a filter that misses one value converts caution into false
   confidence while omitting a named field either happens or does not.
-- Q: FR-009d exported only the control-plane attribution trail, which does not meet "centralise logs
-  from all control planes AND agents". Widen it, or split telemetry into its own feature? → A:
-  **Widen it inside 017.** Export now covers the attribution trail, Feature 016's run records and
+- Q: FR-009d exported only the control-plane attribution records, which does not meet "centralise
+  logs from all control planes AND agents". Widen it, or split telemetry into its own feature? → A:
+  **Widen it inside 017.** Export now covers the attribution records, Feature 016's run records and
   Feature 012's egress events, and **each container exports its own** (FR-009g) so an agent reaches
   the collector whether or not a control plane exists.
   **`task` is never exported** (FR-009f). It is the one field a credential can arrive in (T15), and a
@@ -168,7 +168,7 @@ and it is why FR-004 and FR-008 exist.
 ### Session 2026-08-20
 
 - Q: FR-009d names three record classes; FR-009e says "the trail". Does the local leg carry the same
-  three? → A: **Identical payloads, defined once.** Both legs carry the attribution trail, Feature
+  three? → A: **Identical payloads, defined once.** Both legs carry the attribution records, Feature
   016's run records and Feature 012's egress events, from a **single** field-set definition.
   `collect` downloads exactly what export would have sent. Anything else makes "the two legs are
   independent, not alternatives" false in practice, and makes "do they agree?" unanswerable — agree
@@ -377,7 +377,7 @@ regarding its own container is defined and safe.
   contact for weeks. This requirement therefore delivers **attribution**, not **durability**; the
   durable, tamper-evident half is FR-009d.
 - **FR-009d**: **Tool telemetry** MUST be exportable to a destination the emitting container
-  **cannot rewrite** — the control-plane attribution trail (FR-009a), agent **run records**
+  **cannot rewrite** — the control-plane attribution records (FR-009a), agent **run records**
   (Feature 016) and **egress events** (Feature 012), so that one collector answers "what happened
   across everything I run" rather than only "what did a control plane do".
 
@@ -493,13 +493,14 @@ regarding its own container is defined and safe.
   control plane). The control plane is the one container whose stopping makes the report
   undeliverable, so self-exclusion is what makes "the outcome is never unknown" achievable at all.
 - **FR-009e**: The tool MUST provide a **dedicated command to collect the trail from each host on
-  demand**, and that command MUST work **whether or not** an export destination is declared. **It
-  collects the same three record classes FR-009d exports** — the attribution trail, Feature 016's run
-  records and Feature 012's egress events — from the **same single field-set definition** (FR-009f),
-  so what is downloaded is exactly what export would have sent. The
-  local record exists unconditionally (FR-009a), so its retrieval must be unconditional too —
-  otherwise declaring a collector would leave the operator with logs and no defined way to download
-  them.
+  demand**, and that command MUST work **whether or not** an export destination is declared. **The
+  trail is all three record classes, never one of them** — the attribution records, Feature 016's run
+  records and Feature 012's egress events. Naming the whole after one part is how a collection that
+  retrieved a third of it passes for complete. **It collects the same three classes FR-009d
+  exports**, from the **same single field-set definition** (FR-009f), so what is downloaded is
+  exactly what export would have sent. The local record exists unconditionally (FR-009a), so its
+  retrieval must be unconditional too — otherwise declaring a collector would leave the operator
+  with logs and no defined way to download them.
 
   **The two legs are independent, not alternatives.** The local trail is the durable baseline: it is
   written where the action lands regardless of any endpoint, and this command is how the operator

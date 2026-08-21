@@ -211,7 +211,7 @@ asserts the table itself.
 
 ## R11 — One payload definition, or the two legs drift invisibly
 
-**Finding**: FR-009e and FR-009d both carry the attribution trail, Feature 016's run records and
+**Finding**: FR-009e and FR-009d both carry the attribution records, Feature 016's run records and
 Feature 012's egress events. Two lists that agree today drift the moment one is edited, **and the
 drift is invisible** — each leg still looks correct on its own.
 

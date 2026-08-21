@@ -104,7 +104,7 @@ The control-plane image installs the CLI, ssh, tmux and git, and **no agent CLIs
 ## C13 — Two legs, one payload definition
 
 The local trail and the OTLP export carry **identical payloads from a single field-set definition**
-(FR-009f): the attribution trail, Feature 016's run records, Feature 012's egress events.
+(FR-009f): the attribution records, Feature 016's run records, Feature 012's egress events.
 
 > *Fails without this*: two lists that agree today drift the moment one is edited, and **the drift is
 > invisible** — each leg still looks correct alone. It also makes C17's reconciliation
