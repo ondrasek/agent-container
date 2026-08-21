@@ -5624,16 +5624,23 @@ def test_manage_the_fleet_from_INSIDE_the_control_plane(acc, _control_plane_imag
     a config file into the container first.
     """
     laptop = _gen_keypair(acc.tmp / "cplaptop")
-    port = acc.up("hub7", role="control-plane", authorized_key=[laptop.with_suffix(".pub")])
+    port = acc.up(
+        "hub7",
+        role="control-plane",
+        authorized_key=[laptop.with_suffix(".pub")],
+        # The label-based `stop` fallback is new in 017, so the CLI installed in
+        # the image does not have it and this test would measure the released one.
+        mount=[_cli_mount()],
+    )
     acc.up("managed", wait=False, mode="headless", task="sleep 300")
 
-    listed = _ssh(port, laptop, "agent-container list --json")
+    listed = _ssh(port, laptop, f"python3 {_CLI_UNDER_TEST} list --json")
     assert listed.returncode == 0, f"`list` failed inside the control plane:\n{listed.stderr}"
     payload = json.loads(listed.stdout)
     data = payload.get("data", payload)
     assert "containers" in data, f"no container listing came back: {data}"
 
-    stopped = _ssh(port, laptop, "agent-container stop managed")
+    stopped = _ssh(port, laptop, f"python3 {_CLI_UNDER_TEST} stop managed")
     assert stopped.returncode == 0, f"`stop` failed inside the control plane:\n{stopped.stderr}"
 
 
@@ -5649,7 +5656,21 @@ def test_an_unreachable_permitted_host_is_NAMED_never_omitted(acc, _control_plan
     # product had not named an unreachable host — blaming the code for the
     # harness. Any setup step whose success the assertion depends on has to be
     # checked, or the failure message points at the wrong thing.
-    add = acc.cli(["host", "add", "deadvps", "--docker-context", "nonexistent-ctx-xyz"])
+    # `--address` MATTERS HERE, and its absence is why the first version of this
+    # test failed. `driver_reachable_address` defaults to "localhost" when a host
+    # has no address, so `host_is_local` reports True and `gather_rows` treats the
+    # host as a LOCAL ALIAS — never querying it, and therefore never marking it
+    # unreachable. A registered-but-addressless docker context is assumed to point
+    # at the local daemon.
+    #
+    # An RFC 5737 documentation address (203.0.113.0/24 is reserved and
+    # unroutable), so the host is unmistakably remote and cannot accidentally
+    # resolve to something real on a developer's network.
+    add = acc.cli([
+        "host", "add", "deadvps",
+        "--docker-context", "nonexistent-ctx-xyz",
+        "--address", "203.0.113.253",
+    ])  # fmt: skip
     assert add.returncode == 0, f"could not register the unreachable host:\n{add.stderr}"
     listed = acc.cli(["host", "ls", "--json"])
     assert "deadvps" in listed.stdout, f"the host did not persist: {listed.stdout[:300]}"
@@ -5837,8 +5858,12 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
     data = json.loads(r.stdout).get("data", {})
     assert data.get("compared") is True, f"no comparison was made: {data}"
     assert data.get("agree") is True, (
-        f"the legs disagreed on a healthy system: {data}. `missing_at_collector` "
-        f"means the local leg claims a delivery that did not land."
+        f"the legs disagreed on a healthy system.\n"
+        f"  collector ids ({len(collector_ids)}): {collector_ids}\n"
+        f"  payload: {data}\n"
+        f"`missing_at_collector` means the local leg claims a delivery that did "
+        f"not land; `unknown_locally` means the collector holds something this "
+        f"machine never marked accepted."
     )
     assert r.returncode == 0
 
