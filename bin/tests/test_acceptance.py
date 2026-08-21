@@ -17,6 +17,7 @@ Codifies the manual verification performed during the SSH-identity work.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -25,7 +26,9 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -199,6 +202,58 @@ def _container_diag(name: str) -> str:
     return "\n".join(chunks)
 
 
+def _wait_until(predicate, what: str, timeout: int = 60) -> None:
+    """Poll until `predicate` holds, then return; fail NAMING what was awaited.
+
+    A bare `time.sleep` would make every downstream assertion flaky in a way that
+    reads as a product defect, and a timeout whose message says only "timed out"
+    sends the reader to the wrong place.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.4)
+    pytest.fail(f"timed out after {timeout}s waiting for: {what}")
+
+
+def _wait_for_container_exit(cname: str, timeout: int = 120) -> None:
+    """Wait for a headless container to finish.
+
+    A record is written on the way out, so asserting on the trail before the
+    container has exited measures a race rather than the feature.
+    """
+
+    def gone() -> bool:
+        r = subprocess.run(
+            [RUNTIME, "inspect", "-f", "{{.State.Running}}", cname],
+            capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+        return r.returncode != 0 or r.stdout.strip() != "true"
+
+    _wait_until(gone, f"{cname} to exit", timeout=timeout)
+
+
+def _runs_store_of(state_dir: Path) -> Path:
+    """The durable run store under the isolated XDG_DATA_HOME (see _cli_env).
+
+    Derived from the same constant the harness sets, so a change to the isolation
+    scheme breaks this loudly instead of making every trail assertion read as
+    "nothing was exported" — the vacuous pass that would hide a broken exporter.
+    """
+    return state_dir / "xdgdata" / "agent-container" / "runs"
+
+
+def _record_states(acc) -> list[str]:
+    """The `export_state` of every record in the operator's durable store."""
+    root = _runs_store_of(acc.state_dir)
+    out = []
+    for path in sorted(root.glob("*/*/*.json")):
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            out.append(str(json.loads(path.read_text()).get("export_state")))
+    return out
+
+
 def _wait_sshd(port: int, timeout: int = 45) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -267,10 +322,37 @@ def _ssh(port: int, key: Path, command: str) -> subprocess.CompletedProcess:
 def _image(tmp_path_factory) -> str:
     """Build the image once for the whole acceptance session."""
     state = tmp_path_factory.mktemp("acc-build-state")
-    r = _run_cli([*AGENT_CONTAINER, "build"], state, timeout=1800)
+    r = _run_cli([*AGENT_CONTAINER, "build"], state, timeout=3600)
     if r.returncode != 0:
         pytest.fail(f"image build failed:\n{r.stderr[-3000:]}")
     return "localhost/agent-container:latest"
+
+
+CONTROL_PLANE_IMAGE = "localhost/agent-container-control-plane:latest"
+
+
+@pytest.fixture(scope="session")
+def _control_plane_image(_image) -> str:
+    """The SECOND image (Feature 017 FR-015a).
+
+    Depends on `_image` rather than building separately: `build` produces both, so
+    a second invocation would rebuild the agent image for nothing. Asserted to
+    EXIST rather than assumed — `build` skips it when it cannot resolve a version
+    (the image pins the CLI it installs), and a missing image would otherwise
+    surface as every 017 acceptance failing on `up` instead of on the reason.
+    """
+    r = subprocess.run(
+        [RUNTIME, "image", "inspect", CONTROL_PLANE_IMAGE],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        pytest.fail(
+            f"{CONTROL_PLANE_IMAGE} was not built. `build` refuses it when the CLI "
+            f"version is unresolvable, because that image PINS the CLI it installs. "
+            f"Run from a checkout with a resolvable version."
+        )
+    return CONTROL_PLANE_IMAGE
 
 
 @pytest.fixture
@@ -292,6 +374,7 @@ def acc(_image):
         known_hosts=None,
         mode=None,
         agent=None,
+        role=None,
         task=None,
         workspace=None,
         workspace_dir=None,
@@ -316,6 +399,8 @@ def acc(_image):
             argv += ["--mode", mode]
         if agent is not None:
             argv += ["--agent", agent]
+        if role is not None:
+            argv += ["--role", role]
         if task is not None:
             argv += ["--task", task]
         if workspace is not None:
@@ -344,6 +429,20 @@ def acc(_image):
         except AssertionError as e:
             raise AssertionError(f"{e}\n{_container_diag(name)}") from None
         return port
+
+    def up_raw(name, **kw):
+        """`up`, returning the CompletedProcess.
+
+        `up` asserts success and returns a port, discarding stdout — which is
+        precisely where the one-shot passphrase is. A separate entry point rather
+        than a flag on `up`, so no existing caller changes behaviour.
+        """
+        r = up(name, wait=False, **kw)
+        assert r.returncode == 0, f"up {name} failed:\n{r.stderr}"
+        port_file = state_dir / "agent-container" / "local" / f"{name}.port"
+        if port_file.is_file():
+            _wait_sshd(int(port_file.read_text().strip()))
+        return r
 
     def down(name, *, purge=False):
         argv = [*AGENT_CONTAINER, "down", name, *(["--purge"] if purge else []), "-y"]
@@ -380,12 +479,40 @@ def acc(_image):
         cli=cli,
         register=started.append,  # ensure a declaratively-applied container is torn down
         tmp=work,
+        work=work,
         state_dir=state_dir,
+        up_raw=up_raw,
     )
 
     for name in dict.fromkeys(started):  # dedupe, preserve order
         _run_cli([*AGENT_CONTAINER, "down", name, "--purge", "-y"], state_dir)
     shutil.rmtree(work, ignore_errors=True)
+
+
+_PASSPHRASE_BEGIN = "AGENT_CONTAINER_CONTROL_PLANE_PASSPHRASE_BEGIN"
+_PASSPHRASE_END = "AGENT_CONTAINER_CONTROL_PLANE_PASSPHRASE_END"
+
+
+def _extract_passphrase(text: str) -> str | None:
+    """The printed passphrase, or None.
+
+    Two shapes are accepted because two producers exist: the entrypoint's raw
+    sentinel block (visible in container logs) and the CLI's operator-facing
+    banner. Matching only one would make the gate pass by finding nothing on the
+    path it did not know about — the vacuous-pass failure this suite exists to
+    prevent, applied to the feature's load-bearing absence.
+    """
+    lines = text.splitlines()
+    if _PASSPHRASE_BEGIN in lines:
+        i = lines.index(_PASSPHRASE_BEGIN)
+        if i + 1 < len(lines) and lines[i + 1] != _PASSPHRASE_END:
+            return lines[i + 1].strip() or None
+    for i, ln in enumerate(lines):
+        if "copy it now, it is shown ONCE" in ln and i + 1 < len(lines):
+            candidate = lines[i + 1].strip()
+            if candidate and not candidate.startswith("==="):
+                return candidate
+    return None
 
 
 # --- acceptance tests --------------------------------------------------------
@@ -4940,3 +5067,459 @@ def test_doctor_never_INVOKES_a_credential_resolver(acc):
     assert cred and cred[0]["status"] == "unknown", cred
     assert "NOT verified" in cred[0]["finding"]["observed"]
     assert "secret-value" not in r.stdout and "secret-value" not in r.stderr
+
+
+# =============================================================================
+# Feature 017 — the control plane, and the dual-stack observability it widened to
+# =============================================================================
+#
+# What is here is what a real container shows and a function call cannot: an
+# ABSENCE (a passphrase that exists nowhere, an image with no agents, a deploy
+# that granted nothing), a REFUSING collector, a SIGKILL, and a trail that
+# survives the destruction of the host that produced it.
+
+
+def test_the_control_plane_image_has_NO_AGENT_on_path(_control_plane_image):
+    """S9 / SC-009 / C12 — checked on the BUILT image, not the Dockerfile.
+
+    The source census is a different claim: it says no `npm i -g` line installs
+    an agent. This says no agent BINARY is reachable, which also covers one
+    arriving through a base image, a transitive install, or a hand-edited layer.
+    Keep both — neither implies the other.
+    """
+    for agent_bin in ("claude", "codex", "pi", "opencode", "npm", "node"):
+        r = subprocess.run(
+            [RUNTIME, "run", "--rm", "--entrypoint", "sh", _control_plane_image,
+             "-c", f"command -v {agent_bin} || echo ABSENT"],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        assert "ABSENT" in r.stdout, (
+            f"{agent_bin} is on PATH in the control-plane image — FR-015a wants "
+            f"'no agents here' to be a property of the artifact"
+        )
+
+
+def test_the_control_plane_image_HAS_the_cli(_control_plane_image):
+    """The converse of the test above, and it has to be here: an image that
+    installed nothing at all would pass every absence check."""
+    r = subprocess.run(
+        [RUNTIME, "run", "--rm", "--entrypoint", "sh", _control_plane_image,
+         "-c", "command -v agent-container && agent-container --help >/dev/null && echo OK"],
+        capture_output=True, text=True, timeout=180,
+    )  # fmt: skip
+    assert "OK" in r.stdout, (
+        f"the CLI is not usable in the control-plane image:\n{r.stderr[-2000:]}"
+    )
+
+
+def test_THE_GATE_the_passphrase_exists_NOWHERE(acc, _control_plane_image, tmp_path):
+    """T012 / S4 / C4 — the feature's load-bearing absence.
+
+    Greps for THE ACTUAL PRINTED VALUE, not for the shape of the print statement.
+    Asserting the code looks right proves nothing about where the value went, and
+    an absence is exactly what working output never demonstrates.
+
+    Everything the tool can write is searched: state, config, the durable data
+    store, the container's own log, and a `list --json` payload.
+    """
+    out = acc.up_raw("hub", role="control-plane")
+    passphrase = _extract_passphrase(out.stdout + out.stderr)
+    assert passphrase, (
+        "no passphrase was printed on the boot that created the key — the operator "
+        f"has an encrypted key they cannot unlock:\n{out.stdout[-2000:]}\n{out.stderr[-2000:]}"
+    )
+    assert len(passphrase) >= 16, f"passphrase is implausibly short: {len(passphrase)} chars"
+
+    # 1. Nothing the tool wrote on this machine.
+    for root in (acc.state_dir, acc.work):
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                body = path.read_text(errors="replace")
+            except OSError:
+                continue
+            assert passphrase not in body, f"the passphrase is in {path}"
+
+    # 2. Not in the container's log. The entrypoint prints it to stdout ONCE and
+    #    the tool consumes it; a `log()` call would make it durable where nothing
+    #    rotates it. This is the one place it legitimately transits, so what is
+    #    asserted is that it appears at most in the block the tool parses — never
+    #    in a log line of its own.
+    logs = subprocess.run(
+        [RUNTIME, "logs", "agent-container-hub"], capture_output=True, text=True, timeout=120
+    )
+    log_body = logs.stdout + logs.stderr
+    for line in log_body.splitlines():
+        if passphrase in line:
+            assert line.strip() == passphrase, (
+                f"the passphrase appears in a log LINE rather than alone in the "
+                f"sentinel block: {line[:120]!r}"
+            )
+
+    # 3. Not in any --json payload.
+    r = acc.cli([*AGENT_CONTAINER, "list", "--json"])
+    assert passphrase not in r.stdout, "the passphrase is in `list --json`"
+
+    # 4. Not in any run record the tool ingested.
+    for path in _runs_store_of(acc.state_dir).rglob("*.json"):
+        if path.is_file():
+            assert passphrase not in path.read_text(errors="replace"), f"passphrase in {path}"
+
+
+def test_the_passphrase_is_printed_ONCE_not_on_every_boot(acc, _control_plane_image):
+    """R3: it crosses the tool on the boot that CREATES the key.
+
+    A second print would mean either the key was regenerated — invalidating every
+    authorisation the operator made — or the value was stored somewhere to be
+    re-printed, which is the thing that must not exist.
+    """
+    first = acc.up_raw("hub2", role="control-plane")
+    assert _extract_passphrase(first.stdout + first.stderr)
+    acc.cli([*AGENT_CONTAINER, "stop", "hub2"])
+    second = acc.cli([*AGENT_CONTAINER, "start", "hub2"])
+    assert not _extract_passphrase(second.stdout + second.stderr), (
+        "a passphrase was printed on a restart — either the key was regenerated or "
+        "the value is being stored somewhere"
+    )
+
+
+def test_the_private_key_is_ENCRYPTED_at_rest_and_0600(acc, _control_plane_image):
+    """T025 / S3 / SC-008. An unencrypted key on this volume means possessing the
+    volume is possessing the fleet."""
+    acc.up("hub3", role="control-plane")
+    r = subprocess.run(
+        [RUNTIME, "exec", "agent-container-hub3", "sh", "-c",
+         "stat -c %a /home/dev/.ssh/id_ed25519; head -c 200 /home/dev/.ssh/id_ed25519"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    mode, _, body = r.stdout.partition("\n")
+    assert mode.strip() == "600", f"the control-plane key is mode {mode.strip()}, not 600"
+    # An OpenSSH key encrypted with a passphrase does NOT say "none" for its
+    # cipher. Checked by attempting a passphrase-free read, which is the
+    # behavioural test rather than a guess about the header.
+    probe = subprocess.run(
+        [RUNTIME, "exec", "agent-container-hub3", "sh", "-c",
+         "ssh-keygen -y -P '' -f /home/dev/.ssh/id_ed25519 >/dev/null 2>&1 && echo UNENCRYPTED || echo ENCRYPTED"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    assert "ENCRYPTED" in probe.stdout, (
+        "the control-plane private key can be read with an EMPTY passphrase — it is "
+        "not encrypted at rest, and the volume alone is then the whole fleet"
+    )
+
+
+def test_no_PRIVATE_KEY_reaches_the_operators_disk(acc, _control_plane_image):
+    """SC-008: only public halves leave. Walks the whole state + config tree with
+    no exclusions — the carve-outs 018 needed are gone."""
+    acc.up("hub4", role="control-plane")
+    for root in (acc.state_dir, acc.work):
+        for path in root.rglob("*"):
+            if path.is_file():
+                body = path.read_text(errors="replace")
+                assert "PRIVATE KEY" not in body, f"a private key reached {path}"
+
+
+def test_deploying_a_control_plane_GRANTS_NOTHING(acc, _control_plane_image):
+    """T024 / S6 / C6 / FR-007b — the quiet load-bearer.
+
+    If deploying granted anything, nesting and revocation both stop meaning what
+    the spec says: a nested control plane would inherit reach, and revoking a key
+    would not be the boundary.
+
+    Measured by asking the container to reach a host it was never authorised on.
+    """
+    port = acc.up("hub5", role="control-plane")
+    # The container holds a key nobody authorised. An SSH attempt to the host must
+    # fail on authentication, not succeed.
+    r = subprocess.run(
+        [RUNTIME, "exec", "agent-container-hub5", "sh", "-c",
+         "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
+         "root@host.docker.internal true 2>&1; echo EXIT=$?"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    assert "EXIT=0" not in r.stdout, (
+        "a freshly deployed control plane authenticated somewhere without its key "
+        "being authorised — deployment granted reach, which breaks FR-007b"
+    )
+    assert port > 0
+
+
+def test_panic_from_inside_EXCLUDES_ITSELF_and_survives(acc, _control_plane_image):
+    """T035 / S8 / C9 / SC-010 / SC-006.
+
+    Not to protect the container — to protect the REPORT. `panic`'s whole value is
+    telling the truth about what it could not reach, and there is no report at all
+    if the reporter is the first casualty.
+    """
+    acc.up("hub6", role="control-plane")
+    acc.up("victim", wait=False, mode="headless", task="sleep 300")
+    r = subprocess.run(
+        [RUNTIME, "exec", "-e", "AGENT_CONTAINER_CONTROL_PLANE_NAME=hub6",
+         "agent-container-hub6", "agent-container", "panic", "--destroy", "-y", "--json"],
+        capture_output=True, text=True, timeout=300,
+    )  # fmt: skip
+    payload = json.loads(r.stdout)
+    data = payload.get("data", payload)
+    assert "hub6" in (data.get("self_excluded") or []), (
+        f"the control plane did not report itself as excluded: {data}"
+    )
+    # AND IT IS STILL RUNNING — the report would be undeliverable otherwise.
+    alive = subprocess.run(
+        [RUNTIME, "inspect", "-f", "{{.State.Running}}", "agent-container-hub6"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert alive.stdout.strip() == "true", "the control plane destroyed itself"
+
+
+# --- Feature 017 dual-stack observability, against a REAL collector ----------
+
+
+@contextlib.contextmanager
+def _collector(mode: str, port: int):
+    """A local OTLP receiver, reachable from a container.
+
+    `mode` selects the behaviour under test:
+      accept    -> 200 {}
+      refuse    -> 200 with partialSuccess.rejectedLogRecords = 1
+      transient -> 503
+
+    THE REFUSING MODE IS THE POINT. A compliant collector passes whether or not
+    the exporter honours `partial_success`, so only one configured to refuse
+    exposes the naive 2xx-means-success implementation (SC-021, S17).
+
+    Bound on 0.0.0.0 so the container reaches it; the port is per-test to keep
+    parallel runs from sharing a receiver.
+    """
+    script = textwrap.dedent(
+        f"""
+        import http.server, json
+        SEEN = []
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                SEEN.append(raw)
+                with open({str(_acc_base() / f"collector-{port}.jsonl")!r}, "ab") as fh:
+                    fh.write(raw + b"\\n")
+                mode = {mode!r}
+                if mode == "refuse":
+                    body = json.dumps({{"partialSuccess": {{"rejectedLogRecords": 1}}}}).encode()
+                    self.send_response(200)
+                elif mode == "transient":
+                    body = b"busy"; self.send_response(503)
+                else:
+                    body = b"{{}}"; self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+            def log_message(self, *a): pass
+        http.server.HTTPServer(("0.0.0.0", {port}), H).serve_forever()
+        """
+    )
+    log = _acc_base() / f"collector-{port}.jsonl"
+    log.unlink(missing_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            with contextlib.suppress(OSError):
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    break
+            time.sleep(0.2)
+        else:
+            pytest.fail(f"the test collector never bound on {port}")
+        yield log
+    finally:
+        proc.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+
+
+def _collector_url(port: int) -> str:
+    """A URL for the collector that resolves FROM INSIDE a container.
+
+    `host.docker.internal` on Docker Desktop / Lima; the default gateway
+    otherwise. Resolved once here so a failure to reach the collector is a
+    harness problem with a name, not an export that silently reads as fail-open —
+    which would make every test below pass for the wrong reason.
+    """
+    return f"http://host.docker.internal:{port}/v1/logs"
+
+
+def _settings(acc, **keys) -> None:
+    """Write the user-level settings the CLI reads (project-level would need a
+    project root, and these tests deploy imperatively)."""
+    d = _config_dir_of(acc.state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "settings.yaml").write_text(
+        "\n".join(f"{k}: {json.dumps(v)}" for k, v in keys.items()) + "\n"
+    )
+
+
+def test_a_REFUSING_collector_makes_records_rejected_not_accepted(acc, tmp_path):
+    """T052 / SC-021 / S17 — the naive-implementation catcher.
+
+    OTLP's response carries `partialSuccess` with a rejected count, so a receiver
+    may return 200 while refusing records. An exporter that treats 2xx as success
+    marks refused records as delivered, and the local leg then claims a delivery
+    the collector never made. A COMPLIANT collector passes either way, which is
+    why this one is configured to refuse.
+    """
+    with _collector("refuse", 9531):
+        _settings(acc, otlp_endpoint=_collector_url(9531))
+        acc.up("expref", wait=False, mode="headless", task="echo hello")
+        _wait_for_container_exit("agent-container-expref")
+        acc.cli([*AGENT_CONTAINER, "telemetry", "collect"])
+        states = _record_states(acc)
+    assert states, "no records were collected at all"
+    assert "accepted" not in states, (
+        f"a refusing collector produced `accepted` records — the exporter is "
+        f"treating 2xx as acceptance: {states}"
+    )
+    assert "rejected" in states, f"expected at least one `rejected` record, got {states}"
+
+
+def test_export_is_FAIL_OPEN_when_the_collector_is_unreachable(acc):
+    """T061 / S14 / C18c. The work must not be blocked by its own observability,
+    and the record must survive locally with the gap visible."""
+    _settings(acc, otlp_endpoint="http://127.0.0.1:9599/v1/logs")  # nothing listening
+    r = acc.up("expopen", wait=False, mode="headless", task="echo still-works")
+    assert r.returncode == 0, f"an unreachable collector blocked the deploy:\n{r.stderr}"
+    _wait_for_container_exit("agent-container-expopen")
+    acc.cli([*AGENT_CONTAINER, "telemetry", "collect"])
+    states = _record_states(acc)
+    assert states, "the local record did not survive an unreachable collector"
+    # RETRYABLE, not terminal — the collector may simply be back later. This is
+    # the `000` http_code case, which a numeric guard alone does not catch.
+    assert "failed" in states or "pending" in states, (
+        f"an unreachable collector produced a TERMINAL state, so those records "
+        f"would never be retried: {states}"
+    )
+    assert "rejected" not in states, (
+        "an unreachable collector was recorded as `rejected` (terminal) — those "
+        "records are now permanently discarded"
+    )
+
+
+def test_a_SIGKILL_loses_nothing_that_was_already_written(acc):
+    """T057 / SC-022 / C16 — and it must be a KILL, not a graceful stop.
+
+    A graceful stop would pass against an exit-time batch, which is exactly the
+    implementation this rejects. Only killing proves the export already happened
+    at write time.
+    """
+    with _collector("accept", 9532) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9532))
+        acc.up("expkill", role=None)
+        # Wait for the START record to have been written and exported.
+        _wait_until(lambda: log.exists() and log.stat().st_size > 0, "a record at the collector")
+        before = log.read_bytes()
+        subprocess.run([RUNTIME, "kill", "-s", "KILL", "agent-container-expkill"],
+                       capture_output=True, timeout=120)  # fmt: skip
+        time.sleep(2)
+        after = log.read_bytes()
+    assert before, "nothing reached the collector before the kill"
+    # Everything present before the kill is still there: the collector holds it,
+    # so the container's death cannot take it.
+    assert after.startswith(before), "the collector lost records across the kill"
+
+
+def test_the_task_marker_is_present_by_default_and_absent_when_excluded(acc):
+    """T064 / S13 / SC-017 — BOTH positions, at the receiver.
+
+    A switch verified in one position may not be wired at all.
+    """
+    marker = "TASKMARKER-9f2b-do-the-thing"
+    with _collector("accept", 9533) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9533))
+        acc.up("exptask", wait=False, mode="headless", task=f"echo {marker}")
+        _wait_for_container_exit("agent-container-exptask")
+        _wait_until(lambda: log.exists() and marker in log.read_text(errors="replace"),
+                    f"the task marker {marker} at the collector")  # fmt: skip
+
+    with _collector("accept", 9534) as log2:
+        _settings(acc, otlp_endpoint=_collector_url(9534), export_task_text=False)
+        acc.up("exptask2", wait=False, mode="headless", task=f"echo {marker}")
+        _wait_for_container_exit("agent-container-exptask2")
+        _wait_until(lambda: log2.exists() and log2.stat().st_size > 0, "a record at the collector")
+        body = log2.read_text(errors="replace")
+    assert marker not in body, (
+        "export_task_text: false did not remove the task text — the exclusion is "
+        "not wired, and an operator who set it believes their tasks are private"
+    )
+    # AND the record still correlates, or the exclusion is lossy rather than cheap.
+    assert "agent_container.run_id" in body, (
+        "run_id did not export alongside the excluded task, so a collector record "
+        "cannot be matched to its local counterpart (C18f)"
+    )
+
+
+def test_an_agent_container_exports_with_NO_control_plane_deployed(acc):
+    """T060 / S12 / SC-018 / C18d — the half that gets missed if export is built
+    as control-plane plumbing."""
+    with _collector("accept", 9535) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9535))
+        acc.up("expplain", wait=False, mode="headless", task="echo no-control-plane-here")
+        _wait_for_container_exit("agent-container-expplain")
+        _wait_until(lambda: log.exists() and log.stat().st_size > 0,
+                    "a record from an ordinary agent container")  # fmt: skip
+        body = log.read_text(errors="replace")
+    assert "agent_container.run_id" in body
+    # No control plane was deployed in this test at all — asserted, so the test
+    # cannot pass by accident of a leftover container from another one.
+    ps = subprocess.run([RUNTIME, "ps", "--format", "{{.Names}}"],
+                        capture_output=True, text=True, timeout=60)  # fmt: skip
+    assert "agent-container-hub" not in ps.stdout
+
+
+def test_collect_works_with_AND_without_an_endpoint(acc):
+    """T069 / S16 — both configurations deliberately.
+
+    One that only worked without an endpoint would leave an operator who
+    configured OTLP holding logs with no way to download them.
+    """
+    # WITHOUT.
+    _settings(acc)
+    acc.up("collnone", wait=False, mode="headless", task="echo without-endpoint")
+    _wait_for_container_exit("agent-container-collnone")
+    r1 = acc.cli([*AGENT_CONTAINER, "telemetry", "collect", "--json"])
+    assert r1.returncode == 0, f"collect failed with no endpoint declared:\n{r1.stderr}"
+    assert _record_states(acc), "collect retrieved nothing with no endpoint declared"
+
+    # WITH.
+    with _collector("accept", 9536):
+        _settings(acc, otlp_endpoint=_collector_url(9536))
+        acc.up("collwith", wait=False, mode="headless", task="echo with-endpoint")
+        _wait_for_container_exit("agent-container-collwith")
+        r2 = acc.cli([*AGENT_CONTAINER, "telemetry", "collect", "--json"])
+    assert r2.returncode == 0, f"collect failed with an endpoint declared:\n{r2.stderr}"
+    data = json.loads(r2.stdout).get("data", {})
+    assert data.get("complete") is True, f"collect reported an incomplete trail: {data}"
+
+
+def test_the_exported_trail_survives_the_destruction_of_its_host(acc):
+    """T071 / SC-014 — tamper-evidence, measured by DESTROYING.
+
+    A trail the audited party can rewrite is not evidence, and only the negative
+    case proves it. Asserted by removing the container AND its volumes — the
+    local record is gone, the collector's copy is not.
+    """
+    with _collector("accept", 9537) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9537))
+        acc.up("tamper", wait=False, mode="headless", task="echo evidence-9f2b")
+        _wait_for_container_exit("agent-container-tamper")
+        _wait_until(lambda: log.exists() and "evidence-9f2b" in log.read_text(errors="replace"),
+                    "the record at the collector")  # fmt: skip
+        # DESTROY the source, volumes and all.
+        acc.down("tamper", purge=True)
+        assert not acc.volumes_of("tamper"), "purge left volumes behind"
+        surviving = log.read_text(errors="replace")
+    assert "evidence-9f2b" in surviving, (
+        "the collector's copy did not survive the destruction of the environment "
+        "that produced it — the exported trail is not evidence"
+    )

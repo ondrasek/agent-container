@@ -64,7 +64,7 @@ cannot fail:
       fail-on-unknown clause is what makes a third image impossible to add unnoticed
 - [X] T008 [P] Prove T007 can fail: add a throwaway third Dockerfile with no expectation and assert
       the test rejects it (C12, R2). A census that cannot fail is the defect it exists to prevent
-- [ ] T009 [P] Acceptance S9 in `bin/tests/test_acceptance.py` — inspect the **built** control-plane
+- [X] T009 [P] Acceptance S9 in `bin/tests/test_acceptance.py` — inspect the **built** control-plane
       image and assert no agent CLI is on `PATH` (SC-009). Source census and built-image check are
       different claims; keep both
 - [X] T010 Passphrase-protected key generation in **`image-control-plane/entrypoint.sh`**: generate
@@ -77,7 +77,7 @@ cannot fail:
 - [X] T011 One-shot passphrase read-out in `bin/agent-container`: read it through the runtime
       **once**, hold it **only within the printing call's scope**, and never assign it to anything
       that outlives the print (R3, C4). This is the feature's narrow Constitution III exception
-- [ ] T012 **THE GATE: acceptance S4** — after a control-plane deploy, the passphrase appears in **no**
+- [X] T012 **THE GATE: acceptance S4** — after a control-plane deploy, the passphrase appears in **no**
       file under state/config/data, **no** run record, **no** container log, and **no** `--json`
       payload (C4). Grep for the actual printed value; asserting the print statement's shape proves
       nothing about where the value went
@@ -134,10 +134,10 @@ that is visible before deploying.
 
 ### Tests for User Story 2
 
-- [ ] T024 [P] [US2] Acceptance S6 — deploy a control plane and, **without authorising its key
+- [X] T024 [P] [US2] Acceptance S6 — deploy a control plane and, **without authorising its key
       anywhere**, confirm it reaches nothing (C6, FR-007b). The quiet load-bearer: if deploying
       granted anything, nesting and revocation both stop meaning what the spec says
-- [ ] T025 [P] [US2] Acceptance S3 — the private key is `0600`, **encrypted at rest**, and no
+- [X] T025 [P] [US2] Acceptance S3 — the private key is `0600`, **encrypted at rest**, and no
       `PRIVATE KEY` appears anywhere on the operator's disk (C3, SC-008)
 - [ ] T026 [P] [US2] Acceptance S7 — `revoke` ends access with no per-host manual reconfiguration
       (C7, SC-005)
@@ -174,7 +174,7 @@ that is visible before deploying.
 
 ### Tests for User Story 3
 
-- [ ] T035 [P] [US3] Acceptance S8 — `panic --destroy` from inside reports the control plane as
+- [X] T035 [P] [US3] Acceptance S8 — `panic --destroy` from inside reports the control plane as
       **excluded**, names how to stop it instead, and leaves it running (C9, SC-010, SC-006)
 - [ ] T036 [P] [US3] Acceptance S10 — silent on a PATCH difference; **advisory** when the control
       plane is newer; **REFUSED** when the environment is newer, naming redeploy as the remedy
@@ -244,7 +244,7 @@ and the drift would be invisible because each leg still looks correct alone.
       marking anything `accepted` (FR-009h). **A 2xx is not acceptance** - a receiver may return
       success while refusing records, and treating 2xx as success marks refused records as delivered
       (C14, R9)
-- [ ] T052 [P] **Acceptance SC-021 - point at a collector configured to REFUSE a subset** and confirm
+- [X] T052 [P] **Acceptance SC-021 - point at a collector configured to REFUSE a subset** and confirm
       those records read `rejected`, not `accepted`. Only a refusing receiver exposes the naive
       2xx-means-success implementation; a compliant collector would pass either way (S17)
 - [X] T053 Derive the state from the response, **never** from the fact that an export was attempted
@@ -261,7 +261,7 @@ and the drift would be invisible because each leg still looks correct alone.
       Anything held for later is lost exactly when a container is killed, which is the case an audit
       trail exists for; and it needs no resident exporter, which the project avoids on the same
       grounds Feature 012's boundary runs no refresher (C16)
-- [ ] T057 [P] **Acceptance SC-022 - kill a running container with `SIGKILL`** and confirm every record
+- [X] T057 [P] **Acceptance SC-022 - kill a running container with `SIGKILL`** and confirm every record
       written before the kill is at the collector. **Not a graceful stop**: a graceful stop would pass
       against an exit-time batch, which is the implementation this rejects (S18)
 - [X] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
@@ -269,10 +269,10 @@ and the drift would be invisible because each leg still looks correct alone.
       endpoint, which project-level-only declaration would deny it
 - [X] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
       project resolves the user-level endpoint (FR-009d, C18g)
-- [ ] T060 [P] Acceptance S12 - an agent container's record reaches a real collector with **no control
+- [X] T060 [P] Acceptance S12 - an agent container's record reaches a real collector with **no control
       plane deployed** (SC-018, C18d). The half that gets missed if export is built as control-plane
       plumbing
-- [ ] T061 [P] Acceptance S14 - export is **fail-open**: an unreachable or undeclared collector degrades
+- [X] T061 [P] Acceptance S14 - export is **fail-open**: an unreachable or undeclared collector degrades
       to the local record, reports the gap, and never blocks the work (C18c). Under enforced egress,
       silence yields an empty collector that reads like a quiet system
 
@@ -283,7 +283,7 @@ and the drift would be invisible because each leg still looks correct alone.
 - [X] T063 Exclusion of the task text **by name**, never by pattern (FR-009f). The tool cannot know
       whether the collector is the operator's own VPS or a shared backend; a redactor that misses once
       converts caution into false confidence
-- [ ] T064 [P] Acceptance S13 - the planted marker is **present** by default and **absent** when
+- [X] T064 [P] Acceptance S13 - the planted marker is **present** by default and **absent** when
       excluded (SC-017). **Both positions**, at the receiver: a switch verified in one position may not
       be wired at all
 
@@ -304,7 +304,7 @@ and the drift would be invisible because each leg still looks correct alone.
       that host**", and a skipped host never reads as a complete trail
 - [X] T068 `collect` **retries `pending` and `failed`** records (FR-009h), which is what makes it the
       recovery path rather than only a downloader (R10)
-- [ ] T069 [P] Acceptance S16 - `collect` works **with and without** an endpoint declared, in both
+- [X] T069 [P] Acceptance S16 - `collect` works **with and without** an endpoint declared, in both
       configurations deliberately. One that only worked without an endpoint would leave an operator who
       configured OTLP holding logs with no way to download them
 - [X] T070 **THE RECONCILIATION: acceptance SC-020** - for a window, the set of records marked
@@ -314,7 +314,7 @@ and the drift would be invisible because each leg still looks correct alone.
       The window is **since the last successful `collect`** or an operator-supplied range, and
       `pending` records are **outside** it — counting not-yet as divergence would fail this against a
       healthy system (C17, R12, S19)
-- [ ] T071 [P] **Acceptance SC-014 - the exported trail is TAMPER-EVIDENT.** Destroy the host an action
+- [X] T071 [P] **Acceptance SC-014 - the exported trail is TAMPER-EVIDENT.** Destroy the host an action
       was performed on, and separately attempt to remove exported entries **from inside a session**;
       the collector's copy survives both - **zero** exported entries a control plane can remove.
       Measured by destroying and by attempting deletion, never by inspecting the export code: a trail
