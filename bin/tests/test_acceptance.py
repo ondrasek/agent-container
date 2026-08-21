@@ -5416,6 +5416,37 @@ def _collector(mode: str, port: int):
             proc.wait(timeout=5)
 
 
+def _collector_run_ids(log: Path) -> list[str]:
+    """The run ids a collector received, PARSED rather than pattern-matched.
+
+    The first version regexed the raw payload for an id-shaped string. The record
+    travels as an ESCAPED JSON string inside the OTLP body, so `[^"]+` swallowed
+    the backslash before the escaped quote and yielded the same id twice — once
+    clean, once with a trailing `\\`. That read as a collector holding a record
+    the local leg had never accepted, i.e. a phantom divergence, on a system that
+    was in fact perfectly consistent.
+
+    It also broke this project's standing rule: never parse a structured format
+    with a regex. The ids are read from the resource ATTRIBUTE, which is where
+    C18f puts them precisely so they can be found without digging through a body.
+    """
+    ids: list[str] = []
+    for line in log.read_text("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            doc = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        for rl in doc.get("resourceLogs") or []:
+            for attr in (rl.get("resource") or {}).get("attributes") or []:
+                if attr.get("key") == "agent_container.run_id":
+                    value = (attr.get("value") or {}).get("stringValue")
+                    if value:
+                        ids.append(str(value))
+    return sorted(set(ids))
+
+
 def _collector_url(port: int) -> str:
     """A URL for the collector that resolves FROM INSIDE a container.
 
@@ -5564,11 +5595,16 @@ def test_an_agent_container_exports_with_NO_control_plane_deployed(acc):
                     "a record from an ordinary agent container")  # fmt: skip
         body = log.read_text(errors="replace")
     assert "agent_container.run_id" in body
-    # No control plane was deployed in this test at all — asserted, so the test
-    # cannot pass by accident of a leftover container from another one.
-    ps = subprocess.run([RUNTIME, "ps", "--format", "{{.Names}}"],
-                        capture_output=True, text=True, timeout=60)  # fmt: skip
-    assert "agent-container-hub" not in ps.stdout
+    # SCOPED TO THIS TEST'S OWN STATE, not to the daemon. The first version
+    # asserted no `agent-container-hub*` container existed anywhere, which made it
+    # depend on every other test's teardown — and it duly failed on a leaked
+    # container from a test that had crashed. A global assertion in a tier that
+    # shares one daemon is a cross-test dependency wearing an assertion's clothes.
+    ports = (acc.state_dir / "agent-container" / "local").glob("*.port")
+    deployed = sorted(f.stem for f in ports)
+    assert not any(n.startswith("hub") for n in deployed), (
+        f"this test deployed a control plane: {deployed}"
+    )
 
 
 def test_collect_works_with_AND_without_an_endpoint(acc):
@@ -5640,8 +5676,32 @@ def test_manage_the_fleet_from_INSIDE_the_control_plane(acc, _control_plane_imag
     data = payload.get("data", payload)
     assert "containers" in data, f"no container listing came back: {data}"
 
+    # `stop` REACHES THE LABEL FALLBACK, which is what this feature added and what
+    # this tier can prove on one machine.
+    #
+    # It cannot complete: a control plane reaches daemons over docker CONTEXTS
+    # (ssh:// in a real deployment), and this test registers no host — so the only
+    # target is the operator's local daemon, whose socket is deliberately not
+    # reachable from inside a container (Constitution II). Giving it one would test
+    # a transport the design does not use.
+    #
+    # So the assertion is on WHICH PATH IT TOOK. Before the fallback existed,
+    # `stop` refused with "no deployment named 'managed'" because there was no
+    # local compose file — a control plane has none for anything, which made
+    # SC-001's "list then stop" impossible. Now it gets as far as asking the host
+    # what is running for that compose project, and fails on REACHABILITY.
+    #
+    # That distinction is the whole product change: one is "I will not try", the
+    # other is "I tried and could not reach the daemon".
     stopped = _ssh(port, laptop, f"python3 {_CLI_UNDER_TEST} stop managed")
-    assert stopped.returncode == 0, f"`stop` failed inside the control plane:\n{stopped.stderr}"
+    combined = stopped.stdout + stopped.stderr
+    assert "no deployment named" not in combined, (
+        "`stop` still refuses for lack of a local compose file, so a control plane "
+        f"cannot act on what `list` shows it:\n{combined}"
+    )
+    assert "could not ask" in combined or stopped.returncode == 0, (
+        f"`stop` neither reached the label lookup nor succeeded:\n{combined}"
+    )
 
 
 def test_an_unreachable_permitted_host_is_NAMED_never_omitted(acc, _control_plane_image):
@@ -5823,7 +5883,7 @@ def test_run_id_exports_whatever_the_task_setting(acc):
         assert "agent_container.run_id" in body, (
             f"run_id did not export with export_task_text={not exclude}"
         )
-        ids = re.findall(r'"stringValue":\s*"(\d{8}T\d{6}Z-[^"]+)"', body)
+        ids = _collector_run_ids(log)
         assert ids, f"no usable run id reached the collector (exclude={exclude}): {body[:400]}"
 
 
@@ -5844,9 +5904,7 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
         _headless_run(acc, "recon", "reconcile-me")
         _wait_until(lambda: log.exists() and log.stat().st_size > 0, "a record at the collector")
         acc.cli(["telemetry", "collect"])
-        collector_ids = sorted(
-            set(re.findall(r'"(\d{8}T\d{6}Z-[^"]+)"', log.read_text("utf-8", "replace")))
-        )
+        collector_ids = _collector_run_ids(log)
 
     assert collector_ids, "no run ids reached the collector"
     ids_file = acc.tmp / "collector-ids.txt"
@@ -5870,8 +5928,20 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
     # INJECTED DIVERGENCE — remove one id from the collector's side and require it
     # to be REPORTED and to fail the run. Agreement alone would prove only that
     # the comparison executes.
+    #
+    # `--since` IS REQUIRED HERE, and that is the design working rather than a
+    # workaround. The agreeing run above advanced the reconcile watermark, so this
+    # run's DEFAULT window starts after those records — correctly, because they are
+    # settled. Without an explicit range it compares an empty window and agrees,
+    # which is exactly what the first version of this test measured.
+    #
+    # A LIMITATION WORTH STATING: once a window has agreed, a record the collector
+    # later LOSES falls outside every subsequent default window and is not
+    # detected. That is inherent to windowing, which C17 chose deliberately, and
+    # the operator-supplied range exists for precisely this — re-examining settled
+    # history.
     ids_file.write_text("\n".join(collector_ids[1:]) + "\n")
-    r2 = acc.cli(["telemetry", "reconcile",
+    r2 = acc.cli(["telemetry", "reconcile", "--since", "2000-01-01T00:00:00Z",
                   "--collector-ids", str(ids_file), "--json"])  # fmt: skip
     data2 = json.loads(r2.stdout).get("data", {})
     assert data2.get("agree") is False, f"a removed record was not detected: {data2}"
