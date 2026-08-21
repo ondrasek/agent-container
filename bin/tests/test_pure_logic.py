@@ -1398,3 +1398,85 @@ def test_capture_reads_through_the_runtime_never_ssh_keyscan(real_capture, monke
     assert seen[0][0] == "podman"
     assert "exec" in seen[0] and wiz.CONTAINER_HOSTKEY_PUB in seen[0]
     assert not any("keyscan" in part for argv in seen for part in argv)
+
+
+# --- defaults belong at the surface (project-wide invariant) ------------------
+#
+# A default substituted for absent data DEEP IN AN IMPLEMENTATION is invisible to
+# everything downstream, and this project has paid for it: `driver_reachable_address`
+# answered "localhost" for a host with no address, so `host_is_local` reported True
+# for a REMOTE docker context, `gather_rows` classified it as a local alias, never
+# queried it and never reported it unreachable. An operator would have read a
+# complete-looking listing with a host silently missing.
+#
+# So every behavioural default is NAMED and applied at a boundary — a flag default,
+# a settings reader's caller, or a record constructor. These guards keep the named
+# ones single-sourced; they cannot prove the rule holds everywhere, and that ceiling
+# is stated rather than implied.
+
+
+def _func_body(src: str, name: str) -> str:
+    """A function's source, sliced to the next top-level `def` rather than a fixed
+    character count — a magic window silently shrinks the assertion every time the
+    code grows."""
+    i = src.index(f"\ndef {name}(")
+    j = src.index("\ndef ", i + 1)
+    return src[i:j]
+
+
+_NAMED_DEFAULTS = ("DEFAULT_SSH_USER", "DEFAULT_ATTACH_ADDRESS", "EGRESS_ENFORCEMENT_DEFAULT")
+
+
+@pytest.mark.parametrize("const", _NAMED_DEFAULTS)
+def test_the_named_defaults_exist(wiz, const):
+    """Named, so a default is greppable, auditable and changeable in ONE place."""
+    assert getattr(wiz, const, None), f"{const} is missing; a default lost its name"
+
+
+def test_the_egress_enforcement_default_is_not_duplicated_as_a_literal(wiz):
+    """`"advisory"` was hardcoded at FOUR separate decision sites, each free to
+    drift — a security-relevant policy with no owner.
+
+    Comments and doctests may name it; DECISION lines must use the constant.
+    """
+    src = Path(wiz.__file__).read_text()
+    offenders = []
+    for i, ln in enumerate(src.splitlines(), 1):
+        st = ln.strip()
+        if st.startswith("#") or st.startswith(">>>") or "EGRESS_ENFORCEMENT_DEFAULT" in ln:
+            continue
+        # A decision is `... or "advisory"` / `get(..., "advisory")` — not a
+        # comparison against it, and not the value in a declaration or a doc.
+        if 'or "advisory"' in ln or "'advisory'" in ln and " or " in ln:
+            offenders.append((i, st[:100]))
+    assert not offenders, (
+        f"the enforcement default is substituted as a literal at {offenders}. "
+        f"Use EGRESS_ENFORCEMENT_DEFAULT so the policy has one owner."
+    )
+
+
+def test_the_declarative_reader_does_not_restate_ExecSpec_defaults(wiz):
+    """Two copies of "the default mode is interactive" drift the moment one is
+    edited, and the drift is INVISIBLE: a declarative deploy and an imperative one
+    would silently differ. ExecSpec owns them; the reader reads what the spec said.
+    """
+    src = Path(wiz.__file__).read_text()
+    at = src.index("        mode=c.get(")
+    body = src[at - 400 : at + 500]
+    for restated in ('c.get("mode", "interactive")', 'c.get("agent", "claude")',
+                     'c.get("workspace", "persistent")'):  # fmt: skip
+        assert restated not in body, (
+            f"the declarative reader restates an ExecSpec default: {restated}"
+        )
+    assert "ExecSpec.mode" in body and "ExecSpec.agent" in body
+
+
+def test_driver_reachable_address_is_an_accessor_not_a_defaulter(wiz):
+    """THE defect that motivated the rule. It must not answer for absent data."""
+    body = _func_body(Path(wiz.__file__).read_text(), "driver_reachable_address")
+    assert 'or "localhost"' not in body
+    assert "DEFAULT_ATTACH_ADDRESS" not in body, (
+        "it defaults again, just with a nicer name — the point is that the "
+        "BOUNDARY resolves the address, so this reads an explicit value"
+    )
+    assert "die(" in body, "absence must be reported, not substituted"

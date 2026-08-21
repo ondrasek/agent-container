@@ -21,54 +21,56 @@ re-summarise them here.
   Stay Podman-compatible; never depend on Docker-Desktop-only behaviour.
 - **Layout (011) — [`docs/layout.md`](docs/layout.md) is the one map.** Never "project directory".
   Config is two levels, project winning, same filename both; **plaintext credentials are user-level
-  only**. The build context **is** the image directory. **Pre-011 layouts are refused, not ignored.**
+  only**. Build context **is** the image directory. **Pre-011 layouts are refused, not ignored.**
 - **Run mechanism is compose** (v2), generated and run **on the target host**. `configs: {file:}` **is**
-  a bind and fails over a remote context (measured); only `{content:}` is API-delivered. Inline
-  non-secret injected material — the 001/003 lesson.
+  a bind and fails over a remote context (measured); only `{content:}` is API-delivered — the 001/003
+  lesson.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv, or
   printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a missing
-  referenced file must `die` **before** compose. On-volume `auth.json` is
-  **operator-interactive-login only**; a `--task` is **not** a credential channel. **`/run` covers
-  INJECTED material only** — **no private SSH key is injected at all** (see below).
+  referenced file must `die` **before** compose. On-volume `auth.json` is **operator-login only**; a
+  `--task` is **not** a credential channel. **No private SSH key is injected at all** (see below).
 - **The supported-agent list is single-sourced** (`AGENTS`); tests pin the completions and every
-  Dockerfile to it. All fail on drift and name what to update.
+  Dockerfile to it, failing on drift and naming what to update.
+- **DEFAULTS BELONG AT THE SURFACE, never in an implementation** — a flag default, a settings reader's
+  CALLER, a record constructor; each **named** (greppable, one owner). A reader reports **absence**.
+  Substituting deep down is invisible downstream and cost a real defect: an addressless host read as
+  local, so a remote one was never queried nor reported unreachable. Absent ≠ defaulted ≠
+  declared-empty. Display placeholders (`?`, `-`) are fine — that IS the surface.
 - **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates it
   `root:root` and rootless can't write it. Both images.
 - **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently (only `build`
   needs a checkout). **PyYAML is the one third-party dep**; `yaml.safe_load` **only** — never a regex
   over a structured format. Justify new deps against Constitution VI.
 
-- **Egress enforcement is packet-level and says so.** Default-deny in a netns shared with the
-  **egress sidecar**, which alone holds `NET_ADMIN`; squid **splices, never bumps**. A declaration
-  governs **all** egress; absent ≠ `allow: []`; the strength claim is tested for **absence** of
-  overclaim.
+- **Egress enforcement is packet-level and says so.** Default-deny in a netns shared with the **egress
+  sidecar**, which alone holds `NET_ADMIN`; squid **splices, never bumps**. A declaration governs
+  **all** egress; the strength claim is tested for **absence** of overclaim.
 - **Both SSH identities are CAPTURED, never supplied — only public halves leave.** Host key pinned per
   deploy: **mismatch ⇒ refuse, never prompt**; absent ⇒ warn + ask (no tty ⇒ refuse) — a pin must
   **predate** what it checks. The agent key sits at the **conventional** `~/.ssh/id_ed25519`, so
-  nothing wires it; the `~/.ssh/config` **block** is write-once, not the file. `--purge`/`ssh-key
-  rotate` is the revocation boundary. A first SSH clone-on-start can't clone — exit **3**, worded to
-  forbid the teardown the code invites.
-- **The inventory remembers what we CREATED; `panic` acts on it.** Durable but **flat**; capped by
-  count, **never age**; not backfilled. `panic` enumerates from it, stops by **compose project
-  label**, verifies by **observation**. **Unreachable ⇒ `undetermined`, never `stopped`** and fails
-  the run; an **unverified destroy writes no outcome**.
+  nothing wires it; the `~/.ssh/config` **block** is write-once. `--purge`/`ssh-key rotate` is the
+  revocation boundary. A first SSH clone-on-start can't clone — exit **3**, worded to forbid the
+  teardown it invites.
+- **The inventory remembers what we CREATED; `panic` acts on it.** Durable, **flat**, capped by count
+  **not age**. `panic` enumerates from it, stops by **compose project label** (so does `stop` with no
+  local compose file), verifies by **observation**. **Unreachable ⇒ `undetermined`, never `stopped`**
+  and fails the run; an **unverified destroy writes no outcome**.
 - **A run's account outlives its container.** Container writes to the runs volume, CLI ingests on next
-  contact, **teardown drains before removing volumes**; `task` verbatim, *unknown* never `0`.
+  contact, **teardown drains before removing volumes**; *unknown* usage never `0`.
+
 - **Observability is TWO LEGS, ONE PAYLOAD** (017). Local trail unconditional; export is `curl`,
   **write-time**, **fail-open**, **zero** deps — protocol only, **never** a backend package.
   `accepted` = *this endpoint accepted this record*, nothing more; **2xx is not acceptance**;
-  `rejected`≠`failed`; `pending` **outside** the window. `task` exports by default, excluded **by name
-  never pattern**, `run_id` always. `collect` **names what it missed**.
+  `rejected`≠`failed`. `task` exports by default, excluded **by name never pattern**, `run_id` always.
+  `collect` **names what it missed**; reconcile's window is the last **reconcile**.
 - **A control plane is an ordinary environment holding a standing key** (017). Second image, **no
-  agents** (census over *every* Dockerfile). Passphrase in-container, printed **once**, **no
-  recovery**; scope **declares**, the authorised key **is** the boundary, `revoke` the only narrowing.
-  `panic` from inside **excludes itself and says so**. Role **inheritable**, provenance **persisted**.
-- **`doctor` is read-only BY COMPOSITION, not a flag** — never reaches a writer (a test walks the call
-  graph); `unknown` is first-class and **never exits 1**; a credential is checked by DECLARATION,
-  never resolved (resolving is the prompt).
+  agents** but it DOES need a runtime client. Passphrase in-container, printed **once**, **no
+  recovery**; the authorised key **is** the boundary, `revoke` the only narrowing. `panic` from inside
+  **excludes itself and says so**. Role **inheritable**, provenance **persisted**.
+- **`doctor` is read-only BY COMPOSITION** — never reaches a writer (a test walks the call graph);
+  `unknown` **never exits 1**; a credential is checked by DECLARATION, never resolved.
 - **Every substantive merge to `main` is a release.** python-semantic-release bumps from Conventional
-  Commits (`feat`→minor, `fix`→patch, **breaking→minor pre-1.0**; docs/chore/test cut none), tags and
-  publishes via OIDC. No manual tagging.
+  Commits (`feat`→minor, `fix`→patch, **breaking→minor pre-1.0**), tags and publishes via OIDC.
 
 ### Where the detail lives
 
@@ -88,22 +90,22 @@ Never bake host-specific orchestration into the image.
 
 - **Rootless by decision**: no `sudo`/root at runtime, sshd as `dev` on 2222. **Bake every system dep
   at build — an agent never `apt install`s.**
-- **Commit-and-push** is a property of the agent config, not of git hooks (bypassable).
+
+- **Commit-and-push** is a property of the agent config, not git hooks (bypassable).
 
 - **Quality gate — one script, two uses.** `scripts/quality-gate.sh`; Stop hook and CI run the *same*
   script. It **excludes** the CI-authoritative acceptance tier (`pytest -m acceptance bin/tests`; on
-  macOS+Lima the work dir must be Lima-shared). **Read its exit code unpiped** (`| tail` reports
-  tail's). **Never edit the tree while that tier runs** — it re-reads the CLI per invocation.
-- **Run the full suite, not only your new tests** — a changed contract is exactly when an existing test
-  still pins the old shape.
-- **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced three ways: the local
+  macOS+Lima the work dir must be Lima-shared). **Read its exit code unpiped.** **Never edit the tree
+  while that tier runs** — it re-reads the CLI per invocation.
+- **Run the full suite** — a changed contract is exactly when an existing test pins the old shape.
+- **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced by the local
   `commit-msg` hook (once per clone), the `commits` CI job, and a ruleset on `main`; `--no-verify`
   bypasses only the first.
-- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, and one proves it can fail.
-- **Keep this file under 2000 tokens** — `chars/4` UNDERSTATES by ~7%, so measure with a tokenizer.
-  New detail goes to `docs/`; **prune before adding**.
+- **Every short flag needs a long one**; a test enforces it, and one proves it can fail.
+- **Keep this file under 2000 tokens** — `chars/4` UNDERSTATES by ~7%; measure with a tokenizer. New
+  detail goes to `docs/`; **prune before adding**.
 
-## Out of scope (don't add unless asked)
+## Out of scope
 
-IDE integrations beyond SSH/tmux/nvim · multi-user access control (one operator) · Kubernetes.
+IDE integrations beyond SSH/tmux/nvim · multi-user access control · Kubernetes.
 

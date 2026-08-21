@@ -283,16 +283,17 @@ def test_env_live_config_parses_inspect_env(wiz, monkeypatch):
         wiz, "query", lambda argv, timeout=None: subprocess.CompletedProcess(argv, 0, out, "")
     )
     cfg = wiz.env_live_config(LOCAL_HOST, "acme")
-    # Feature 017: an ABSENT role reads as `agent` — the only thing this tool
-    # could deploy before the role existed. Defaulting to control-plane would be
-    # the dangerous direction: the next redeploy of every pre-017 environment
-    # would swap in the narrower image.
+    # Feature 017: the role is reported RAW. Absent stays absent, exactly as
+    # `mode`/`agent`/`repo` do — a reader that substituted "agent" here would make
+    # "the container did not say" indistinguishable from "the container said
+    # agent", and only the caller can tell those apart: one means nothing to
+    # inherit, the other means inherit this.
     assert cfg == {
         "mode": "headless",
         "agent": "codex",
         "repo": None,
         "egress": None,
-        "role": "agent",
+        "role": None,
     }
     # a failed inspect → None (never a fabricated config)
     monkeypatch.setattr(

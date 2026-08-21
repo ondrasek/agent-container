@@ -484,10 +484,27 @@ def test_an_endpoint_without_a_scheme_is_REFUSED_not_prefixed(wiz, tmp_path, mon
         wiz.resolve_otlp_endpoint(proj)
 
 
-def test_the_task_is_exported_by_DEFAULT(wiz, tmp_path, monkeypatch):
-    """FR-009f0/C18a: a task is not a credential channel."""
+def test_an_undeclared_task_switch_reports_ABSENCE_not_the_default(wiz, tmp_path, monkeypatch):
+    """The reader reports what the operator SAID; the boundary applies the default.
+
+    A reader that returned True would make "the operator chose to export" and "the
+    operator never said" the same answer, and only one of those is a choice —
+    which matters the moment anything wants to report which case they are in.
+    """
     proj = _settings(tmp_path, monkeypatch, wiz)
-    assert wiz.export_task_text(proj) is True
+    assert wiz.export_task_text(proj) is None
+    # The DEFAULT is still true, and it is named rather than written as a bare
+    # literal inside a reader.
+    assert wiz.EXPORT_TASK_TEXT_DEFAULT is True
+
+
+def test_a_declared_task_switch_is_reported_verbatim(wiz, tmp_path, monkeypatch):
+    """FR-009f0/C18a: a task is not a credential channel, so the default exports
+    it — but an explicit declaration must be distinguishable from the default."""
+    for declared in (True, False):
+        proj = _settings(tmp_path, monkeypatch, wiz,
+                         project=f"export_task_text: {str(declared).lower()}\n")  # fmt: skip
+        assert wiz.export_task_text(proj) is declared
 
 
 def test_the_task_switch_REFUSES_a_string(wiz, tmp_path, monkeypatch):
@@ -507,7 +524,11 @@ def test_the_task_switch_is_delivered_as_an_explicit_value(wiz):
     i = src.index("    def compose_environment(")
     body = src[i : src.index("\nINHERITABLE = ", i)]
     assert "AGENT_CONTAINER_EXPORT_TASK" in body
-    assert '"0" if not export_task_text() else "1"' in body
+    # The DEFAULT IS APPLIED HERE, at the boundary, and lands as an explicit
+    # "0"/"1" — so the container never sees an absence and never defaults anything
+    # itself.
+    assert "EXPORT_TASK_TEXT_DEFAULT if declared is None else declared" in body
+    assert '"1" if include_task else "0"' in body
 
 
 # --- the two-level settings contract (FR-009d, T058/T059) -------------------
@@ -518,11 +539,13 @@ def _settings(tmp_path, monkeypatch, wiz, *, project=None, user=None):
     import textwrap
 
     proj = tmp_path / "proj"
-    (proj / ".agent-container").mkdir(parents=True)
+    # exist_ok: a test may write settings more than once (declared true, then
+    # declared false) to prove the two are distinguishable.
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
     if project is not None:
         (proj / ".agent-container" / "settings.yaml").write_text(textwrap.dedent(project))
     cfg = tmp_path / "cfg"
-    cfg.mkdir()
+    cfg.mkdir(exist_ok=True)
     if user is not None:
         (cfg / "settings.yaml").write_text(textwrap.dedent(user))
     monkeypatch.setattr(wiz, "CONFIG_DIR", cfg)
@@ -1900,3 +1923,44 @@ def test_the_refusal_happens_before_any_runtime_call(wiz):
     refuse_at = body.index("refuse_unversioned_control_plane")
     assert refuse_at < body.index("ensure_tunnel(")
     assert refuse_at < body.index("compose_up_exec(") if "compose_up_exec(" in body else True
+
+
+# --- defaulting belongs at the boundary, not in the implementation ------------
+
+
+def test_an_undeclared_scope_is_reported_as_the_DEFAULT_not_as_a_declaration(wiz, monkeypatch):
+    """Three cases, three different facts.
+
+    The reader used to substitute the registry for "undeclared", presenting a
+    derived list as though the operator had chosen it — at exactly the moment an
+    operator is deciding whether to authorise a standing key. `None` now means
+    nothing was declared, and the report says which default is being applied.
+    """
+    monkeypatch.setattr(wiz, "load_registry", lambda: {"hosts": {"vps1": {}, "vps2": {}}})
+    lines = wiz.report_control_plane_scope("hub", None)
+    assert "NO scope declared" in lines[0]
+    assert "default applies" in lines[0]
+    assert "vps1" in lines[0] and "vps2" in lines[0]
+    assert "control_plane_hosts" in lines[1], "the report does not say how to narrow it"
+
+
+def test_an_undeclared_scope_with_no_hosts_says_it_reaches_NOTHING(wiz, monkeypatch):
+    monkeypatch.setattr(wiz, "load_registry", lambda: {"hosts": {}})
+    lines = wiz.report_control_plane_scope("hub", None)
+    assert "NO scope declared and NO hosts registered" in lines[0]
+
+
+def test_a_DECLARED_empty_scope_is_distinct_from_undeclared(wiz):
+    """`allow: []` means nothing is permitted; absence means no declaration
+    exists. Feature 012 learned this, and it holds here too."""
+    lines = wiz.report_control_plane_scope("hub", [])
+    assert "you declared no hosts" in lines[0]
+    assert "NO scope declared" not in lines[0]
+
+
+def test_an_undeclared_scope_REFUSES_NOTHING(wiz, monkeypatch):
+    """Refusing against a scope the operator never wrote would be a control they
+    did not ask for."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    monkeypatch.setattr(wiz, "control_plane_permitted_hosts", lambda _n: None)
+    wiz.refuse_out_of_scope("", "any-host-at-all")  # must not raise

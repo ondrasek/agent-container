@@ -734,7 +734,44 @@ def test_remove_orphans_is_on_down_only(wiz, tmp_path):
 
 def test_driver_reachable_address(wiz):
     assert wiz.driver_reachable_address({"address": "1.2.3.4"}) == "1.2.3.4"
-    assert wiz.driver_reachable_address({}) == "localhost"
+
+
+def test_driver_reachable_address_DEFAULTS_NOTHING(wiz):
+    """It used to answer "localhost" for an absent address, putting a policy
+    decision where nothing downstream could see it.
+
+    That cost a real defect: `host_is_local` then reported True for any
+    addressless host, so a REMOTE docker context was classified as a local alias,
+    never queried, and never reported unreachable — an operator would have read a
+    complete-looking listing with a host silently missing.
+
+    Defaulting now happens at the boundary (`host add` at registration,
+    `registry_hosts` for anything that bypassed it), so a record arriving here
+    without one is a CONSTRUCTION ERROR in the caller, and saying so beats being
+    quietly wrong about a remote host.
+    """
+    with pytest.raises(wiz.Fatal, match="no address"):
+        wiz.driver_reachable_address({})
+
+
+def test_registry_hosts_RESOLVES_the_address_at_the_boundary(wiz):
+    """Every consumer downstream reads an explicit value; none has to guess."""
+    reg = {"hosts": {
+        "vps": {"driver": "docker", "context": "ssh://ops@203.0.113.7"},
+        "lima": {"driver": "docker", "context": "lima-docker"},
+        "explicit": {"driver": "docker", "context": "whatever", "address": "10.0.0.9"},
+    }}  # fmt: skip
+    hosts = wiz.registry_hosts(reg)
+    # Derived from an ssh:// context — genuinely remote.
+    assert hosts["vps"]["address"] == "203.0.113.7"
+    # A local context really is local, and now SAYS so in the record.
+    assert hosts["lima"]["address"] == "localhost"
+    # An explicit address is never overwritten.
+    assert hosts["explicit"]["address"] == "10.0.0.9"
+    # And the stored registry is not mutated in place — normalisation is a read
+    # concern, so a caller that writes the registry back cannot accidentally
+    # persist a derived value as though the operator had chosen it.
+    assert "address" not in reg["hosts"]["vps"]
 
 
 # --- sidecar / helper services (Feature 002 US4, R5) -------------------------

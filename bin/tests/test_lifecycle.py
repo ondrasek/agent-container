@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
-H = {"driver": "docker", "context": "lima"}
+# A REALISTIC host record: it carries an address, because every record the tool
+# hands to its own code does. `registry_hosts` resolves one at the boundary and
+# `host add` resolves one at registration, so a fixture without an address is not
+# a record the implementation can receive — and `driver_reachable_address` now
+# says so rather than quietly answering "localhost".
+H = {"driver": "docker", "context": "lima", "address": "localhost"}
 F = Path("/s/acme.compose.yaml")
 
 

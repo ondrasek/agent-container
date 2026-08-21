@@ -79,6 +79,24 @@ AGENT_IMAGE_DIR = "image"
 # The two roles an environment can have (data-model §1). Persisted on the
 # inventory entry, so a STOPPED control plane is still identifiable — which
 # inspecting the container could not tell you.
+# --- DEFAULTS BELONG AT THE SURFACE ------------------------------------------
+# Every default an operator can be affected by is NAMED here and applied at a
+# BOUNDARY — a CLI flag default, a settings reader's caller, or a record
+# constructor — never substituted for absent data deep in an implementation.
+#
+# The rule exists because breaking it cost a real defect: `driver_reachable_address`
+# answered "localhost" for a host with no address, so `host_is_local` reported True
+# for a REMOTE docker context, `gather_rows` classified it as a local alias, never
+# queried it, and never reported it unreachable. An operator would have read a
+# complete-looking listing with a host silently missing — the exact failure SC-002
+# exists to prevent, caused by a default nobody could see.
+#
+# Named rather than inlined so a default is greppable, auditable and changeable in
+# ONE place. An unnamed literal repeated across implementations is a policy with no
+# owner: `"advisory"` appeared at four separate decision sites, each free to drift.
+DEFAULT_SSH_USER = "dev"  # the image's only account (Constitution II)
+DEFAULT_ATTACH_ADDRESS = "localhost"
+EGRESS_ENFORCEMENT_DEFAULT = "advisory"  # Feature 012: absent enforcement is advisory
 ROLE_AGENT = "agent"
 ROLE_CONTROL_PLANE = "control-plane"
 ROLES = (ROLE_AGENT, ROLE_CONTROL_PLANE)
@@ -782,7 +800,7 @@ def resolve_ssh_user(override: str | None = None) -> str:
     ...
     Fatal: invalid ssh user '-oProxyCommand=x'
     """
-    user = override or os.environ.get("AGENT_CONTAINER_USER") or "dev"
+    user = override or os.environ.get("AGENT_CONTAINER_USER") or DEFAULT_SSH_USER
     if not SSH_USER_RE.fullmatch(user):
         die(f"invalid ssh user '{user}'")
     return user
@@ -4552,8 +4570,36 @@ def save_registry(reg: dict) -> None:
 
 
 def registry_hosts(reg: dict) -> dict:
+    """The host records, with every ABSENT DEFAULT RESOLVED HERE.
+
+    THE BOUNDARY IS THE PLACE TO DEFAULT. `host add` already resolves an address
+    at registration, so a record the tool wrote always carries one — but a record
+    that predates that, or one an operator hand-edited, may not. The old code
+    handled it deep in `driver_reachable_address`, which returned "localhost" for
+    a missing address and made the decision INVISIBLE to everything downstream.
+
+    That cost a real defect: `host_is_local` therefore reported True for any
+    addressless host, so `gather_rows` classified a REMOTE docker context as a
+    local alias, never queried it, and never reported it unreachable. An operator
+    would have seen a complete-looking listing with a host silently omitted — the
+    exact failure SC-002 exists to prevent, caused by a default nobody could see.
+
+    Normalising at the edge means every consumer reads an explicit value and no
+    implementation has to guess. The derivation is stated, once, where the data
+    enters — and `driver_reachable_address` is now a plain accessor.
+    """
     hosts = reg.get("hosts")
-    return hosts if isinstance(hosts, dict) else {}
+    if not isinstance(hosts, dict):
+        return {}
+    out = {}
+    for name, rec in hosts.items():
+        if not isinstance(rec, dict):
+            out[name] = rec
+            continue
+        if not rec.get("address"):
+            rec = rec | {"address": address_from_context(str(rec.get("context") or ""))}
+        out[name] = rec
+    return out
 
 
 def get_host(reg: dict, name: str) -> dict | None:
@@ -4578,7 +4624,7 @@ def address_from_context(context: str) -> str:
     'localhost'
     """
     m = re.match(r"ssh://(?:[^@/]+@)?([^:/]+)", context)
-    return m.group(1) if m else "localhost"
+    return m.group(1) if m else DEFAULT_ATTACH_ADDRESS
 
 
 def probe_host_runtime(host: dict) -> str | None:
@@ -5553,10 +5599,19 @@ def resolve_settings_key(key: str, cwd: Path | None = None) -> object | None:
     return None
 
 
-def export_task_text(cwd: Path | None = None) -> bool:
-    """Whether the `task` field is exported (FR-009f0, FR-009f, contract C18a).
+# The default, named where it can be seen and referenced, rather than written as a
+# bare `True` inside a reader. The delivery boundary applies it.
+EXPORT_TASK_TEXT_DEFAULT = True
 
-    DEFAULT TRUE, and that is a decision with a reason rather than an oversight.
+
+def export_task_text(cwd: Path | None = None) -> bool | None:
+    """Whether the `task` field is exported — or None if UNDECLARED
+    (FR-009f0, FR-009f, contract C18a).
+
+    THE DEFAULT IS TRUE, and that is a decision with a reason rather than an
+    oversight — but it is applied by the caller (see EXPORT_TASK_TEXT_DEFAULT), so
+    "undeclared" stays distinguishable from "declared true" for anything that
+    later wants to report which one an operator is in.
     A task is NOT a credential channel: credentials reach a container by
     injection, the single exception being the SSH keys a container generates
     itself. Withholding the task would design around an operator error the tool
@@ -5577,7 +5632,11 @@ def export_task_text(cwd: Path | None = None) -> bool:
     """
     value = resolve_settings_key("export_task_text", cwd)
     if value is None:
-        return True
+        # UNDECLARED, reported as such. The default is applied at the delivery
+        # boundary (`ExecSpec.compose_environment`), not here: a reader that
+        # returned True would make "the operator chose to export" and "the
+        # operator never said" the same answer, and only one of those is a choice.
+        return None
     if not isinstance(value, bool):
         # Refused rather than coerced. "false" as a STRING is truthy in Python,
         # so a coercing reader would export the task text for an operator who
@@ -5669,7 +5728,9 @@ def export_record_via_endpoint(path: Path, endpoint: str) -> str:
         # constrained at the point of use as well as at the point of entry.
         warn(f"refusing to export to a non-HTTP endpoint: {endpoint!r}")
         return EXPORT_FAILED
-    payload = json.dumps(otlp_log_payload(rec, include_task=export_task_text())).encode()
+    declared_task = export_task_text()
+    include_task = EXPORT_TASK_TEXT_DEFAULT if declared_task is None else declared_task
+    payload = json.dumps(otlp_log_payload(rec, include_task=include_task)).encode()
     req = urllib.request.Request(
         endpoint,
         data=payload,
@@ -6980,8 +7041,29 @@ def driver_ingest_clear_argv(
 
 
 def driver_reachable_address(host: dict) -> str:
-    """Address used for attach: the host's own address (localhost for local)."""
-    return host.get("address") or "localhost"
+    """The host's attach address. A PLAIN ACCESSOR — it defaults nothing.
+
+    It used to return "localhost" for an absent address, which put a policy
+    decision in the implementation where nothing downstream could see it (see
+    `registry_hosts` for the defect that caused). Defaulting belongs at the
+    boundary: `host add` resolves it at registration and `registry_hosts`
+    normalises anything that bypassed it, so by the time a record reaches here the
+    address is present.
+
+    A record with no address is therefore a CONSTRUCTION ERROR in the caller, not
+    an operator's missing input — so it dies naming the caller's problem rather
+    than silently answering "localhost" and being wrong about a remote host.
+    """
+    address = host.get("address")
+    if not address:
+        die(
+            "internal: a host record reached driver_reachable_address with no address",
+            remedy=(
+                "build host records through `registry_hosts` or `implicit_local_host`, "
+                "which resolve it at the boundary"
+            ),
+        )
+    return str(address)
 
 
 # --- compose generation (Feature 001) ----------------------------------------
@@ -7501,7 +7583,7 @@ def implicit_local_host(rt: str | None = None) -> dict:
     return {
         "driver": rt or detect_runtime(),
         "context": "",
-        "address": "localhost",
+        "address": DEFAULT_ATTACH_ADDRESS,
         "provisioning": None,
         "created_by_tool": False,
     }
@@ -9422,7 +9504,12 @@ class ExecSpec:
         # Delivered as an explicit "0"/"1" rather than by the variable's presence:
         # an absent variable is indistinguishable from a deploy that predates the
         # switch, and this is a field whose exposure the operator chose.
-        env["AGENT_CONTAINER_EXPORT_TASK"] = "0" if not export_task_text() else "1"
+        # THE DEFAULT IS APPLIED HERE, at the boundary that hands the value to the
+        # container, and it lands as an explicit "0"/"1" — so the container never
+        # sees an absence and never has to default anything itself.
+        declared = export_task_text()
+        include_task = EXPORT_TASK_TEXT_DEFAULT if declared is None else declared
+        env["AGENT_CONTAINER_EXPORT_TASK"] = "1" if include_task else "0"
         if self.role == ROLE_CONTROL_PLANE and name:
             # Feature 017 FR-010/FR-014a: the container has to know its OWN name,
             # because two things inside it read this and neither can derive it.
@@ -9683,7 +9770,7 @@ def compose_up_exec(
     egress = resolve_egress_declaration(name)
     # FR-003c BEFORE staging: if an enforced declaration would break `git push`,
     # the operator hears it now, not after the agent has done a session of work.
-    _push_mode = (egress or {}).get("enforcement") or "advisory"
+    _push_mode = (egress or {}).get("enforcement") or EGRESS_ENFORCEMENT_DEFAULT
     # Resolved ONCE and reused: the SSH push check and the strength statement must
     # not be able to disagree about which mechanism is being deployed.
     _transparent = (
@@ -9699,7 +9786,7 @@ def compose_up_exec(
         # be warned about an SSH push that will work perfectly well.
         transparent=_transparent,
     )
-    _mode = (egress or {}).get("enforcement") or "advisory"
+    _mode = (egress or {}).get("enforcement") or EGRESS_ENFORCEMENT_DEFAULT
     # US2: the disclosure (undeclared + the agent has a default) and FR-003a (declared
     # but the default is outside the set) are mutually exclusive by construction —
     # one asks the operator to decide, the other tells them a decision is incomplete.
@@ -9921,7 +10008,7 @@ def compose_up_exec(
         raise typer.Exit(EXIT_PENDING_REGISTRATION)
 
 
-def control_plane_permitted_hosts(name: str) -> list[str]:
+def control_plane_permitted_hosts(name: str) -> list[str] | None:
     """The DECLARED scope for a control plane (FR-004, data-model §5).
 
     A DECLARATION OF INTENT, not an enforcement point. Actual reach is wherever
@@ -9936,7 +10023,13 @@ def control_plane_permitted_hosts(name: str) -> list[str]:
     """
     declared = resolve_settings_key("control_plane_hosts")
     if declared is None:
-        return sorted(load_registry().get("hosts", {}))
+        # UNDECLARED, and the caller is told so rather than handed a list that
+        # looks deliberate. `report_control_plane_scope` then states which case the
+        # operator is in — "you declared these" and "you declared nothing, so
+        # intent is every registered host" are different facts, and a substituted
+        # list makes them indistinguishable at exactly the moment an operator is
+        # deciding whether to authorise a standing key.
+        return None
     if not isinstance(declared, list) or not all(isinstance(h, str) for h in declared):
         die(
             f"control_plane_hosts for {name} must be a list of host names",
@@ -10033,6 +10126,12 @@ def refuse_out_of_scope(name: str, host_name: str) -> None:
     if me is None:
         return
     declared = control_plane_permitted_hosts(me)
+    if declared is None:
+        # UNDECLARED means the default — every registered host — and the default is
+        # applied HERE, visibly, rather than by the reader. Nothing is refused in
+        # that case: refusing against a scope the operator never wrote would be a
+        # control they did not ask for.
+        return
     if host_name in declared:
         return
     die(
@@ -10044,27 +10143,45 @@ def refuse_out_of_scope(name: str, host_name: str) -> None:
     )
 
 
-def report_control_plane_scope(name: str, hosts: list[str]) -> list[str]:
+def report_control_plane_scope(name: str, hosts: list[str] | None) -> list[str]:
     """The declared scope as lines, for `status` and the pre-deploy statement.
 
     ONE renderer for both, so the scope an operator sees before deploying is
     literally the same text they see afterwards. Two renderers would let the
     before and after disagree, and the whole point of SC-004 is that intent is
     visible in advance and comparable later.
+
+    THREE CASES, AND THEY ARE DIFFERENT FACTS. `None` means nothing was declared,
+    so the tool APPLIES A DEFAULT and says which one; an empty list means the
+    operator declared no hosts; a populated list is a choice. The reader used to
+    substitute the registry for `None`, which presented a derived list as a
+    declaration — at exactly the moment an operator is deciding whether to
+    authorise a standing key.
     """
+    tail = "a declaration of INTENT — actual reach is wherever the public key is authorised"
+    if hosts is None:
+        registered = sorted(load_registry().get("hosts", {}))
+        if not registered:
+            return [
+                f"{name}: NO scope declared and NO hosts registered — it reaches nothing "
+                f"until you authorise its public key somewhere",
+                tail,
+            ]
+        return [
+            f"{name}: NO scope declared, so the default applies — every registered host "
+            f"({len(registered)}): {', '.join(registered)}",
+            f"declare `control_plane_hosts` to narrow it. {tail}",
+        ]
     if not hosts:
         return [
-            f"{name}: declared scope is EMPTY — no hosts are registered, so it reaches "
+            f"{name}: declared scope is EMPTY — you declared no hosts, so it reaches "
             f"nothing until you authorise its public key somewhere",
-            "a declaration of INTENT — actual reach is wherever the public key is authorised",
+            tail,
         ]
-    return [
-        f"{name}: declared scope ({len(hosts)} host(s)): {', '.join(hosts)}",
-        "a declaration of INTENT — actual reach is wherever the public key is authorised",
-    ]
+    return [f"{name}: declared scope ({len(hosts)} host(s)): {', '.join(hosts)}", tail]
 
 
-def state_control_plane_consequences(name: str, hosts: list[str]) -> None:
+def state_control_plane_consequences(name: str, hosts: list[str] | None) -> None:
     """FR-006, FR-017, contract C19 — said BEFORE the deploy, never after.
 
     Three things, and the third is the one an operator otherwise discovers only
@@ -10091,7 +10208,7 @@ def state_control_plane_consequences(name: str, hosts: list[str]) -> None:
     # same text `status` shows later, or "compare intent against reality" becomes a
     # comparison of two different renderings.
     scope_lines = report_control_plane_scope(name, hosts)
-    log(f"  2. {scope_lines[0].split(': ', 1)[1]}")
+    log(f"  2. {scope_lines[0].split(': ', 1)[1]}")  # the name is already on line 1
     for extra in scope_lines[1:]:
         log(f"     ({extra})")
     log(
@@ -11957,7 +12074,7 @@ def resolve_attach_target(
         die(
             f"no attach target for {name}; checked {HOSTS_CONF} (no {key}_HOST/{key}_PORT) and {sf}"
         )
-    host = host_override or os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
+    host = host_override or os.environ.get("AGENT_CONTAINER_HOST") or DEFAULT_ATTACH_ADDRESS
     return user, host, port, "local"
 
 
@@ -12531,7 +12648,7 @@ def wiz_attach(rt: str) -> None:
         if port is None:  # TOCTOU: state file vanished since the picker rendered
             warn(f"state file for {name} disappeared; is the container still up?")
             return
-        host = os.environ.get("AGENT_CONTAINER_HOST") or "localhost"
+        host = os.environ.get("AGENT_CONTAINER_HOST") or DEFAULT_ATTACH_ADDRESS
     wizard_handover(user, host, port, logs_hint=f"agent-container logs {name}", window=window)
     hint(f"agent-container attach {name} --{kind}" + (f" --window {window}" if window else ""))
 
@@ -14650,7 +14767,7 @@ def enforce_egress_declaration(
     if not is_egress_declared(egress):
         return False
     assert isinstance(egress, dict)
-    mode = egress.get("enforcement") or "advisory"
+    mode = egress.get("enforcement") or EGRESS_ENFORCEMENT_DEFAULT
     ok, reason = egress_enforceable(egress, agent, override)
     if ok:
         log(f"egress: enforcement={mode} (enforced)")
@@ -14829,7 +14946,7 @@ def egress_config_token(egress: object) -> str | None:
     # validated yet on every path that computes a token, so a non-string entry must
     # still produce a stable token rather than raise inside drift detection.
     outside_part = ",".join(sorted(str(x) for x in outside)) if isinstance(outside, list) else ""
-    return f"{egress.get('enforcement') or 'advisory'}:{outside_part}:{fp}"
+    return f"{egress.get('enforcement') or EGRESS_ENFORCEMENT_DEFAULT}:{outside_part}:{fp}"
 
 
 def is_egress_declared(egress: object) -> bool:
@@ -15042,11 +15159,15 @@ def env_exec_spec(env: dict) -> ExecSpec:
     """Map a declared `container` block to the 004 ExecSpec."""
     c = env.get("container") or {}
     return ExecSpec(
-        mode=c.get("mode", "interactive"),
-        agent=c.get("agent", "claude"),
+        # ExecSpec OWNS these defaults; the reader must not restate them. Two
+        # copies of "the default mode is interactive" drift the moment one is
+        # edited, and the drift is invisible — a declarative deploy and an
+        # imperative one would silently differ.
+        mode=c.get("mode") or ExecSpec.mode,
+        agent=c.get("agent") or ExecSpec.agent,
         task=resolve_task(c.get("task")),
         repo=c.get("repo"),
-        workspace=c.get("workspace", "persistent"),
+        workspace=c.get("workspace") or ExecSpec.workspace,
         workspace_dir=c.get("workspace_dir"),
     )
 
@@ -15077,12 +15198,12 @@ def env_live_config(host_rec: dict, name: str) -> dict[str, str | None] | None:
         "mode": env.get("AGENT_CONTAINER_MODE"),
         "agent": env.get("AGENT_CONTAINER_AGENT"),
         "repo": env.get("AGENT_CONTAINER_CLONE_URL"),
-        # Feature 017. Absent means a container deployed before the role existed,
-        # which is an AGENT environment — the only thing this tool could deploy
-        # then. Defaulting to the control-plane role on absence would be the
-        # dangerous direction: it would swap in the narrower image on the next
-        # redeploy of every pre-017 environment.
-        "role": env.get("AGENT_CONTAINER_ROLE") or ROLE_AGENT,
+        # Feature 017. RAW, not defaulted — absent stays absent, exactly as
+        # `mode`/`agent`/`repo` above do. A reader that substituted a value here
+        # would make "the container did not say" indistinguishable from "the
+        # container said agent", and the caller is the only place that can tell
+        # those apart: one means nothing to inherit, the other means inherit this.
+        "role": env.get("AGENT_CONTAINER_ROLE"),
     }
 
 
@@ -15418,7 +15539,7 @@ def plan_payload(plans: list) -> list[dict]:
     out: list[dict] = []
     for env, name, host_name, _host_rec, state, detail in plans:
         container = env.get("container") or {}
-        agent = container.get("agent") or "claude"
+        agent = container.get("agent") or ExecSpec.agent
         out.append(
             {
                 "name": name,
@@ -15491,7 +15612,7 @@ def egress_payload(egress: object, agent: str, override: Path | None = None) -> 
         # `enforced: true, mechanism: none` would be worse than either field alone.
         "mechanism": mechanism,
         "not_enforced_reason": None if ok else reason,
-        "enforcement": egress.get("enforcement") or "advisory",
+        "enforcement": egress.get("enforcement") or EGRESS_ENFORCEMENT_DEFAULT,
         "providers": sorted(
             {label for label, _h, port, src in entries if src == "tool" or port is None}
         ),
@@ -15821,7 +15942,7 @@ def do_aac_apply(
         # the name charset and would be written straight into the merged file.
         refuse_operator_proxy_vars(
             env.get("egress"),
-            (c.get("agent") or "claude"),
+            (c.get("agent") or ExecSpec.agent),
             base_env,
             [str(cr.get("name")) for cr in (env.get("credentials") or [])],
             resolve_sidecar_override(name),
