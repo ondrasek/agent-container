@@ -196,12 +196,12 @@ that is visible before deploying.
       control plane is still identifiable. **Visibility is the whole of the work** — nesting needs no
       enforcement code, because scope is where the key is authorised and a parent cannot constrain a
       child even in principle (R8); a gate here would be a control that cannot control
-- [ ] T041 [P] [US3] Acceptance SC-011 — every control plane shows whether it came from the operator's
+- [X] T041 [P] [US3] Acceptance SC-011 — every control plane shows whether it came from the operator's
       machine or another control plane, and which. Nesting lets standing keys grow from inside the
       system, and a count nobody can see is a count nobody audits
 - [X] T042 [US3] The FR-016 semver rule in `bin/agent-container`: ignore patch, advise when newer,
       **refuse** when the environment is newer, `unknown` when either version is unreadable
-- [ ] T043 [P] [US3] Multiple control planes are individually identifiable and do not conflict
+- [X] T043 [P] [US3] Multiple control planes are individually identifiable and do not conflict
       (FR-014); and an interrupted session leaves the outcome knowable (FR-013)
 
 **Checkpoint**: coherent with itself, including the recursion.
@@ -319,22 +319,22 @@ and the drift would be invisible because each leg still looks correct alone.
       the collector's copy survives both - **zero** exported entries a control plane can remove.
       Measured by destroying and by attempting deletion, never by inspecting the export code: a trail
       the audited party can rewrite is not evidence, and only the negative case proves it
-- [ ] T072 [P] Hermetic test that **no backend-specific dependency** is added, checked against the
+- [X] T072 [P] Hermetic test that **no backend-specific dependency** is added, checked against the
       installed package set rather than the import list (SC-016)
 
 ---
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T073 [P] `docs/control-plane.md` - the surface, the passphrase contract and its **no-recovery**
+- [X] T073 [P] `docs/control-plane.md` - the surface, the passphrase contract and its **no-recovery**
       rule, scope, revocation (FR-006, FR-017; Constitution: docs track behaviour)
-- [ ] T074 [P] `docs/observability.md` - **the dual stack**: the local trail as durable baseline, OTLP
+- [X] T074 [P] `docs/observability.md` - **the dual stack**: the local trail as durable baseline, OTLP
       as the active path, that they are independent and carry identical payloads, the export state and
       what `accepted` does **not** mean, and the `task` include/exclude with its reasoning
       (FR-009d-i, FR-009f)
-- [ ] T075 [P] `docs/agent-interface.md` - the control-plane fields on `list --json`, the telemetry
+- [X] T075 [P] `docs/agent-interface.md` - the control-plane fields on `list --json`, the telemetry
       payload shape, and the export state values (FR-009f, FR-009h, data-model §6)
-- [ ] T076 [P] `README.md` - a short control-plane section, matching how 018/019/013 treat theirs
+- [X] T076 [P] `README.md` - a short control-plane section, matching how 018/019/013 treat theirs
       (FR-001; Constitution: docs track behaviour)
 - [X] T077 **`docs/threat-model.md` - the 017 row. This feature INTRODUCES A NEW TRUST BOUNDARY**
       (Constitution MUST). Record: the standing key spanning a sandbox shell and daemon access; the
@@ -342,7 +342,7 @@ and the drift would be invisible because each leg still looks correct alone.
       Constitution III; the export as a new outbound channel a Feature 012 declaration governs; that
       the exported payload carries the task text by default and what that means for a shared
       collector; and the residual that a compromised control plane acts until its key is withdrawn
-- [ ] T078 One-line invariant in `CLAUDE.md` (Constitution: docs track behaviour). The file is at
+- [X] T078 One-line invariant in `CLAUDE.md` (Constitution: docs track behaviour). The file is at
       **~1993 tokens with ~7 to spare**, so this **DISPLACES** something - measure with a tokenizer,
       not `chars/4`, which understates by ~7%
 - [ ] T079 Confirm the commit is `feat` - MINOR (Constitution VII). Additive: a command, a second

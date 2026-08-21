@@ -11,6 +11,7 @@ because an absence is never demonstrated by working output.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -1629,3 +1630,122 @@ def test_a_failed_registry_install_is_LOUD(wiz):
     manage something would conclude it was gone."""
     ep = (Path(wiz.__file__).parents[1] / "image-control-plane" / "entrypoint.sh").read_text()
     assert "will resolve NO hosts" in ep
+
+
+# --- no backend-specific dependency (SC-016, C18b, T072) ---------------------
+
+# OTel was accepted AT THE PROTOCOL LEVEL ONLY. A backend-specific package would
+# couple an audit path to one vendor's API — the coupling that makes end-to-end
+# ingestion unobservable in the first place (C14), and the exact thing FR-009d
+# permits the protocol in order to avoid.
+_BACKEND_PACKAGES = (
+    "opentelemetry",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp",
+    "datadog",
+    "ddtrace",
+    "newrelic",
+    "elastic-apm",
+    "sentry-sdk",
+    "honeycomb",
+    "boto3",
+    "google-cloud-logging",
+    "azure-monitor-opentelemetry",
+    "loki-logger-handler",
+    "requests",
+    "httpx",
+)
+
+
+def _declared_packages(text: str) -> set[str]:
+    """Distribution names from a dependency list, stripped of version specifiers."""
+    names = set()
+    for raw in re.findall(r'"([^"]+)"', text):
+        name = re.split(r"[<>=!~\[; ]", raw, maxsplit=1)[0].strip()
+        if name:
+            names.add(name.lower())
+    return names
+
+
+def test_the_INSTALLED_package_set_carries_no_backend_client(wiz):
+    """SC-016, checked against the DECLARED DISTRIBUTIONS rather than the import
+    list.
+
+    The import list is the weaker check twice over: a package can be declared and
+    imported lazily inside a function, where a module-level import scan never sees
+    it — and a package can be installed as a transitive dependency and imported by
+    nothing here while still shipping in the wheel.
+    """
+    root = Path(wiz.__file__).parents[1]
+    pyproject = (root / "pyproject.toml").read_text()
+    deps = pyproject[pyproject.index("dependencies = [") :]
+    deps = deps[: deps.index("]")]
+    declared = _declared_packages(deps)
+    assert declared == {"typer", "questionary", "rich", "pyyaml"}, (
+        f"the runtime dependency set changed: {sorted(declared)}. PyYAML is the one "
+        f"third-party dep this project accepts; justify any addition against "
+        f"Constitution VI."
+    )
+    for banned in _BACKEND_PACKAGES:
+        assert banned.lower() not in declared, (
+            f"{banned} is a runtime dependency. OTel was accepted at the PROTOCOL "
+            f"level only, and a backend-specific package couples an audit path to "
+            f"one vendor's API — the coupling C14 exists to avoid."
+        )
+
+
+def test_the_PEP723_block_and_pyproject_agree(wiz):
+    """Two encodings of the dependency set. A drift would let `uv run bin/…` install
+    something the wheel does not, so the tested tool and the shipped tool would
+    differ in exactly the dimension this criterion measures."""
+    root = Path(wiz.__file__).parents[1]
+    src = (root / "bin" / "agent-container").read_text()
+    # The CLOSING marker, not the first `# ///` in the file — that is the OPENING
+    # `# /// script` line, so searching from zero yields a reversed slice and an
+    # empty dependency set, which would make this test pass on an empty block.
+    start = src.index("# dependencies = [")
+    block = src[start : src.index("# ///", start)]
+    inline = _declared_packages(block.replace("#", ""))
+    pyproject = (root / "pyproject.toml").read_text()
+    deps = pyproject[pyproject.index("dependencies = [") :]
+    deps = deps[: deps.index("]")]
+    assert inline == _declared_packages(deps)
+
+
+def test_the_export_path_imports_nothing_beyond_the_stdlib(wiz):
+    """C18b. The CLI leg uses urllib and the container leg uses curl; neither may
+    reach for a client library."""
+    body = _func_body(Path(wiz.__file__).read_text(), "export_record_via_endpoint")
+    imports = re.findall(r"^\s*import\s+(\S+)", body, re.M)
+    for mod in imports:
+        assert mod.split(".")[0] in {"urllib", "json", "time"}, (
+            f"the exporter imports {mod}, which is not stdlib-only"
+        )
+
+
+# --- US3 identity (FR-013/FR-014, T041/T043) ---------------------------------
+
+
+def test_multiple_control_planes_are_individually_identifiable(wiz, monkeypatch):
+    """FR-014: they must not conflict. Identity is per-environment and per-host, so
+    two control planes differ in exactly the way two environments do — no special
+    case, which is the point of a control plane being an ordinary environment."""
+    monkeypatch.delenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", raising=False)
+    a = wiz.build_inventory_entry("hub-a", "local", False, role=wiz.ROLE_CONTROL_PLANE)
+    b = wiz.build_inventory_entry("hub-b", "local", False, role=wiz.ROLE_CONTROL_PLANE)
+    assert a["name"] != b["name"]
+    assert a["entry_id"] != b["entry_id"]
+    # Distinct ports, from the same deterministic hash every environment uses.
+    assert wiz.port_for_name("hub-a") != wiz.port_for_name("hub-b")
+    # And distinct container names and volume sets.
+    assert wiz.container_name("hub-a") != wiz.container_name("hub-b")
+    assert set(wiz.per_container_volumes("hub-a")).isdisjoint(wiz.per_container_volumes("hub-b"))
+
+
+def test_a_nested_control_plane_records_its_PARENT(wiz, monkeypatch):
+    """SC-011: nesting lets standing keys grow from inside the system, so the
+    origin has to be readable. Persisted, so a stopped one still answers."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub-a")
+    child = wiz.build_inventory_entry("hub-b", "local", False, role=wiz.ROLE_CONTROL_PLANE)
+    assert child["provenance"] == "control-plane:hub-a"
+    assert child["role"] == "control-plane"

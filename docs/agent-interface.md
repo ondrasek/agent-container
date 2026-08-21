@@ -57,6 +57,78 @@ was captured — one per direction:
 `null`, never `""` — a JSON consumer must be able to tell *never captured* from a
 captured value.
 
+### `list --json` also says what it could NOT see (Feature 017)
+
+```json
+{"containers": [...], "unreachable_hosts": ["dead-vps"], "complete": false}
+```
+
+`complete` is `false` the moment a host did not answer. The rows already carry a
+`status: "unreachable"` marker, but a consumer would have to scan and infer — and
+the failure being guarded is a consumer reading a **short list as a complete
+one**. An explicit field is the difference between *"there are no containers
+there"* and *"nobody asked successfully"*.
+
+## The telemetry payload (Feature 017)
+
+Both observability legs — the local trail and the OTLP export — carry **one field
+set**, derived from a single definition. A field added to that definition reaches
+both without a second edit.
+
+Feature 017 added three fields to the record shape documented in
+[`observability.md`](observability.md):
+
+| Field | Provenance | Notes |
+|---|---|---|
+| `attribution` | `tool` | which control plane performed the action; `null` for the operator's own machine |
+| `egress_decision` | `tool` | Feature 012 events |
+| `export_state` | `tool` | see below |
+
+All three are `tool` provenance, deliberately: `task` remains the **only**
+operator-authored field in the whole table, and that single row *is* the
+no-credentials claim. A second free-text field would falsify it while every other
+test still passed.
+
+### `export_state`
+
+```
+pending | accepted | rejected | failed
+```
+
+`pending` at birth, on every record. **`accepted` means the configured endpoint
+returned success for that record and nothing more** — never arrival at a backend,
+which would require querying the backend's own API. There is no `ingested` or
+`confirmed` value, and a consumer must not treat `accepted` as delivery.
+
+`rejected` and `failed` are distinct because they decide whether a retry helps.
+`accepted` and `rejected` are terminal.
+
+### `telemetry` envelopes
+
+`collect` reports per host and names what it missed:
+
+```json
+{"collected": 12, "hosts": [{"host": "vps1", "ingested": 12, "status": "ok"}],
+ "unreachable": ["vps2"], "complete": false}
+```
+
+`reconcile` reports the comparison, and whether one happened at all:
+
+```json
+{"window": {"since": "2026-08-20T09:00:00Z", "until": null},
+ "local_accepted": 40, "collector_holds": 39, "pending_excluded": 3,
+ "missing_at_collector": ["20260821T1000Z-ab12"], "unknown_locally": [],
+ "compared": true, "agree": false}
+```
+
+`agree`, **not** `ok`. The envelope already carries a top-level `ok` meaning *the
+command ran*; a second `ok` inside it meaning *the legs agree* is how a consumer
+reads agreement off a run that compared nothing. `agree` is `null` when
+`compared` is `false`.
+
+Field types do not change between branches: `local_accepted` is a count in both,
+and the id lists are `null` rather than absent when no comparison was made.
+
 ## `doctor --json`: every check, not only the problems
 
 The report carries `scope`, `scope_target`, `exit_code`, `checks_run`, `checks` and `findings`.

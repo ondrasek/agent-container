@@ -328,8 +328,165 @@ that is quietly short of runs.
   when the daemon could not be asked at all: a warning that cries wolf on a host that is merely
   asleep is one an operator learns to scroll past, which would cost exactly the case it exists for.
 
+---
+
+# The dual stack — a local trail and an active export (Feature 017)
+
+Feature 017 widened the above from "run records" to **the tool's whole observability trail**, and
+added a second leg.
+
+**Two legs, one payload.**
+
+| Leg | What it is |
+|---|---|
+| **the local trail** | the **durable baseline**. Written where the action lands, regardless of any endpoint. |
+| **OTLP export** | an **additional active path**, to a collector you declare. |
+
+They are **independent, not alternatives**. The local record exists whether or not you configure an
+endpoint, and export never replaces it.
+
+## They carry identical payloads, from one definition
+
+`RECORD_PAYLOAD_FIELDS` is **derived** from `RECORD_FIELD_PROVENANCE` rather than written out again.
+Two lists would agree today and drift the moment one was edited — and **the drift would be
+invisible**, because each leg still looks correct on its own. Nothing would fail until someone
+compared them, which is exactly what reconciliation does and exactly what it could not do if the
+halves carried different things.
+
+Three classes, one shape: **attribution records** (which control plane did what), **run records**
+(Feature 016), and **egress events** (Feature 012).
+
+## The export state — what the client can actually observe
+
+Every record carries one, and it is `pending` at birth.
+
+| Value | Means | Retry? |
+|---|---|---|
+| `pending` | written; not yet resolved with the endpoint | **yes** |
+| `accepted` | the **configured endpoint returned success for this record** | no |
+| `rejected` | the endpoint explicitly refused it | **no** — it will refuse again unchanged |
+| `failed` | unreachable, or an error | **yes** — it may be back later |
+
+### `accepted` does NOT mean it arrived at a backend
+
+It means the configured endpoint returned success for that record and **nothing more**. Establishing
+arrival would require querying the backend's own API — the vendor coupling this feature refuses, and
+the same coupling that makes end-to-end ingestion unobservable in the first place. There is
+deliberately no `ingested` or `confirmed` state.
+
+### A 2xx is not acceptance
+
+OTLP's export response carries `partialSuccess` with a rejected-record count, so **a receiver may
+return 200 while refusing records**. That count is subtracted before anything is marked `accepted`.
+An implementation that skipped it would record refused records as delivered — and the local leg would
+then claim a delivery the collector never made.
+
+`rejected` and `failed` stay distinct because they decide whether retrying helps. Collapsing them
+would either retry forever against a refusal or abandon a recoverable record. `accepted` and
+`rejected` are **terminal**: re-exporting an accepted record duplicates it at the collector.
+
+State is derived from the **response**, never from the fact that an attempt was made.
+
+## Export mechanics
+
+A `curl` POST of a JSON document, from the entrypoint. **Zero Python packages, zero image
+additions** — `curl` and `jq` already ship. OTel is used at the **protocol level only**; no
+backend-specific package, ever, and a test checks the declared distribution set rather than the
+import list.
+
+**It fires at write time, per record** — not batched at exit, not on a timer. Anything held for later
+is lost exactly when a container is `kill -9`'d, which is the circumstance under which someone later
+asks what happened. It also needs no resident exporter.
+
+**It is fail-open.** An unreachable or undeclared collector degrades to the local record, reports the
+gap, and never blocks the work. Under enforced egress, silence here would yield an empty collector
+that reads like a quiet system — the most misleading outcome an audit trail can have.
+
+## Declaring an endpoint
+
+`settings.yaml`, at either config level, **project winning** — the tool's existing two-level
+contract:
+
+```yaml
+# ~/.config/agent-container/settings.yaml  (or .agent-container/settings.yaml)
+otlp_endpoint: https://collector.example/v1/logs
+export_task_text: true          # the default
+```
+
+A URL without a scheme is **refused, not prefixed**: guessing would decide, on your behalf, whether
+the trail crosses the network in plaintext.
+
+Export is **outbound traffic a Feature 012 declaration governs**. If you enforce egress, declare the
+collector or export will be blocked — fail-open, so the work continues and the gap is reported.
+
+## The task text
+
+**Exported by default**, because a task is **not a credential channel**: credentials reach a
+container by injection, the single exception being the SSH keys a container generates itself.
+Withholding it would design around an operator error the tool already provides the correct
+alternative for — and it is the most useful field for *"this run failed, what was it doing"*, on a
+phone, with no laptop to correlate against.
+
+**Pointing this at a shared backend therefore shares your tasks.** To exclude it:
+
+```yaml
+export_task_text: false
+```
+
+**Excluded by name, never by pattern.** There is no regex, no entropy heuristic and no
+"looks-like-a-token" check. A redactor that misses one value converts caution into false confidence;
+omitting a named field either happens or it does not.
+
+**`run_id` exports regardless.** That is what makes the exclusion cheap rather than lossy — without
+correlation, excluding the task removes the reason to look at the record at all.
+
+## Getting the trail off the hosts
+
+```sh
+agent-container telemetry collect          # every host
+agent-container telemetry retry            # re-export pending/failed
+agent-container telemetry reconcile        # do the two legs agree?
+```
+
+`collect` works **whether or not** an endpoint is declared — the local record exists
+unconditionally, so its retrieval must too. It is Feature 016's `drain` **generalised**, not a second
+puller.
+
+It reports **per-host counts and names every host it could not reach**, and carries a `complete`
+flag. "Collected nothing" and "collected nothing *from that host*" are different facts, and a skipped
+host must never read as a complete trail.
+
+`retry` re-exports `pending` and `failed` only. There is no override flag: the terminal states are
+terminal, and forcing them would duplicate records or repeat refusals.
+
+## Reconciliation — do the two legs agree?
+
+```sh
+agent-container telemetry reconcile --collector-ids ids.txt
+```
+
+Over a window — **since the last successful `collect`**, or a range you supply — the set of records
+marked `accepted` locally must equal the set your collector holds, **or the difference is reported**.
+Zero silent divergence, in **both** directions:
+
+- locally `accepted`, absent at the collector → the local leg claims a delivery that did not land;
+- at the collector, not `accepted` here → a second exporter, a replay, or a lost local store.
+
+**`pending` records are outside the window.** They have not finished exporting, and counting them as
+divergence would fail this against a healthy system with exports in flight.
+
+**The tool does not query your collector.** That would be the vendor coupling described above, so you
+run your backend's own query and hand over the ids; the tool does the comparison it can do without
+coupling. Without that file it reports **no comparison was made** — never "no divergence", which
+would assert agreement that was never checked.
+
+The watermark advances **only after a complete `collect`**. A partial one that advanced it would make
+the next reconciliation treat the unreached hosts as "before the window" and silently exclude exactly
+the records that are missing.
+
 ## See also
 
+- [`docs/control-plane.md`](control-plane.md) — the control plane, and what attribution records
 - [`docs/layout.md`](layout.md) — where the store lives and why it is neither state nor config
 - [`docs/threat-model.md`](threat-model.md) — the task-text exposure, as an accepted residual risk
 - [`docs/execution.md`](execution.md) — headless runs, `--task`, and workspace modes

@@ -654,6 +654,42 @@ It reads credential *declarations* but never **resolves** one — for a manager 
 the prompt — so no secret value is retrieved at all. Full contract:
 [`docs/doctor.md`](docs/doctor.md).
 
+### Manage from a phone — the control plane (Feature 017)
+
+An SSH-reachable container holding a **configured** CLI, so the management surface is something you
+attach to rather than something that lives only on your laptop:
+
+```bash
+agent-container up hub --role control-plane
+agent-container attach hub          # `list`, `stop`, `redeploy` — nothing to configure on arrival
+```
+
+It runs a narrower image with **no agent CLI installed**, mints its own **passphrase-protected**
+keypair, and enumerates your hosts **live** — naming any it could not reach rather than showing a
+short list that looks complete. Output switches to a block form at 80 columns automatically, because
+the operator on a phone should not have to remember a flag.
+
+**Read [`docs/control-plane.md`](docs/control-plane.md) before deploying one.** This is the
+highest-risk feature in the tool: a session in it reaches a sandbox shell *and* machine-level daemon
+access, the passphrase is printed **once** and is **unrecoverable**, and `revoke` is the only
+concrete way to narrow its reach. `panic` from inside excludes its own container and says so.
+
+### The observability trail (Feature 017)
+
+Every container now keeps a **local trail** and can **export it** to an OTLP collector you declare.
+The two legs are independent and carry identical payloads:
+
+```bash
+agent-container telemetry collect      # download the trail from every host
+agent-container telemetry reconcile    # do the two legs agree?
+```
+
+Export is a `curl` POST from the entrypoint — **zero added dependencies** — fires at **write time**
+(so a `kill -9` does not lose what was already written), and is **fail-open**: an unreachable
+collector degrades to the local record and reports the gap. `accepted` on a record means *the
+endpoint returned success for it*, never that a backend holds it. The **task text is exported by
+default**; see [`docs/observability.md`](docs/observability.md) for why, and how to exclude it.
+
 ### Credential model (the agent's SSH key, API keys, canonical config)
 
 Beyond interactive login, `up`/`redeploy` inject an agent's credentials and
