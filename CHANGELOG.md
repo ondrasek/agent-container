@@ -2,6 +2,139 @@
 
 <!-- version list -->
 
+## v0.32.0 (2026-08-21)
+
+### Chores
+
+- **specs**: Point the speckit cursor at 017
+  ([`0df5212`](https://github.com/ondrasek/agent-container/commit/0df521250a8140f1d2cf77d4f8bb42b7803b8205))
+
+### Documentation
+
+- Trim CLAUDE.md under its 2000-token budget, measured properly
+  ([`58cbac4`](https://github.com/ondrasek/agent-container/commit/58cbac4e0b4da22288407d3dcbc78be7a3eb3bd0))
+
+- **017**: Split the export-dependency clause from endpoint resolution, and cite R8
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`5c29576`](https://github.com/ondrasek/agent-container/commit/5c2957687ed9b6f0aa40aae0b093a85a85626a80))
+
+- **017**: Stop naming the whole trail after one of its three classes
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`a948728`](https://github.com/ondrasek/agent-container/commit/a948728913fc6e2b8935d83650b4b37e19d5e2de))
+
+- **specs**: A per-record export state that claims only what the client can see
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`b33236e`](https://github.com/ondrasek/agent-container/commit/b33236ed6f1ee8cb556c4002df3e8630a721b8af))
+
+- **specs**: Attribute every control-plane action, drained off the hosts
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`1647fc8`](https://github.com/ondrasek/agent-container/commit/1647fc8c4419597619a9d01407ad92068e390c02))
+
+- **specs**: Both observability legs carry the same payload, defined once
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`b66c544`](https://github.com/ondrasek/agent-container/commit/b66c5441a8d78550e6e3fa53bf870e60773b7f92))
+
+- **specs**: Close 013 — the acceptance tier is green with no selector
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`abfcb70`](https://github.com/ondrasek/agent-container/commit/abfcb70bc1359ad1b061535895b6054c0a578e06))
+
+- **specs**: Collected records land in the operator's durable store
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`f0370e6`](https://github.com/ondrasek/agent-container/commit/f0370e6e235c22372ad7251164bef8df239d96d9))
+
+- **specs**: Confirm 013 ships as feat/MINOR
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`b650239`](https://github.com/ondrasek/agent-container/commit/b650239763227ccd40ad69d9864eb5c7016d5c19))
+
+- **specs**: Define SC-020's window and scope SC-022 to completed exports
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`2481688`](https://github.com/ondrasek/agent-container/commit/24816885dbc2450be72cf804e70cea37732bdecc))
+
+- **specs**: Export fires at write time, per record
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`86ab717`](https://github.com/ondrasek/agent-container/commit/86ab7171df950a150894799578aa91e78746b6fd))
+
+- **specs**: FR-016 becomes a semver rule with a direction
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`5a3bac1`](https://github.com/ondrasek/agent-container/commit/5a3bac10f8a99d005e3694fe5dfadaefa8cb8d72))
+
+- **specs**: Generate tasks for 017 — 65 tasks, census before second image
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`6a56667`](https://github.com/ondrasek/agent-container/commit/6a566675964ae3577a91ae5d39f5b491833b5b57))
+
+- **specs**: Make trail retrieval unconditional, not the no-endpoint path
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`89cfad4`](https://github.com/ondrasek/agent-container/commit/89cfad48127b72d22f54a7491ba780f475daf9fb))
+
+- **specs**: Name the file, not a range, wherever scope was hardcoded
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`01dc269`](https://github.com/ondrasek/agent-container/commit/01dc269a4e6946ee692a87a3f939088ac22d80d4))
+
+- **specs**: Nesting is supported deliberately, and inherits no reach
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`f6714e3`](https://github.com/ondrasek/agent-container/commit/f6714e3ff47cdfea1de16d35a379ba3b8e274155))
+
+- **specs**: OTLP as the export protocol, plus a command to collect logs
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`e878daf`](https://github.com/ondrasek/agent-container/commit/e878daf5cc452a93383463a0fb7f3534b72b5d27))
+
+- **specs**: Plan 017 — three of its pieces do not exist yet
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`a171f93`](https://github.com/ondrasek/agent-container/commit/a171f93d6bcbc40006e74cd5934097469c2a2f47))
+
+- **specs**: Re-plan 017 against the current spec, carrying R2 and R3 verbatim
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`c9f26f5`](https://github.com/ondrasek/agent-container/commit/c9f26f5a1b680c84275538c7e00d552813dca63b))
+
+- **specs**: Re-sync task citations after the re-plan
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`52fb1c7`](https://github.com/ondrasek/agent-container/commit/52fb1c73ac469747cae3c40fea77ef5a16239d39))
+
+- **specs**: Regenerate the observability phase for the dual stack
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`71aaa11`](https://github.com/ondrasek/agent-container/commit/71aaa116bdda8714b3fb289d2e3d34cd4c51de50))
+
+- **specs**: Split correlation out of the task-text clause
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`3dfc25b`](https://github.com/ondrasek/agent-container/commit/3dfc25bcd41e9b7dcc03cad357ad31473d072e51))
+
+- **specs**: State that a task is not a credential channel, and export it
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`0b06a9c`](https://github.com/ondrasek/agent-container/commit/0b06a9c96dea01aef78362487b0baec578bcfdf3))
+
+- **specs**: The attribution trail needs a destination the control plane can't rewrite
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`b2214f0`](https://github.com/ondrasek/agent-container/commit/b2214f029fde52f441ac4c395ac96dce68bce812))
+
+- **specs**: The control plane queries hosts live; it does not sync an inventory
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`737ce65`](https://github.com/ondrasek/agent-container/commit/737ce65961803238b9e55abfedba2dd6525b1049))
+
+- **specs**: The OTLP endpoint is declared at either config level
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`991c773`](https://github.com/ondrasek/agent-container/commit/991c773219f4203adceb2be1ebd499c2f0b3e667))
+
+- **specs**: Widen telemetry export to all containers, never the task text
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`df2b1a9`](https://github.com/ondrasek/agent-container/commit/df2b1a927cbe37c91eaef713d7d241118b876a17))
+
+### Features
+
+- **control-plane**: --role control-plane, the one-shot passphrase, and provenance
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`fab2416`](https://github.com/ondrasek/agent-container/commit/fab24169abb166d2e4d0b276a6f35e2402ac47df))
+
+- **control-plane**: The second image, and a census that can actually see it
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`5dc2cfc`](https://github.com/ondrasek/agent-container/commit/5dc2cfcf7b1a24695a948df2ed1507bda2b08e12))
+
+### Testing
+
+- **doctor**: Assert non-invocation instead of watching for a dialog
+  ([#013](https://github.com/ondrasek/agent-container/pull/13),
+  [`3d95269`](https://github.com/ondrasek/agent-container/commit/3d952691d162199ab84317c90de591b4c590fb98))
+
+
 ## v0.31.0 (2026-08-17)
 
 ### Documentation
