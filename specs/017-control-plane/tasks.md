@@ -67,9 +67,13 @@ cannot fail:
 - [ ] T009 [P] Acceptance S9 in `bin/tests/test_acceptance.py` — inspect the **built** control-plane
       image and assert no agent CLI is on `PATH` (SC-009). Source census and built-image check are
       different claims; keep both
-- [ ] T010 Passphrase-protected key generation in `image/entrypoint.sh`: for a control-plane role,
-      generate in-container with a passphrase (not `-N ''`), `0600`, encrypted at rest on the volume
-      (FR-007, C3, R3)
+- [X] T010 Passphrase-protected key generation in **`image-control-plane/entrypoint.sh`**: generate
+      in-container with a passphrase (not `-N ''`), `0600`, encrypted at rest on the volume
+      (FR-007, C3, R3).
+      **Landed in the control-plane entrypoint, not the shared one.** The build context IS one image
+      directory by construction (R1), so a Dockerfile cannot COPY a sibling's entrypoint — the second
+      image carries its own. Regions the two genuinely share are sentinel-delimited and asserted
+      byte-identical instead.
 - [X] T011 One-shot passphrase read-out in `bin/agent-container`: read it through the runtime
       **once**, hold it **only within the printing call's scope**, and never assign it to anything
       that outlives the print (R3, C4). This is the feature's narrow Constitution III exception
