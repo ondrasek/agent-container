@@ -228,9 +228,9 @@ and the drift would be invisible because each leg still looks correct alone.
 - [X] T046 [P] Hermetic test that attribution adds **no second operator-free-text field**:
       `RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row, asserted on the table itself
       (FR-009c, C18e) - a second field falsifies the closure while every other test passes
-- [ ] T047 Attribution on every management action, mutating and read-only, recording **which** control
+- [X] T047 Attribution on every management action, mutating and read-only, recording **which** control
       plane performed it, appended where the action lands (FR-009a, SC-013)
-- [ ] T048 [P] A host that cannot be written to MUST NOT fail the action - report the gap and mark the
+- [X] T048 [P] A host that cannot be written to MUST NOT fail the action - report the gap and mark the
       action **unrecorded** rather than leaving it absent (FR-009b)
 
 ### The export state - what the client can actually observe

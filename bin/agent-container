@@ -3795,7 +3795,16 @@ RUN_SCHEMA = 1
 RUN_OUTCOMES: dict[str, tuple[str, ...]] = {
     "headless": ("finished", "failed", "stopped", "never-started"),
     "interactive": ("ended", "stopped"),
+    # Feature 017 FR-009a. A management action performed FROM a control plane —
+    # its own kind rather than a borrowed one, because filing it under `headless`
+    # would make every `runs list` count management actions as agent runs, and the
+    # two answer different questions.
+    #
+    # `unrecorded` is FR-009b's outcome: the action happened, the host could not be
+    # written to, and the gap is visible AS a gap rather than as an absence.
+    "management": ("performed", "failed", "unrecorded"),
 }
+RUN_KIND_MANAGEMENT = "management"
 # The one outcome the TOOL authors (C6, research R5): the container never ran, so
 # nothing inside it existed to report. Named here so the ingestion path cannot
 # assume every record arrives from a volume.
@@ -4163,7 +4172,7 @@ def build_run_record(
     *,
     run_id: str,
     environment: str,
-    agent: str,
+    agent: str | None,
     kind: str,
     outcome: str,
     started_at: str,
@@ -4222,7 +4231,13 @@ def build_run_record(
             f"run record: outcome '{outcome}' is not legal for kind '{kind}' "
             f"(legal: {', '.join(RUN_OUTCOMES[kind])})"
         )
-    if agent not in AGENTS:
+    if kind == RUN_KIND_MANAGEMENT:
+        # No agent ran. `None` rather than a placeholder: naming an agent here
+        # would be an invented fact, the same reason an interactive record may not
+        # carry a task.
+        if agent is not None:
+            die("run record: a management action has no agent (FR-009a)")
+    elif agent not in AGENTS:
         # The field set is closed (C13/SC-005) and every non-task field is
         # tool-generated; an agent name that is not one of ours means the caller
         # invented one, not that a new agent appeared.
@@ -5674,6 +5689,105 @@ def export_record_via_endpoint(path: Path, endpoint: str) -> str:
     return state
 
 
+def attribution_run_id(command: str) -> str:
+    """A sortable, unique id for an attribution record.
+
+    Same shape as a run id (RUN_ID_RE) because it lands in the same store and
+    becomes a filename there — and a second id format would mean two validators.
+    """
+    return f"{utc_now().replace(':', '').replace('-', '')}-{command}-{runs_nonce()}"
+
+
+def runs_nonce() -> str:
+    """Four hex characters, from `secrets`. Separates two actions inside one
+    second, which a scripted loop reaches easily."""
+    return secrets.token_hex(2)
+
+
+def record_attribution(
+    host_name: str,
+    host_rec: dict,
+    name: str,
+    command: str,
+    *,
+    outcome: str = "performed",
+) -> str | None:
+    """FR-009a: record WHICH control plane performed a management action.
+
+    A NO-OP unless this CLI is running inside a control plane. On the operator's
+    own machine there is nothing to attribute — the operator IS the actor, and a
+    record saying so on every `list` would be noise that buries the records that
+    matter.
+
+    MUTATING AND READ-ONLY ALIKE. A read is how an attacker finds what to act on,
+    so a trail that recorded only writes would answer "what was changed" and not
+    "what was looked at" — and the second question is the one an investigation
+    starts with.
+
+    Appended WHERE THE ACTION LANDS, on the target environment's runs volume,
+    because the control plane holds no durable store of its own (FR-003a) and its
+    own filesystem dies with it. The volume is the one the drain already reads, so
+    `telemetry collect` picks these up with no second mechanism.
+
+    NEVER FAILS THE ACTION (FR-009b). The operator asked a question; refusing to
+    answer because bookkeeping failed inverts the priority. A host that cannot be
+    written to yields a REPORTED GAP — visible as unrecorded, never silently
+    absent from the trail.
+
+    Returns the record id, or None when nothing was recorded.
+    """
+    me = self_control_plane_name()
+    if me is None:
+        return None
+    if host_rec.get("driver") not in ("docker", "podman"):
+        warn(
+            f"{name}: this action is UNRECORDED — {host_name} is attach-only, so no "
+            f"record can be written there (FR-009b)"
+        )
+        return None
+    now = utc_now()
+    try:
+        rec = build_run_record(
+            run_id=attribution_run_id(command),
+            environment=name,
+            agent=None,
+            kind=RUN_KIND_MANAGEMENT,
+            outcome=outcome,
+            started_at=now,
+            ended_at=now,
+            attribution=f"{ROLE_CONTROL_PLANE}:{me}",
+        )
+    except Fatal as e:
+        warn(f"{name}: could not construct the attribution record ({e}); action UNRECORDED")
+        return None
+    filename = f"{rec['run_id']}.json"
+    argv = driver_attribution_argv(
+        host_rec, runs_volume_name(name), resolve_ingest_image({}, name), filename
+    )
+    try:
+        r = subprocess.run(
+            argv,
+            input=json.dumps(rec).encode(),
+            capture_output=True,
+            timeout=RUNS_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        warn(
+            f"{name}: the action was performed but is UNRECORDED — could not write the "
+            f"attribution record to {host_name} ({e}). FR-009b: the gap is reported "
+            f"rather than the action refused"
+        )
+        return None
+    if r.returncode != 0:
+        warn(
+            f"{name}: the action was performed but is UNRECORDED — writing the "
+            f"attribution record to {host_name} exited {r.returncode} "
+            f"({r.stderr.decode(errors='replace').strip()[:120]})"
+        )
+        return None
+    return str(rec["run_id"])
+
+
 def stored_record_paths(host: str | None = None, environment: str | None = None) -> list[Path]:
     """Every durable record path, optionally narrowed to one host/environment.
 
@@ -6405,6 +6519,47 @@ def driver_down_argv(
 # runtime, exactly like the rest of the driver seam.
 
 RUNS_INGEST_MOUNT = "/mnt"
+
+
+def driver_attribution_argv(host: dict, volume: str, image: str, filename: str) -> list[str]:
+    """Write ONE attribution record onto a runs volume from OUR stdin.
+
+    The inverse of `driver_ingest_argv`, and deliberately built from the same
+    seam: the drain reads `agent-container-<name>-runs`, so a record written
+    anywhere else would be invisible to the mechanism that collects it.
+
+    WRITABLE, unlike the ingest mount — this is the one helper that must write —
+    but still `--network none`. It copies stdin to a file and exits; a network
+    would buy nothing, and on a host with an egress declaration a networked
+    helper the tool starts behind the operator's back is the last thing to add.
+
+    `--entrypoint sh` for the same load-bearing reason `--entrypoint tar` is: the
+    agent image's ENTRYPOINT would otherwise swallow the command as arguments and
+    the write would silently not happen.
+
+    Staged under a dot-prefixed name and renamed, matching the entrypoint's own
+    rule — the tool's listing skips that shape, so a half-written record can never
+    be read as a finished one.
+
+    >>> driver_attribution_argv({"driver": "docker", "context": "vps"}, "v", "img", "r.json")
+    ['docker', '--context', 'vps', 'run', '--rm', '-i', '--network', 'none', '-v', 'v:/mnt', '--entrypoint', 'sh', 'img', '-c', 'cat > /mnt/.r.json.tmp && mv /mnt/.r.json.tmp /mnt/r.json']
+    """
+    staged = f"{RUNS_INGEST_MOUNT}/.{filename}.tmp"
+    final = f"{RUNS_INGEST_MOUNT}/{filename}"
+    return driver_runtime_argv(host) + [
+        "run",
+        "--rm",
+        "-i",
+        "--network",
+        "none",
+        "-v",
+        f"{volume}:{RUNS_INGEST_MOUNT}",
+        "--entrypoint",
+        "sh",
+        image,
+        "-c",
+        f"cat > {staged} && mv {staged} {final}",
+    ]
 
 
 def driver_ingest_argv(host: dict, volume: str, image: str) -> list[str]:
@@ -9358,6 +9513,9 @@ def compose_up_exec(
     # of an unrecoverable secret is an operator who will lose it.
     if spec.role == ROLE_CONTROL_PLANE:
         print_control_plane_passphrase_once(host_rec, name)
+    # FR-009a. A nested deploy is the action most worth attributing: it is how a
+    # standing key gets minted from inside the system.
+    record_attribution(host_name, host_rec, name, "up")
     if spec.repo and is_ssh_git_url(spec.repo) and clone_pending_url(host_rec, name):
         warn(
             f"{name}: the workspace was NOT cloned — the agent's SSH key is not "
@@ -9809,6 +9967,9 @@ def do_stop(name: str, host: str | None = None) -> None:
         if run_child(argv).returncode != 0:
             die("compose stop failed")
     log(f"stopped {container_name(name)} on {host_name} (resume: agent-container start {name})")
+    # FR-009a: AFTER the action, so the record states what happened rather than
+    # what was attempted. A no-op unless this CLI runs inside a control plane.
+    record_attribution(host_name, host_rec, name, "stop")
 
 
 def do_start(name: str, host: str | None = None) -> None:
@@ -9835,6 +9996,7 @@ def do_start(name: str, host: str | None = None) -> None:
     log(
         f"started {container_name(name)} on {host_name}; attach with: agent-container attach {name}{hflag}"
     )
+    record_attribution(host_name, host_rec, name, "start")
 
 
 def do_redeploy(

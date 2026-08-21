@@ -169,8 +169,23 @@ def test_every_legal_kind_outcome_pair_is_accepted(wiz):
         for outcome in outcomes:
             # exit_code is headless-only and never applies to never-started.
             exit_code = 0 if (kind == "headless" and outcome != "never-started") else None
-            r = _record(wiz, kind=kind, outcome=outcome, exit_code=exit_code, task=None)
+            # Feature 017: a management action has NO AGENT. Passing one is
+            # refused rather than ignored — naming an agent that did not run would
+            # be an invented fact, the same reason an interactive record may not
+            # carry a task.
+            agent = None if kind == wiz.RUN_KIND_MANAGEMENT else "claude"
+            r = _record(
+                wiz, kind=kind, outcome=outcome, exit_code=exit_code, task=None, agent=agent
+            )
             assert (r["kind"], r["outcome"]) == (kind, outcome)
+
+
+def test_a_management_record_REFUSES_an_agent(wiz):
+    """FR-009a: no agent ran. A placeholder here would be a fact nobody
+    established, and `runs list` would then attribute a management action to an
+    agent that was never involved."""
+    with pytest.raises(wiz.Fatal, match="management action has no agent"):
+        _record(wiz, kind="management", outcome="performed", task=None, agent="claude")
 
 
 def _assert_interactive_completion_outcomes_are_refused(wiz):

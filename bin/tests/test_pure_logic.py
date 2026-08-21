@@ -504,12 +504,19 @@ def test_entrypoint_outcome_vocabulary_matches_the_canonical_one(wiz):
     `never-started` is excluded on purpose, and against the NAMED constant rather
     than the literal: it is the one outcome the TOOL authors (C6), for a container
     that never ran, and a record written from inside one disproves it.
+
+    The `management` KIND is excluded for the same class of reason (Feature 017
+    FR-009a): a management action is performed BY THE CLI against a host, so no
+    container-written record can carry one, and requiring the entrypoint to know
+    that vocabulary would make it carry arms it can never reach. Excluded against
+    the NAMED constant, so adding a third CLI-only kind fails here until it is
+    named — the exclusion cannot silently widen.
     """
     expected = {
         (kind, outcome)
         for kind, outcomes in wiz.RUN_OUTCOMES.items()
         for outcome in outcomes
-        if outcome != wiz.RUN_OUTCOME_NEVER_STARTED
+        if outcome != wiz.RUN_OUTCOME_NEVER_STARTED and kind != wiz.RUN_KIND_MANAGEMENT
     }
     arms = _entrypoint_outcome_arms()
     assert arms == expected, (

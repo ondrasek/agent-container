@@ -10,9 +10,16 @@ because an absence is never demonstrated by working output.
 
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
+
+# A real host record. `{}` resolves to driver None, which dies as "attach-only"
+# before reaching anything under test — a failure that looks like the assertion
+# under test failing.
+HOST = {"driver": "docker", "context": "", "address": "localhost"}
 
 # --- the ONE payload definition (FR-009e/FR-009f, T044/T045) -----------------
 
@@ -1020,3 +1027,126 @@ def test_revoke_leaves_the_CONTAINER_alone(wiz):
     body = _func_body(Path(wiz.__file__).read_text(), "do_revoke")
     for destructive in ("do_purge", "do_destroy", "compose_down", '"rm"'):
         assert destructive not in body
+
+
+# --- attribution (FR-009a/FR-009b, T047/T048) --------------------------------
+
+
+def test_attribution_is_a_NO_OP_outside_a_control_plane(wiz, monkeypatch):
+    """On the operator's own machine the operator IS the actor. A record saying so
+    on every action would be noise that buries the records that matter."""
+    monkeypatch.delenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", raising=False)
+    assert wiz.record_attribution("local", {"driver": "docker"}, "acme", "stop") is None
+
+
+def test_an_attach_only_host_is_reported_as_UNRECORDED(wiz, monkeypatch):
+    """FR-009b: the gap is visible AS a gap. No container can run there, so no
+    record can be written — and staying silent would make the action simply absent
+    from the trail, which is indistinguishable from it never happening."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    warned: list[str] = []
+    monkeypatch.setattr(wiz, "warn", lambda m: warned.append(m))
+    assert wiz.record_attribution("vps", {"driver": "ssh"}, "acme", "stop") is None
+    assert warned and "UNRECORDED" in warned[0]
+
+
+def test_a_write_failure_reports_the_gap_and_does_NOT_raise(wiz, monkeypatch):
+    """FR-009b: the operator asked a question; refusing to answer because
+    bookkeeping failed inverts the priority. The action already happened."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    warned: list[str] = []
+    monkeypatch.setattr(wiz, "warn", lambda m: warned.append(m))
+    monkeypatch.setattr(
+        wiz.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 1, b"", b"denied"),
+    )
+    # Returns None rather than raising — the caller has already acted.
+    assert wiz.record_attribution("vps", HOST, "acme", "stop") is None
+    assert warned and "UNRECORDED" in warned[0]
+
+
+def test_the_attribution_record_names_WHICH_control_plane(wiz, monkeypatch):
+    """SC-013. "A control plane did it" is not an answer when nesting means there
+    may be several."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    captured: dict = {}
+
+    def fake_run(argv, **kw):
+        captured["payload"] = json.loads(kw["input"].decode())
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(wiz.subprocess, "run", fake_run)
+    rid = wiz.record_attribution("vps", HOST, "acme", "stop")
+    assert rid is not None
+    rec = captured["payload"]
+    assert rec["attribution"] == "control-plane:hub"
+    assert rec["kind"] == "management"
+    assert rec["environment"] == "acme"
+    # No agent ran, and the record says so rather than borrowing a name.
+    assert rec["agent"] is None
+    # It is born `pending` like every other record, so `collect`/`retry` treat it
+    # identically — one payload, one state machine.
+    assert rec["export_state"] == "pending"
+
+
+def test_the_attribution_record_lands_on_the_volume_the_DRAIN_reads(wiz):
+    """Written where the action lands (FR-003a), and specifically to the volume
+    Feature 016 already collects from — a record written anywhere else would be
+    invisible to the mechanism that gathers it."""
+    argv = wiz.driver_attribution_argv(HOST, wiz.runs_volume_name("acme"), "img", "r.json")
+    assert f"{wiz.runs_volume_name('acme')}:{wiz.RUNS_INGEST_MOUNT}" in argv
+    # WRITABLE — the one helper that must be — but still no network.
+    assert ":ro" not in " ".join(argv)
+    assert "--network" in argv and "none" in argv
+
+
+def test_the_attribution_write_is_staged_then_renamed(wiz):
+    """The tool's listing skips dot-prefixed .tmp names, so a half-written record
+    can never be read as a finished one."""
+    argv = wiz.driver_attribution_argv(HOST, "v", "img", "r.json")
+    script = argv[-1]
+    assert script.startswith("cat > /mnt/.r.json.tmp")
+    assert "mv /mnt/.r.json.tmp /mnt/r.json" in script
+
+
+def test_the_mutating_management_actions_are_attributed(wiz):
+    """FR-009a/SC-013. Asserted per COMMAND, so adding a mutating command without
+    attribution fails here rather than silently leaving a hole in the trail."""
+    src = Path(wiz.__file__).read_text()
+    # `compose_up_exec`, NOT `do_up`. It is the only choke point every deploy path
+    # passes through — `up`, `apply`, `redeploy` and the wizard — and this file
+    # already records why that distinction matters: an egress lookup placed in
+    # `do_up` left `redeploy` unenforced while the declaration still read as
+    # enforced. Attribution placed in `do_up` would leave every `redeploy`
+    # unattributed while the trail read as complete, which is the same defect.
+    for func, command in (
+        ("compose_up_exec", "up"),
+        ("do_stop", "stop"),
+        ("do_start", "start"),
+    ):
+        body = _func_body(src, func)
+        assert f'record_attribution(host_name, host_rec, name, "{command}")' in body, (
+            f"{func} performs a management action without recording attribution"
+        )
+
+
+def test_deploy_attribution_sits_at_the_CHOKE_POINT_not_in_do_up(wiz):
+    """Stated as its own test because the wrong location passes every other check.
+
+    `do_up` serves `up` and `apply`; `do_redeploy` and the wizard call
+    `compose_up_exec` directly. Attribution in `do_up` would therefore record
+    every `up` and no `redeploy` — and a trail missing a whole command reads as a
+    trail, which is worse than an obviously empty one.
+    """
+    src = Path(wiz.__file__).read_text()
+    assert 'record_attribution(host_name, host_rec, name, "up")' not in _func_body(src, "do_up"), (
+        "deploy attribution is in do_up, so `redeploy` and the wizard go unattributed"
+    )
+
+
+def test_attribution_is_recorded_AFTER_the_action(wiz):
+    """So the record states what HAPPENED rather than what was attempted. A record
+    written first would claim an action that may then have failed."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_stop")
+    assert body.index("compose stop failed") < body.index("record_attribution")
