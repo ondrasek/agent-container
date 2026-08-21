@@ -44,7 +44,7 @@ def up_env(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     return wiz
 
 

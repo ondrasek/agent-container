@@ -246,7 +246,7 @@ def test_compose_up_exec_threads_discovered_apikeys(wiz, monkeypatch, tmp_path):
     wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     (wiz.CONFIG_DIR / "acme.anthropic.key").write_bytes(b"K")
     monkeypatch.setattr(wiz, "build_compose_model", _fake_build)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
     monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
     monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["true"])
@@ -361,7 +361,7 @@ def test_compose_up_exec_threads_canonical_config(wiz, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     _config_src(tmp_path)
     monkeypatch.setattr(wiz, "build_compose_model", _fake_build)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
     monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
     monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["true"])
@@ -392,7 +392,7 @@ def _compose_tripwires(wiz, monkeypatch, tmp_path) -> list[str]:
     subprocess). Returns the ordered list of stages that were reached."""
     tripped: list[str] = []
     monkeypatch.setattr(wiz, "port_free", lambda p: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
 
     def _build(*a, **k):
         tripped.append("build_compose_model")
@@ -518,7 +518,7 @@ def test_all_material_staged_locally_before_compose_up(wiz, monkeypatch, tmp_pat
         return {"name": name, "services": {"agent": {}}, "volumes": {}}
 
     monkeypatch.setattr(wiz, "build_compose_model", _build)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
     monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
     monkeypatch.setattr(wiz, "port_free", lambda p: True)

@@ -67,6 +67,21 @@ from rich.table import Table
 # --- constants ---------------------------------------------------------------
 
 IMAGE_NAME = "localhost/agent-container:latest"
+# Feature 017 FR-015a: the CONTROL-PLANE image. A separate image rather than a
+# build arg on the shared one, because "no agents are installed here" has to be a
+# readable property of the artifact — not something you reconstruct from a build
+# invocation. Its source directory is `image-control-plane/`, and the agent census
+# in bin/tests/test_pure_logic.py declares its expectation as "none" and enforces
+# it against every Dockerfile in the tree.
+CONTROL_PLANE_IMAGE_NAME = "localhost/agent-container-control-plane:latest"
+CONTROL_PLANE_IMAGE_DIR = "image-control-plane"
+AGENT_IMAGE_DIR = "image"
+# The two roles an environment can have (data-model §1). Persisted on the
+# inventory entry, so a STOPPED control plane is still identifiable — which
+# inspecting the container could not tell you.
+ROLE_AGENT = "agent"
+ROLE_CONTROL_PLANE = "control-plane"
+ROLES = (ROLE_AGENT, ROLE_CONTROL_PLANE)
 CONTAINER_PREFIX = "agent-container-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
@@ -1745,6 +1760,14 @@ INVENTORY_FIELDS = (
     "created_at",
     "outcome",
     "outcome_at",
+    # Feature 017 FR-009/FR-014a. Both are CLOSED VOCABULARIES, which is what
+    # keeps the claim above true: `role` is one of ROLES, and `provenance` is
+    # "operator" or "control-plane:<validated name>" — see deploy_provenance(),
+    # which refuses an env-supplied name that is not a valid environment name
+    # rather than passing it through. A field set pinned by NAME says nothing
+    # about what may arrive IN a field.
+    "role",
+    "provenance",
     "notes",
 )
 
@@ -1766,8 +1789,56 @@ def inventory_entry_id(name: str, when: str) -> str:
     return f"{stamp}-{name}-{secrets.token_hex(3)}"
 
 
+def deploy_provenance() -> str:
+    """Where THIS deploy is being made from (FR-014a, data-model §1).
+
+    `operator` on the operator's own machine; `control-plane:<name>` when the CLI
+    is running inside a control plane. Nesting is supported, so a standing key can
+    now be minted from inside a session — and a count nobody can see is a count
+    nobody audits (SC-011).
+
+    Read from the environment the deploy is happening IN, because that is the only
+    place the answer exists: a control plane's CLI is an ordinary CLI, and nothing
+    about the call distinguishes it.
+
+    Visibility is the WHOLE of the work here. Nesting needs no enforcement code:
+    scope is where the key is authorised, which is outside the container, so a
+    parent cannot constrain a child even in principle (research R8). A gate here
+    would be a control that cannot control.
+
+    THE NAME IS VALIDATED, NOT TRUSTED. This value lands in the inventory, whose
+    guarantee is that every field is tool-generated so there is nowhere for a
+    credential to arrive (FR-010). An env var is settable by whoever runs the CLI,
+    so passing it through unchecked would put operator-controlled free text into
+    the one field set that is pinned closed precisely to prevent that — and the
+    closure test would still pass, because it checks WHICH fields exist and not
+    what they may contain.
+
+    >>> deploy_provenance()  # no env var set
+    'operator'
+    """
+    inside = os.environ.get("AGENT_CONTAINER_CONTROL_PLANE_NAME", "").strip()
+    if not inside:
+        return "operator"
+    if not NAME_RE.fullmatch(inside):
+        # Reported, not silently dropped: something set this, and an unreadable
+        # provenance is a fact about the deploy worth seeing. `unknown` rather
+        # than the raw value, so the field stays closed.
+        warn(
+            f"AGENT_CONTAINER_CONTROL_PLANE_NAME={inside!r} is not a valid environment "
+            f"name; recording provenance as control-plane:unknown"
+        )
+        return f"{ROLE_CONTROL_PLANE}:unknown"
+    return f"{ROLE_CONTROL_PLANE}:{inside}"
+
+
 def build_inventory_entry(
-    name: str, host: str, host_provisioned: bool, when: str | None = None
+    name: str,
+    host: str,
+    host_provisioned: bool,
+    when: str | None = None,
+    role: str = ROLE_AGENT,
+    provenance: str | None = None,
 ) -> dict:  # noqa: FBT001
     """A new `active` entry (data-model §1).
 
@@ -1789,6 +1860,11 @@ def build_inventory_entry(
         "created_at": when,
         "outcome": "active",
         "outcome_at": None,
+        # PERSISTED, so a STOPPED control plane is still identifiable (data-model
+        # §1). Inspecting the container would not answer this: the container is
+        # exactly what is not running.
+        "role": role,
+        "provenance": provenance or deploy_provenance(),
         "notes": [],
     }
 
@@ -3194,7 +3270,9 @@ def set_inventory_outcome_for_host(host: str, outcome: str, when: str | None = N
     return changed
 
 
-def record_inventory_creation(name: str, host: str, host_provisioned: bool) -> None:
+def record_inventory_creation(
+    name: str, host: str, host_provisioned: bool, role: str = ROLE_AGENT
+) -> None:
     """Record a deployment (FR-001), and NEVER fail the deploy for it (FR-008).
 
     A write failure is surfaced rather than swallowed: an unrecorded environment is
@@ -3204,7 +3282,7 @@ def record_inventory_creation(name: str, host: str, host_provisioned: bool) -> N
     be a worse outcome than the missing row.
     """
     try:
-        write_inventory_entry(build_inventory_entry(name, host, host_provisioned))
+        write_inventory_entry(build_inventory_entry(name, host, host_provisioned, role=role))
         prune_inventory()
     except (OSError, Fatal) as e:
         warn(
@@ -4989,6 +5067,56 @@ def sidecar_override_candidates(name: str, cwd: Path) -> list[Path]:
     return [*project, CONFIG_DIR / f"{name}.services.yaml"]
 
 
+# Feature 017 FR-004/FR-009d: TOOL-WIDE settings, as opposed to the
+# per-environment files above. Same two-level contract (project wins, same
+# filename both levels, Feature 011), one file: `settings.yaml`.
+#
+# Tool-wide rather than per-environment because both of its consumers are:
+# `control_plane_hosts` is a scope declaration for the operator's fleet, and
+# `otlp_endpoint` must be resolvable for a container deployed OUTSIDE any
+# project — a project-level-only declaration would leave every such container
+# with no endpoint at all, while C18d requires each container to export its own.
+SETTINGS_FILENAME = "settings.yaml"
+
+
+def settings_candidates(cwd: Path | None = None) -> list[Path]:
+    """Discovery order: project config directory first, then user config.
+
+    >>> [p.name for p in settings_candidates(Path("/nonexistent-xyz"))]
+    ['settings.yaml']
+    """
+    pcd = project_config_dir(cwd or Path.cwd())
+    project = [pcd / SETTINGS_FILENAME] if pcd is not None else []
+    return [*project, CONFIG_DIR / SETTINGS_FILENAME]
+
+
+def resolve_settings_key(key: str, cwd: Path | None = None) -> object | None:
+    """The value of `key` from the winning settings file, or None if undeclared.
+
+    PROJECT WINS ENTIRELY for a given key — the two files are not merged
+    key-by-key. Merging would mean an operator could not turn a project setting
+    off, only replace it, and "which file is this value from" would stop having
+    one answer.
+
+    A missing KEY in the project file falls through to the user file, which is
+    the difference that matters: a project declaring `control_plane_hosts` must
+    not thereby unset a user-level `otlp_endpoint` it never mentioned.
+
+    Parsed with `yaml.safe_load` only — never a regex over a structured format,
+    which silently misses flow style and quoted keys.
+    """
+    for candidate in settings_candidates(cwd):
+        if not candidate.is_file():
+            continue
+        try:
+            doc = _yaml_document(candidate.read_text())
+        except OSError as e:
+            die(f"could not read {candidate}: {e}")
+        if key in doc:
+            return doc[key]
+    return None
+
+
 def resolve_sidecar_override(name: str) -> Path | None:
     """The first existing sidecar override for <name>, validated, or None. A
     present-but-invalid override is fatal (FR-018) — never silently ignored."""
@@ -5790,35 +5918,69 @@ def do_build(tag: str, context: Path | None = None) -> None:
             ctx = REPO_ROOT
     if ctx is None:
         die(_no_checkout_message(), remedy="see the path named above")
-    # Feature 011 FR-006/FR-007: the context is `image/`, not the checkout root.
-    # Narrow BY CONSTRUCTION — the directory boundary is the guarantee, rather
-    # than a .dockerignore allowlist that must be maintained in step with the
-    # Dockerfile. This matters most for a REMOTE host, where the context crosses
-    # the network to another daemon.
-    ctx = ctx / "image"
     rt = detect_runtime()
-    log(f"building image '{tag}' with {rt} from {ctx}")
-    # Inherited stdio: layer progress must stream, never capture.
+    # Feature 017 T004: BOTH images. The control-plane image is not optional
+    # extra work — `up --role control-plane` selects it, and an operator who ran
+    # `build` and then found the deploy failing on a missing image would have
+    # been told, by the command whose whole job is producing images, that there
+    # was nothing left to build.
+    #
+    # A custom `tag` names the AGENT image only. The control-plane image keeps its
+    # own name: they are different artifacts, and one tag cannot mean both.
+    targets = [(tag, AGENT_IMAGE_DIR)]
+    if (ctx / CONTROL_PLANE_IMAGE_DIR / "Dockerfile").is_file():
+        targets.append((CONTROL_PLANE_IMAGE_NAME, CONTROL_PLANE_IMAGE_DIR))
+    else:
+        # Named, not silent. A checkout predating Feature 017 builds the agent
+        # image and says why the second one is absent; the alternative is a
+        # `up --role control-plane` that fails later on a missing image with
+        # nothing connecting the two.
+        warn(
+            f"{CONTROL_PLANE_IMAGE_DIR}/Dockerfile is not in this checkout — building the "
+            "agent image only. `up --role control-plane` will have no image to select"
+        )
     # FR-012a/FR-012b: stamp the building CLI's version, and OMIT the arg entirely
     # when it cannot be resolved. `_resolve_version()` returns "0.0.0+unknown" in that
     # case, and stamping that would assert a version nobody has — an unstamped image
     # is honestly *unknown*, which is what `doctor` reports.
-    argv = [rt, "build", "-t", tag]
+    #
+    # Resolved ONCE, outside the loop, so the two images cannot end up carrying
+    # different versions — FR-016 compares the control plane's version against an
+    # environment's, and two stamps from one `build` disagreeing would make that
+    # comparison report a drift that never happened.
     version = _resolve_version()
-    if version and not version.endswith("+unknown"):
-        argv += ["--build-arg", f"AGENT_CONTAINER_VERSION={version}"]
-    else:
+    stamped = bool(version) and not version.endswith("+unknown")
+    if not stamped:
         warn(
-            f"building without a version stamp ({version}) — `doctor` will report this "
-            f"image's freshness as unknown, which is correct rather than unfortunate"
+            f"building without a version stamp ({version}) — `doctor` will report these "
+            f"images' freshness as unknown, which is correct rather than unfortunate"
         )
-    rc = run_child(argv + [str(ctx)]).returncode
-    if rc != 0:
-        die(f"build failed (exit {rc})")
+    for image_tag, subdir in targets:
+        # Feature 011 FR-006/FR-007: the context is the IMAGE DIRECTORY, not the
+        # checkout root. Narrow BY CONSTRUCTION — the directory boundary is the
+        # guarantee, rather than a .dockerignore allowlist that must be maintained
+        # in step with the Dockerfile. This matters most for a REMOTE host, where
+        # the context crosses the network to another daemon.
+        image_ctx = ctx / subdir
+        log(f"building image '{image_tag}' with {rt} from {image_ctx}")
+        # Inherited stdio: layer progress must stream, never capture.
+        argv = [rt, "build", "-t", image_tag]
+        if stamped:
+            argv += ["--build-arg", f"AGENT_CONTAINER_VERSION={version}"]
+            if subdir == CONTROL_PLANE_IMAGE_DIR:
+                # The control-plane image INSTALLS the CLI, so the version it runs
+                # and the version it is labelled with must be the same value. Two
+                # sources would let FR-016 compare a label against a CLI that is
+                # not the one in the image.
+                argv += ["--build-arg", f"AGENT_CONTAINER_PYPI_VERSION={version}"]
+        rc = run_child(argv + [str(image_ctx)]).returncode
+        if rc != 0:
+            die(f"build failed for {image_tag} (exit {rc})")
 
 
-def resolve_build_context() -> Path:
-    """The compose build context — `<checkout>/image` (Feature 011 FR-006/FR-007).
+def resolve_build_context(role: str = ROLE_AGENT) -> Path:
+    """The compose build context — the ROLE's image directory (Feature 011
+    FR-006/FR-007, Feature 017 FR-015a).
 
     The context is the image directory, not the checkout: narrow BY CONSTRUCTION
     rather than by a .dockerignore allowlist maintained in step with the
@@ -5828,15 +5990,35 @@ def resolve_build_context() -> Path:
     Same resolution as do_build (AGENT_CONTAINER_REPO -> REPO_ROOT); dies
     actionably when no checkout is reachable (e.g. a bare PyPI install).
     """
+    subdir = CONTROL_PLANE_IMAGE_DIR if role == ROLE_CONTROL_PLANE else AGENT_IMAGE_DIR
     env = os.environ.get("AGENT_CONTAINER_REPO")
     if env:
         base = Path(env).expanduser().resolve()
         if not _is_repo_checkout(base):
             die(f"AGENT_CONTAINER_REPO={env} is not an agent-container checkout")
-        return base / "image"
+        return _require_image_dir(base / subdir, role)
     if REPO_ROOT is not None:
-        return REPO_ROOT / "image"
+        return _require_image_dir(REPO_ROOT / subdir, role)
     die(_no_checkout_message(), remedy="see the path named above")
+
+
+def _require_image_dir(path: Path, role: str) -> Path:
+    """Refuse a role whose image sources are not in this checkout.
+
+    Checked HERE rather than left to the runtime, because the runtime's error for
+    a missing context names a path and not a cause: an operator on a checkout
+    predating Feature 017 would read "no such file or directory" about a
+    directory they never knew should exist.
+    """
+    if not (path / "Dockerfile").is_file():
+        die(
+            f"--role {role} needs {path}/Dockerfile, which is not in this checkout",
+            remedy=(
+                "update the checkout to a version that ships the control-plane image, "
+                "then run `agent-container build`"
+            ),
+        )
+    return path
 
 
 def host_is_local(host: dict) -> bool:
@@ -7675,6 +7857,11 @@ class ExecSpec:
 
     mode: str = "interactive"
     agent: str = "claude"
+    # Feature 017 FR-001/data-model §1. A control plane IS an ordinary
+    # environment — same naming, ports and volumes (Constitution IV) — so the
+    # role rides here rather than becoming a parallel deploy path. It selects the
+    # narrower image and is persisted on the inventory entry.
+    role: str = ROLE_AGENT
     task: str | None = None  # resolved text (after @file); delivered as an injected file
     repo: str | None = None  # clone-on-start source URL (persistent/ephemeral only)
     workspace: str = "persistent"
@@ -7684,6 +7871,33 @@ class ExecSpec:
     def validate(self) -> None:
         if self.mode not in EXEC_MODES:
             die(f"--mode must be one of {', '.join(EXEC_MODES)} (got '{self.mode}')")
+        if self.role not in ROLES:
+            die(f"--role must be one of {', '.join(ROLES)} (got '{self.role}')")
+        # A control plane has NO AGENT INSTALLED (FR-015a), so an agent-shaped
+        # request against it must fail here, loudly, rather than deploy a
+        # container that cannot do what was asked. `--agent` keeps its default
+        # value in this role and is never read; refusing a NON-default value is
+        # the distinction — refusing the default too would reject every ordinary
+        # `up --role control-plane`.
+        if self.role == ROLE_CONTROL_PLANE:
+            if self.mode != "interactive":
+                die(
+                    f"--mode {self.mode} is not available for --role {ROLE_CONTROL_PLANE}: "
+                    "the control-plane image installs no agent to run headlessly "
+                    "(FR-015a). Attach over SSH and use the CLI instead"
+                )
+            if self.agent != ExecSpec.agent:
+                die(
+                    f"--agent is not available for --role {ROLE_CONTROL_PLANE}: "
+                    f"no agent CLI is installed in that image (FR-015a). Deploy an "
+                    f"agent environment for {self.agent}, and manage it from the "
+                    "control plane"
+                )
+            if self.task is not None:
+                die(
+                    f"--task is not available for --role {ROLE_CONTROL_PLANE}: "
+                    "there is no agent to give a task to (FR-015a)"
+                )
         if self.agent not in AGENTS:
             die(f"--agent must be one of {', '.join(AGENTS)} (got '{self.agent}')")
         if self.workspace not in WORKSPACE_MODES:
@@ -7937,7 +8151,7 @@ def compose_up_exec(
     # none→container layer) + whether to declare the named workspace volume. bind on
     # a non-local host is refused here, before any runtime call (FR-011).
     ws_mount, declare_ws = resolve_workspace(spec, name, host_rec)
-    build_ctx = resolve_build_context()
+    build_ctx = resolve_build_context(spec.role)
     # Feature 012: the declaration is read HERE — the one choke point every deploy
     # path passes through (`up`, `apply`, `redeploy`, wizard). A lookup in `do_up`
     # would leave `redeploy` unenforced while the declaration read as enforced.
@@ -8122,7 +8336,9 @@ def compose_up_exec(
     # `do_up` records some deploys and not others, and SC-001's 100% is unreachable
     # while nothing looks wrong. host_provisioned comes from the host record so US3
     # can later tell a host the tool CREATED from one merely registered.
-    record_inventory_creation(name, host_name, bool(host_rec.get("created_by_tool")))
+    record_inventory_creation(
+        name, host_name, bool(host_rec.get("created_by_tool")), role=spec.role
+    )
     # FR-011: an upgrade must not leave a pre-018 private key behind.
     remove_stale_staged_host_key(host_name, name)
     # Feature 019: the same, for the pre-019 outbound key — and capture the agent's
@@ -8152,6 +8368,12 @@ def compose_up_exec(
     # register, and the replacement is a different key. So say what not to do.
     # Only an SSH clone-on-start can be pending, so only that case pays for the
     # round-trip — and the check cannot misfire where there is nothing to clone.
+    # FR-007: the passphrase crosses to the tool ONCE, here, on the boot that
+    # created the key. Placed after the attach instructions because it must be the
+    # LAST thing on screen — an operator who has to scroll to find the only copy
+    # of an unrecoverable secret is an operator who will lose it.
+    if spec.role == ROLE_CONTROL_PLANE:
+        print_control_plane_passphrase_once(host_rec, name)
     if spec.repo and is_ssh_git_url(spec.repo) and clone_pending_url(host_rec, name):
         warn(
             f"{name}: the workspace was NOT cloned — the agent's SSH key is not "
@@ -8168,6 +8390,138 @@ def compose_up_exec(
             f"are about to register, and the replacement will be a different one."
         )
         raise typer.Exit(EXIT_PENDING_REGISTRATION)
+
+
+def control_plane_permitted_hosts(name: str) -> list[str]:
+    """The DECLARED scope for a control plane (FR-004, data-model §5).
+
+    A DECLARATION OF INTENT, not an enforcement point. Actual reach is wherever
+    the public key is authorised, which lives outside the container on purpose —
+    so this field exists to let the operator see intent before deploying and
+    compare it against reality afterwards. Treating it as the boundary would be a
+    control that does not control.
+
+    Resolved from the two-level config the tool already has, project winning.
+    Absent means "every registered host", which is stated rather than assumed:
+    an empty list would read as "nothing", and the two are opposite.
+    """
+    declared = resolve_settings_key("control_plane_hosts")
+    if declared is None:
+        return sorted(load_registry().get("hosts", {}))
+    if not isinstance(declared, list) or not all(isinstance(h, str) for h in declared):
+        die(
+            f"control_plane_hosts for {name} must be a list of host names",
+            remedy="fix the declaration in .agent-container/ or ~/.config/agent-container/",
+        )
+    return list(declared)
+
+
+# The sentinels the control-plane entrypoint wraps the passphrase in. Matched
+# EXACTLY, on their own lines: a looser parse could scrape an adjacent log line
+# into the operator's password manager, and the value's whole purpose is that it
+# is the only copy.
+_PASSPHRASE_BEGIN = "AGENT_CONTAINER_CONTROL_PLANE_PASSPHRASE_BEGIN"
+_PASSPHRASE_END = "AGENT_CONTAINER_CONTROL_PLANE_PASSPHRASE_END"
+
+
+def print_control_plane_passphrase_once(host_rec: dict, name: str) -> bool:
+    """FR-007, contract C4, research R3 — THE narrow Constitution III exception.
+
+    The one place this tool touches a secret it did not receive from the operator.
+    The rules, all of which this function is written to obey:
+
+      * READ ONCE, from the container's log, on the boot that created the key.
+      * HELD ONLY WITHIN THIS CALL'S SCOPE. It is never returned, never assigned
+        to a caller-visible name, never put in a record, a `--json` payload, a
+        state file, or a variable that outlives the print.
+      * NEVER LOGGED. `log()` and `warn()` are not used for the value — they go
+        through the tool's own output path, and this must not.
+
+    Returns whether a passphrase was found and printed, which is a BOOLEAN and
+    deliberately not the value: a caller that wanted to re-print it would have to
+    read the log again, and by then the honest answer may be that it is gone.
+
+    Printed to stdout even under --json. A `--json` run that swallowed it would
+    destroy the only copy in exchange for well-formed output, and there is no
+    machine consumer for a value whose destination is a human's password manager.
+    """
+    rt_argv = driver_runtime_argv(host_rec) + ["logs", container_name(name)]
+    try:
+        out = subprocess.run(rt_argv, capture_output=True, text=True, timeout=CLONE_RESOLVE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        warn(
+            f"{name}: could not read the container log to retrieve the key passphrase ({e}). "
+            f"The key exists and is encrypted, but the passphrase is UNRECOVERABLE — "
+            f"redeploy to mint a fresh keypair"
+        )
+        return False
+    # Both streams: the entrypoint prints the block to stdout and its log() lines
+    # to stderr, and the runtimes differ in which stream they attribute container
+    # output to.
+    lines = ((out.stdout or "") + "\n" + (out.stderr or "")).splitlines()
+    try:
+        i = lines.index(_PASSPHRASE_BEGIN)
+        j = lines.index(_PASSPHRASE_END, i)
+    except ValueError:
+        # Not an error: on every boot AFTER the first, the key already exists and
+        # no passphrase is generated. Saying nothing is correct — announcing a
+        # missing passphrase on every restart would train the operator to ignore
+        # the one time it matters.
+        return False
+    if j != i + 2:
+        warn(
+            f"{name}: the passphrase block in the container log is malformed — refusing to "
+            f"print anything rather than risk printing the wrong line"
+        )
+        return False
+    # The ONE use. Not bound to a name that outlives the print: the value is
+    # indexed out of the list, printed, and the list slot is overwritten so the
+    # only remaining copy is the container log the operator can now rotate.
+    print(
+        f"\n=== {name}: CONTROL-PLANE KEY PASSPHRASE — copy it now, it is shown ONCE ===\n"
+        f"{lines[i + 1]}\n"
+        f"=== stored NOWHERE by this tool. No recovery. Put it in your password manager ===\n"
+    )
+    lines[i + 1] = ""
+    return True
+
+
+def state_control_plane_consequences(name: str, hosts: list[str]) -> None:
+    """FR-006, FR-017, contract C19 — said BEFORE the deploy, never after.
+
+    Three things, and the third is the one an operator otherwise discovers only
+    by losing it:
+
+      1. A session holds whatever the container holds. The key is not scoped to
+         "inspect"; it is the same key that stops and destroys.
+      2. The declared scope, named host by host, so intent is visible before it
+         is authorised rather than inferred afterwards.
+      3. THE PASSPHRASE HAS NO RECOVERY. Printed once, stored nowhere by the
+         tool, and unrecoverable — redeploy mints a fresh keypair and the old
+         public half must be withdrawn with `revoke`.
+
+    Printed rather than prompted: `up` is a non-interactive path an agent may
+    drive, and a prompt would either block it or be auto-answered, which is worse
+    than a statement because it reads as consent.
+    """
+    log(f"deploying {name} as a CONTROL PLANE — read this before it starts:")
+    log(
+        "  1. a session in this container holds whatever the container holds. Its "
+        "key stops and destroys, not only inspects"
+    )
+    if hosts:
+        log(f"  2. declared scope: {', '.join(hosts)}")
+    else:
+        log(
+            "  2. declared scope: NO hosts are registered, so it will reach nothing "
+            "until you authorise its public key somewhere"
+        )
+    log("     (a declaration of intent — actual reach is wherever you authorise the public key)")
+    log(
+        "  3. the key passphrase is printed ONCE, below, and stored NOWHERE. There "
+        "is NO RECOVERY: if you lose it, redeploy for a fresh keypair and `revoke` "
+        "the old public half"
+    )
 
 
 def do_up(
@@ -8187,6 +8541,11 @@ def do_up(
     # Resolve binds up front so a bad --mount aborts before any runtime call.
     resolved_mounts = [resolve_bind_mount(m) for m in (mounts or [])]
     host_name, host_rec = resolve_deploy_host(host)
+    # FR-006/FR-017, contract C19: BEFORE any runtime call, so an operator who
+    # reads it and stops has not yet created the standing key. A statement after
+    # the deploy would be a description, not a warning.
+    if spec.role == ROLE_CONTROL_PLANE:
+        state_control_plane_consequences(name, control_plane_permitted_hosts(name))
     ensure_tunnel(host_rec)
     # Drain-on-contact (FR-001a, research R7). A detached run — the default
     # headless mode — ends with no CLI attached, so its record waits on the volume
@@ -13953,6 +14312,18 @@ def up(
     agent: str = typer.Option(
         "claude", "--agent", help="Primary agent to run: claude | codex | pi | opencode."
     ),
+    # Feature 017 FR-001. The consequences of this flag are stated BEFORE the
+    # deploy, not in docs — see `state_control_plane_consequences`. A standing key
+    # that reaches every permitted host is not something to learn about
+    # afterwards.
+    role: str = typer.Option(
+        ROLE_AGENT,
+        "--role",
+        help="agent (default) | control-plane. A control plane runs a configured "
+        "agent-container CLI and NO agent, so it can be managed from a device with "
+        "nothing installed. It mints its own passphrase-protected key, printed ONCE "
+        "and unrecoverable if lost.",
+    ),
     # The task-text rule is stated HERE, at the flag the operator types the task
     # into, and not only in docs/threat-model.md — a warning read after the paste
     # is not a warning. `task` is the ONE field of a run record an operator authors
@@ -14010,6 +14381,7 @@ def up(
     spec = ExecSpec(
         mode=mode,
         agent=agent,
+        role=role,
         task=resolve_task(task),
         repo=repo,
         workspace=workspace,
@@ -14032,6 +14404,7 @@ def up(
         port=port_for_name(name),
         mode=spec.mode,
         agent=spec.agent,
+        role=spec.role,
         workspace=spec.workspace,
     )
 

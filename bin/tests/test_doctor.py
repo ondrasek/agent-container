@@ -332,20 +332,68 @@ def test_the_freshness_check_never_touches_a_registry(wiz, monkeypatch):
     assert wiz.IMAGE_VERSION_LABEL in " ".join(argv)
 
 
+def _func_body(src: str, name: str) -> str:
+    """A function's source, sliced to the next top-level `def` rather than a fixed
+    character count.
+
+    This replaced a 900-character window anchored on one statement. Feature 017
+    moved the version resolution ABOVE that anchor so `build` could stamp two
+    images from one resolved value, and the window then excluded the very clause
+    it was asserting — a false failure, and the fourth time a magic window has
+    cost this suite one.
+    """
+    i = src.index(f"\ndef {name}(")
+    j = src.index("\ndef ", i + 1)
+    return src[i:j]
+
+
 def test_build_OMITS_the_stamp_when_the_version_is_unknown(wiz):
     """R5. `_resolve_version()` returns "0.0.0+unknown" when it cannot tell, and
     stamping that would be worse than not stamping — a meaningless value that looks
     like an answer, where absence is honestly *unknown* (FR-012b)."""
-    src = Path(wiz.__file__).read_text()
-    block = src[src.index('argv = [rt, "build", "-t", tag]') :][:900]
-    assert 'not version.endswith("+unknown")' in block
-    assert "--build-arg" in block
+    body = _func_body(Path(wiz.__file__).read_text(), "do_build")
+    assert 'not version.endswith("+unknown")' in body
+    assert "--build-arg" in body
 
 
-def test_the_dockerfile_defaults_the_stamp_to_EMPTY(wiz):
+def test_build_resolves_the_version_ONCE_for_every_image(wiz):
+    """Feature 017 T004: `build` now produces two images, and FR-016 compares the
+    control plane's version against an environment's.
+
+    Two resolutions could return different values — the git describe underlying
+    `_resolve_version` is not a constant — and FR-016 would then report a drift
+    between two images built by the same command. So the value is resolved OUTSIDE
+    the per-image loop, and this asserts that ordering rather than trusting it.
+    """
+    body = _func_body(Path(wiz.__file__).read_text(), "do_build")
+    resolve_at = body.index("version = _resolve_version()")
+    loop_at = body.index("for image_tag, subdir in targets:")
+    assert resolve_at < loop_at, (
+        "_resolve_version() is called inside the per-image loop, so two images "
+        "from one `build` could carry different versions"
+    )
+    # Comment lines excluded: the block DOCUMENTS `_resolve_version()` as well as
+    # calling it, and counting prose would make this assert the wrong thing —
+    # failing on a clarifying comment and passing on a second real call the day
+    # someone deleted the comment.
+    calls = [
+        ln
+        for ln in body.splitlines()
+        if "_resolve_version()" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert len(calls) == 1, f"expected one _resolve_version() call, found: {calls}"
+
+
+@pytest.mark.parametrize("image_dir", ["image", "image-control-plane"])
+def test_the_dockerfile_defaults_the_stamp_to_EMPTY(wiz, image_dir):
     """An unset build arg must produce an image with no usable stamp, not one carrying
-    a literal placeholder that would read as a version."""
-    df = (Path(wiz.__file__).parents[1] / "image" / "Dockerfile").read_text()
+    a literal placeholder that would read as a version.
+
+    Parameterised over BOTH images (Feature 017): the control-plane image is the
+    one FR-016's semver rule reads, so an unstamped-but-placeholder-carrying
+    control plane would make the comparison assert a version nobody has.
+    """
+    df = (Path(wiz.__file__).parents[1] / image_dir / "Dockerfile").read_text()
     assert "ARG AGENT_CONTAINER_VERSION=\n" in df
     assert f'LABEL {wiz.IMAGE_VERSION_LABEL}="${{AGENT_CONTAINER_VERSION}}"' in df
 

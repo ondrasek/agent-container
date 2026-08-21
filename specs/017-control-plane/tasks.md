@@ -40,9 +40,9 @@ cannot fail:
 - [X] T003 [P] Stamp the control-plane image with Feature 013's
       `org.opencontainers.image.version` label from the same build arg, so `doctor` and FR-016 read
       **one** version source rather than two (R1)
-- [ ] T004 Teach `build` to build **both** images, and to omit the version arg for each when
+- [X] T004 Teach `build` to build **both** images, and to omit the version arg for each when
       unresolvable — the FR-012b rule already applies to the agent image
-- [ ] T005 [P] Add `--role control-plane` to `up` in `bin/agent-container`, selecting the second
+- [X] T005 [P] Add `--role control-plane` to `up` in `bin/agent-container`, selecting the second
       image and recording the role on the environment (FR-001, C8, data-model §1)
 - [ ] T006 [P] Add `doctor`, `revoke` and `telemetry` to the command list in
       `completions/agent-container.{bash,zsh}`; the sibling test pins completions to the CLI's list
@@ -70,7 +70,7 @@ cannot fail:
 - [ ] T010 Passphrase-protected key generation in `image/entrypoint.sh`: for a control-plane role,
       generate in-container with a passphrase (not `-N ''`), `0600`, encrypted at rest on the volume
       (FR-007, C3, R3)
-- [ ] T011 One-shot passphrase read-out in `bin/agent-container`: read it through the runtime
+- [X] T011 One-shot passphrase read-out in `bin/agent-container`: read it through the runtime
       **once**, hold it **only within the printing call's scope**, and never assign it to anything
       that outlives the print (R3, C4). This is the feature's narrow Constitution III exception
 - [ ] T012 **THE GATE: acceptance S4** — after a control-plane deploy, the passphrase appears in **no**
@@ -151,7 +151,7 @@ that is visible before deploying.
       and that a failure on one is reported rather than silently skipped (FR-008, C7)
 - [ ] T031 [US2] Interactive-only enforcement: the key stays **locked** whenever no operator is
       attached; the passphrase is supplied **on connect** (FR-007a, C5)
-- [ ] T032 [US2] State the consequences **before** deployment — that a session holds whatever the
+- [X] T032 [US2] State the consequences **before** deployment — that a session holds whatever the
       container holds, the declared scope, and that a lost passphrase has **no recovery** (FR-006,
       FR-017, C19, SC-004)
 - [ ] T033 [P] [US2] Hermetic test that the pre-deploy statement names all three, since omitting the
@@ -187,7 +187,7 @@ that is visible before deploying.
 - [ ] T039 [US3] Report the exclusion as a **first-class outcome**, never a silent skip (SC-010) —
       only the report is checkable, and this is the one container whose stopping makes the report
       undeliverable
-- [ ] T040 [P] [US3] Role and `provenance` on the inventory entry — `operator` vs
+- [X] T040 [P] [US3] Role and `provenance` on the inventory entry — `operator` vs
       `control-plane:<name>` (FR-009, FR-014a, C8, R8, data-model §1). Persisted, so a **stopped**
       control plane is still identifiable. **Visibility is the whole of the work** — nesting needs no
       enforcement code, because scope is where the key is authorised and a parent cannot constrain a

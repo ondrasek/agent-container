@@ -60,7 +60,7 @@ LOCAL_HOST = {"driver": "podman", "context": "", "address": "localhost"}
 
 def test_compose_up_exec_generates_file_and_runs(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
 
     wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
@@ -87,7 +87,7 @@ def test_compose_up_exec_generates_file_and_runs(wiz, capture_compose, monkeypat
 
 def test_compose_up_exec_never_inlines_secrets(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     env_file, secret = make_env_file(tmp_path)
 
     wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
@@ -102,7 +102,7 @@ def test_compose_up_exec_never_inlines_secrets(wiz, capture_compose, monkeypatch
 
 def test_compose_up_exec_port_is_name_hash(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
     wiz.compose_up_exec("local", LOCAL_HOST, "my-box", env_file, [], None, [])
     model = json.loads(wiz.compose_file_path("local", "my-box").read_text())
@@ -119,7 +119,7 @@ def test_compose_up_exec_waits_for_busy_port_then_proceeds(
     waited = []
     monkeypatch.setattr(wiz, "port_free", lambda port: False)  # busy the whole time
     monkeypatch.setattr(wiz, "wait_port_released", lambda port, *a, **k: waited.append(port))
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
     wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, [], None, [])
     assert waited == [2206]  # it waited for the port rather than dying
@@ -160,7 +160,7 @@ def test_port_free_uses_reuseaddr_matching_daemon_semantics(wiz):
 
 def test_compose_up_exec_failed_run_writes_no_state(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     monkeypatch.setattr(
         wiz.subprocess, "run", lambda argv, *a, **k: subprocess.CompletedProcess(argv, 1)
     )
@@ -172,7 +172,7 @@ def test_compose_up_exec_failed_run_writes_no_state(wiz, monkeypatch, tmp_path):
 
 def test_compose_up_exec_threads_binds_into_volumes(wiz, capture_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     env_file, _ = make_env_file(tmp_path)
     wiz.compose_up_exec("local", LOCAL_HOST, "acme", env_file, ["/abs/host:/opt/data"], None, [])
     vols = json.loads(wiz.compose_file_path("local", "acme").read_text())["services"]["agent"][
@@ -241,7 +241,7 @@ def up_env(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     monkeypatch.setattr(wiz, "port_free", lambda port: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     return wiz
 
 
@@ -829,7 +829,7 @@ def test_resolve_sidecar_override_fatal_on_invalid(wiz, monkeypatch, tmp_path):
 def test_compose_up_exec_merges_discovered_override(wiz, capture_compose, monkeypatch, tmp_path):
     """End-to-end: a discovered override rides as a second -f in the real up argv."""
     monkeypatch.setattr(wiz, "port_free", lambda p: True)
-    monkeypatch.setattr(wiz, "resolve_build_context", lambda: tmp_path / "repo")
+    monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
