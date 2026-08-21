@@ -518,20 +518,127 @@ def test_entrypoint_outcome_vocabulary_matches_the_canonical_one(wiz):
     )
 
 
-def test_dockerfile_installs_exactly_the_canonical_agents(wiz):
-    """FR-002/FR-003: every agent is baked, and nothing extra is."""
-    body = (_ROOT / "image" / "Dockerfile").read_text()
+# Feature 017 adds a SECOND image. Until then this census read a hardcoded
+# `image/Dockerfile`, so a new Dockerfile was invisible to it: the suite would
+# stay green while the control-plane image — the one container worth stealing —
+# went unchecked. The spec predicted the census would FAIL on a second image; it
+# would have silently NOT COVERED it, which is the worse direction (research R2).
+#
+# So the census enumerates the tree and is parameterised over what it finds, with
+# a declared expectation per image. `"agents"` means exactly AGENTS; `"none"`
+# means no agent package at all.
+_DOCKERFILE_EXPECTATIONS = {
+    "image/Dockerfile": "agents",
+    "image-control-plane/Dockerfile": "none",
+}
+
+
+def _discovered_dockerfiles() -> list[str]:
+    """Every Dockerfile in the tree, repo-relative and sorted.
+
+    Enumerated rather than listed, because a listed set cannot notice an
+    addition — which is the whole defect this replaces.
+    """
+    found = [
+        str(p.relative_to(_ROOT))
+        for p in _ROOT.glob("*/Dockerfile*")
+        if p.is_file() and not p.name.endswith(".dockerignore")
+    ]
+    return sorted(found)
+
+
+# Feature 017's second image carries its OWN entrypoint, because the build
+# context is one image directory by construction (research R1) — a Dockerfile
+# cannot COPY from a sibling. That means the regions the two entrypoints share
+# exist twice, and two copies of shell that agree today drift the moment one is
+# edited. The drift would be INVISIBLE: each image still boots, each still lets
+# the operator in, and the divergence is only findable by reading both files.
+#
+# So the shared regions are sentinel-delimited and asserted byte-identical. Only
+# genuinely-shared regions are marked; the two entrypoints are otherwise
+# different programs, and pretending otherwise would force one of them to carry
+# machinery it has no use for.
+_SHARED_ENTRYPOINT_BLOCKS = ("authorized_keys",)
+
+
+def _shared_block(path: Path, tag: str) -> str:
+    body = path.read_text()
+    begin = f"# SHARED-BLOCK BEGIN {tag}"
+    end = f"# SHARED-BLOCK END {tag}"
+    assert begin in body, f"{path.name} has no '{begin}' sentinel"
+    assert end in body, f"{path.name} has no '{end}' sentinel"
+    return body[body.index(begin) + len(begin) : body.index(end)]
+
+
+@pytest.mark.parametrize("tag", _SHARED_ENTRYPOINT_BLOCKS)
+def test_shared_entrypoint_blocks_are_identical_across_images(tag):
+    """FR-015a's second image must not drift from the first where they overlap.
+
+    `authorized_keys` decides WHO CAN LOG IN. If the control-plane image's
+    assembly diverged — dropping the dedupe, or missing an injected source — the
+    symptom would be an operator locked out of, or silently admitted to, the one
+    container whose key reaches the whole fleet.
+    """
+    agent = _shared_block(_ROOT / "image" / "entrypoint.sh", tag)
+    control = _shared_block(_ROOT / "image-control-plane" / "entrypoint.sh", tag)
+    assert agent == control, (
+        f"the {tag!r} shared block has DRIFTED between image/entrypoint.sh and "
+        "image-control-plane/entrypoint.sh. Make them identical, or — if they "
+        "genuinely must differ now — remove the sentinels and say why in both "
+        "files. A sentinel around a block that is allowed to differ is worse "
+        "than none, because it reads as a guarantee."
+    )
+
+
+def test_every_dockerfile_has_a_declared_agent_expectation():
+    """R2/C12: a new image cannot enter the tree unnoticed.
+
+    THE clause that makes a third image impossible to add silently. Without it
+    the census still passes on the images it knows and says nothing about the one
+    it does not — a check that passes while the thing it names goes unexamined.
+    """
+    undeclared = set(_discovered_dockerfiles()) - set(_DOCKERFILE_EXPECTATIONS)
+    assert not undeclared, (
+        f"Dockerfile(s) with no declared agent expectation: {sorted(undeclared)}. "
+        "Add each to _DOCKERFILE_EXPECTATIONS with 'agents' (installs exactly "
+        "AGENTS) or 'none' (installs no agent). This check exists because the "
+        "census used to read one hardcoded path, so a second image was not "
+        "failed — it was skipped."
+    )
+    # And the converse: an expectation for a file that no longer exists is a
+    # stale entry that would mask the next addition by making the set look
+    # maintained.
+    missing = set(_DOCKERFILE_EXPECTATIONS) - set(_discovered_dockerfiles())
+    assert not missing, (
+        f"_DOCKERFILE_EXPECTATIONS names Dockerfile(s) that do not exist: "
+        f"{sorted(missing)}. Remove them; a stale entry makes this table look "
+        "maintained while it is not."
+    )
+
+
+@pytest.mark.parametrize("rel", sorted(_DOCKERFILE_EXPECTATIONS))
+def test_dockerfile_installs_exactly_the_canonical_agents(wiz, rel):
+    """FR-002/FR-003/FR-015a: each image installs exactly what it declares."""
+    path = _ROOT / rel
+    if not path.exists():
+        pytest.fail(
+            f"{rel} has a declared agent expectation but does not exist. "
+            "The sibling test explains why a stale entry is a problem."
+        )
+    body = path.read_text()
     pkgs = set(re.findall(r"npm i -g (?:--ignore-scripts )?(\S+)", body))
     unmapped = pkgs - set(_NPM_PACKAGE_TO_AGENT)
     assert not unmapped, (
-        f"Dockerfile installs npm package(s) with no agent mapping: {unmapped}. "
+        f"{rel} installs npm package(s) with no agent mapping: {unmapped}. "
         "Add them to _NPM_PACKAGE_TO_AGENT (or drop them) — an unmapped package "
         "would silently disappear from this check."
     )
     installed = {_NPM_PACKAGE_TO_AGENT[p] for p in pkgs}
-    assert installed == _canonical_agents(wiz), (
-        f"Dockerfile disagrees with AGENTS: only in Dockerfile="
-        f"{installed - _canonical_agents(wiz)}, only in AGENTS={_canonical_agents(wiz) - installed}"
+    expected = _canonical_agents(wiz) if _DOCKERFILE_EXPECTATIONS[rel] == "agents" else set()
+    assert installed == expected, (
+        f"{rel} disagrees with its declared expectation "
+        f"{_DOCKERFILE_EXPECTATIONS[rel]!r}: only in Dockerfile="
+        f"{installed - expected}, only in expectation={expected - installed}"
     )
 
 

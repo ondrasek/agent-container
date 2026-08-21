@@ -32,12 +32,12 @@ cannot fail:
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Create `image-control-plane/` with a `Dockerfile` installing **`agent-container` from PyPI
+- [X] T001 Create `image-control-plane/` with a `Dockerfile` installing **`agent-container` from PyPI
       at a pinned version**, plus ssh, tmux, git — and **no agent CLIs or runtimes** (FR-015a, C12,
       R1). The CLI is in **no** image today; this is a build, not configuration
-- [ ] T002 [P] Add `image-control-plane/.dockerignore` and confirm the build context is that
+- [X] T002 [P] Add `image-control-plane/.dockerignore` and confirm the build context is that
       directory alone, matching Feature 011's narrow-by-construction rule (FR-015a)
-- [ ] T003 [P] Stamp the control-plane image with Feature 013's
+- [X] T003 [P] Stamp the control-plane image with Feature 013's
       `org.opencontainers.image.version` label from the same build arg, so `doctor` and FR-016 read
       **one** version source rather than two (R1)
 - [ ] T004 Teach `build` to build **both** images, and to omit the version arg for each when
@@ -56,13 +56,13 @@ cannot fail:
 
 **T007 is the one that must land first. The census cannot currently fail.**
 
-- [ ] T007 **Parameterise the agent census over EVERY Dockerfile** in
+- [X] T007 **Parameterise the agent census over EVERY Dockerfile** in
       `bin/tests/test_pure_logic.py`, with a declared expectation per image — the agent image installs
       exactly `AGENTS`, the control-plane image installs **none** — and **FAIL on any Dockerfile with
       no declared expectation** (R2, C12). The spec predicted this test would fail on a second image;
       it reads a hardcoded `image/Dockerfile`, so it would silently **not cover** it. The
       fail-on-unknown clause is what makes a third image impossible to add unnoticed
-- [ ] T008 [P] Prove T007 can fail: add a throwaway third Dockerfile with no expectation and assert
+- [X] T008 [P] Prove T007 can fail: add a throwaway third Dockerfile with no expectation and assert
       the test rejects it (C12, R2). A census that cannot fail is the defect it exists to prevent
 - [ ] T009 [P] Acceptance S9 in `bin/tests/test_acceptance.py` — inspect the **built** control-plane
       image and assert no agent CLI is on `PATH` (SC-009). Source census and built-image check are

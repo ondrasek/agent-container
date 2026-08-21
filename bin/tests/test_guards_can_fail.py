@@ -40,6 +40,8 @@ def fake_root(tmp_path, monkeypatch):
     for rel in (
         "image/entrypoint.sh",
         "image/Dockerfile",
+        "image-control-plane/Dockerfile",
+        "image-control-plane/entrypoint.sh",
         "completions/agent-container.bash",
         "completions/agent-container.zsh",
         "docs/execution.md",
@@ -71,7 +73,9 @@ def test_guards_pass_on_the_unmodified_fixture(wiz, fake_root):
     vacuous — passing for the wrong reason is exactly what is being guarded."""
     tpl.test_entrypoint_dispatch_matches_canonical_agent_list(wiz)
     tpl.test_entrypoint_writes_to_the_runs_mount_path(wiz)
-    tpl.test_dockerfile_installs_exactly_the_canonical_agents(wiz)
+    tpl.test_every_dockerfile_has_a_declared_agent_expectation()
+    for rel in sorted(tpl._DOCKERFILE_EXPECTATIONS):
+        tpl.test_dockerfile_installs_exactly_the_canonical_agents(wiz, rel)
     tpl.test_completions_offer_exactly_the_canonical_agents(wiz)
     tpl.test_orchestration_templates_mount_the_full_volume_set(wiz)
     tpl.test_completions_offer_every_cli_command(wiz)
@@ -103,7 +107,82 @@ def test_runs_mount_guard_fails_when_the_entrypoint_writes_elsewhere(wiz, fake_r
 def test_dockerfile_guard_fails_when_an_agent_is_not_installed(wiz, fake_root):
     _corrupt(fake_root / "image" / "Dockerfile", "npm i -g opencode-ai", "npm i -g something-else")
     with pytest.raises(AssertionError, match="unmapped|disagrees"):
-        tpl.test_dockerfile_installs_exactly_the_canonical_agents(wiz)
+        tpl.test_dockerfile_installs_exactly_the_canonical_agents(wiz, "image/Dockerfile")
+
+
+# --- Feature 017: the census used to go BLIND on a second image ---------------
+# The spec predicted the census would FAIL on a Dockerfile that omits the agents.
+# It would not have: it read one hardcoded path, so a second image was not
+# failed — it was SKIPPED, and the suite stayed green while the container holding
+# keys to everything went unchecked. That is the worse direction, and these three
+# proofs are why the parameterised version is not just tidier.
+
+
+def test_census_rejects_a_dockerfile_it_has_no_expectation_for(wiz, fake_root):
+    """T008/C12: THE clause that makes a third image impossible to add unnoticed.
+
+    Without this, adding an image is a silent reduction in coverage: every
+    declared image still passes and nothing mentions the new one.
+    """
+    third = fake_root / "image-something-new" / "Dockerfile"
+    third.parent.mkdir(parents=True, exist_ok=True)
+    third.write_text("FROM debian:12-slim\nRUN npm i -g @anthropic-ai/claude-code\n")
+    with pytest.raises(AssertionError, match="no declared agent expectation"):
+        tpl.test_every_dockerfile_has_a_declared_agent_expectation()
+
+
+def test_census_rejects_an_agent_installed_in_the_control_plane_image(wiz, fake_root):
+    """FR-015a: 'no agents here' is the property this image exists to have.
+
+    The failure being guarded is an agent CLI arriving in the control-plane image
+    — by a copy-paste from the agent Dockerfile, most likely — which would put a
+    model-calling agent in the container whose key reaches the whole fleet.
+    """
+    cp = fake_root / "image-control-plane" / "Dockerfile"
+    cp.write_text(cp.read_text() + "\nRUN npm i -g opencode-ai\n")
+    with pytest.raises(AssertionError, match="disagrees with its declared expectation"):
+        tpl.test_dockerfile_installs_exactly_the_canonical_agents(
+            wiz, "image-control-plane/Dockerfile"
+        )
+
+
+def test_shared_block_guard_fails_when_the_copies_diverge(wiz, fake_root):
+    """The drift guard must reject a real divergence, not just read like one.
+
+    A guard over duplicated shell is only worth having if it fails; this one
+    covers who can log in to the control plane, so a vacuous version would be
+    the most expensive kind of false comfort.
+    """
+    _corrupt(
+        fake_root / "image-control-plane" / "entrypoint.sh",
+        "awk 'NF && !seen[$0]++'",
+        "cat",
+    )
+    with pytest.raises(AssertionError, match="has DRIFTED"):
+        tpl.test_shared_entrypoint_blocks_are_identical_across_images("authorized_keys")
+
+
+def test_shared_block_guard_fails_when_a_sentinel_is_removed(wiz, fake_root):
+    """Deleting the sentinel must not be a way to silence the guard.
+
+    Otherwise the cheapest fix for a failing drift check is to delete the marker,
+    which converts a caught divergence into an uncaught one.
+    """
+    _corrupt(
+        fake_root / "image-control-plane" / "entrypoint.sh",
+        "# SHARED-BLOCK END authorized_keys",
+        "# (sentinel removed)",
+    )
+    with pytest.raises(AssertionError, match="has no .*sentinel"):
+        tpl.test_shared_entrypoint_blocks_are_identical_across_images("authorized_keys")
+
+
+def test_census_rejects_a_stale_expectation_for_a_deleted_image(wiz, fake_root):
+    """A table entry for a file that no longer exists makes the table LOOK
+    maintained, which is what would let the next real addition slip past."""
+    (fake_root / "image-control-plane" / "Dockerfile").unlink()
+    with pytest.raises(AssertionError, match="do not exist"):
+        tpl.test_every_dockerfile_has_a_declared_agent_expectation()
 
 
 def test_completion_guard_fails_when_the_agent_list_drifts(wiz, fake_root):

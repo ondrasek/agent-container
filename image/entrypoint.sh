@@ -799,6 +799,7 @@ chmod 0644 "${HOSTKEY}.pub"
 # Non-secret (public keys). Sources: the persisted file, a bind-mounted file
 # (`up --authorized-key`), and the SSH_AUTHORIZED_KEYS env var. Deduped so
 # repeated boots and overlapping sources don't accumulate duplicates.
+# SHARED-BLOCK BEGIN authorized_keys (drift-guarded; see test_pure_logic)
 AUTHKEYS="${SSH_DIR}/authorized_keys"
 _akt="$(mktemp)"
 [[ -f "${AUTHKEYS}" ]] && cat "${AUTHKEYS}" >> "${_akt}"
@@ -810,6 +811,7 @@ if [[ -s "${_akt}" ]]; then
     log "authorized_keys assembled ($(grep -c . "${AUTHKEYS}") key(s))"
 fi
 rm -f "${_akt}"
+# SHARED-BLOCK END authorized_keys
 
 # sshd's privilege-separation directory (/run/sshd) is created root-owned at
 # build time; a rootless sshd only needs it to exist, not to write to it.
