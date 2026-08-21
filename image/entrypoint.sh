@@ -112,6 +112,21 @@ RUNS_STARTED_AT=""
 RUNS_KIND=""
 RUNS_AGENT=""
 RUNS_TASK_JSON="null"
+# Feature 017 FR-009a/FR-009h. Both fields exist on EVERY record the container
+# writes, because the payload definition is one set shared by both observability
+# legs (data-model §6) — a record missing a field on one leg is a record the
+# reconciliation in SC-020 cannot compare.
+#
+# ATTRIBUTION is null here and that is a claim, not a gap: the container writes
+# its own run record, and a run is not a management action performed BY a control
+# plane. FR-009a's attribution is stamped where a management ACTION lands.
+RUNS_ATTRIBUTION_JSON="null"
+# `pending` at birth (data-model §7): written, not yet resolved with the endpoint.
+# Never "absent until exported" — an absent state cannot distinguish a record
+# that was never sent from one whose outcome was lost, and telling those apart is
+# the entire purpose of the field. Overwritten by the export attempt's OUTCOME,
+# never by the fact that one was attempted (FR-009i).
+RUNS_EXPORT_STATE="pending"
 RUNS_NOTES=()
 RUNS_COMPLETED=0
 RUNS_SIGNALLED=0
@@ -573,6 +588,9 @@ runs_emit() {
   "exit_code": ${exit_json},
   "repository": ${RUNS_REPO_JSON},
   "usage": { "reported": false },
+  "attribution": ${RUNS_ATTRIBUTION_JSON},
+  "egress_decision": null,
+  "export_state": $(json_string "${RUNS_EXPORT_STATE}"),
   "notes": $(runs_notes_json)
 }
 EOF

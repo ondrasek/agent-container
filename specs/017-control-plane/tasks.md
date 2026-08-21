@@ -77,7 +77,7 @@ cannot fail:
       file under state/config/data, **no** run record, **no** container log, and **no** `--json`
       payload (C4). Grep for the actual printed value; asserting the print statement's shape proves
       nothing about where the value went
-- [ ] T013 [P] Hermetic test that the passphrase never enters a record or an export payload — the
+- [X] T013 [P] Hermetic test that the passphrase never enters a record or an export payload — the
       closed field set of data-model §6 has no slot for it, and this asserts the absence structurally
       rather than by grepping one run's output
 - [ ] T014 Inject the host registry as **non-secret configuration** inline in the compose model
@@ -216,12 +216,12 @@ and the drift would be invisible because each leg still looks correct alone.
 
 ### The shared payload
 
-- [ ] T044 **One field-set definition serving both legs** in `bin/agent-container` (FR-009f,
+- [X] T044 **One field-set definition serving both legs** in `bin/agent-container` (FR-009f,
       data-model §6) - the attribution records, Feature 016's run records and Feature 012's egress
       events. `collect` retrieves exactly what export would have sent (C13, R11)
-- [ ] T045 [P] Hermetic test that there is **exactly one** definition and both legs read it - assert on
+- [X] T045 [P] Hermetic test that there is **exactly one** definition and both legs read it - assert on
       the shared constant, not on two lists that happen to agree today (FR-009e, FR-009f)
-- [ ] T046 [P] Hermetic test that attribution adds **no second operator-free-text field**:
+- [X] T046 [P] Hermetic test that attribution adds **no second operator-free-text field**:
       `RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row, asserted on the table itself
       (FR-009c, C18e) - a second field falsifies the closure while every other test passes
 - [ ] T047 Attribution on every management action, mutating and read-only, recording **which** control
@@ -231,21 +231,21 @@ and the drift would be invisible because each leg still looks correct alone.
 
 ### The export state - what the client can actually observe
 
-- [ ] T049 **The export state on every record**: `pending` · `accepted` · `rejected` · `failed`
+- [X] T049 **The export state on every record**: `pending` · `accepted` · `rejected` · `failed`
       (FR-009h). Provenance is `tool`, so it does not touch FR-009c's single `operator` row
-- [ ] T050 **`accepted` means the CONFIGURED ENDPOINT returned success for that record - nothing
+- [X] T050 **`accepted` means the CONFIGURED ENDPOINT returned success for that record - nothing
       more** (FR-009h). It MUST NOT be read or named as arrival at a backend: establishing that would
       require querying the backend's own API, the vendor coupling FR-009d forbids (C14, R9)
-- [ ] T051 **Honour OTLP `partial_success`**: subtract rejected records from the response before
+- [X] T051 **Honour OTLP `partial_success`**: subtract rejected records from the response before
       marking anything `accepted` (FR-009h). **A 2xx is not acceptance** - a receiver may return
       success while refusing records, and treating 2xx as success marks refused records as delivered
       (C14, R9)
 - [ ] T052 [P] **Acceptance SC-021 - point at a collector configured to REFUSE a subset** and confirm
       those records read `rejected`, not `accepted`. Only a refusing receiver exposes the naive
       2xx-means-success implementation; a compliant collector would pass either way (S17)
-- [ ] T053 Derive the state from the response, **never** from the fact that an export was attempted
+- [X] T053 Derive the state from the response, **never** from the fact that an export was attempted
       (FR-009i) - distinguishing attempt from outcome is the whole point of having the state
-- [ ] T054 [P] Hermetic test that `rejected` and `failed` stay distinct, since they decide whether a
+- [X] T054 [P] Hermetic test that `rejected` and `failed` stay distinct, since they decide whether a
       retry is worth attempting: a refusal will be refused again unchanged, an unreachable endpoint may
       simply be back later (FR-009h, C15, R10, S20)
 
@@ -263,7 +263,7 @@ and the drift would be invisible because each leg still looks correct alone.
 - [ ] T058 Endpoint declared at **either config level - user or project, project winning** (FR-009d),
       the tool's existing two-level contract (C18g). An environment outside any project still has an
       endpoint, which project-level-only declaration would deny it
-- [ ] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
+- [X] T059 [P] Hermetic test of the precedence: project overrides user, and a deployment outside any
       project resolves the user-level endpoint (FR-009d, C18g)
 - [ ] T060 [P] Acceptance S12 - an agent container's record reaches a real collector with **no control
       plane deployed** (SC-018, C18d). The half that gets missed if export is built as control-plane

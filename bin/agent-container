@@ -3607,7 +3607,145 @@ RECORD_FIELD_PROVENANCE: dict[str, str] = {
     "repository": "git",
     "usage": "agent",
     "notes": "tool",
+    # Feature 017. Both are `tool` provenance, deliberately: FR-009c requires
+    # exactly ONE `operator` row across this whole table, and that single row IS
+    # the no-credentials claim. A second free-text field would falsify it while
+    # every other test still passed, which is why the test asserts the TABLE and
+    # not a sample record.
+    "attribution": "tool",  # which control plane performed the action (FR-009a)
+    "egress_decision": "tool",  # Feature 012 events
+    "export_state": "tool",  # §7 — see EXPORT_STATES
 }
+
+# Feature 017 FR-009f, data-model §6: THE ONE PAYLOAD DEFINITION.
+#
+# The same field set governs the OTLP export and the local trail `collect`
+# retrieves. Two definitions would drift the moment one was edited, and THE DRIFT
+# WOULD BE INVISIBLE — each leg still looks correct on its own, so nothing fails
+# until someone compares them, which is exactly what SC-020's reconciliation
+# does and exactly what it could not do if they carried different things.
+#
+# Derived from RECORD_FIELD_PROVENANCE rather than written out again: a second
+# literal list is the drift this exists to prevent. `schema` and `notes` are
+# tool-internal bookkeeping and are excluded by name, so adding a field to the
+# provenance table adds it to BOTH legs automatically.
+_PAYLOAD_EXCLUDED = frozenset({"schema", "notes"})
+RECORD_PAYLOAD_FIELDS: tuple[str, ...] = tuple(
+    f for f in RECORD_FIELD_PROVENANCE if f not in _PAYLOAD_EXCLUDED
+)
+
+# Feature 017 FR-009h, data-model §7. Four values, on every record.
+#
+# Export is fail-open and always on, so a PARTIAL export is a designed-in
+# condition rather than an error — without a state, "lost" and "never sent" are
+# indistinguishable.
+EXPORT_PENDING = "pending"
+EXPORT_ACCEPTED = "accepted"
+EXPORT_REJECTED = "rejected"
+EXPORT_FAILED = "failed"
+EXPORT_STATES = (EXPORT_PENDING, EXPORT_ACCEPTED, EXPORT_REJECTED, EXPORT_FAILED)
+
+# `rejected` and `failed` are RETRIED DIFFERENTLY, and that is the whole reason
+# they are separate values (research R10). Collapsing them would either retry
+# forever against a refusal or abandon a recoverable record.
+EXPORT_RETRYABLE = frozenset({EXPORT_PENDING, EXPORT_FAILED})
+
+# `accepted` and `rejected` are TERMINAL. Re-exporting an accepted record would
+# duplicate it at the collector; re-exporting a rejected one repeats a refusal
+# that will be refused again unchanged.
+EXPORT_TERMINAL = frozenset({EXPORT_ACCEPTED, EXPORT_REJECTED})
+
+# Legal transitions (data-model §7). Encoded rather than left to the call sites,
+# because "accepted is terminal" is the kind of rule that survives as prose until
+# the first caller that has a reason.
+EXPORT_TRANSITIONS: dict[str, frozenset[str]] = {
+    EXPORT_PENDING: frozenset({EXPORT_ACCEPTED, EXPORT_REJECTED, EXPORT_FAILED}),
+    EXPORT_FAILED: frozenset({EXPORT_PENDING, EXPORT_ACCEPTED, EXPORT_REJECTED}),
+    EXPORT_ACCEPTED: frozenset(),
+    EXPORT_REJECTED: frozenset(),
+}
+
+
+def export_transition_is_legal(old: str, new: str) -> bool:
+    """Whether `old` -> `new` is a permitted export-state move (data-model §7).
+
+    >>> export_transition_is_legal(EXPORT_PENDING, EXPORT_ACCEPTED)
+    True
+    >>> export_transition_is_legal(EXPORT_ACCEPTED, EXPORT_PENDING)
+    False
+    >>> export_transition_is_legal(EXPORT_FAILED, EXPORT_PENDING)
+    True
+    """
+    return new in EXPORT_TRANSITIONS.get(old, frozenset())
+
+
+def export_state_is_retryable(state: str) -> bool:
+    """Whether `collect` should try this record again (FR-009h, research R10).
+
+    This is what makes `collect` the RECOVERY path rather than only a downloader.
+
+    >>> [export_state_is_retryable(s) for s in EXPORT_STATES]
+    [True, False, False, True]
+    """
+    return state in EXPORT_RETRYABLE
+
+
+def export_outcome_from_response(
+    status: int | None, partial_rejected: int = 0, records: int = 1
+) -> str:
+    """The export state DERIVED FROM THE RESPONSE — never from the attempt
+    (FR-009i, contract C14, research R9).
+
+    Distinguishing attempt from outcome is the entire purpose of having a state,
+    so a caller that knows only "we tried" must not be able to produce a value
+    from that.
+
+    A 2xx IS NOT ACCEPTANCE. OTLP's export response carries `partial_success`
+    with a rejected-record count, so a receiver may return 200 while refusing
+    records. Those must be SUBTRACTED before anything is marked accepted, or
+    refused records are recorded as delivered — and the local leg then claims a
+    delivery the collector never made, which is precisely the divergence SC-020
+    exists to detect.
+
+    `accepted` means THE CONFIGURED ENDPOINT RETURNED SUCCESS FOR THIS RECORD and
+    nothing more. It must never be read, or named, as arrival at a backend:
+    establishing that would require querying the backend's own API — the vendor
+    coupling FR-009d forbids. The state claims only what the client can see.
+
+    >>> export_outcome_from_response(200)
+    'accepted'
+    >>> export_outcome_from_response(200, partial_rejected=1, records=1)
+    'rejected'
+    >>> export_outcome_from_response(400)
+    'rejected'
+    >>> export_outcome_from_response(503)
+    'failed'
+    >>> export_outcome_from_response(None)
+    'failed'
+    """
+    if status is None:
+        # No response at all: unreachable, DNS failure, timeout. Retryable — the
+        # endpoint may simply be back later.
+        return EXPORT_FAILED
+    if 200 <= status < 300:
+        # The partial_success subtraction. With one record per request — which is
+        # what write-time export means (FR-009g) — any rejected count at all means
+        # THIS record was refused.
+        if partial_rejected >= records:
+            return EXPORT_REJECTED
+        if partial_rejected > 0:
+            # More than one record in the batch and only some refused. This
+            # function answers for ONE record and cannot tell which, so it
+            # refuses to guess: claiming acceptance here is the bug this whole
+            # function exists to prevent.
+            return EXPORT_PENDING
+        return EXPORT_ACCEPTED
+    if status in (408, 429) or status >= 500:
+        # Explicitly transient. Retrying may work.
+        return EXPORT_FAILED
+    # 4xx: the endpoint understood and refused. It will refuse again unchanged.
+    return EXPORT_REJECTED
+
 
 # `usage.units` is the one place an AGENT's vocabulary enters a record, and FR-015
 # forbids normalising it — so the keys are whatever the agent calls them. What is
@@ -3795,6 +3933,9 @@ def build_run_record(
     repository: dict | None = None,
     usage: dict | None = None,
     notes: list[str] | None = None,
+    attribution: str | None = None,
+    egress_decision: object | None = None,
+    export_state: str = EXPORT_PENDING,
 ) -> dict:
     """Build one record in the schema of data-model §1, REFUSING an illegal
     kind/outcome pair (C5) rather than emitting a record no consumer can read.
@@ -3853,6 +3994,13 @@ def build_run_record(
         validate_repository_effect(repository)
     if usage is not None:
         validate_usage(usage)
+    if export_state not in EXPORT_STATES:
+        # Refused HERE, the one place a record is constructed, so an illegal
+        # state is unrepresentable rather than merely unlikely — the same reason
+        # the kind/outcome pairing is enforced here.
+        die(
+            f"run record: unknown export_state '{export_state}' (legal: {', '.join(EXPORT_STATES)})"
+        )
     return {
         "schema": RUN_SCHEMA,
         "run_id": run_id,
@@ -3870,6 +4018,18 @@ def build_run_record(
         # Omitting the key would be indistinguishable from a schema change, and a
         # consumer would read the absence as zero (research R6).
         "usage": usage if usage is not None else usage_unreported(),
+        # Feature 017 FR-009a: WHICH control plane performed the action. None on
+        # a record the operator's own machine produced — an absence that means
+        # "not from a control plane", which is a different claim from "unknown".
+        "attribution": attribution,
+        # Feature 012 events ride the same shape (data-model §6), so `collect`
+        # retrieves one record kind rather than three.
+        "egress_decision": egress_decision,
+        # FR-009h: ON EVERY RECORD, and `pending` at birth. Not "absent until
+        # exported" — an absent state cannot distinguish a record that was never
+        # sent from one whose outcome was lost, and telling those apart is the
+        # entire purpose of having the field.
+        "export_state": export_state,
         "notes": list(notes or []),
     }
 

@@ -244,9 +244,20 @@ def test_record_shape_matches_the_data_model(wiz):
         "exit_code",
         "repository",
         "usage",
+        # Feature 017, data-model §6. Spelled out rather than derived from
+        # RECORD_FIELD_PROVENANCE on purpose: this literal is a SECOND encoding of
+        # the data model, so a field added to the table alone fails here instead
+        # of silently agreeing with itself.
+        "attribution",
+        "egress_decision",
+        "export_state",
         "notes",
     }
     assert r["schema"] == wiz.RUN_SCHEMA == 1
+    # FR-009h: `pending` at birth on every record — written, not yet resolved
+    # with the endpoint. Never absent: an absent state cannot distinguish a record
+    # that was never sent from one whose outcome was lost.
+    assert r["export_state"] == wiz.EXPORT_PENDING
     # host is stamped at INGESTION — the container does not reliably know what the
     # operator calls its host (data-model §1).
     assert r["host"] is None
