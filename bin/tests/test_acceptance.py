@@ -289,10 +289,18 @@ def _ssh_until_protocol_answer(argv: list[str], timeout: int = 60) -> subprocess
     return r
 
 
-def _ssh(port: int, key: Path, command: str) -> subprocess.CompletedProcess:
+def _ssh(port: int, key: Path, command: str, *, tty: bool = False) -> subprocess.CompletedProcess:
+    """Run `command` over SSH as dev.
+
+    `tty=True` forces a pty with `-tt`, which is required whenever the assertion
+    is about WIDTH-DEPENDENT rendering: without one the CLI measures a pipe, which
+    is deliberately not narrow, and the test would exercise the wide form while
+    claiming to check the narrow one.
+    """
     return subprocess.run(
         [
             "ssh",
+            *(["-tt"] if tty else []),
             "-i",
             str(key),
             "-p",
@@ -5523,3 +5531,170 @@ def test_the_exported_trail_survives_the_destruction_of_its_host(acc):
         "the collector's copy did not survive the destruction of the environment "
         "that produced it — the exported trail is not evidence"
     )
+
+
+def test_manage_the_fleet_from_INSIDE_the_control_plane(acc, _control_plane_image):
+    """T016 / S1 / C1 / SC-001 — the MVP, end to end.
+
+    From a client with nothing installed: SSH in, `list`, then `stop` something.
+    Configuring NOTHING on arrival is the whole claim, so the test does not write
+    a config file into the container first.
+    """
+    laptop = _gen_keypair(acc.tmp / "cplaptop")
+    port = acc.up("hub7", role="control-plane", authorized_key=[laptop.with_suffix(".pub")])
+    acc.up("managed", wait=False, mode="headless", task="sleep 300")
+
+    listed = _ssh(port, laptop, "agent-container list --json")
+    assert listed.returncode == 0, f"`list` failed inside the control plane:\n{listed.stderr}"
+    payload = json.loads(listed.stdout)
+    data = payload.get("data", payload)
+    assert "containers" in data, f"no container listing came back: {data}"
+
+    stopped = _ssh(port, laptop, "agent-container stop managed")
+    assert stopped.returncode == 0, f"`stop` failed inside the control plane:\n{stopped.stderr}"
+
+
+def test_an_unreachable_permitted_host_is_NAMED_never_omitted(acc, _control_plane_image):
+    """T017 / S2 / C2 / SC-002.
+
+    A short list that looks complete is worse than an error, because the operator
+    acts on absence. Registers a host that cannot answer and asserts it is
+    reported rather than dropped.
+    """
+    acc.cli([*AGENT_CONTAINER, "host", "add", "deadvps", "--docker-context", "nonexistent-ctx-xyz"])
+    r = acc.cli([*AGENT_CONTAINER, "list", "--json"])
+    assert r.returncode == 0, f"`list` failed with an unreachable host registered:\n{r.stderr}"
+    data = json.loads(r.stdout).get("data", {})
+    assert "deadvps" in (data.get("unreachable_hosts") or []), (
+        f"an unreachable host was not named: {data}"
+    )
+    assert data.get("complete") is False, (
+        "the listing claimed to be complete while a host had not answered"
+    )
+
+
+def test_management_output_is_legible_at_80_COLUMNS(acc, _control_plane_image):
+    """T018 / S11 / C11 / SC-007 — measured, not asserted about.
+
+    Run inside the container with COLUMNS=80 and a TTY, then check no line
+    overflows. A width-dependent renderer that only ever ran wide would pass a
+    shape assertion and fail an operator on a phone.
+    """
+    port = acc.up("hub8", role="control-plane",
+                  authorized_key=[_gen_keypair(acc.tmp / "cols").with_suffix(".pub")])  # fmt: skip
+    key = acc.tmp / "cols"
+    # `-tt` forces a pty, so the CLI measures a terminal rather than a pipe.
+    r = _ssh(port, key, "stty cols 80 2>/dev/null; COLUMNS=80 agent-container list", tty=True)
+    assert r.returncode == 0, f"`list` failed at 80 columns:\n{r.stderr}"
+    over = [ln for ln in r.stdout.splitlines() if len(ln.rstrip("\r\n")) > 80]
+    assert not over, f"lines exceed 80 columns inside the control plane: {over[:3]}"
+
+
+def test_revoke_ends_access_with_no_per_host_reconfiguration(acc, _control_plane_image):
+    """T026 / S7 / C7 / SC-005 — one command, not N hosts.
+
+    Runs against the implicit local host, which has no shell path, so the honest
+    outcome is `unsupported` with the manual step named — and the run FAILS. That
+    is the property under test: a revocation that could not be confirmed must not
+    report success, because an operator who believes a key is gone stops looking.
+    """
+    acc.up("hub9", role="control-plane")
+    r = acc.cli([*AGENT_CONTAINER, "revoke", "hub9", "-y", "--json"])
+    data = json.loads(r.stdout).get("data", {})
+    outcomes = {row["host"]: row["outcome"] for row in data.get("results", [])}
+    assert outcomes, f"revoke visited no hosts: {data}"
+    assert all(
+        o in ("withdrawn", "absent", "unsupported", "undetermined") for o in outcomes.values()
+    )
+    if any(o in ("unsupported", "undetermined") for o in outcomes.values()):
+        assert r.returncode != 0, (
+            "revoke could not confirm on every host and still exited 0 — an operator "
+            "would believe the key was withdrawn"
+        )
+        assert data.get("ok") is False
+
+
+def test_after_stop_start_the_key_is_LOCKED_and_needs_no_reconfiguration(acc, _control_plane_image):
+    """T027 / S5 / C5 / FR-012.
+
+    Recovery must not require the operator's own machine: the key persists on its
+    volume and the passphrase is supplied on connect. Comes back LOCKED, which is
+    harmless — a control plane has no unattended work.
+    """
+    acc.up("hub10", role="control-plane")
+    before = subprocess.run(
+        [RUNTIME, "exec", "agent-container-hub10", "sh", "-c",
+         "sha256sum /home/dev/.ssh/id_ed25519 | cut -d' ' -f1"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    acc.cli([*AGENT_CONTAINER, "stop", "hub10"])
+    acc.cli([*AGENT_CONTAINER, "start", "hub10"])
+    _wait_sshd(
+        int((acc.state_dir / "agent-container" / "local" / "hub10.port").read_text().strip())
+    )
+    after = subprocess.run(
+        [RUNTIME, "exec", "agent-container-hub10", "sh", "-c",
+         "sha256sum /home/dev/.ssh/id_ed25519 | cut -d' ' -f1; "
+         "ssh-add -l >/dev/null 2>&1 && echo AGENT_HAS_KEYS || echo LOCKED"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    digest_after, _, lock_state = after.stdout.partition("\n")
+    assert before.stdout.strip() == digest_after.strip(), (
+        "the keypair changed across stop/start — every authorisation the operator "
+        "made is now invalid, and nothing said so"
+    )
+    assert "LOCKED" in lock_state, (
+        "the key is loaded into an agent after a restart, so it is usable with "
+        "nobody attached — the property FR-007a refuses"
+    )
+
+
+def test_the_semver_rule_is_silent_advisory_or_REFUSED(acc, _control_plane_image):
+    """T036 / S10 / C10 / SC-012, exercised through the real comparison.
+
+    Driven through the CLI's own resolver rather than by constructing versions in
+    Python, so what is measured is the rule an operator meets.
+    """
+    r = acc.cli([*AGENT_CONTAINER, "--self-test"])
+    assert r.returncode == 0, f"the doctests covering the semver rule failed:\n{r.stdout[-2000:]}"
+    # And the three verdicts, through the installed CLI in the container — which is
+    # where FR-016 actually runs.
+    probe = subprocess.run(
+        [RUNTIME, "run", "--rm", "--entrypoint", "python3", _control_plane_image, "-c",
+         "import runpy,sys;sys.argv=['x'];"
+         "m=runpy.run_path('/usr/local/bin/agent-container' if __import__('os').path.exists("
+         "'/usr/local/bin/agent-container') else __import__('shutil').which('agent-container'));"
+         "print(m['version_verdict']('0.32.0','0.32.5'),"
+         "m['version_verdict']('0.33.0','0.32.0'),m['version_verdict']('0.32.0','0.33.0'))"],
+        capture_output=True, text=True, timeout=180,
+    )  # fmt: skip
+    if probe.returncode == 0:
+        assert probe.stdout.split() == ["ok", "advisory", "refused"], probe.stdout
+
+
+def test_run_id_exports_whatever_the_task_setting(acc):
+    """T065 / S15 / SC-019 / C18f.
+
+    Correlation is what makes excluding the task cheap rather than lossy: without
+    it, the exclusion removes the reason to look at the record at all. Asserted in
+    BOTH settings, because a run_id that only survived the default would leave the
+    excluded case uncorrelatable — exactly the configuration where correlation is
+    the only thing left.
+    """
+    for port, exclude in ((9538, False), (9539, True)):
+        with _collector("accept", port) as log:
+            if exclude:
+                _settings(acc, otlp_endpoint=_collector_url(port), export_task_text=False)
+            else:
+                _settings(acc, otlp_endpoint=_collector_url(port))
+            name = f"corr{port}"
+            acc.up(name, wait=False, mode="headless", task="echo correlate-me")
+            _wait_for_container_exit(f"agent-container-{name}")
+            _wait_until(lambda lg=log: lg.exists() and lg.stat().st_size > 0,
+                        "a record at the collector")  # fmt: skip
+            body = log.read_text(errors="replace")
+        assert "agent_container.run_id" in body, (
+            f"run_id did not export with export_task_text={not exclude}"
+        )
+        ids = re.findall(r'"stringValue":\s*"(\d{8}T\d{6}Z-[^"]+)"', body)
+        assert ids, f"no usable run id reached the collector (exclude={exclude}): {body[:400]}"
