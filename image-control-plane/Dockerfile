@@ -22,7 +22,25 @@
 #   3. user + sshd config  — cheap; placed late so earlier layers cache.
 #   4. entrypoint.sh       — changes most often; last.
 
-FROM debian:12-slim
+# BASE IMAGE DEVIATION FROM ADR 0001, and it is forced rather than chosen.
+#
+# ADR 0001 pins `debian:12-slim`. This image INSTALLS the agent-container
+# distribution from PyPI, and that distribution declares `requires-python >=
+# 3.14`. Debian 12 ships Python 3.11, so `pip install agent_container` there
+# resolves to 0.1.0 — the last release published before the floor was raised —
+# and every later version is skipped with "Requires-Python >=3.14". A build that
+# "succeeded" would have shipped a CLI several dozen releases old while the image
+# label claimed the current version, which is precisely the label-vs-installed
+# disagreement FR-016 would then compare.
+#
+# Found by RUNNING the acceptance tier, not by reading: the pin is correct, the
+# guard is correct, and pip's own resolution is what refuses.
+#
+# `python:3.14-slim` is Debian 13 (trixie) with Python 3.14, so the apt userland
+# below is unchanged and ADR 0001's actual intent holds: Debian-based, no
+# Docker-Desktop-only features, Podman-compatible. The agent image keeps
+# `debian:12-slim` — it carries no Python of ours and has no reason to move.
+FROM python:3.14-slim
 
 # Feature 013 FR-012a, and Feature 017 FR-016. The version of the CLI that built
 # this image, so `doctor` can tell locally whether the image is older than the
@@ -69,9 +87,6 @@ RUN apt-get update \
         locales \
         less \
         jq \
-        python3 \
-        python3-pip \
-        python3-venv \
     && sed -i 's/^# *\(C.UTF-8\)/\1/' /etc/locale.gen || true \
     && locale-gen C.UTF-8 \
     && apt-get clean \
@@ -90,10 +105,11 @@ RUN apt-get update \
 # label. Same value, one source: an image whose label and whose installed CLI
 # disagreed would make FR-016's semver comparison lie.
 #
-# --break-system-packages: Debian 12 marks the system Python externally managed
-# (PEP 668). A venv would work too, but it puts the console script somewhere
-# nothing else in the image looks; this is a single-purpose image whose only
-# Python consumer IS this tool.
+# No --break-system-packages: the `python:` images do not mark their interpreter
+# externally managed (PEP 668), so passing it would suppress a real error if this
+# base ever changed. This is a single-purpose image whose only Python consumer IS
+# this tool, so installing into the system interpreter is the right home — a venv
+# would put the console script somewhere nothing else in the image looks.
 #
 # NO DEFAULT, AND THE BUILD FAILS WITHOUT IT. A default version is a pin that
 # goes stale on every release: the first version of this file defaulted to
@@ -113,7 +129,7 @@ RUN set -eux; \
         echo "or pass --build-arg AGENT_CONTAINER_PYPI_VERSION=<version>." >&2; \
         exit 1; \
     fi; \
-    python3 -m pip install --no-cache-dir --break-system-packages \
+    python3 -m pip install --no-cache-dir \
         "agent_container==${AGENT_CONTAINER_PYPI_VERSION}"; \
     agent-container --help > /dev/null; \
     command -v agent-container

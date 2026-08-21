@@ -1749,3 +1749,74 @@ def test_a_nested_control_plane_records_its_PARENT(wiz, monkeypatch):
     child = wiz.build_inventory_entry("hub-b", "local", False, role=wiz.ROLE_CONTROL_PLANE)
     assert child["provenance"] == "control-plane:hub-a"
     assert child["role"] == "control-plane"
+
+
+# --- the base image must be able to run the package it installs (T001) -------
+
+
+def test_the_control_plane_base_SATISFIES_the_packages_python_floor(wiz):
+    """The defect this exists for shipped once and was found only by BUILDING.
+
+    The image installs `agent_container` from PyPI. The distribution declares
+    `requires-python`, and the first version of this Dockerfile used
+    `debian:12-slim`, whose Python is 3.11 — so pip skipped every release above
+    the floor with "Requires-Python >=3.14" and resolved to 0.1.0, the last
+    release published before the floor was raised. That build would have
+    "succeeded" while shipping a CLI dozens of releases old, under a label
+    claiming the current version — precisely the label-vs-installed disagreement
+    FR-016 would then compare.
+
+    Neither the pin nor the guard was wrong; pip's own resolution refused. So the
+    check is a cross-file one: the floor in pyproject and the interpreter in the
+    base image must agree, and raising the floor must fail HERE rather than in a
+    build log nobody reads until the acceptance tier runs.
+    """
+    root = Path(wiz.__file__).parents[1]
+    pyproject = (root / "pyproject.toml").read_text()
+    m = re.search(r'requires-python\s*=\s*">=\s*(\d+)\.(\d+)"', pyproject)
+    assert m, "could not read requires-python from pyproject.toml"
+    floor = (int(m.group(1)), int(m.group(2)))
+
+    df = (root / "image-control-plane" / "Dockerfile").read_text()
+    base = re.search(r"^FROM\s+(\S+)", df, re.M)
+    assert base, "no FROM line in the control-plane Dockerfile"
+    tag = base.group(1)
+    bm = re.match(r"python:(\d+)\.(\d+)", tag)
+    assert bm, (
+        f"the control-plane base is {tag!r}, which carries no declared Python "
+        f"version. This image installs a distribution requiring Python "
+        f">={floor[0]}.{floor[1]}; a base whose interpreter is older makes pip "
+        f"resolve to an ANCIENT release instead of failing."
+    )
+    base_ver = (int(bm.group(1)), int(bm.group(2)))
+    assert base_ver >= floor, (
+        f"the control-plane base ships Python {base_ver[0]}.{base_ver[1]} but the "
+        f"package requires >={floor[0]}.{floor[1]}. pip will silently resolve to "
+        f"the last release published before the floor was raised."
+    )
+
+
+def test_the_deviation_from_ADR_0001_is_RECORDED_in_the_dockerfile(wiz):
+    """ADR 0001 pins debian:12-slim. Deviating without saying why leaves the next
+    reader to "fix" it back, and the build failure they would then get names pip's
+    resolution rather than the reason."""
+    df = (Path(wiz.__file__).parents[1] / "image-control-plane" / "Dockerfile").read_text()
+    # LINE-ANCHORED. The deviation comment itself contains "DEVIATION FROM ADR
+    # 0001", so an unanchored search for "FROM " matches inside the prose and
+    # truncates the slice before the very text being asserted — which is how this
+    # test failed on its first run against a correct file.
+    m = re.search(r"^FROM\s", df, re.M)
+    assert m, "no FROM line in the control-plane Dockerfile"
+    head = df[: m.start()]
+    assert "ADR 0001" in head
+    assert "requires-python" in head or "3.14" in head
+
+
+def test_the_AGENT_image_still_uses_the_ADR_base(wiz):
+    """The deviation is scoped to the one image that needs it. The agent image
+    carries no Python of ours and has no reason to move."""
+    df = (Path(wiz.__file__).parents[1] / "image" / "Dockerfile").read_text()
+    assert re.search(r"^FROM\s+debian:12-slim", df, re.M), (
+        "the agent image's base moved; ADR 0001 pins debian:12-slim and only the "
+        "control-plane image has a forced reason to deviate"
+    )
