@@ -1820,3 +1820,60 @@ def test_the_AGENT_image_still_uses_the_ADR_base(wiz):
         "the agent image's base moved; ADR 0001 pins debian:12-slim and only the "
         "control-plane image has a forced reason to deviate"
     )
+
+
+# --- the DEPLOY path builds the image too (T001/T005, Feature 013 FR-012a) ---
+
+
+def test_compose_passes_the_version_arg_so_up_built_images_are_STAMPED(wiz, monkeypatch):
+    """Feature 013's label was absent on every image built by `up` rather than by
+    `build`, so `doctor` reported freshness `unknown` for the common case.
+
+    Honest, but needlessly so: the version is known at that point. Found while
+    running the acceptance tier for 017, which is a different requirement — the
+    deploy path building without args is one defect with two symptoms.
+    """
+    monkeypatch.setattr(wiz, "_resolve_version", lambda: "0.32.0")
+    model = wiz.build_compose_model("acme", "/ctx")
+    args = model["services"]["agent"]["build"]["args"]
+    assert args["AGENT_CONTAINER_VERSION"] == "0.32.0"
+    # The agent image installs no CLI, so it must NOT get the PyPI pin.
+    assert "AGENT_CONTAINER_PYPI_VERSION" not in args
+
+
+def test_a_control_plane_deploy_passes_the_PYPI_PIN(wiz, monkeypatch):
+    """The image installs the CLI at that version, so the label and the installed
+    distribution come from ONE value. Two sources would let FR-016 compare a label
+    against a CLI that is not the one in the image."""
+    monkeypatch.setattr(wiz, "_resolve_version", lambda: "0.32.0")
+    args = wiz.compose_build_args(wiz.ROLE_CONTROL_PLANE)
+    assert args["AGENT_CONTAINER_PYPI_VERSION"] == args["AGENT_CONTAINER_VERSION"] == "0.32.0"
+
+
+def test_an_unresolvable_version_OMITS_the_args_entirely(wiz, monkeypatch):
+    """Matching `do_build`: an empty label reads as "no stamp", which FR-012b maps
+    to *unknown*. Stamping 0.0.0+unknown would assert a version nobody has."""
+    monkeypatch.setattr(wiz, "_resolve_version", lambda: "0.0.0+unknown")
+    assert wiz.compose_build_args() == {}
+    assert wiz.compose_build_args(wiz.ROLE_CONTROL_PLANE) == {}
+
+
+def test_an_unversioned_control_plane_deploy_is_REFUSED_BEFORE_compose(wiz, monkeypatch):
+    """The acceptance tier hit the alternative: the failure surfaced as a
+    Dockerfile guard inside a build log, naming an environment variable rather
+    than the reason. There is nothing to fall back to — the image pins the CLI it
+    installs, and a default would install a version nobody chose."""
+    monkeypatch.setattr(wiz, "_resolve_version", lambda: "0.0.0+unknown")
+    with pytest.raises(wiz.Fatal, match="pins the CLI it installs"):
+        wiz.refuse_unversioned_control_plane(wiz.ROLE_CONTROL_PLANE)
+    # An AGENT deploy is unaffected: no CLI is installed there.
+    wiz.refuse_unversioned_control_plane(wiz.ROLE_AGENT)
+
+
+def test_the_refusal_happens_before_any_runtime_call(wiz):
+    """Before `ensure_tunnel` and before compose, so an operator who cannot deploy
+    learns it without a partially-created environment."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_up")
+    refuse_at = body.index("refuse_unversioned_control_plane")
+    assert refuse_at < body.index("ensure_tunnel(")
+    assert refuse_at < body.index("compose_up_exec(") if "compose_up_exec(" in body else True

@@ -6336,6 +6336,59 @@ def do_telemetry_collect(hosts: list[str] | None, names: list[str] | None, as_js
 REGISTRY_INJECTED_FIELDS = ("driver", "context", "address", "provisioning", "created_by_tool")
 
 
+def compose_build_args(role: str = ROLE_AGENT) -> dict[str, str]:
+    """Build args for the compose-driven build (Feature 013 FR-012a, 017 FR-015a).
+
+    THE DEPLOY PATH BUILDS THE IMAGE, and it was passing none of these. Two
+    consequences, one pre-existing and one new:
+
+      * Feature 013's version LABEL was absent on every image built by `up`
+        rather than by `build`, so `doctor` reported freshness `unknown` for the
+        common case. Honest, but needlessly so — the version is known here.
+      * Feature 017's control-plane image REQUIRES a version to install, so
+        `up --role control-plane` failed inside the build with the Dockerfile's
+        own guard. Found by running the acceptance tier.
+
+    Omitted entirely when unresolvable, matching `do_build`: an empty label reads
+    as "no stamp", which is what FR-012b maps to *unknown*. Stamping
+    `0.0.0+unknown` would assert a version nobody has.
+    """
+    version = _resolve_version()
+    if not version or version.endswith("+unknown"):
+        return {}
+    args = {"AGENT_CONTAINER_VERSION": version}
+    if role == ROLE_CONTROL_PLANE:
+        # The control-plane image INSTALLS the CLI at this version, so the label
+        # and the installed distribution come from one value — two sources would
+        # let FR-016 compare a label against a CLI that is not the one in the
+        # image.
+        args["AGENT_CONTAINER_PYPI_VERSION"] = version
+    return args
+
+
+def refuse_unversioned_control_plane(role: str) -> None:
+    """FR-015a: refuse a control-plane deploy whose CLI version cannot be resolved.
+
+    Refused HERE, before compose, because the alternative is what the acceptance
+    tier actually hit: a failure surfacing as a Dockerfile guard inside a build
+    log, naming an environment variable rather than the reason. The image PINS the
+    CLI it installs, so there is no version to install and nothing to fall back to
+    — a default would install a version nobody chose.
+    """
+    if role != ROLE_CONTROL_PLANE:
+        return
+    if compose_build_args(role).get("AGENT_CONTAINER_PYPI_VERSION"):
+        return
+    die(
+        "cannot deploy a control plane: the CLI version could not be resolved, and "
+        "that image pins the CLI it installs",
+        remedy=(
+            "deploy from a checkout with a resolvable version (a git tag or an "
+            "installed distribution), so the image and its label agree"
+        ),
+    )
+
+
 def projected_host_registry(reg: dict) -> dict:
     """The registry as it is injected — FR-004, research R4.
 
@@ -6938,7 +6991,7 @@ def build_compose_model(
     workspace_mounts = [ws] if ws is not None else []
     service: dict = {
         "container_name": container_name(name),
-        "build": {"context": str(build_context)},
+        "build": {"context": str(build_context), "args": compose_build_args(role)},
         "restart": restart,
         "ports": [f"{port}:2222"],
         "volumes": workspace_mounts + other_volume_mounts(name) + list(extra_mounts or []),
@@ -10005,6 +10058,7 @@ def do_up(
     # reads it and stops has not yet created the standing key. A statement after
     # the deploy would be a description, not a warning.
     if spec.role == ROLE_CONTROL_PLANE:
+        refuse_unversioned_control_plane(spec.role)
         state_control_plane_consequences(name, control_plane_permitted_hosts(name))
     ensure_tunnel(host_rec)
     # Drain-on-contact (FR-001a, research R7). A detached run — the default
