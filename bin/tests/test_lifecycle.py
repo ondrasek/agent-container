@@ -78,9 +78,56 @@ def _fix_host(wiz, monkeypatch, *, tunnel=True):
 
 
 def test_do_stop_without_a_deployment_dies(wiz, monkeypatch):
+    """Feature 017 added a label-based fallback for callers with no derived host
+    state (a control plane). It must not turn a typo into a success, so the host
+    is asked and an EMPTY answer still dies.
+
+    The runtime query is stubbed to answer "no containers", which is the case
+    under test: without it this would fail on an unreachable daemon and pass for
+    the wrong reason.
+    """
     _fix_host(wiz, monkeypatch)
+    monkeypatch.setattr(wiz, "project_containers", lambda *a, **k: set())
     with pytest.raises(wiz.Fatal, match="to stop"):
         wiz.do_stop("ghost")  # no compose file staged for this name
+
+
+def test_do_stop_FALLS_BACK_to_the_project_label(wiz, monkeypatch):
+    """FR-003a/SC-001: a control plane has no compose file for anything, and
+    `list` showing an environment that `stop` refuses to touch is the worst
+    split — the operator can see it and cannot act on it."""
+    _fix_host(wiz, monkeypatch)
+    monkeypatch.setattr(
+        wiz, "project_containers", lambda *a, **k: {"agent-container-ghost", "agent-egress-ghost"}
+    )
+    stopped = []
+
+    def fake_query(argv, timeout=None):
+        stopped.append(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(wiz, "query", fake_query)
+    monkeypatch.setattr(wiz, "log", lambda _m: None)
+    wiz.do_stop("ghost")
+    # The SIDECAR too: stopping the agent alone would leave the boundary running
+    # while the report said the environment had stopped.
+    assert sorted(stopped) == ["agent-container-ghost", "agent-egress-ghost"]
+
+
+def test_a_partial_label_stop_is_NAMED_not_reported_as_success(wiz, monkeypatch):
+    """The failure `panic` exists to avoid, one environment down."""
+    _fix_host(wiz, monkeypatch)
+    monkeypatch.setattr(wiz, "project_containers", lambda *a, **k: {"a", "b"})
+    monkeypatch.setattr(
+        wiz,
+        "query",
+        lambda argv, timeout=None: subprocess.CompletedProcess(
+            argv, 0 if argv[-1] == "a" else 1, "", "nope"
+        ),
+    )
+    monkeypatch.setattr(wiz, "log", lambda _m: None)
+    with pytest.raises(wiz.Fatal, match="could not stop: b"):
+        wiz.do_stop("ghost")
 
 
 def test_do_start_without_a_deployment_dies(wiz, monkeypatch):

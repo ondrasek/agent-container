@@ -1210,18 +1210,41 @@ def test_the_pending_count_is_REPORTED_not_dropped(wiz, store):
     assert pending == 1
 
 
-def test_the_window_defaults_to_the_last_successful_collect(wiz, store, monkeypatch):
-    """R12: an undefined window makes the comparison unexecutable."""
-    monkeypatch.setattr(wiz, "read_collect_watermark", lambda: "2026-08-01T00:00:00Z")
+def test_the_window_defaults_to_the_last_successful_RECONCILE(wiz, store, monkeypatch):
+    """R12: an undefined window makes the comparison unexecutable.
+
+    C17 says "since the last successful `collect`", and taken literally that
+    window is UNUSABLE — which the acceptance tier demonstrated rather than
+    argued. `collect` ingests records WRITTEN BEFORE IT RAN, so a watermark set at
+    collect time puts every record it just gathered below the lower bound: the run
+    reported `local_accepted: 0` against `collector_holds: 2` on a healthy system,
+    with the collector's own ids listed as `unknown_locally`.
+
+    The boundary that bounds a COMPARISON is the previous comparison.
+    """
+    monkeypatch.setattr(wiz, "read_reconcile_watermark", lambda: "2026-08-01T00:00:00Z")
     assert wiz.reconciliation_window(None, None) == ("2026-08-01T00:00:00Z", None)
     # An operator-supplied range WINS.
     assert wiz.reconciliation_window("2026-05-05T00:00:00Z", None)[0] == "2026-05-05T00:00:00Z"
 
 
+def test_the_reconcile_watermark_advances_only_on_AGREEMENT(wiz):
+    """Advancing after a reported divergence would move the boundary past records
+    the operator has not resolved — so the next run would report agreement over a
+    window chosen to exclude the problem."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_reconcile")
+    writes = [ln for ln in body.splitlines()
+              if "write_reconcile_watermark(" in ln and not ln.strip().startswith("#")]  # fmt: skip
+    assert len(writes) == 2, f"expected the human and --json paths only: {writes}"
+    # Both must be INDENTED under a guard, never at function level where every
+    # outcome reaches them.
+    assert all(len(ln) - len(ln.lstrip()) >= 8 for ln in writes), writes
+
+
 def test_no_watermark_means_FULL_HISTORY_not_an_empty_window(wiz, monkeypatch):
     """Wider than intended is safe; narrower is not. A window that silently
     excluded records would report agreement it never established."""
-    monkeypatch.setattr(wiz, "read_collect_watermark", lambda: None)
+    monkeypatch.setattr(wiz, "read_reconcile_watermark", lambda: None)
     assert wiz.reconciliation_window(None, None) == (None, None)
 
 

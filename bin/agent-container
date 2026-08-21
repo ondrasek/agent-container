@@ -2483,7 +2483,22 @@ def partition_self_exclusion(entries: list[dict]) -> tuple[list[dict], list[dict
     if me is None:
         return entries, []
     keep = [e for e in entries if e.get("name") != me]
-    return keep, [e for e in entries if e.get("name") == me]
+    mine = [e for e in entries if e.get("name") == me]
+    if not mine:
+        # NOT IN THE CANDIDATE SET, and the exclusion is still reported.
+        #
+        # A control plane's container holds its OWN state directory, so the
+        # inventory it reads is empty — the operator's is on their machine. The
+        # first version returned no exclusion here, which is defensible (nothing
+        # was going to be stopped anyway) and useless: the operator needs to know
+        # the shell they are typing in is not in scope, whether or not it appears
+        # in a list.
+        #
+        # A synthetic entry rather than a special case downstream: the reporter
+        # and the `--json` envelope then have one shape to handle, and "excluded"
+        # means the same thing however it was derived.
+        mine = [{"name": me, "host": None, "outcome": "active"}]
+    return keep, mine
 
 
 def report_self_exclusion(excluded: list[dict], form: str) -> None:
@@ -6054,6 +6069,40 @@ def collect_watermark_path() -> Path:
     return DATA_DIR / "telemetry" / "last-collect"
 
 
+def reconcile_watermark_path() -> Path:
+    """Separate from the collect watermark, because they answer different
+    questions: one is "when did I last pull", the other "when did I last compare".
+    Conflating them is what made the window exclude the records it was meant to
+    cover."""
+    return DATA_DIR / "telemetry" / "last-reconcile"
+
+
+def read_reconcile_watermark() -> str | None:
+    try:
+        t = reconcile_watermark_path().read_text().strip()
+    except OSError:
+        return None
+    return t or None
+
+
+def write_reconcile_watermark(when: str) -> None:
+    """Written only after a comparison that AGREED.
+
+    Advancing after a reported divergence would move the boundary past records the
+    operator has not resolved, so the next run would report agreement over a
+    window chosen to exclude the problem.
+    """
+    try:
+        p = reconcile_watermark_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(when + "\n")
+    except OSError as e:
+        warn(
+            f"could not record the reconcile watermark ({e}); the next window falls back to "
+            f"the full history, which is wider but never narrower"
+        )
+
+
 def read_collect_watermark() -> str | None:
     try:
         t = collect_watermark_path().read_text().strip()
@@ -6084,11 +6133,23 @@ def reconciliation_window(since: str | None, until: str | None) -> tuple[str | N
     """The window to reconcile over (C17, research R12).
 
     An operator-supplied range wins; otherwise the lower bound is the last
-    SUCCESSFUL collect. Both may be None, which means the full history — WIDER
+    SUCCESSFUL RECONCILE. Both may be None, which means the full history — WIDER
     than intended is safe, narrower is not: a window that silently excluded
     records would report agreement it did not establish.
+
+    A CORRECTION TO THE SPEC'S LITERAL WORDING, and the reason is measured. C17
+    says "since the last successful `collect`". Taken literally that window is
+    unusable: `collect` ingests records that were WRITTEN BEFORE it ran, so a
+    watermark set at collect time puts every record it just gathered *below* the
+    lower bound. The acceptance run showed exactly that — `local_accepted: 0`
+    against `collector_holds: 2`, with the collector's own ids reported as
+    `unknown_locally` on a completely healthy system.
+
+    The boundary that actually bounds a COMPARISON is the previous comparison, so
+    `reconcile` advances its own watermark. "Everything since I last checked" is
+    also what an operator means by it, and the first run compares all history.
     """
-    return (since or read_collect_watermark(), until)
+    return (since or read_reconcile_watermark(), until)
 
 
 def records_in_window(
@@ -6205,7 +6266,9 @@ def do_telemetry_reconcile(
                 "agree": ok,
             }
         )
-        if not ok:
+        if ok:
+            write_reconcile_watermark(utc_now())
+        else:
             raise typer.Exit(1)
         return
     log(
@@ -6217,6 +6280,7 @@ def do_telemetry_reconcile(
         log(f"also in this window, not compared: {', '.join(sorted(other))}")
     if ok:
         log("the two legs AGREE over this window")
+        write_reconcile_watermark(utc_now())
         return
     if missing_at_collector:
         warn(
@@ -10322,6 +10386,37 @@ def cli_down(name: str, purge: bool, yes: bool, host: str | None = None) -> None
         down_container(host_name, host_rec, name, purge)
 
 
+def stop_by_project_label(host_rec: dict, host_name: str, name: str) -> bool:
+    """Stop a deployment by its compose project LABEL. True if anything was stopped.
+
+    The fallback for a caller with no derived host state — a control plane, whose
+    whole design is a live view and no durable local store (FR-003a). Without it
+    `list` shows an environment that `stop` then refuses to touch.
+
+    Returns False rather than dying when the project has no containers, so the
+    caller can emit its own "no such deployment" message. Reporting "stopped
+    nothing" as success here would make a typo look like a completed action.
+    """
+    try:
+        present = project_containers(host_rec, compose_project(name), include_stopped=False)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        die(f"could not ask {host_name} what is running for '{name}': {e}")
+    if not present:
+        return False
+    log(f"no local compose file for '{name}'; stopping by compose project label")
+    failed = []
+    for cname in sorted(present):
+        r = query(driver_runtime_argv(host_rec) + ["stop", cname], timeout=KILL_HOST_TIMEOUT)
+        if r.returncode != 0:
+            failed.append(cname)
+    if failed:
+        # NAMED. A partial stop reported as success is the failure `panic` exists
+        # to avoid, and the same reasoning applies to one environment.
+        die(f"could not stop: {', '.join(failed)}")
+    log(f"stopped {len(present)} container(s) for {name} on {host_name} by label")
+    return True
+
+
 def do_stop(name: str, host: str | None = None) -> None:
     """Pause/reclaim (FR-006): halt the deployment (all services) keeping the
     container and its volumes; `start` resumes it without recreation."""
@@ -10329,6 +10424,18 @@ def do_stop(name: str, host: str | None = None) -> None:
     host_name, host_rec = resolve_deploy_host(host)
     compose_file = compose_file_path(host_name, name)
     if not compose_file.is_file():
+        # Feature 017: A CONTROL PLANE HAS NO DERIVED HOST STATE, so it has no
+        # compose file for anything — and this refusal made SC-001's "list then
+        # stop" impossible from inside one. `list` worked (it enumerates live) and
+        # `stop` refused, which is the worst split: the operator can see the
+        # environment and cannot act on it.
+        #
+        # Stopping by COMPOSE PROJECT LABEL is the same mechanism Feature 015's
+        # `panic` uses, and for the same reason: derived state dies with its host
+        # while the label is on the container itself. Sidecars are covered too,
+        # which stopping `agent-container-<name>` alone would miss.
+        if stop_by_project_label(host_rec, host_name, name):
+            return
         die(
             f"no deployment named '{name}' on {host_name} to stop (deploy it: agent-container up {name})"
         )

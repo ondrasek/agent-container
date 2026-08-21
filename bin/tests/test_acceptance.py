@@ -5644,7 +5644,15 @@ def test_an_unreachable_permitted_host_is_NAMED_never_omitted(acc, _control_plan
     acts on absence. Registers a host that cannot answer and asserts it is
     reported rather than dropped.
     """
-    acc.cli(["host", "add", "deadvps", "--docker-context", "nonexistent-ctx-xyz"])
+    # ASSERTED. The first version ignored this, so when the registration did not
+    # take, `list` correctly reported no hosts and the test failed claiming the
+    # product had not named an unreachable host — blaming the code for the
+    # harness. Any setup step whose success the assertion depends on has to be
+    # checked, or the failure message points at the wrong thing.
+    add = acc.cli(["host", "add", "deadvps", "--docker-context", "nonexistent-ctx-xyz"])
+    assert add.returncode == 0, f"could not register the unreachable host:\n{add.stderr}"
+    listed = acc.cli(["host", "ls", "--json"])
+    assert "deadvps" in listed.stdout, f"the host did not persist: {listed.stdout[:300]}"
     r = acc.cli(["list", "--json"])
     assert r.returncode == 0, f"`list` failed with an unreachable host registered:\n{r.stderr}"
     data = json.loads(r.stdout).get("data", {})
