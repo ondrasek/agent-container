@@ -222,6 +222,89 @@ def test_the_state_never_claims_backend_arrival(wiz):
     assert "not acceptance" in doc.lower()
 
 
+# --- the semver rule (FR-016, C10, T037) -------------------------------------
+
+
+def test_pre_1_0_the_BREAKING_CHANNEL_IS_MINOR(wiz):
+    """T037: `major_on_zero = false`, so pre-1.0 a breaking change lands as MINOR.
+
+    Not obvious from the numbers, which is exactly why it is tested rather than
+    assumed. Get this wrong and 0.31 vs 0.32 reads as compatible — a control
+    plane confidently driving an environment across a breaking change.
+    """
+    assert wiz.breaking_channel((0, 31, 9)) != wiz.breaking_channel((0, 32, 0))
+    # And post-1.0 the minor is NOT the channel, or every feature release would
+    # refuse.
+    assert wiz.breaking_channel((1, 2, 0)) == wiz.breaking_channel((1, 9, 0))
+
+
+@pytest.mark.parametrize(
+    ("cp", "env", "expect"),
+    [
+        # PATCH differences are ignored ENTIRELY — not warned about. This is the
+        # common case after any `fix` release, and reporting it would train the
+        # operator to ignore the report that matters.
+        ("0.32.0", "0.32.5", "ok"),
+        ("0.32.9", "0.32.0", "ok"),
+        # Post-1.0 minor is not the breaking channel.
+        ("1.4.0", "1.9.9", "ok"),
+        # Control plane NEWER: advisory. The normal state after an upgrade.
+        ("0.33.0", "0.32.0", "advisory"),
+        ("2.0.0", "1.9.9", "advisory"),
+        # Environment NEWER: REFUSED. Where interfaces the control plane does not
+        # know about may exist.
+        ("0.32.0", "0.33.0", "refused"),
+        ("1.9.9", "2.0.0", "refused"),
+        # A pre-1.0 control plane is older than any 1.x, whatever the minor says.
+        ("0.99.0", "1.0.0", "refused"),
+        ("1.0.0", "0.99.0", "advisory"),
+        # Unreadable on either side: unknown, NEVER assumed compatible.
+        (None, "0.32.0", "unknown"),
+        ("0.32.0", None, "unknown"),
+        ("garbage", "0.32.0", "unknown"),
+        ("0.32", "0.32.0", "unknown"),
+    ],
+)
+def test_version_verdict_by_precedence(wiz, cp, env, expect):
+    assert wiz.version_verdict(cp, env) == expect
+
+
+def test_the_unknown_SENTINEL_is_not_treated_as_version_zero(wiz):
+    """`_resolve_version()` returns "0.0.0+unknown" when it cannot tell.
+
+    Discarding build metadata would turn that into the genuine version 0.0.0 —
+    the lowest there is — so every environment would read as newer and every
+    comparison would REFUSE. A safety check that refuses everything is one people
+    route around, so this failure mode is worse than being wrong in one case.
+    """
+    assert wiz.parse_semver("0.0.0+unknown") is None
+    assert wiz.version_verdict("0.0.0+unknown", "0.32.0") == wiz.VERSION_UNKNOWN
+    # And a REAL 0.0.0 is still a version, so the sentinel check must be exact.
+    assert wiz.parse_semver("0.0.0") == (0, 0, 0)
+
+
+def test_ok_says_nothing_at_all(wiz):
+    """Silence, not a quiet message. A line per patch bump is the noise that
+    makes the refusal invisible."""
+    assert wiz.version_verdict_message("acme", wiz.VERSION_OK, "0.32.0", "0.32.1") is None
+
+
+def test_a_refusal_NAMES_REDEPLOY(wiz):
+    """C10/SC-012. A refusal that does not say what would fix it converts a
+    safety check into a dead end, and the operator's next move is to reach for
+    whatever bypass exists."""
+    msg = wiz.version_verdict_message("acme", wiz.VERSION_REFUSED, "0.32.0", "0.33.0")
+    assert msg is not None
+    assert "redeploy" in msg.lower()
+    assert "0.33.0" in msg and "0.32.0" in msg
+
+
+def test_unknown_does_not_claim_compatibility(wiz):
+    msg = wiz.version_verdict_message("acme", wiz.VERSION_UNKNOWN, None, "0.32.0")
+    assert msg is not None
+    assert "not assumed compatible" in msg.lower()
+
+
 # --- the two-level settings contract (FR-009d, T058/T059) -------------------
 
 
@@ -331,6 +414,88 @@ def test_control_plane_role_refuses_a_task(wiz):
 def test_an_unknown_role_is_refused(wiz):
     with pytest.raises(wiz.Fatal, match="--role must be one of"):
         wiz.ExecSpec(role="supervisor").validate()
+
+
+# --- panic self-exclusion (FR-010, R6, T038/T039) ---------------------------
+
+
+def _active(name, host="local"):
+    return {"name": name, "host": host, "outcome": "active"}
+
+
+def test_no_control_plane_means_no_exclusion(wiz, monkeypatch):
+    """Control. On the operator's own machine nothing is protected, or `panic`
+    would quietly narrow its own scope — the false guarantee FR-013 names."""
+    monkeypatch.delenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", raising=False)
+    entries = [_active("a"), _active("b")]
+    keep, excluded = wiz.partition_self_exclusion(entries)
+    assert keep == entries and excluded == []
+
+
+def test_a_control_plane_excludes_ITSELF_and_nothing_else(wiz, monkeypatch):
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    keep, excluded = wiz.partition_self_exclusion([_active("a"), _active("hub"), _active("b")])
+    assert [e["name"] for e in keep] == ["a", "b"]
+    assert [e["name"] for e in excluded] == ["hub"]
+
+
+def test_exclusion_matches_by_NAME_not_by_reachability(wiz, monkeypatch):
+    """It must work for an entry whose host is unreachable — the case where the
+    operator most wants the kill switch and least wants it to take the shell they
+    are typing in."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    keep, excluded = wiz.partition_self_exclusion([_active("hub", host="dead-vps")])
+    assert keep == []
+    assert excluded[0]["host"] == "dead-vps"
+
+
+def test_an_invalid_control_plane_name_protects_NOTHING_rather_than_guessing(wiz, monkeypatch):
+    """An unvalidated value could match nothing while READING as protection,
+    which is the worse of the two failures: the operator believes the container
+    they are in is safe."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "Hub; rm -rf /")
+    keep, excluded = wiz.partition_self_exclusion([_active("hub")])
+    assert excluded == [] and len(keep) == 1
+
+
+def test_the_exclusion_report_names_how_to_stop_it_instead(wiz, monkeypatch, capsys):
+    """SC-010/C9. An exclusion that does not say what to do instead is a dead
+    end, and the operator's next move is to look for a flag that overrides it."""
+    lines: list[str] = []
+    monkeypatch.setattr(wiz, "log", lambda m: lines.append(m))
+    wiz.report_self_exclusion([_active("hub", host="vps1")], "destroy")
+    out = "\n".join(lines)
+    assert "EXCLUDED" in out
+    assert "hub" in out
+    # The remedy, with the host, so it is copy-pasteable rather than a hint.
+    assert "agent-container destroy hub --host vps1" in out
+    # And WHY, because the reason is the non-obvious part.
+    assert "report would never be delivered" in out
+
+
+def test_the_report_is_never_silent(wiz, monkeypatch):
+    """Only the report is checkable. This is the one container whose stopping
+    would make any report undeliverable, so 'it worked and said nothing' and 'it
+    stopped itself before reporting' look identical from outside."""
+    lines: list[str] = []
+    monkeypatch.setattr(wiz, "log", lambda m: lines.append(m))
+    wiz.report_self_exclusion([_active("hub")], "stop")
+    assert lines, "the exclusion produced no output at all"
+
+
+def test_panic_json_carries_self_excluded(wiz):
+    """A consumer reading only `results` would see the container it asked about
+    simply ABSENT — the silent skip this requirement forbids."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_panic")
+    # Every emit_json in do_panic must carry the field, not just the last one:
+    # the early-return branches are the ones an operator with a single recorded
+    # environment actually hits.
+    envelopes = body.count("emit_json(")
+    assert envelopes >= 3, f"expected three emit_json branches, found {envelopes}"
+    assert body.count('"self_excluded"') == envelopes, (
+        "not every panic --json branch reports the self-exclusion; a machine "
+        "consumer would read a protected container as absent"
+    )
 
 
 # --- provenance (FR-014a, T040) ---------------------------------------------

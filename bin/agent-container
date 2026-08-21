@@ -1789,6 +1789,142 @@ def inventory_entry_id(name: str, when: str) -> str:
     return f"{stamp}-{name}-{secrets.token_hex(3)}"
 
 
+# Feature 017 FR-016, contract C10. The three verdicts a version comparison can
+# reach, and `unknown` is one of them — never "assumed compatible".
+VERSION_OK = "ok"
+VERSION_ADVISORY = "advisory"
+VERSION_REFUSED = "refused"
+VERSION_UNKNOWN = "unknown"
+
+
+def parse_semver(text: str | None) -> tuple[int, int, int] | None:
+    """(major, minor, patch) from a version string, or None if unreadable.
+
+    Pre-release and build metadata are DISCARDED rather than ordered. Ordering
+    them correctly is the fiddly part of semver and none of it changes the answer
+    this feature needs: whether the two sides are on the same breaking channel.
+
+    None rather than a guess. An unreadable version must reach the caller as
+    `unknown`, and a zero-filled fallback would silently compare as 0.0.0 —
+    which is a real version, and would make every comparison against it refuse.
+
+    THE `+unknown` SENTINEL IS NOT A VERSION. `_resolve_version()` returns
+    "0.0.0+unknown" when it cannot tell, and discarding build metadata would turn
+    that into the genuine version 0.0.0 — the lowest there is, so every
+    environment would read as newer and every comparison would REFUSE. Caught by
+    this function's own doctest, which is why the sentinel is matched before the
+    metadata is stripped rather than after.
+
+    >>> parse_semver("1.2.3")
+    (1, 2, 3)
+    >>> parse_semver("0.32.0")
+    (0, 32, 0)
+    >>> parse_semver("1.2.3-rc.1+build5")
+    (1, 2, 3)
+    >>> [parse_semver(v) for v in ("", None, "latest", "0.0.0+unknown", "1.2")]
+    [None, None, None, None, None]
+    """
+    if not text:
+        return None
+    text = text.strip()
+    if text.endswith("+unknown"):
+        return None
+    core = re.split(r"[-+]", text, maxsplit=1)[0]
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", core)
+    if m is None:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def breaking_channel(v: tuple[int, int, int]) -> tuple[int, ...]:
+    """The part of a version a breaking change moves.
+
+    `major_on_zero = false` in this project's release config, so PRE-1.0 A
+    BREAKING CHANGE LANDS AS MINOR. That is not obvious from the numbers, which
+    is why it is encoded here and tested rather than left as a convention: post
+    1.0 the channel is (major,), and below it (0, minor).
+
+    >>> breaking_channel((0, 32, 0)), breaking_channel((0, 31, 5))
+    ((0, 32), (0, 31))
+    >>> breaking_channel((1, 2, 3)), breaking_channel((1, 9, 0))
+    ((1,), (1,))
+    """
+    return (v[0],) if v[0] >= 1 else (0, v[1])
+
+
+def version_verdict(control_plane: str | None, environment: str | None) -> str:
+    """FR-016/C10 — the control plane's version against an environment's.
+
+    Compared BY PRECEDENCE, not equality. An equality check would fire on every
+    patch bump and become noise, and a warning nobody reads is the failure mode
+    Feature 013's severity split exists to avoid. (013's own `image-freshness`
+    does use equality, deliberately: "was this image built by exactly this CLI"
+    is a different question from "can these two interoperate".)
+
+    The direction is asymmetric because the risk is:
+
+      * control plane NEWER  -> advisory. The normal state after any upgrade.
+      * environment NEWER    -> REFUSED. This is where interfaces the control
+        plane does not know about may exist, and acting on them half-blind is
+        worse than declining.
+      * same breaking channel, or a PATCH difference -> silent. Not warned
+        about, ignored.
+      * either side unreadable -> unknown, NEVER assumed compatible.
+
+    >>> version_verdict("0.32.0", "0.32.5")
+    'ok'
+    >>> version_verdict("0.33.0", "0.32.0")
+    'advisory'
+    >>> version_verdict("0.32.0", "0.33.0")
+    'refused'
+    >>> version_verdict("2.0.0", "1.9.9")
+    'advisory'
+    >>> version_verdict("1.0.0", "1.9.9")
+    'ok'
+    >>> version_verdict(None, "0.32.0"), version_verdict("0.32.0", "garbage")
+    ('unknown', 'unknown')
+    """
+    cp = parse_semver(control_plane)
+    env = parse_semver(environment)
+    if cp is None or env is None:
+        return VERSION_UNKNOWN
+    cp_ch, env_ch = breaking_channel(cp), breaking_channel(env)
+    if cp_ch == env_ch:
+        return VERSION_OK
+    # Channels of different lengths — (0, 31) vs (1,) — compare on the major
+    # first, which is what makes a pre-1.0 control plane older than any 1.x.
+    if (cp[0], cp_ch) > (env[0], env_ch):
+        return VERSION_ADVISORY
+    return VERSION_REFUSED
+
+
+def version_verdict_message(name: str, verdict: str, cp: str | None, env: str | None) -> str | None:
+    """The operator-facing line for a verdict, or None when there is nothing to say.
+
+    `refused` NAMES REDEPLOY as the remedy (C10, SC-012). A refusal that does not
+    say what would fix it converts a safety check into a dead end, and the
+    operator's next move is to reach for whatever bypass exists.
+    """
+    if verdict == VERSION_OK:
+        return None
+    if verdict == VERSION_UNKNOWN:
+        return (
+            f"{name}: version unknown (control plane {cp or 'unreadable'}, environment "
+            f"{env or 'unreadable'}) — not assumed compatible. Rebuild the image so it "
+            f"carries a version stamp"
+        )
+    if verdict == VERSION_ADVISORY:
+        return (
+            f"{name}: this control plane ({cp}) is newer than the environment ({env}). "
+            f"Usually fine — the normal state after an upgrade"
+        )
+    return (
+        f"{name}: REFUSED — the environment ({env}) is newer than this control plane "
+        f"({cp}), so it may expose interfaces this control plane does not know about. "
+        f"Redeploy the control plane to catch up: agent-container redeploy <control-plane>"
+    )
+
+
 def deploy_provenance() -> str:
     """Where THIS deploy is being made from (FR-014a, data-model §1).
 
@@ -2304,6 +2440,70 @@ def _kill_one_host(
     return results
 
 
+def self_control_plane_name() -> str | None:
+    """The name of the control plane this CLI is running INSIDE, or None.
+
+    The same signal `deploy_provenance()` reads, and validated the same way for
+    the same reason: it decides what `panic` will not stop, so an unvalidated
+    value could name something that is not an environment and quietly protect
+    nothing — or, worse, match nothing while reading as protection.
+    """
+    inside = os.environ.get("AGENT_CONTAINER_CONTROL_PLANE_NAME", "").strip()
+    if not inside or NAME_RE.fullmatch(inside) is None:
+        return None
+    return inside
+
+
+def partition_self_exclusion(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split `entries` into (actionable, self-excluded) — FR-010, research R6.
+
+    A control plane must not destroy the container it is running in. Not because
+    the operation would fail, but because it would SUCCEED: the process issuing
+    the command dies mid-operation, every remaining environment is left in
+    whatever state it was in, and THE REPORT IS NEVER DELIVERED. That last part is
+    the reason this is not merely inconvenient — `panic`'s whole value is a report
+    that tells the truth about what it could not reach, and there is no report at
+    all if the reporter is the first casualty.
+
+    Matched by NAME against the inventory rather than by inspecting the container,
+    because this must work for an entry whose host is unreachable — the case where
+    the operator most wants the kill switch and least wants it to take the shell
+    they are typing in.
+
+    An exclusion in machinery that already verifies by observation, rather than a
+    new mechanism: `panic` keeps enumerating from the record and keeps failing on
+    `undetermined`.
+    """
+    me = self_control_plane_name()
+    if me is None:
+        return entries, []
+    keep = [e for e in entries if e.get("name") != me]
+    return keep, [e for e in entries if e.get("name") == me]
+
+
+def report_self_exclusion(excluded: list[dict], form: str) -> None:
+    """SC-010: a FIRST-CLASS OUTCOME, never a silent skip.
+
+    Only the report is checkable. A silent exclusion is indistinguishable from a
+    `panic` that simply missed the environment — and this is the one container
+    whose stopping would make any report undeliverable, so "it worked and said
+    nothing" and "it stopped itself before reporting" look identical from outside.
+
+    NAMES HOW TO STOP IT INSTEAD. An exclusion that does not is a dead end, and
+    the operator's next move is to look for a flag that overrides it.
+    """
+    for e in excluded:
+        name, host = e.get("name"), e.get("host")
+        hflag = "" if host in (None, DEFAULT_HOST) else f" --host {host}"
+        log(
+            f"EXCLUDED from {form}: {name} — this control plane is the container you are "
+            f"issuing this command from. Stopping it would kill this process "
+            f"mid-operation and the report would never be delivered.\n"
+            f"  to stop it, from your own machine: agent-container "
+            f"{'destroy' if form == 'destroy' else 'stop'} {name}{hflag}"
+        )
+
+
 def do_panic(
     hosts: list[str] | None,
     names: list[str] | None,
@@ -2326,6 +2526,12 @@ def do_panic(
     entries = kill_candidates(hosts, names)
     all_active = kill_candidates(None, None)
     excluded = len(all_active) - len(entries)
+    # FR-010: BEFORE anything is stopped, and before the empty-scope branches
+    # below, so an operator whose only recorded environment IS this control plane
+    # is told that specifically rather than "the scope matched none" — which would
+    # be true and useless.
+    entries, self_excluded = partition_self_exclusion(entries)
+    report_self_exclusion(self_excluded, form)
 
     if not all_active:
         # Absent or empty store. NOTHING RECORDED, not nothing exists — the tool
@@ -2336,12 +2542,37 @@ def do_panic(
             "backfilled, so this means nothing was RECORDED — not that nothing exists."
         )
         if as_json:
-            emit_json({"form": form, "results": [], "excluded": excluded, "ok": True})
+            emit_json(
+                {
+                    "form": form,
+                    "results": [],
+                    "excluded": excluded,
+                    "self_excluded": [e.get("name") for e in self_excluded],
+                    "ok": True,
+                }
+            )
         return
     if not entries:
-        log(f"the scope matched none of the {len(all_active)} recorded environments")
+        if self_excluded:
+            # Distinguished deliberately. "The scope matched none" would be true
+            # and would hide the one fact that matters: something WAS in scope and
+            # was protected, which is a different situation from an empty scope.
+            log(
+                f"nothing left to {form}: the only environment in scope is this control "
+                f"plane, which is excluded above"
+            )
+        else:
+            log(f"the scope matched none of the {len(all_active)} recorded environments")
         if as_json:
-            emit_json({"form": form, "results": [], "excluded": excluded, "ok": True})
+            emit_json(
+                {
+                    "form": form,
+                    "results": [],
+                    "excluded": excluded,
+                    "self_excluded": [e.get("name") for e in self_excluded],
+                    "ok": True,
+                }
+            )
         return
 
     if destroy and not preview and not yes:
@@ -2414,6 +2645,11 @@ def do_panic(
                 "preview": preview,
                 "results": results,
                 "excluded": excluded,
+                # FR-010/SC-010: in the MACHINE view too. A consumer reading only
+                # `results` would see a container it asked about simply absent,
+                # which is the silent skip this requirement forbids — and absence
+                # is exactly what a stopped-before-reporting run also looks like.
+                "self_excluded": [e.get("name") for e in self_excluded],
                 "ok": ok,
                 "unresolved": len(unresolved),
             }

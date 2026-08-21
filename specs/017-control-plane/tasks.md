@@ -175,16 +175,16 @@ that is visible before deploying.
 - [ ] T036 [P] [US3] Acceptance S10 — silent on a PATCH difference; **advisory** when the control
       plane is newer; **REFUSED** when the environment is newer, naming redeploy as the remedy
       (C10, SC-012)
-- [ ] T037 [P] [US3] Hermetic test of the semver rule by precedence, including that
+- [X] T037 [P] [US3] Hermetic test of the semver rule by precedence, including that
       `major_on_zero = false` makes **pre-1.0 MINOR** the breaking channel — not obvious from the
       numbers, which is why it is tested rather than assumed (FR-016, C10)
 
 ### Implementation for User Story 3
 
-- [ ] T038 [US3] Self-exclusion inside Feature 015's existing `panic` path, by the control plane's own
+- [X] T038 [US3] Self-exclusion inside Feature 015's existing `panic` path, by the control plane's own
       container name — an exclusion in machinery that already verifies by observation, not a new
       mechanism (FR-010, R6)
-- [ ] T039 [US3] Report the exclusion as a **first-class outcome**, never a silent skip (SC-010) —
+- [X] T039 [US3] Report the exclusion as a **first-class outcome**, never a silent skip (SC-010) —
       only the report is checkable, and this is the one container whose stopping makes the report
       undeliverable
 - [X] T040 [P] [US3] Role and `provenance` on the inventory entry — `operator` vs
@@ -195,7 +195,7 @@ that is visible before deploying.
 - [ ] T041 [P] [US3] Acceptance SC-011 — every control plane shows whether it came from the operator's
       machine or another control plane, and which. Nesting lets standing keys grow from inside the
       system, and a count nobody can see is a count nobody audits
-- [ ] T042 [US3] The FR-016 semver rule in `bin/agent-container`: ignore patch, advise when newer,
+- [X] T042 [US3] The FR-016 semver rule in `bin/agent-container`: ignore patch, advise when newer,
       **refuse** when the environment is newer, `unknown` when either version is unreadable
 - [ ] T043 [P] [US3] Multiple control planes are individually identifiable and do not conflict
       (FR-014); and an interrupted session leaves the outcome knowable (FR-013)
