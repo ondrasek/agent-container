@@ -307,7 +307,7 @@ and the drift would be invisible because each leg still looks correct alone.
 - [ ] T069 [P] Acceptance S16 - `collect` works **with and without** an endpoint declared, in both
       configurations deliberately. One that only worked without an endpoint would leave an operator who
       configured OTLP holding logs with no way to download them
-- [ ] T070 **THE RECONCILIATION: acceptance SC-020** - for a window, the set of records marked
+- [X] T070 **THE RECONCILIATION: acceptance SC-020** - for a window, the set of records marked
       `accepted` locally equals the set the collector holds, **or the difference is explicitly
       reported**. Zero silent divergence. This is what makes the dual stack one system rather than two
       hopeful ones, and it is only expressible because both legs carry identical payloads (T044).

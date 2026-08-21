@@ -272,11 +272,11 @@ _agent_container() {
             # `rejected` are terminal, and a flag to override that would
             # duplicate records at the collector or repeat a refusal.
             if [[ ${COMP_CWORD} -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "collect retry" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "collect retry reconcile" -- "${cur}") )
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --name --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --name --since --until --collector-ids --json" -- "${cur}") )
                 return 0
             fi
             return 0

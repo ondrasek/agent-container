@@ -237,9 +237,12 @@ _agent-container() {
                         '*:container:__agent_container_names'
                     ;;
                 telemetry)
-                    _arguments '1:command:(collect retry)' \
+                    _arguments '1:command:(collect retry reconcile)' \
                         '*--host[Host to act on]:host:' \
                         '*--name[Environment to act on]:container:__agent_container_names' \
+                        '--since[Window lower bound]:since:' \
+                        '--until[Window upper bound]:until:' \
+                        '--collector-ids[File of run ids the collector holds]:file:_files' \
                         '--json[Machine-readable envelope]'
                     ;;
                 ssh-key)

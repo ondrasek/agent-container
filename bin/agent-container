@@ -6040,6 +6040,195 @@ def withdraw_key_from_host(host_rec: dict, pubkey: str) -> bool:
     raise Fatal(f"could not edit authorized_keys (exit {r.returncode}): {r.stderr.strip()[:120]}")
 
 
+# Where the last successful `collect` is remembered, so the reconciliation window
+# has a lower bound that is a FACT rather than a guess. A file rather than a
+# derived value: "since the last collect" cannot be reconstructed from the records
+# themselves, because a window with no records in it is exactly the case that
+# needs a boundary.
+def collect_watermark_path() -> Path:
+    return DATA_DIR / "telemetry" / "last-collect"
+
+
+def read_collect_watermark() -> str | None:
+    try:
+        t = collect_watermark_path().read_text().strip()
+    except OSError:
+        return None
+    return t or None
+
+
+def write_collect_watermark(when: str) -> None:
+    """Written only after a COMPLETE collect (FR-009e, SC-015).
+
+    A partial collect must not advance the watermark: the next reconciliation
+    would then treat the hosts it could not reach as "before the window" and
+    silently exclude exactly the records that are missing.
+    """
+    try:
+        p = collect_watermark_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(when + "\n")
+    except OSError as e:
+        warn(
+            f"could not record the collect watermark ({e}); the next reconciliation window "
+            f"will fall back to the full history, which is wider but never narrower"
+        )
+
+
+def reconciliation_window(since: str | None, until: str | None) -> tuple[str | None, str | None]:
+    """The window to reconcile over (C17, research R12).
+
+    An operator-supplied range wins; otherwise the lower bound is the last
+    SUCCESSFUL collect. Both may be None, which means the full history — WIDER
+    than intended is safe, narrower is not: a window that silently excluded
+    records would report agreement it did not establish.
+    """
+    return (since or read_collect_watermark(), until)
+
+
+def records_in_window(
+    paths: list[Path], since: str | None, until: str | None
+) -> tuple[list[dict], int]:
+    """(records inside the window, count of `pending` excluded).
+
+    `pending` RECORDS ARE OUTSIDE THE WINDOW (C17, R12). They have not finished
+    being exported, so counting them as divergence would make SC-020 fail against
+    a perfectly healthy system that simply has exports in flight — and a criterion
+    that fails on healthy systems is one people stop running.
+
+    The pending count is RETURNED rather than dropped, because "12 in flight" is
+    the difference between a reconciliation an operator can trust and one they
+    should re-run in a minute.
+    """
+    inside: list[dict] = []
+    pending = 0
+    for path in paths:
+        try:
+            rec = json.loads(path.read_text())
+        except OSError, json.JSONDecodeError:
+            continue
+        stamp = str(rec.get("started_at") or "")
+        if since and stamp < since:
+            continue
+        if until and stamp > until:
+            continue
+        if rec.get("export_state") == EXPORT_PENDING:
+            pending += 1
+            continue
+        inside.append(rec)
+    return inside, pending
+
+
+def do_telemetry_reconcile(
+    since: str | None, until: str | None, collector_ids: Path | None, as_json: bool
+) -> None:
+    """SC-020, contract C17 — do the two legs agree?
+
+    THIS IS WHAT MAKES THE DUAL STACK ONE SYSTEM rather than two hopeful ones, and
+    it is only expressible because both legs carry identical payloads from a single
+    definition (FR-009f): *"do they agree?"* has no answer when the halves carry
+    different things.
+
+    Compares the set of locally-`accepted` run ids against the set the collector
+    holds. The collector's side is supplied as a file of ids — one per line —
+    because obtaining it requires querying the backend's own API, the vendor
+    coupling FR-009d forbids the tool from taking on. The operator runs their
+    collector's own query and hands the tool the answer; the tool does the
+    comparison it can do without coupling.
+
+    ZERO SILENT DIVERGENCE. Every difference is reported in BOTH directions:
+      * local `accepted`, absent at the collector — the local leg claims a
+        delivery that did not land. The serious direction.
+      * at the collector, not locally `accepted` — the collector holds something
+        this machine has no record of accepting, which is what a second exporter,
+        a replayed record, or a lost local store looks like.
+    """
+    lo, hi = reconciliation_window(since, until)
+    local, pending = records_in_window(stored_record_paths(), lo, hi)
+    accepted = {str(r.get("run_id")) for r in local if r.get("export_state") == EXPORT_ACCEPTED}
+    other = {str(r.get("export_state")) for r in local} - {EXPORT_ACCEPTED}
+    if collector_ids is None:
+        # Without the collector's side there is no comparison, and saying so is the
+        # honest outcome. Reporting "no divergence" from a one-sided read would be
+        # the worst possible answer: it asserts agreement that was never checked.
+        msg = (
+            f"{len(accepted)} record(s) marked accepted in this window, {pending} still "
+            f"pending (outside the window by design). NO COMPARISON WAS MADE — pass "
+            f"--collector-ids FILE with the run ids your collector holds, one per line"
+        )
+        if as_json:
+            emit_json(
+                {
+                    "window": {"since": lo, "until": hi},
+                    # A COUNT, the same type the compared branch emits. The same
+                    # field name carrying a list in one branch and an int in the
+                    # other is how a machine consumer breaks on the case it did
+                    # not happen to test first.
+                    "local_accepted": len(accepted),
+                    "collector_holds": None,
+                    "pending_excluded": pending,
+                    "missing_at_collector": None,
+                    "unknown_locally": None,
+                    "compared": False,
+                    # NOT `ok`. The envelope already has a top-level `ok` meaning "the
+                    # command ran", and a second `ok` inside it meaning "the legs
+                    # agree" is how a consumer reads agreement off a run that made
+                    # no comparison. `agree` is null when nothing was compared.
+                    "agree": None,
+                }
+            )
+        else:
+            warn(msg)
+        return
+    try:
+        remote = {ln.strip() for ln in collector_ids.read_text().splitlines() if ln.strip()}
+    except OSError as e:
+        die(f"could not read {collector_ids}: {e}")
+    missing_at_collector = sorted(accepted - remote)
+    unknown_locally = sorted(remote - accepted)
+    ok = not missing_at_collector and not unknown_locally
+    if as_json:
+        emit_json(
+            {
+                "window": {"since": lo, "until": hi},
+                "local_accepted": len(accepted),
+                "collector_holds": len(remote),
+                "pending_excluded": pending,
+                "missing_at_collector": missing_at_collector,
+                "unknown_locally": unknown_locally,
+                "compared": True,
+                "agree": ok,
+            }
+        )
+        if not ok:
+            raise typer.Exit(1)
+        return
+    log(
+        f"window: {lo or 'all history'} .. {hi or 'now'}; "
+        f"{len(accepted)} accepted locally, {len(remote)} at the collector, "
+        f"{pending} pending (excluded by design)"
+    )
+    if other:
+        log(f"also in this window, not compared: {', '.join(sorted(other))}")
+    if ok:
+        log("the two legs AGREE over this window")
+        return
+    if missing_at_collector:
+        warn(
+            f"{len(missing_at_collector)} record(s) marked ACCEPTED locally are NOT at the "
+            f"collector — the local leg claims a delivery that did not land: "
+            f"{', '.join(missing_at_collector[:10])}"
+            + (" …" if len(missing_at_collector) > 10 else "")
+        )
+    if unknown_locally:
+        warn(
+            f"{len(unknown_locally)} record(s) at the collector are not marked accepted "
+            f"here — a second exporter, a replay, or a lost local store: "
+            f"{', '.join(unknown_locally[:10])}" + (" …" if len(unknown_locally) > 10 else "")
+        )
+    raise typer.Exit(1)
+
+
 def do_telemetry_collect(hosts: list[str] | None, names: list[str] | None, as_json: bool) -> None:
     """`telemetry collect` — FR-009e, contract C18, research R13.
 
@@ -6100,6 +6289,11 @@ def do_telemetry_collect(hosts: list[str] | None, names: list[str] | None, as_js
         if len(unreachable) == before:
             per_host.append({"host": host_name, "ingested": len(ids), "status": "ok"})
     total = sum(h["ingested"] for h in per_host)
+    if not unreachable:
+        # Only on a COMPLETE collect. Advancing after a partial one would make the
+        # next reconciliation treat the unreached hosts as "before the window" and
+        # silently exclude exactly the records that are missing.
+        write_collect_watermark(utc_now())
     if as_json:
         emit_json(
             {
@@ -15901,6 +16095,38 @@ def telemetry_collect(
     """
     set_json_mode(as_json)
     do_telemetry_collect(host or None, name or None, as_json)
+
+
+@telemetry_app.command("reconcile")
+def telemetry_reconcile(
+    since: str | None = typer.Option(
+        None, "--since", help="Window lower bound (RFC3339). Default: the last successful collect."
+    ),
+    until: str | None = typer.Option(None, "--until", help="Window upper bound (RFC3339)."),
+    collector_ids: Path | None = typer.Option(
+        None,
+        "--collector-ids",
+        help="File of run ids your collector holds, one per line. Without it, no "
+        "comparison is made — and the tool says so rather than implying agreement.",
+    ),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Do the two legs agree? (SC-020)
+
+    Compares locally-`accepted` records against the set your collector holds, over
+    a window: since the last successful `collect`, or a range you supply.
+    `pending` records are OUTSIDE the window — they have not finished exporting,
+    and counting them as divergence would fail this against a healthy system.
+
+    The collector's side is a file you produce from your own backend's query. The
+    tool does not query it: that would be the vendor coupling FR-009d forbids, and
+    it is the same coupling that makes end-to-end ingestion unobservable in the
+    first place.
+
+    Exits non-zero on any divergence, in either direction.
+    """
+    set_json_mode(as_json)
+    do_telemetry_reconcile(since, until, collector_ids, as_json)
 
 
 @telemetry_app.command("retry")

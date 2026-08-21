@@ -1150,3 +1150,146 @@ def test_attribution_is_recorded_AFTER_the_action(wiz):
     written first would claim an action that may then have failed."""
     body = _func_body(Path(wiz.__file__).read_text(), "do_stop")
     assert body.index("compose stop failed") < body.index("record_attribution")
+
+
+# --- reconciliation (SC-020, C17, R12, T070) ---------------------------------
+
+
+def _rec_file(d, rid, stamp, state):
+    (d / f"{rid}.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "run_id": rid,
+                "environment": "demo",
+                "host": "local",
+                "agent": "claude",
+                "kind": "headless",
+                "task": None,
+                "started_at": stamp,
+                "ended_at": None,
+                "outcome": "finished",
+                "exit_code": 0,
+                "repository": None,
+                "usage": {"reported": False},
+                "attribution": None,
+                "egress_decision": None,
+                "export_state": state,
+                "notes": [],
+            }
+        )
+    )
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch, wiz):
+    d = tmp_path / "runs" / "local" / "demo"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(wiz, "DATA_DIR", tmp_path)
+    return d
+
+
+def test_PENDING_records_are_OUTSIDE_the_window(wiz, store):
+    """C17/R12. They have not finished exporting, so counting them as divergence
+    would make SC-020 fail against a perfectly healthy system with exports in
+    flight — and a criterion that fails on healthy systems is one people stop
+    running."""
+    _rec_file(store, "a1", "2026-08-21T10:00:00Z", "accepted")
+    _rec_file(store, "p1", "2026-08-21T10:01:00Z", "pending")
+    inside, pending = wiz.records_in_window(wiz.stored_record_paths(), None, None)
+    assert pending == 1
+    assert [r["run_id"] for r in inside] == ["a1"]
+
+
+def test_the_pending_count_is_REPORTED_not_dropped(wiz, store):
+    """ "12 in flight" is the difference between a reconciliation an operator can
+    trust and one they should re-run in a minute."""
+    _rec_file(store, "p1", "2026-08-21T10:00:00Z", "pending")
+    _, pending = wiz.records_in_window(wiz.stored_record_paths(), None, None)
+    assert pending == 1
+
+
+def test_the_window_defaults_to_the_last_successful_collect(wiz, store, monkeypatch):
+    """R12: an undefined window makes the comparison unexecutable."""
+    monkeypatch.setattr(wiz, "read_collect_watermark", lambda: "2026-08-01T00:00:00Z")
+    assert wiz.reconciliation_window(None, None) == ("2026-08-01T00:00:00Z", None)
+    # An operator-supplied range WINS.
+    assert wiz.reconciliation_window("2026-05-05T00:00:00Z", None)[0] == "2026-05-05T00:00:00Z"
+
+
+def test_no_watermark_means_FULL_HISTORY_not_an_empty_window(wiz, monkeypatch):
+    """Wider than intended is safe; narrower is not. A window that silently
+    excluded records would report agreement it never established."""
+    monkeypatch.setattr(wiz, "read_collect_watermark", lambda: None)
+    assert wiz.reconciliation_window(None, None) == (None, None)
+
+
+def test_the_watermark_advances_ONLY_after_a_COMPLETE_collect(wiz):
+    """A partial collect must not advance it: the next reconciliation would treat
+    the hosts it could not reach as "before the window" and silently exclude
+    exactly the records that are missing."""
+    lines = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_collect").splitlines()
+    write_at = next(i for i, ln in enumerate(lines) if "write_collect_watermark" in ln)
+    guard_at = next((i for i, ln in enumerate(lines) if ln.strip() == "if not unreachable:"), None)
+    assert guard_at is not None, "no completeness guard around the watermark write"
+    assert guard_at < write_at, (
+        "the watermark is written before checking that every host was reached"
+    )
+    # And the write must be INSIDE that block, not merely after it.
+    assert lines[write_at].startswith(
+        " " * (len(lines[guard_at]) - len(lines[guard_at].lstrip()) + 4)
+    )
+
+
+def test_divergence_is_reported_in_BOTH_directions(wiz):
+    """Zero silent divergence. The two directions mean different things: local
+    `accepted` missing at the collector is a delivery claim that did not land,
+    while a record at the collector this machine never accepted is what a second
+    exporter, a replay, or a lost local store looks like."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_reconcile")
+    assert "accepted - remote" in body
+    assert "remote - accepted" in body
+
+
+def test_a_one_sided_read_reports_NO_COMPARISON_not_agreement(wiz):
+    """Reporting "no divergence" from a one-sided read would be the worst possible
+    answer: it asserts agreement that was never checked."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_reconcile")
+    assert '"compared": False' in body
+    assert '"agree": None' in body
+    assert "NO COMPARISON WAS MADE" in body
+
+
+def test_the_inner_verdict_is_not_called_ok(wiz):
+    """The envelope already carries a top-level `ok` meaning "the command ran".
+    A second `ok` inside it meaning "the legs agree" is how a consumer reads
+    agreement off a run that made no comparison."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_reconcile")
+    assert '"ok":' not in body, "the reconciliation payload has its own `ok` field"
+    assert '"agree":' in body
+
+
+def test_the_envelope_field_types_do_not_change_between_branches(wiz):
+    """`local_accepted` as a list in one branch and an int in the other is how a
+    machine consumer breaks on the case it did not happen to test first."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_reconcile")
+    assert body.count('"local_accepted": len(accepted)') == 2, (
+        "local_accepted is not the same type in both branches"
+    )
+
+
+def test_the_tool_does_NOT_query_the_collector(wiz):
+    """C14/FR-009d: obtaining the collector's side requires the backend's own API,
+    which is the vendor coupling that made end-to-end ingestion unobservable in
+    the first place. The operator supplies the answer; the tool compares."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_telemetry_reconcile")
+    for coupling in ("urlopen", "curl", "requests", "opener.open"):
+        assert coupling not in body, f"reconciliation reaches out to the collector via {coupling}"
+    assert "collector_ids.read_text()" in body
+
+
+def test_reconciliation_is_only_expressible_because_the_legs_share_a_payload(wiz):
+    """It compares run ids, which both legs export unconditionally (C18f). If the
+    task exclusion had removed correlation, this comparison would have nothing to
+    join on — which is why run_id exports whatever the task setting is."""
+    assert "run_id" in wiz.RECORD_PAYLOAD_FIELDS
