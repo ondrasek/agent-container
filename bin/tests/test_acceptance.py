@@ -5468,8 +5468,19 @@ def _settings(acc, **keys) -> None:
     )
 
 
-def _headless_run(acc, name: str, marker: str = "hello") -> None:
+def _exporting_headless_run(acc, name: str, marker: str = "hello") -> None:
     """A headless run that ACTUALLY ENDS, using the suite's stand-in agent.
+
+    NAMED DISTINCTLY ON PURPOSE. This was first called `_headless_run`, which
+    ALREADY EXISTED above for Feature 016's seeded-repository tests — and Python's
+    later definition wins, so every one of those callers silently switched to this
+    helper. They then ran against a bind workspace pointing at a fake-agent
+    directory with no git repository, and three tests that had passed for months
+    began reporting `state: "no-repository"`.
+
+    Nothing failed at import, nothing warned, and the failures surfaced 2000 lines
+    away from the cause in a tier that takes an hour to run. A shadowed helper is
+    the quietest possible regression.
 
     The first version of these tests passed a shell command as `--task` to the
     real `claude` binary, which is uncredentialed here — so the container never
@@ -5502,7 +5513,7 @@ def test_a_REFUSING_collector_makes_records_rejected_not_accepted(acc, tmp_path)
     """
     with _collector("refuse", 9531):
         _settings(acc, otlp_endpoint=_collector_url(9531))
-        _headless_run(acc, "expref")
+        _exporting_headless_run(acc, "expref")
         acc.cli(["telemetry", "collect"])
         states = _record_states(acc)
     assert states, "no records were collected at all"
@@ -5518,7 +5529,7 @@ def test_export_is_FAIL_OPEN_when_the_collector_is_unreachable(acc):
     and the record must survive locally with the gap visible."""
     _settings(acc, otlp_endpoint="http://127.0.0.1:9599/v1/logs")  # nothing listening
     # Fail-open is asserted by the run COMPLETING, which `_headless_run` requires.
-    _headless_run(acc, "expopen", "still-works")
+    _exporting_headless_run(acc, "expopen", "still-works")
     acc.cli(["telemetry", "collect"])
     states = _record_states(acc)
     assert states, "the local record did not survive an unreachable collector"
@@ -5565,13 +5576,13 @@ def test_the_task_marker_is_present_by_default_and_absent_when_excluded(acc):
     marker = "TASKMARKER-9f2b-do-the-thing"
     with _collector("accept", 9533) as log:
         _settings(acc, otlp_endpoint=_collector_url(9533))
-        _headless_run(acc, "exptask", marker)
+        _exporting_headless_run(acc, "exptask", marker)
         _wait_until(lambda: log.exists() and marker in log.read_text(errors="replace"),
                     f"the task marker {marker} at the collector")  # fmt: skip
 
     with _collector("accept", 9534) as log2:
         _settings(acc, otlp_endpoint=_collector_url(9534), export_task_text=False)
-        _headless_run(acc, "exptask2", marker)
+        _exporting_headless_run(acc, "exptask2", marker)
         _wait_until(lambda: log2.exists() and log2.stat().st_size > 0, "a record at the collector")
         body = log2.read_text(errors="replace")
     assert marker not in body, (
@@ -5590,7 +5601,7 @@ def test_an_agent_container_exports_with_NO_control_plane_deployed(acc):
     as control-plane plumbing."""
     with _collector("accept", 9535) as log:
         _settings(acc, otlp_endpoint=_collector_url(9535))
-        _headless_run(acc, "expplain", "no-control-plane-here")
+        _exporting_headless_run(acc, "expplain", "no-control-plane-here")
         _wait_until(lambda: log.exists() and log.stat().st_size > 0,
                     "a record from an ordinary agent container")  # fmt: skip
         body = log.read_text(errors="replace")
@@ -5615,7 +5626,7 @@ def test_collect_works_with_AND_without_an_endpoint(acc):
     """
     # WITHOUT.
     _settings(acc)
-    _headless_run(acc, "collnone", "without-endpoint")
+    _exporting_headless_run(acc, "collnone", "without-endpoint")
     r1 = acc.cli(["telemetry", "collect", "--json"])
     assert r1.returncode == 0, f"collect failed with no endpoint declared:\n{r1.stderr}"
     assert _record_states(acc), "collect retrieved nothing with no endpoint declared"
@@ -5623,7 +5634,7 @@ def test_collect_works_with_AND_without_an_endpoint(acc):
     # WITH.
     with _collector("accept", 9536):
         _settings(acc, otlp_endpoint=_collector_url(9536))
-        _headless_run(acc, "collwith", "with-endpoint")
+        _exporting_headless_run(acc, "collwith", "with-endpoint")
         r2 = acc.cli(["telemetry", "collect", "--json"])
     assert r2.returncode == 0, f"collect failed with an endpoint declared:\n{r2.stderr}"
     data = json.loads(r2.stdout).get("data", {})
@@ -5639,7 +5650,7 @@ def test_the_exported_trail_survives_the_destruction_of_its_host(acc):
     """
     with _collector("accept", 9537) as log:
         _settings(acc, otlp_endpoint=_collector_url(9537))
-        _headless_run(acc, "tamper", "evidence-9f2b")
+        _exporting_headless_run(acc, "tamper", "evidence-9f2b")
         _wait_until(lambda: log.exists() and "evidence-9f2b" in log.read_text(errors="replace"),
                     "the record at the collector")  # fmt: skip
         # DESTROY the source, volumes and all.
@@ -5876,7 +5887,7 @@ def test_run_id_exports_whatever_the_task_setting(acc):
             else:
                 _settings(acc, otlp_endpoint=_collector_url(port))
             name = f"corr{port}"
-            _headless_run(acc, name, "correlate-me")
+            _exporting_headless_run(acc, name, "correlate-me")
             _wait_until(lambda lg=log: lg.exists() and lg.stat().st_size > 0,
                         "a record at the collector")  # fmt: skip
             body = log.read_text(errors="replace")
@@ -5901,7 +5912,7 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
     """
     with _collector("accept", 9540) as log:
         _settings(acc, otlp_endpoint=_collector_url(9540))
-        _headless_run(acc, "recon", "reconcile-me")
+        _exporting_headless_run(acc, "recon", "reconcile-me")
         _wait_until(lambda: log.exists() and log.stat().st_size > 0, "a record at the collector")
         acc.cli(["telemetry", "collect"])
         collector_ids = _collector_run_ids(log)

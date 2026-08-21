@@ -1480,3 +1480,29 @@ def test_driver_reachable_address_is_an_accessor_not_a_defaulter(wiz):
         "BOUNDARY resolves the address, so this reads an explicit value"
     )
     assert "die(" in body, "absence must be reported, not substituted"
+
+
+def test_no_test_helper_is_DEFINED_TWICE_in_the_acceptance_module():
+    """A shadowed helper is the quietest possible regression.
+
+    `_headless_run` existed for Feature 016's seeded-repository tests; Feature 017
+    added a second definition of the same name 2000 lines later. Python's later
+    definition wins, so every pre-existing caller silently switched to a helper
+    that used a bind workspace with no git repository — and three tests that had
+    passed for months began reporting `state: "no-repository"`.
+
+    Nothing failed at import. Nothing warned. The failures surfaced far from the
+    cause, in a tier that takes an hour to run, and cost a full baseline bisect at
+    a prior release tag to attribute.
+
+    Module-level `def`s only: a nested closure legitimately shadows.
+    """
+    import re as _re
+
+    src = (_ROOT / "bin" / "tests" / "test_acceptance.py").read_text()
+    names = _re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)\(", src, _re.M)
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, (
+        f"defined more than once at module level in test_acceptance.py: {dupes}. "
+        f"The later definition wins and silently re-points every earlier caller."
+    )
