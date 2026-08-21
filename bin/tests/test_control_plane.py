@@ -1529,3 +1529,103 @@ def test_the_pre_deploy_statement_names_ALL_THREE_consequences(wiz, monkeypatch)
     assert "NO RECOVERY" in out
     # And it names what to do about a loss, not only that it is unrecoverable.
     assert "redeploy" in out and "revoke" in out
+
+
+# --- the injected host registry (FR-002/FR-004, R4, T014/T015/T023) ----------
+
+
+def test_the_projection_carries_NO_CREDENTIAL_MATERIAL(wiz):
+    """FR-004/R4: it is names, drivers, contexts and addresses. The capability is
+    the authorised key, never the list."""
+    reg = {
+        "hosts": {
+            "vps1": {
+                "driver": "docker",
+                "context": "agent-container-vps1",
+                "address": "203.0.113.9",
+                "provisioning": {"connection": "ssh-forward"},
+                "created_by_tool": True,
+                # Things that must NOT travel, whatever they are called.
+                "token": "hcloud-secret",
+                "api_key": "sk-live-xxxx",
+                "password": "hunter2",
+                "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----",
+            }
+        }
+    }
+    out = wiz.projected_host_registry(reg)
+    blob = json.dumps(out)
+    for secret in ("hcloud-secret", "sk-live-xxxx", "hunter2", "PRIVATE KEY"):
+        assert secret not in blob, f"{secret!r} reached the injected registry"
+    assert set(out["hosts"]["vps1"]) == set(wiz.REGISTRY_INJECTED_FIELDS)
+
+
+def test_the_projection_is_an_ALLOW_LIST_not_a_redaction(wiz):
+    """A pass that removed known-bad keys would carry whatever key someone adds
+    next — which is how a snapshot grows a credential nobody decided to include.
+    """
+    out = wiz.projected_host_registry(
+        {"hosts": {"v": {"driver": "docker", "some_future_field": "whatever"}}}
+    )
+    assert out == {"hosts": {"v": {"driver": "docker"}}}
+
+
+def test_the_registry_is_injected_INLINE_not_as_a_file_bind(wiz):
+    """R4/the 001-003 lesson, measured: a `file:` config is a read-only BIND of a
+    local path and cannot reach a daemon that does not share the filesystem. A
+    remote deploy would silently have no registry."""
+    body = _func_body(Path(wiz.__file__).read_text(), "build_compose_model")
+    block = body[body.index('model_configs["host_registry"]') :][:200]
+    assert '"content"' in block
+    assert '"file"' not in block
+
+
+def test_an_AGENT_container_gets_no_registry(wiz):
+    """Constitution III. An agent has no use for a map of the operator's
+    infrastructure, and injecting one anyway would widen exposure for nothing."""
+    model = wiz.build_compose_model("acme", "/ctx")
+    assert "host_registry" not in (model.get("configs") or {})
+    svc = model["services"]["agent"]
+    targets = [c.get("source") for c in (svc.get("configs") or [])]
+    assert "host_registry" not in targets
+
+
+def test_a_CONTROL_PLANE_gets_the_registry_at_the_path_the_entrypoint_reads(wiz, monkeypatch):
+    monkeypatch.setattr(wiz, "load_registry", lambda: {"hosts": {"vps1": {"driver": "docker"}}})
+    model = wiz.build_compose_model("hub", "/ctx", role=wiz.ROLE_CONTROL_PLANE)
+    assert "host_registry" in model["configs"]
+    svc = model["services"]["agent"]
+    entry = next(c for c in svc["configs"] if c["source"] == "host_registry")
+    assert entry["target"] == wiz.INJECT_HOST_REGISTRY_PATH
+    # And the content is the PROJECTION, not the raw registry.
+    assert "vps1" in model["configs"]["host_registry"]["content"]
+
+
+def test_the_entrypoint_installs_the_registry_where_the_CLI_LOOKS(wiz):
+    """FR-002/C1: no on-arrival configuration. Copied to the CLI's own config
+    location rather than teaching the CLI a second path."""
+    ep = (Path(wiz.__file__).parents[1] / "image-control-plane" / "entrypoint.sh").read_text()
+    assert "hosts.json" in ep
+    # The CLI reads CONFIG_DIR/hosts.json, so the entrypoint must target the same
+    # XDG location — asserted against the CLI's own constant name to catch drift.
+    assert wiz.HOSTS_JSON.name in ep
+    assert "XDG_CONFIG_HOME" in ep
+    # COPIED, not symlinked: /run is tmpfs, and a dangling symlink reads as a
+    # corrupt registry rather than an absent one.
+    assert "ln -s" not in ep
+
+
+def test_the_entrypoint_says_the_registry_is_a_SNAPSHOT(wiz):
+    """A host registered after this deploy is invisible until redeploy. Stating it
+    in the boot log means the operator meets the fact before it confuses them."""
+    ep = (Path(wiz.__file__).parents[1] / "image-control-plane" / "entrypoint.sh").read_text()
+    assert "SNAPSHOT" in ep
+    assert "redeploy" in ep
+
+
+def test_a_failed_registry_install_is_LOUD(wiz):
+    """The CLI would otherwise start and resolve no hosts, which looks like an
+    empty fleet rather than a broken install — and an operator who attached to
+    manage something would conclude it was gone."""
+    ep = (Path(wiz.__file__).parents[1] / "image-control-plane" / "entrypoint.sh").read_text()
+    assert "will resolve NO hosts" in ep

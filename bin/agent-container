@@ -633,6 +633,11 @@ IMAGE_VERSION_LABEL = "org.opencontainers.image.version"
 INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
 INJECT_APIKEY_DIR = "/run/agent-container/apikeys"
 INJECT_CONFIG_DIR = "/run/agent-container/config"
+# Feature 017 FR-004/R4: the host registry SNAPSHOT a control plane reads on
+# arrival. Under /run because that is where injected material goes and NEVER on a
+# volume — but note this one is NOT a secret: it is names, drivers, contexts and
+# addresses. The capability is the authorised key, never the list.
+INJECT_HOST_REGISTRY_PATH = "/run/agent-container/hosts.json"
 # Feature 004 — the initial/headless task rides the same ephemeral compose-config
 # channel (never argv/env, no size cap); the entrypoint reads it here.
 INJECT_TASK_PATH = "/run/agent-container/task"
@@ -6324,6 +6329,38 @@ def do_telemetry_collect(hosts: list[str] | None, names: list[str] | None, as_js
         log(f"collected {total} record(s) from {len(per_host)} host(s)")
 
 
+# The registry fields a control plane needs to reach a host, and NOTHING else.
+# An allow-list rather than a redaction pass: a projection that removed known-bad
+# keys would carry whatever key someone adds next, which is how a snapshot grows
+# a credential nobody decided to include.
+REGISTRY_INJECTED_FIELDS = ("driver", "context", "address", "provisioning", "created_by_tool")
+
+
+def projected_host_registry(reg: dict) -> dict:
+    """The registry as it is injected — FR-004, research R4.
+
+    NO CREDENTIAL MATERIAL. Each host is projected onto a fixed field set, so a
+    field added to the registry later is absent here until someone adds it
+    deliberately. The `provisioning` block is included because reaching a
+    provisioned host needs its connection kind, and it holds a connection METHOD
+    rather than a secret — the automation key lives on the operator's disk and is
+    not part of the registry.
+
+    A SNAPSHOT, and the docstring says so because the consequence is real: a host
+    registered after this deploy is invisible to the container until it is
+    redeployed. The alternative — a live channel from the operator's machine into
+    the container — is what FR-003a rules out, and a locked control plane could
+    not receive it anyway.
+
+    >>> projected_host_registry({"hosts": {"v": {"driver": "docker", "token": "s3cret"}}})
+    {'hosts': {'v': {'driver': 'docker'}}}
+    """
+    out: dict[str, dict] = {}
+    for name, rec in (reg.get("hosts") or {}).items():
+        out[name] = {k: rec[k] for k in REGISTRY_INJECTED_FIELDS if k in rec}
+    return {"hosts": out}
+
+
 def resolve_otlp_endpoint(cwd: Path | None = None) -> str | None:
     """The OTLP endpoint, or None if undeclared (FR-009d, contract C18g).
 
@@ -6866,6 +6903,11 @@ def build_compose_model(
     egress_filter_body: str | None = None,
     egress_unbound_body: str | None = None,
     egress_ports_body: str | None = None,
+    # Feature 017 FR-004: the role decides whether the host registry is injected.
+    # Defaulted to the agent role so every existing caller is unchanged — an agent
+    # container has no use for the registry and must not receive a map of the
+    # operator's infrastructure it never needed (Constitution III).
+    role: str = ROLE_AGENT,
 ) -> dict:
     """Build the compose model for container <name>. Pure: embeds paths as
     strings, reads nothing. authorized_keys_file is a LOCAL staged
@@ -6967,6 +7009,19 @@ def build_compose_model(
     if authorized_keys_file is not None:
         svc_configs.append({"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH})
         model_configs["ssh_authorized_keys"] = {"file": str(authorized_keys_file)}
+    # Feature 017 FR-004/R4: the host registry, for a control plane only.
+    #
+    # `content:` and NOT `file:`. A `file:` config is a read-only BIND of a local
+    # path, so it cannot reach a daemon that does not share the filesystem — the
+    # 001/003 lesson, measured. Inline non-secret injected material.
+    #
+    # Non-secret, so it rides the config channel rather than the secret one, and a
+    # hermetic test asserts the projection carries no credential material.
+    if role == ROLE_CONTROL_PLANE:
+        svc_configs.append({"source": "host_registry", "target": INJECT_HOST_REGISTRY_PATH})
+        model_configs["host_registry"] = {
+            "content": json.dumps(projected_host_registry(load_registry()), indent=2) + "\n"
+        }
     # Feature 003 runtime-injected material — same portable compose-config channel.
     for cfg_name, local_file, target in injected_configs or []:
         svc_configs.append({"source": cfg_name, "target": target})
@@ -9605,6 +9660,7 @@ def compose_up_exec(
         injected_configs=injected,
         restart=spec.restart_policy(),
         environment=spec.compose_environment(name) | _egress_env,
+        role=spec.role,
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
         egress_filter_body=egress_body,

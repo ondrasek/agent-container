@@ -84,10 +84,10 @@ cannot fail:
 - [X] T013 [P] Hermetic test that the passphrase never enters a record or an export payload — the
       closed field set of data-model §6 has no slot for it, and this asserts the absence structurally
       rather than by grepping one run's output
-- [ ] T014 Inject the host registry as **non-secret configuration** inline in the compose model
+- [X] T014 Inject the host registry as **non-secret configuration** inline in the compose model
       (`configs: {content:}`), the channel every other non-secret injected artifact already uses
       (R4). It is a **snapshot**: a host registered later is invisible until redeploy
-- [ ] T015 [P] Hermetic test that the injected registry carries **no** credential material — it is
+- [X] T015 [P] Hermetic test that the injected registry carries **no** credential material — it is
       names, drivers, contexts and addresses; the capability is the authorised key, not the list
       (FR-004, R4)
 
@@ -119,7 +119,7 @@ cannot fail:
       than a flag (FR-011, C11, R7) — the operator is already on a phone; a flag puts the work on them
 - [X] T022 [P] [US1] Hermetic test for T021: at 80 columns the renderer emits the block form, and no
       line exceeds the width (FR-011, SC-007)
-- [ ] T023 [US1] Verify the in-container CLI reads the injected registry and resolves hosts without
+- [X] T023 [US1] Verify the in-container CLI reads the injected registry and resolves hosts without
       any on-arrival configuration (FR-002, C1)
 
 **Checkpoint**: US1 is independently usable — a configured CLI on arrival.

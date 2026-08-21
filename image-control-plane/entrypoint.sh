@@ -194,6 +194,38 @@ EOF
 fi
 chmod 0600 "${SSH_CONFIG}"
 
+# --- 3c. The injected host registry (Feature 017 FR-002/FR-004) -------------
+# The CLI in this container must resolve hosts with NO on-arrival configuration:
+# that is the whole of US1. The operator's registry is injected as non-secret
+# config at /run/agent-container/hosts.json, and the CLI reads it from
+# $XDG_CONFIG_HOME — so it is COPIED to where the CLI already looks rather than
+# the CLI being taught a second location.
+#
+# Copied, not symlinked: /run is tmpfs and vanishes on restart, and a dangling
+# symlink at the CLI's config path reads as a corrupt registry rather than an
+# absent one. The copy is refreshed on every boot from whatever the current
+# deploy injected, so a redeploy is how the snapshot advances.
+#
+# IT IS A SNAPSHOT and the log says so. A host registered on the operator's
+# machine after this deploy is invisible here until redeploy — stating it in the
+# boot log means the operator meets that fact before it confuses them.
+CP_CONFIG_DIR="${XDG_CONFIG_HOME:-${AGENT_CONTAINER_HOME}/.config}/agent-container"
+INJECTED_REGISTRY="${INJECT_DIR}/hosts.json"
+if [[ -f "${INJECTED_REGISTRY}" ]]; then
+    mkdir -p "${CP_CONFIG_DIR}"
+    if cp "${INJECTED_REGISTRY}" "${CP_CONFIG_DIR}/hosts.json"; then
+        chmod 0644 "${CP_CONFIG_DIR}/hosts.json"
+        log "host registry installed ($(jq -r '.hosts | length' "${CP_CONFIG_DIR}/hosts.json" 2>/dev/null || echo '?') host(s)) — a SNAPSHOT; a host registered later needs a redeploy to appear"
+    else
+        # LOUD. The CLI would start and resolve no hosts, which looks like an
+        # empty fleet rather than a broken install — and an operator who
+        # attached to manage something would conclude it was gone.
+        log "WARNING: could not install the injected host registry; the CLI here will resolve NO hosts"
+    fi
+else
+    log "no host registry was injected; the CLI here will resolve no hosts until you redeploy with hosts registered"
+fi
+
 # --- 4. sshd ----------------------------------------------------------------
 # Daemonize (no -D) so the entrypoint can continue to start tmux and tail.
 # AGENT_CONTAINER_SSHD lets the test harness substitute a stub.
