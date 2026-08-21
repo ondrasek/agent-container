@@ -56,6 +56,39 @@ def test_the_payload_carries_the_task_by_default(wiz):
     assert "task" in wiz.RECORD_PAYLOAD_FIELDS
 
 
+# --- `build` and the two images (T004) ---------------------------------------
+
+
+def test_build_REFUSES_the_control_plane_image_without_a_resolvable_version(wiz):
+    """The control-plane image PINS the CLI it installs, so building it without a
+    resolvable version would need a default — and a default is a pin that goes
+    stale on every release. The first version of that Dockerfile defaulted to
+    0.31.0 and 0.32.0 shipped the same day, which would have installed a CLI older
+    than the tree it was built from while the image carried no label to say so.
+
+    The agent image is deliberately NOT refused: it carries no CLI, so an absent
+    version label there is honestly *unknown* and costs nothing.
+    """
+    body = _func_body(Path(wiz.__file__).read_text(), "do_build")
+    skip = body.index("skipping the control-plane image")
+    # The refusal is conditioned on the stamp, not on the directory existing.
+    assert "elif not stamped:" in body[:skip]
+    assert "AGENT_CONTAINER_PYPI_VERSION" in body
+
+
+def test_the_control_plane_dockerfile_has_NO_default_version(wiz):
+    """Asserted on the file, because the CLI's refusal and the Dockerfile's
+    default are two independent ways to end up installing a version nobody chose,
+    and closing one says nothing about the other."""
+    df = (Path(wiz.__file__).parents[1] / "image-control-plane" / "Dockerfile").read_text()
+    assert "ARG AGENT_CONTAINER_PYPI_VERSION=\n" in df, (
+        "the pinned CLI version has a DEFAULT, which goes stale on every release"
+    )
+    assert 'if [ -z "${AGENT_CONTAINER_PYPI_VERSION}" ]' in df, (
+        "a bare `docker build` with no version would install whatever pip resolves"
+    )
+
+
 # --- the closure that IS the no-credentials claim (FR-009c, T046) ------------
 
 

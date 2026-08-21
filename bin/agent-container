@@ -6087,10 +6087,24 @@ def do_build(tag: str, context: Path | None = None) -> None:
     #
     # A custom `tag` names the AGENT image only. The control-plane image keeps its
     # own name: they are different artifacts, and one tag cannot mean both.
+    # FR-012a/FR-012b: stamp the building CLI's version, and OMIT the arg entirely
+    # when it cannot be resolved. `_resolve_version()` returns "0.0.0+unknown" in that
+    # case, and stamping that would assert a version nobody has — an unstamped image
+    # is honestly *unknown*, which is what `doctor` reports.
+    #
+    # Resolved ONCE, before the target list, so the two images cannot end up
+    # carrying different versions — FR-016 compares the control plane's version
+    # against an environment's, and two stamps from one `build` disagreeing would
+    # make that comparison report a drift that never happened.
+    version = _resolve_version()
+    stamped = bool(version) and not version.endswith("+unknown")
+    if not stamped:
+        warn(
+            f"building without a version stamp ({version}) — `doctor` will report these "
+            f"images' freshness as unknown, which is correct rather than unfortunate"
+        )
     targets = [(tag, AGENT_IMAGE_DIR)]
-    if (ctx / CONTROL_PLANE_IMAGE_DIR / "Dockerfile").is_file():
-        targets.append((CONTROL_PLANE_IMAGE_NAME, CONTROL_PLANE_IMAGE_DIR))
-    else:
+    if not (ctx / CONTROL_PLANE_IMAGE_DIR / "Dockerfile").is_file():
         # Named, not silent. A checkout predating Feature 017 builds the agent
         # image and says why the second one is absent; the alternative is a
         # `up --role control-plane` that fails later on a missing image with
@@ -6099,22 +6113,21 @@ def do_build(tag: str, context: Path | None = None) -> None:
             f"{CONTROL_PLANE_IMAGE_DIR}/Dockerfile is not in this checkout — building the "
             "agent image only. `up --role control-plane` will have no image to select"
         )
-    # FR-012a/FR-012b: stamp the building CLI's version, and OMIT the arg entirely
-    # when it cannot be resolved. `_resolve_version()` returns "0.0.0+unknown" in that
-    # case, and stamping that would assert a version nobody has — an unstamped image
-    # is honestly *unknown*, which is what `doctor` reports.
-    #
-    # Resolved ONCE, outside the loop, so the two images cannot end up carrying
-    # different versions — FR-016 compares the control plane's version against an
-    # environment's, and two stamps from one `build` disagreeing would make that
-    # comparison report a drift that never happened.
-    version = _resolve_version()
-    stamped = bool(version) and not version.endswith("+unknown")
-    if not stamped:
+    elif not stamped:
+        # REFUSED rather than built with a default. That image INSTALLS the CLI at
+        # a pinned version, and building it without a resolvable version would
+        # either need a default — a pin that goes stale on every release — or
+        # install something nobody chose. The agent image is different: it carries
+        # no CLI, so an absent label there is honestly *unknown* and costs nothing.
         warn(
-            f"building without a version stamp ({version}) — `doctor` will report these "
-            f"images' freshness as unknown, which is correct rather than unfortunate"
+            f"skipping the control-plane image: the CLI version could not be resolved "
+            f"({version}), and that image PINS the CLI it installs. Building it would "
+            f"install a version nobody chose. Build from a checkout with a resolvable "
+            f"version, or pass --build-arg AGENT_CONTAINER_PYPI_VERSION explicitly to "
+            f"`{detect_runtime()} build`"
         )
+    else:
+        targets.append((CONTROL_PLANE_IMAGE_NAME, CONTROL_PLANE_IMAGE_DIR))
     for image_tag, subdir in targets:
         # Feature 011 FR-006/FR-007: the context is the IMAGE DIRECTORY, not the
         # checkout root. Narrow BY CONSTRUCTION — the directory boundary is the

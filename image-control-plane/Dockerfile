@@ -94,8 +94,25 @@ RUN apt-get update \
 # (PEP 668). A venv would work too, but it puts the console script somewhere
 # nothing else in the image looks; this is a single-purpose image whose only
 # Python consumer IS this tool.
-ARG AGENT_CONTAINER_PYPI_VERSION=0.31.0
+#
+# NO DEFAULT, AND THE BUILD FAILS WITHOUT IT. A default version is a pin that
+# goes stale on every release: the first version of this file defaulted to
+# 0.31.0, and 0.32.0 shipped the same day. An unstamped build would then have
+# installed a CLI older than the tree it was built from, while the image carried
+# no label to say so — the label and the installed CLI are the two things FR-016
+# compares, and a silent default makes them disagree.
+#
+# `build` refuses to produce this image when it cannot resolve a version, so the
+# failure below is reachable only from a bare `docker build`, where naming the
+# requirement is exactly right.
+ARG AGENT_CONTAINER_PYPI_VERSION=
 RUN set -eux; \
+    if [ -z "${AGENT_CONTAINER_PYPI_VERSION}" ]; then \
+        echo "AGENT_CONTAINER_PYPI_VERSION is required: this image pins the CLI it installs," >&2; \
+        echo "and a default would install a version nobody chose. Use 'agent-container build'," >&2; \
+        echo "or pass --build-arg AGENT_CONTAINER_PYPI_VERSION=<version>." >&2; \
+        exit 1; \
+    fi; \
     python3 -m pip install --no-cache-dir --break-system-packages \
         "agent_container==${AGENT_CONTAINER_PYPI_VERSION}"; \
     agent-container --help > /dev/null; \
