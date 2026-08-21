@@ -5741,3 +5741,54 @@ def test_run_id_exports_whatever_the_task_setting(acc):
         )
         ids = re.findall(r'"stringValue":\s*"(\d{8}T\d{6}Z-[^"]+)"', body)
         assert ids, f"no usable run id reached the collector (exclude={exclude}): {body[:400]}"
+
+
+def test_the_two_legs_RECONCILE_over_a_window(acc):
+    """S19 / SC-020 / C17 — the reconciliation, end to end.
+
+    Hermetic tests pin the window arithmetic and the both-directions reporting.
+    This is the part they cannot show: that the ids a real exporter sent and the
+    ids the local leg marked `accepted` are THE SAME SET, which is only true
+    because both legs carry identical payloads from one definition.
+
+    A divergence is then INJECTED, because agreement on a healthy system proves
+    only that the comparison runs. The direction chosen is the serious one: a
+    record marked accepted locally that the collector does not hold.
+    """
+    with _collector("accept", 9540) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9540))
+        acc.up("recon", wait=False, mode="headless", task="echo reconcile-me")
+        _wait_for_container_exit("agent-container-recon")
+        _wait_until(lambda: log.exists() and log.stat().st_size > 0, "a record at the collector")
+        acc.cli([*AGENT_CONTAINER, "telemetry", "collect"])
+        collector_ids = sorted(
+            set(re.findall(r'"(\d{8}T\d{6}Z-[^"]+)"', log.read_text("utf-8", "replace")))
+        )
+
+    assert collector_ids, "no run ids reached the collector"
+    ids_file = acc.tmp / "collector-ids.txt"
+    ids_file.write_text("\n".join(collector_ids) + "\n")
+
+    # AGREEMENT.
+    r = acc.cli([*AGENT_CONTAINER, "telemetry", "reconcile",
+                 "--collector-ids", str(ids_file), "--json"])  # fmt: skip
+    data = json.loads(r.stdout).get("data", {})
+    assert data.get("compared") is True, f"no comparison was made: {data}"
+    assert data.get("agree") is True, (
+        f"the legs disagreed on a healthy system: {data}. `missing_at_collector` "
+        f"means the local leg claims a delivery that did not land."
+    )
+    assert r.returncode == 0
+
+    # INJECTED DIVERGENCE — remove one id from the collector's side and require it
+    # to be REPORTED and to fail the run. Agreement alone would prove only that
+    # the comparison executes.
+    ids_file.write_text("\n".join(collector_ids[1:]) + "\n")
+    r2 = acc.cli([*AGENT_CONTAINER, "telemetry", "reconcile",
+                  "--collector-ids", str(ids_file), "--json"])  # fmt: skip
+    data2 = json.loads(r2.stdout).get("data", {})
+    assert data2.get("agree") is False, f"a removed record was not detected: {data2}"
+    assert collector_ids[0] in (data2.get("missing_at_collector") or []), (
+        f"divergence was detected but the record was not NAMED: {data2}"
+    )
+    assert r2.returncode != 0, "a divergent reconciliation exited 0"
