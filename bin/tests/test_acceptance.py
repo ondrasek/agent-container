@@ -5615,10 +5615,19 @@ def test_management_output_is_legible_at_80_COLUMNS(acc, _control_plane_image):
     shape assertion and fail an operator on a phone.
     """
     port = acc.up("hub8", role="control-plane",
-                  authorized_key=[_gen_keypair(acc.tmp / "cols").with_suffix(".pub")])  # fmt: skip
+                  authorized_key=[_gen_keypair(acc.tmp / "cols").with_suffix(".pub")],
+                  mount=[f"{SCRIPT_PATH}:/mnt/agent-container-under-test:ro"])  # fmt: skip
     key = acc.tmp / "cols"
     # `-tt` forces a pty, so the CLI measures a terminal rather than a pipe.
-    r = _ssh(port, key, "stty cols 80 2>/dev/null; COLUMNS=80 agent-container list", tty=True)
+    #
+    # And the WORKING-TREE CLI, not the installed one: narrow rendering is new in
+    # 017, so the released copy inside the image renders the wide form and this
+    # would measure the wrong binary (see _exec_working_tree_cli).
+    r = _ssh(
+        port, key,
+        "stty cols 80 2>/dev/null; COLUMNS=80 python3 /mnt/agent-container-under-test list",
+        tty=True,
+    )  # fmt: skip
     assert r.returncode == 0, f"`list` failed at 80 columns:\n{r.stderr}"
     over = [ln for ln in r.stdout.splitlines() if len(ln.rstrip("\r\n")) > 80]
     assert not over, f"lines exceed 80 columns inside the control plane: {over[:3]}"
