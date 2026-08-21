@@ -1432,3 +1432,100 @@ def test_enumeration_never_syncs_the_operators_inventory(wiz):
             f"gather_rows reads the durable inventory ({durable}); the control plane "
             "cannot see that file and its live view is the truth"
         )
+
+
+# --- scope: declared, visible, and refused when out of it (T028/T031/T033/T034)
+
+
+def test_the_scope_renderer_is_SHARED_by_the_statement_and_status(wiz):
+    """SC-004 is that intent is visible in advance and comparable later. Two
+    renderers would let the before and after disagree, and the comparison would
+    then be between two renderings rather than between intent and reality."""
+    body = _func_body(Path(wiz.__file__).read_text(), "state_control_plane_consequences")
+    assert "report_control_plane_scope(" in body
+
+
+def test_an_empty_scope_says_it_reaches_NOTHING(wiz):
+    """Absent and empty are opposite, and the empty case is the one an operator
+    misreads as "everything"."""
+    lines = wiz.report_control_plane_scope("hub", [])
+    assert "EMPTY" in lines[0]
+    assert "reaches" in lines[0] and "nothing" in lines[0]
+
+
+def test_the_scope_report_ALWAYS_says_it_is_intent(wiz):
+    """In both branches. An operator who read the host list as a boundary would be
+    wrong, and the clause that says so must not be the one that only appears when
+    the list is empty."""
+    for hosts in ([], ["vps1", "vps2"]):
+        lines = wiz.report_control_plane_scope("hub", hosts)
+        assert any("INTENT" in ln for ln in lines), hosts
+        assert any("authorised" in ln for ln in lines), hosts
+
+
+def test_out_of_scope_is_a_NO_OP_outside_a_control_plane(wiz, monkeypatch):
+    """On the operator's own machine there is no scope to be out of."""
+    monkeypatch.delenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", raising=False)
+    wiz.refuse_out_of_scope("", "any-host")  # must not raise
+
+
+def test_an_out_of_scope_host_FAILS_VISIBLY(wiz, monkeypatch):
+    """FR-005/SC-003: visibly, rather than partially succeeding. The difference is
+    between "nothing happened" and "three hosts changed and then it stopped"."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    monkeypatch.setattr(wiz, "control_plane_permitted_hosts", lambda _n: ["vps1"])
+    with pytest.raises(wiz.Fatal, match="not in hub's declared scope"):
+        wiz.refuse_out_of_scope("", "vps9")
+    # And an in-scope host passes.
+    wiz.refuse_out_of_scope("", "vps1")
+
+
+def test_the_refusal_does_NOT_claim_to_be_a_boundary(wiz):
+    """Reach is where the key is authorised, outside the container. A host omitted
+    from the declaration but authorised anyway is still reachable, and an operator
+    who read this refusal as a guarantee would be wrong."""
+    doc = wiz.refuse_out_of_scope.__doc__ or ""
+    assert "NOT THE SECURITY BOUNDARY" in doc
+
+
+def test_the_scope_guard_wraps_the_resolver_rather_than_its_branches(wiz):
+    """The resolver has four exits. A check placed in each would be bypassed by a
+    fifth added later, while the declaration still read as governing — so the guard
+    is a wrapper, which cannot miss a path."""
+    src = Path(wiz.__file__).read_text()
+    body = _func_body(src, "resolve_deploy_host")
+    assert "_resolve_deploy_host_unscoped(" in body
+    assert "refuse_out_of_scope(" in body
+    # The inner resolver must NOT carry its own copy of the check.
+    inner = _func_body(src, "_resolve_deploy_host_unscoped")
+    assert "refuse_out_of_scope" not in inner
+
+
+def test_the_key_is_LOCKED_at_boot_with_no_agent_started(wiz):
+    """FR-007a/C5: locked whenever nobody is attached, and the passphrase is
+    supplied on connect.
+
+    Starting an ssh-agent at boot would unlock the key for the container's
+    lifetime — precisely the property being refused — and nothing would look
+    wrong.
+    """
+    ep = (Path(wiz.__file__).parents[1] / "image-control-plane" / "entrypoint.sh").read_text()
+    code = "\n".join(ln for ln in ep.splitlines() if not ln.strip().startswith("#"))
+    assert "ssh-agent" not in code, "the control-plane entrypoint starts an ssh-agent at boot"
+    assert "ssh-add" not in code, "the control-plane entrypoint adds the key at boot"
+    # And it NOTICES a pre-set agent socket rather than trusting the absence.
+    assert "SSH_AUTH_SOCK" in ep
+
+
+def test_the_pre_deploy_statement_names_ALL_THREE_consequences(wiz, monkeypatch):
+    """T033/C19. Omitting the no-recovery clause is the one an operator only
+    discovers after the loss, so its presence is asserted rather than assumed."""
+    lines: list[str] = []
+    monkeypatch.setattr(wiz, "log", lambda m: lines.append(m))
+    wiz.state_control_plane_consequences("hub", ["vps1"])
+    out = " ".join(lines)
+    assert "holds whatever the container holds" in out
+    assert "vps1" in out
+    assert "NO RECOVERY" in out
+    # And it names what to do about a loss, not only that it is unrecoverable.
+    assert "redeploy" in out and "revoke" in out

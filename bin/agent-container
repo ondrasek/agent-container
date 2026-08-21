@@ -7336,9 +7336,29 @@ def implicit_local_host(rt: str | None = None) -> dict:
 
 
 def resolve_deploy_host(host_name: str | None) -> tuple[str, dict]:
+    """FR-005 guard, wrapping the resolution below.
+
+    A WRAPPER rather than a check at each return point, and that is the whole
+    reason it exists: the resolver has four exits, and a fifth added later would
+    silently bypass a check placed in the other four while the declaration still
+    read as governing. A wrapper cannot miss a path.
+    """
+    resolved_name, rec = _resolve_deploy_host_unscoped(host_name)
+    refuse_out_of_scope("", resolved_name)
+    return resolved_name, rec
+
+
+def _resolve_deploy_host_unscoped(host_name: str | None) -> tuple[str, dict]:
     """Resolve (host_name, host_record) for a deploy/lifecycle op. An explicit
     --host must exist; otherwise the registry default; and if the registry is
-    empty, an implicit local host (behaves like the pre-multi-host tool)."""
+    empty, an implicit local host (behaves like the pre-multi-host tool).
+
+    Feature 017 FR-005: when running INSIDE a control plane, a host outside the
+    declared scope is REFUSED here — the one place every deploy and lifecycle op
+    resolves a host, so no command can reach a host by a path that skips the
+    check. Refusing in each command would leave whichever one was added next
+    unguarded while the declaration still read as governing.
+    """
     reg = load_registry()
     if host_name is not None:
         h = get_host(reg, host_name)
@@ -9822,6 +9842,55 @@ def print_control_plane_passphrase_once(host_rec: dict, name: str) -> bool:
     return True
 
 
+def refuse_out_of_scope(name: str, host_name: str) -> None:
+    """FR-005/SC-003: an out-of-scope action fails VISIBLY, never partially.
+
+    Checked only when running INSIDE a control plane — on the operator's own
+    machine there is no scope to be out of.
+
+    THIS IS NOT THE SECURITY BOUNDARY and the message says so. Reach is where the
+    public key is authorised, outside the container; a host omitted from the
+    declaration but authorised anyway is still reachable, and an operator who read
+    this refusal as a guarantee would be wrong. It exists so a MISTAKE fails
+    loudly at the first host rather than half-way through a fleet-wide action —
+    the difference between "nothing happened" and "three hosts changed and then it
+    stopped", which is the state FR-005 calls partially succeeding.
+    """
+    me = self_control_plane_name()
+    if me is None:
+        return
+    declared = control_plane_permitted_hosts(me)
+    if host_name in declared:
+        return
+    die(
+        f"{host_name} is not in {me}'s declared scope ({', '.join(declared) or 'none'})",
+        remedy=(
+            f"add it to control_plane_hosts in settings.yaml and redeploy {me}, or run "
+            f"this from a control plane that declares it"
+        ),
+    )
+
+
+def report_control_plane_scope(name: str, hosts: list[str]) -> list[str]:
+    """The declared scope as lines, for `status` and the pre-deploy statement.
+
+    ONE renderer for both, so the scope an operator sees before deploying is
+    literally the same text they see afterwards. Two renderers would let the
+    before and after disagree, and the whole point of SC-004 is that intent is
+    visible in advance and comparable later.
+    """
+    if not hosts:
+        return [
+            f"{name}: declared scope is EMPTY — no hosts are registered, so it reaches "
+            f"nothing until you authorise its public key somewhere",
+            "a declaration of INTENT — actual reach is wherever the public key is authorised",
+        ]
+    return [
+        f"{name}: declared scope ({len(hosts)} host(s)): {', '.join(hosts)}",
+        "a declaration of INTENT — actual reach is wherever the public key is authorised",
+    ]
+
+
 def state_control_plane_consequences(name: str, hosts: list[str]) -> None:
     """FR-006, FR-017, contract C19 — said BEFORE the deploy, never after.
 
@@ -9845,14 +9914,13 @@ def state_control_plane_consequences(name: str, hosts: list[str]) -> None:
         "  1. a session in this container holds whatever the container holds. Its "
         "key stops and destroys, not only inspects"
     )
-    if hosts:
-        log(f"  2. declared scope: {', '.join(hosts)}")
-    else:
-        log(
-            "  2. declared scope: NO hosts are registered, so it will reach nothing "
-            "until you authorise its public key somewhere"
-        )
-    log("     (a declaration of intent — actual reach is wherever you authorise the public key)")
+    # SHARED renderer (report_control_plane_scope): the scope stated here is the
+    # same text `status` shows later, or "compare intent against reality" becomes a
+    # comparison of two different renderings.
+    scope_lines = report_control_plane_scope(name, hosts)
+    log(f"  2. {scope_lines[0].split(': ', 1)[1]}")
+    for extra in scope_lines[1:]:
+        log(f"     ({extra})")
     log(
         "  3. the key passphrase is printed ONCE, below, and stored NOWHERE. There "
         "is NO RECOVERY: if you lose it, redeploy for a fresh keypair and `revoke` "

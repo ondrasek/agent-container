@@ -147,20 +147,20 @@ that is visible before deploying.
 
 ### Implementation for User Story 2
 
-- [ ] T028 [US2] Declared scope on the environment, **visible before deploy** (FR-004, SC-004) — a
+- [X] T028 [US2] Declared scope on the environment, **visible before deploy** (FR-004, SC-004) — a
       declaration of intent, not an enforcement point; reach is where the key is authorised
 - [X] T029 [US2] `revoke <name>` in `bin/agent-container`: withdraw the public key from every host and
       container that trusts it, in one command (FR-008, C7)
 - [X] T030 [P] [US2] Hermetic tests for T029's target set — which hosts and containers are visited,
       and that a failure on one is reported rather than silently skipped (FR-008, C7)
-- [ ] T031 [US2] Interactive-only enforcement: the key stays **locked** whenever no operator is
+- [X] T031 [US2] Interactive-only enforcement: the key stays **locked** whenever no operator is
       attached; the passphrase is supplied **on connect** (FR-007a, C5)
 - [X] T032 [US2] State the consequences **before** deployment — that a session holds whatever the
       container holds, the declared scope, and that a lost passphrase has **no recovery** (FR-006,
       FR-017, C19, SC-004)
-- [ ] T033 [P] [US2] Hermetic test that the pre-deploy statement names all three, since omitting the
+- [X] T033 [P] [US2] Hermetic test that the pre-deploy statement names all three, since omitting the
       no-recovery clause is the one an operator only discovers after the loss (FR-017, C19)
-- [ ] T034 [P] [US2] Acceptance: an out-of-scope action fails **visibly** rather than partially
+- [X] T034 [P] [US2] Acceptance: an out-of-scope action fails **visibly** rather than partially
       succeeding (FR-005, SC-003)
 
 **Checkpoint**: US2 makes US1 safe to have shipped. Do not ship US1 alone.
