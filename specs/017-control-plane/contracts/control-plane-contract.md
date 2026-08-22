@@ -147,13 +147,31 @@ A record POSTed whose response has not arrived stays `pending`. That is correct,
 
 ## C17 — The two legs reconcile, over a defined window
 
-Over a window — **since the last successful `collect`, or an operator-supplied range** — the set of
+Over a window — **since the last successful `reconcile`, or an operator-supplied range** — the set of
 locally-`accepted` records equals the collector's, **or the difference is reported** (SC-020).
 **`pending` records are outside the window.**
 
 > *Fails without this*: a dual stack whose halves can silently diverge is two unreliable stacks. And
 > counting `pending` as divergence would fail the criterion against a healthy system with exports in
 > flight.
+
+> **CORRECTED AFTER MEASUREMENT.** This clause said *"since the last successful `collect`"*, and that
+> window is unusable: `collect` ingests records that were **written before it ran**, so a watermark
+> set at collect time puts every record it just gathered *below* the lower bound. The acceptance tier
+> demonstrated it rather than argued it — `local_accepted: 0` against `collector_holds: 2` on a
+> completely healthy system, with the collector's own ids reported as `unknown_locally`. A
+> reconciliation that cries divergence on a healthy system is worse than none, because the first thing
+> it teaches an operator is to stop believing it.
+>
+> The boundary that bounds a **comparison** is the previous comparison, so `reconcile` keeps its own
+> watermark, separate from `collect`'s — they answer different questions ("when did I last pull" vs
+> "when did I last compare"), and conflating them is what caused this. It advances **only on
+> agreement**: advancing after a reported divergence would move the boundary past records the operator
+> has not resolved, so the next run would report agreement over a window chosen to exclude the problem.
+>
+> **Known limit, accepted:** once a window has agreed, a record the collector *later loses* falls
+> outside every subsequent default window. Inherent to windowing; the operator-supplied range is the
+> answer, and `docs/observability.md` states it where an operator will read it.
 
 ## C18 — `collect` is always available, lands in the durable store, and is the only puller
 

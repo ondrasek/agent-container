@@ -322,7 +322,8 @@ and the drift would be invisible because each leg still looks correct alone.
       `accepted` locally equals the set the collector holds, **or the difference is explicitly
       reported**. Zero silent divergence. This is what makes the dual stack one system rather than two
       hopeful ones, and it is only expressible because both legs carry identical payloads (T044).
-      The window is **since the last successful `collect`** or an operator-supplied range, and
+      The window is **since the last successful `reconcile`** (corrected from `collect`, which
+      excluded the records collect had just ingested — see C17) or an operator-supplied range, and
       `pending` records are **outside** it — counting not-yet as divergence would fail this against a
       healthy system (C17, R12, S19)
 - [X] T071 [P] **Acceptance SC-014 - the exported trail is TAMPER-EVIDENT.** Destroy the host an action

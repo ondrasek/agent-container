@@ -232,6 +232,18 @@ flight.
 and `pending` records are **outside** it. Both now stated in SC-020 rather than left to an
 implementer.
 
+**SUPERSEDED IN IMPLEMENTATION — and by measurement, not by preference.** "Since the last successful
+`collect`" is unusable: `collect` ingests records **written before it ran**, so a watermark set at
+collect time puts every record it just gathered *below* the lower bound. The acceptance tier showed
+it: `local_accepted: 0` against `collector_holds: 2` on a healthy system, with the collector's own
+ids reported as `unknown_locally`.
+
+The boundary that bounds a **comparison** is the previous comparison, so `reconcile` keeps its own
+watermark and advances it only on agreement. C17, SC-020 and the data model now say `reconcile`. This
+entry is left standing rather than edited, because the decision was genuinely made here and what it
+cost is part of the record — R12 identified the right *risk* (an undefined window) and picked a
+boundary that could not carry it.
+
 ---
 
 ## R13 — `drain` and `collect` are the same act, and only one should exist

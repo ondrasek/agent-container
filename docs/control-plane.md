@@ -137,8 +137,19 @@ precedence**, not equality:
 
 ## The image
 
-A **second image** (`image-control-plane/`), not a build arg. It holds the CLI, ssh, tmux, git and
-curl — and **no agent CLI or runtime**. FR-015a wants "no agents here" to be a readable property of
+A **second image** (`image-control-plane/`), not a build arg. It holds the CLI, ssh, tmux, git, curl,
+and **both container runtime CLIENTS** (`docker-cli` and `podman-remote`) — and **no agent CLI**.
+
+The clients are load-bearing, not incidental: without one, `detect_runtime()` dies and every
+management command refuses, so the container whose job is managing containers manages nothing. Both,
+because **podman is this tool's default runtime** (ADR 0001, and `detect_runtime` prefers it on
+Linux) — an image with only `docker-cli` could manage the non-default configuration and nothing else.
+
+**Clients, never engines.** No daemon, no `dockerd`, no `podman machine`: this container talks to a
+*remote* engine over your contexts and connections. `podman-remote` specifically rather than
+`podman`, which would pull in the local engine this container must not have (Constitution II).
+
+FR-015a wants "no agents here" to be a readable property of
 the artifact rather than something you reconstruct from a build invocation, and the agent census is
 parameterised over every Dockerfile in the tree and **fails on one it has no expectation for**.
 

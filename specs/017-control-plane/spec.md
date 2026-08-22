@@ -623,7 +623,7 @@ regarding its own container is defined and safe.
   between the two legs. This is the criterion that makes the dual stack one system rather than two
   hopeful ones, and it is only expressible because both legs carry identical payloads (FR-009f).
 
-  **The window is: since the last successful `collect`, or an operator-supplied range.** Naming it
+  **The window is: since the last successful `reconcile`, or an operator-supplied range.** Naming it
   matters — "any window" cannot be executed, because an implementer cannot tell which records are in
   scope and a test cannot fail deterministically. Records still `pending` at the moment of comparison
   are **outside** the window rather than counted as divergence: they have not finished being

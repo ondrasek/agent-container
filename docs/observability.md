@@ -492,7 +492,7 @@ terminal, and forcing them would duplicate records or repeat refusals.
 agent-container telemetry reconcile --collector-ids ids.txt
 ```
 
-Over a window — **since the last successful `collect`**, or a range you supply — the set of records
+Over a window — **since the last successful `reconcile`**, or a range you supply — the set of records
 marked `accepted` locally must equal the set your collector holds, **or the difference is reported**.
 Zero silent divergence, in **both** directions:
 
@@ -510,6 +510,22 @@ would assert agreement that was never checked.
 The watermark advances **only after a complete `collect`**. A partial one that advanced it would make
 the next reconciliation treat the unreached hosts as "before the window" and silently exclude exactly
 the records that are missing.
+
+### What reconciliation does NOT catch
+
+**Once a window has agreed, a record the collector later LOSES is not detected.** The window's lower
+bound moves past settled history, so that record falls outside every subsequent default comparison.
+
+This is inherent to windowing, which is a deliberate choice: comparing all history on every run would
+mean re-fetching the collector's entire contents to answer a question about the last hour. The
+operator-supplied range exists for precisely this case —
+
+```sh
+agent-container telemetry reconcile --since 2026-01-01T00:00:00Z --collector-ids ids.txt
+```
+
+— so re-examining settled history is available when you have reason to, and is not the default
+because a default that expensive is one nobody runs.
 
 ## See also
 

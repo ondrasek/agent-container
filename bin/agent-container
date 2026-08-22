@@ -16721,7 +16721,11 @@ def telemetry_collect(
 @telemetry_app.command("reconcile")
 def telemetry_reconcile(
     since: str | None = typer.Option(
-        None, "--since", help="Window lower bound (RFC3339). Default: the last successful collect."
+        None,
+        "--since",
+        help="Window lower bound (RFC3339). Default: the last successful reconcile. "
+        "Pass an explicit range to re-examine settled history — a record the collector "
+        "loses AFTER a window agreed is outside every later default window.",
     ),
     until: str | None = typer.Option(None, "--until", help="Window upper bound (RFC3339)."),
     collector_ids: Path | None = typer.Option(
@@ -16735,7 +16739,7 @@ def telemetry_reconcile(
     """Do the two legs agree? (SC-020)
 
     Compares locally-`accepted` records against the set your collector holds, over
-    a window: since the last successful `collect`, or a range you supply.
+    a window: since the last successful `reconcile`, or a range you supply.
     `pending` records are OUTSIDE the window — they have not finished exporting,
     and counting them as divergence would fail this against a healthy system.
 

@@ -150,7 +150,7 @@ duplicate it at the collector, and re-exporting a rejected one repeats a refusal
 
 Not an entity — a comparison, modelled here because its scope is the part that gets wrong.
 
-Over a **defined window** — since the last successful `collect`, or an operator-supplied range — the
+Over a **defined window** — since the last successful `reconcile`, or an operator-supplied range — the
 set of records marked `accepted` locally equals the set the collector holds, **or the difference is
 reported** (SC-020).
 
