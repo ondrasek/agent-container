@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.34.0 (2026-08-22)
+
+### Documentation
+
+- **017**: Correct C17's window, document the blind spot, fix image drift
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`f85065c`](https://github.com/ondrasek/agent-container/commit/f85065c06a618dca2c619f5a20d02a0bd955481c))
+
+### Features
+
+- **observability**: Attribute `logs` and `attach`, the last unattributed actions
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`48adf1e`](https://github.com/ondrasek/agent-container/commit/48adf1ed527ddc2e93f25e6447e7e005a92062ae))
+
+### Testing
+
+- Cover the PODMAN driver path, the tool's default runtime
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`9fe4ed3`](https://github.com/ondrasek/agent-container/commit/9fe4ed3f1b328c8c8c21c78481b966c37715b1f6))
+
+
 ## v0.33.0 (2026-08-22)
 
 ### Bug Fixes
