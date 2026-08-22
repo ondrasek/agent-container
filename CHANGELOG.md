@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v0.34.1 (2026-08-22)
+
+### Bug Fixes
+
+- **001**: Attach read hosts.conf directly, so hosts.json never superseded it
+  ([#001](https://github.com/ondrasek/agent-container/pull/1),
+  [`6d5adb7`](https://github.com/ondrasek/agent-container/commit/6d5adb7220d512aebea53e45f851f4177adba0d1))
+
+- **ci**: The release pipeline went red after every successful release
+  ([`9fc05d7`](https://github.com/ondrasek/agent-container/commit/9fc05d7fd514e9537052b4512cb98a846056cc2c))
+
+### Documentation
+
+- **020**: Specify the public-key collection, auto-injected
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`0ab138b`](https://github.com/ondrasek/agent-container/commit/0ab138ba0e91a94d9cc103b0b0fd5da12e95ca3e))
+
+- **threat-model**: Add the 020 maintenance row
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`e6ad0f8`](https://github.com/ondrasek/agent-container/commit/e6ad0f8bf1c001d8f7e44f5df3d9180890eec1a8))
+
+
 ## v0.34.0 (2026-08-22)
 
 ### Documentation
