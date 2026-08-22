@@ -1964,3 +1964,122 @@ def test_an_undeclared_scope_REFUSES_NOTHING(wiz, monkeypatch):
     monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
     monkeypatch.setattr(wiz, "control_plane_permitted_hosts", lambda _n: None)
     wiz.refuse_out_of_scope("", "any-host-at-all")  # must not raise
+
+
+# --- FR-009a's READ-ONLY half (T047, completing the gap) ---------------------
+
+
+def test_a_fleet_read_is_attributed_to_the_control_planes_OWN_volume(wiz, monkeypatch, tmp_path):
+    """FR-009a: mutating and read-only ALIKE.
+
+    A read is how an attacker finds what to act on, so a trail recording only
+    writes answers "what was changed" and not "what was looked at" — and an
+    investigation starts with the second question.
+    """
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    monkeypatch.setattr(wiz, "RUNS_MOUNT_PATH", str(runs))
+    rid = wiz.record_fleet_attribution("list", ["acme", "blog"])
+    assert rid is not None
+    written = list(runs.glob("*.json"))
+    assert len(written) == 1, f"expected exactly one record, got {written}"
+    rec = json.loads(written[0].read_text())
+    assert rec["attribution"] == "control-plane:hub"
+    assert rec["kind"] == "management"
+    assert rec["environment"] == "hub"
+    # It names WHAT IT SAW, not merely that it looked.
+    assert "acme" in rec["notes"][0] and "blog" in rec["notes"][0]
+    assert rec["export_state"] == "pending"
+
+
+def test_a_fleet_read_writes_ONE_record_not_one_per_environment(wiz, monkeypatch, tmp_path):
+    """A read of N environments is ONE action. N records would misrepresent it,
+    and the trail would then overcount reads relative to writes."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    monkeypatch.setattr(wiz, "RUNS_MOUNT_PATH", str(runs))
+    wiz.record_fleet_attribution("list", [f"env{i}" for i in range(30)])
+    assert len(list(runs.glob("*.json"))) == 1
+
+
+def test_a_truncated_observation_SAYS_it_was_truncated(wiz, monkeypatch, tmp_path):
+    """A list that looks complete is what answers "it never saw that" with
+    confidence when it did — so the truncation travels in the same words as the
+    count, exactly as Feature 016 does for changed paths."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    monkeypatch.setattr(wiz, "RUNS_MOUNT_PATH", str(runs))
+    many = [f"env{i:02d}" for i in range(wiz.ATTRIBUTION_OBSERVED_CAP + 5)]
+    wiz.record_fleet_attribution("list", many)
+    note = json.loads(next(runs.glob("*.json")).read_text())["notes"][0]
+    assert "TRUNCATED" in note
+    assert f"observed {len(many)}" in note, "the true count is not stated alongside the truncation"
+
+
+def test_a_fleet_read_is_a_NO_OP_outside_a_control_plane(wiz, monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", raising=False)
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    monkeypatch.setattr(wiz, "RUNS_MOUNT_PATH", str(runs))
+    assert wiz.record_fleet_attribution("list", ["acme"]) is None
+    assert list(runs.glob("*.json")) == []
+
+
+def test_a_missing_runs_mount_reports_UNRECORDED_and_does_not_raise(wiz, monkeypatch, tmp_path):
+    """FR-009b. Silence would make a read simply absent from the trail, which is
+    indistinguishable from no read having happened."""
+    monkeypatch.setenv("AGENT_CONTAINER_CONTROL_PLANE_NAME", "hub")
+    monkeypatch.setattr(wiz, "RUNS_MOUNT_PATH", str(tmp_path / "does-not-exist"))
+    warned: list[str] = []
+    monkeypatch.setattr(wiz, "warn", lambda m: warned.append(m))
+    assert wiz.record_fleet_attribution("list", ["acme"]) is None
+    assert warned and "UNRECORDED" in warned[0]
+
+
+def test_the_read_commands_are_attributed(wiz):
+    """Per COMMAND, so adding a read without attribution fails here rather than
+    silently leaving a hole in the trail."""
+    src = Path(wiz.__file__).read_text()
+    for func, command in (
+        ("do_list", "list"),
+        ("do_inventory_list", "inventory-list"),
+        ("do_runs_list", "runs-list"),
+    ):
+        body = _func_body(src, func)
+        assert f'record_fleet_attribution("{command}"' in body, (
+            f"{func} performs a read without recording attribution"
+        )
+
+
+def test_BOTH_list_branches_are_attributed(wiz):
+    """The `--json` path returns before the human one, so a single call in one
+    branch would attribute only half the reads — the same trap the panic envelope
+    had, where only the last branch carried its field."""
+    body = _func_body(Path(wiz.__file__).read_text(), "do_list")
+    assert body.count('record_fleet_attribution("list"') == 2
+
+
+def test_doctor_is_EXEMPT_and_stays_read_only(wiz):
+    """A DECIDED CONFLICT, not an oversight.
+
+    FR-009a wants every read recorded and a record is a WRITE. Feature 013
+    guarantees `doctor` is read-only BY COMPOSITION — a test walks the transitive
+    closure of names reachable from it and asserts no writer is among them — so
+    attributing it would break both the guarantee and that test.
+
+    013 wins because its invariant is STRUCTURAL rather than careful, and because
+    a diagnostic that changes things is one you have to think about before
+    running. A trail requirement is worth less than a diagnostic people will run.
+    """
+    src = Path(wiz.__file__).read_text()
+    body = _func_body(src, "do_doctor")
+    assert "record_fleet_attribution" not in body, (
+        "doctor now writes an attribution record, which breaks Feature 013's "
+        "read-only-by-composition guarantee"
+    )
+    # The exemption must be STATED where a reader looks, not merely be true.
+    assert "FR-009a EXEMPTION" in body
+    assert "THE COST" in body, "the exemption does not state what it costs"

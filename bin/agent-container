@@ -3405,6 +3405,24 @@ def do_doctor(name: str | None, host: str | None, as_json: bool) -> None:
     that a deploy would not work, and `unknown` is the state in which that assertion
     cannot be made (FR-011a).
     """
+    # FR-009a EXEMPTION, DECIDED AND RECORDED — `doctor` is NOT attributed.
+    #
+    # FR-009a wants every management action recorded, reads included, and a record
+    # is a WRITE. Feature 013 guarantees `doctor` is read-only BY COMPOSITION, not
+    # by intention: a test walks the transitive closure of names reachable from
+    # here and asserts no writer is among them. Attributing it would break that
+    # guarantee and that test.
+    #
+    # 013's invariant wins, and not merely because it is older. It is STRUCTURAL —
+    # enforced by the call graph rather than by care — and its rationale is that a
+    # diagnostic which changes things is one you have to think about before
+    # running, which is exactly the property an operator on a bad day needs. A
+    # trail requirement is worth less than a diagnostic people will actually run.
+    #
+    # THE COST, stated rather than hidden: a control plane running `doctor` leaves
+    # no attribution record, so the trail cannot answer "who ran a preflight".
+    # `doctor` reads declarations and resolves no credential, so what it discloses
+    # is what `list` already does — and `list` IS attributed.
     if name:
         validate_name(name)
     scope, checks = doctor_collect(name, host)
@@ -3466,6 +3484,10 @@ def do_inventory_list(as_json: bool) -> None:
     environment that no longer exists.
     """
     entries = read_inventory_entries()
+    # FR-009a: a read of the fleet's history is a read. It names what an operator
+    # deployed and where, which is reconnaissance — the reason FR-009a covers
+    # reads at all.
+    record_fleet_attribution("inventory-list", [str(e.get("name") or "?") for e in entries])
     if as_json:
         emit_json({"entries": entries})
         return
@@ -5770,6 +5792,13 @@ def export_record_via_endpoint(path: Path, endpoint: str) -> str:
     return state
 
 
+# How many observed environment names a fleet-wide attribution record carries.
+# Capped because a `list` across a large fleet would otherwise put an unbounded
+# list in every record; the cap is STATED in the record when it bites, never
+# silently applied.
+ATTRIBUTION_OBSERVED_CAP = 20
+
+
 def attribution_run_id(command: str) -> str:
     """A sortable, unique id for an attribution record.
 
@@ -5783,6 +5812,92 @@ def runs_nonce() -> str:
     """Four hex characters, from `secrets`. Separates two actions inside one
     second, which a scripted loop reaches easily."""
     return secrets.token_hex(2)
+
+
+def record_fleet_attribution(command: str, observed: list[str] | None = None) -> str | None:
+    """FR-009a for a READ-ONLY, FLEET-WIDE action — `list`, `doctor`, `inventory`.
+
+    A NO-OP unless this CLI runs inside a control plane, like its per-environment
+    sibling.
+
+    WHY READS AT ALL. A read is how an attacker finds what to act on, so a trail
+    that recorded only writes answers "what was changed" and not "what was looked
+    at" — and an investigation starts with the second question. FR-009a says
+    mutating and read-only alike, without qualification.
+
+    WHERE IT LANDS, which is the part that needed deciding. A fleet-wide read has
+    no single target environment whose volume it belongs on, and writing one record
+    per observed environment would misrepresent ONE action as N. So it lands on the
+    control plane's OWN runs volume — the only participant common to the whole
+    action — which is mounted in the container and drained by the operator's CLI on
+    next contact like any other.
+
+    That the emitter can erase its own volume is NOT an oversight here: FR-009a
+    states it delivers "attribution, not durability", and names FR-009d's export as
+    the tamper-evident half. The same is true of the per-environment records, which
+    sit on volumes a compromised control plane can also reach.
+
+    `observed` names what the read returned, so the record answers "what did it
+    see" and not merely "it looked". Capped, and the cap is STATED in the record
+    rather than silently truncating a list that would then read as complete.
+
+    NEVER FAILS THE ACTION (FR-009b). The operator asked a question; refusing to
+    answer because bookkeeping failed inverts the priority.
+    """
+    me = self_control_plane_name()
+    if me is None:
+        return None
+    runs_dir = Path(RUNS_MOUNT_PATH)
+    if not runs_dir.is_dir():
+        # Inside a control plane the runs volume is mounted. Its absence means an
+        # image built before that volume existed, so the action is UNRECORDED and
+        # says so — silence here would make a read simply absent from the trail,
+        # which is indistinguishable from no read having happened.
+        warn(
+            f"this action is UNRECORDED: {runs_dir} is not present, so there is nowhere "
+            f"to append attribution (rebuild and redeploy this control plane)"
+        )
+        return None
+    now = utc_now()
+    seen = sorted(observed or [])
+    notes = [f"observed {len(seen)}: {', '.join(seen[:ATTRIBUTION_OBSERVED_CAP])}"]
+    if len(seen) > ATTRIBUTION_OBSERVED_CAP:
+        # The truncation travels in the same words as the count, for the reason
+        # Feature 016 states about changed paths: a list that looks complete is
+        # what answers "it never saw that" with confidence when it did.
+        notes[0] += f" — LIST TRUNCATED AT {ATTRIBUTION_OBSERVED_CAP}, the read saw more"
+    try:
+        rec = build_run_record(
+            run_id=attribution_run_id(command),
+            environment=me,
+            agent=None,
+            kind=RUN_KIND_MANAGEMENT,
+            outcome="performed",
+            started_at=now,
+            ended_at=now,
+            attribution=f"{ROLE_CONTROL_PLANE}:{me}",
+            notes=notes,
+        )
+    except Fatal as e:
+        warn(f"could not construct the attribution record ({e}); this action is UNRECORDED")
+        return None
+    # Staged then renamed, and dot-prefixed while staging: the tool's listing skips
+    # that shape, so a half-written record can never be read as a finished one.
+    final = runs_dir / f"{rec['run_id']}.json"
+    staged = runs_dir / f".{rec['run_id']}.json.tmp"
+    try:
+        staged.write_text(json.dumps(rec))
+        staged.chmod(0o600)
+        staged.replace(final)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        warn(
+            f"the action was performed but is UNRECORDED — could not append attribution "
+            f"to {runs_dir} ({e}). FR-009b: the gap is reported rather than the action refused"
+        )
+        return None
+    return str(rec["run_id"])
 
 
 def record_attribution(
@@ -10954,6 +11069,11 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
         # The control plane enumerates LIVE (FR-003a) and holds no durable
         # inventory, so an unreachable host is the one thing it cannot see past.
         # SC-002 narrows to naming it rather than pretending otherwise.
+        # FR-009a, in BOTH branches. The `--json` path returns before the human
+        # one, so a single call in one branch would attribute only half the reads —
+        # the same trap the panic envelope had, where only the last branch carried
+        # its field.
+        record_fleet_attribution("list", [str(r["name"]) for r in rows])
         unreachable = sorted({str(r["host"]) for r in rows if r.get("status") == "unreachable"})
         emit_json(
             {
@@ -10972,6 +11092,9 @@ def do_list(as_json: bool, local_only: bool = False) -> None:
             }
         )
         return
+    # FR-009a in the HUMAN branch too. The `--json` path returns above, so one call
+    # would attribute only half the reads.
+    record_fleet_attribution("list", [str(r["name"]) for r in rows])
     if hint := inventory_disagreement_hint():
         warn(hint)  # FR-005a: one line, no classification — that is reconcile's job
     if terminal_is_narrow():
@@ -11576,6 +11699,11 @@ def do_runs_list(
     drain_host_records(host_name, host_rec, [environment] if environment else None)
     envs = [environment] if environment else stored_environments(host_name)
     records = stored_records(host_name, envs)
+    # FR-009a: reading the trail is itself a management action. Attributed AFTER
+    # the drain, so the record states what the read actually returned — and
+    # deliberately naming the ENVIRONMENTS rather than the run ids, which would put
+    # an unbounded list of a fleet's history into every record of reading it.
+    record_fleet_attribution("runs-list", envs.copy())
     uncertain: list[dict] = []
     if changed is not None:
         records, uncertain = select_changed(records, normalise_changed_path(changed))

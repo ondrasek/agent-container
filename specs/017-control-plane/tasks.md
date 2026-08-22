@@ -229,7 +229,18 @@ and the drift would be invisible because each leg still looks correct alone.
       `RECORD_FIELD_PROVENANCE` keeps exactly one `operator` row, asserted on the table itself
       (FR-009c, C18e) - a second field falsifies the closure while every other test passes
 - [X] T047 Attribution on every management action, mutating and read-only, recording **which** control
-      plane performed it, appended where the action lands (FR-009a, SC-013)
+      plane performed it, appended where the action lands (FR-009a, SC-013).
+      **Mutating** (`up` via the `compose_up_exec` choke point, `stop`, `start`) lands on the target
+      environment's runs volume. **Read-only, fleet-wide** (`list`, `inventory list`, `runs list`)
+      lands on the control plane's OWN runs volume — the only participant common to the whole action;
+      one record per action, never one per observed environment, with the observed set named and any
+      truncation stated. That the emitter can erase its own volume is not a gap: FR-009a delivers
+      *attribution, not durability*, and names FR-009d's export as the tamper-evident half.
+      **`doctor` is EXEMPT, decided and recorded.** A record is a write, and Feature 013 guarantees
+      `doctor` is read-only BY COMPOSITION — enforced by a call-graph test. 013 wins because that
+      invariant is structural rather than careful, and a diagnostic that changes things is one you
+      think twice about running. Cost stated in the code: the trail cannot answer "who ran a
+      preflight".
 - [X] T048 [P] A host that cannot be written to MUST NOT fail the action - report the gap and mark the
       action **unrecorded** rather than leaving it absent (FR-009b)
 

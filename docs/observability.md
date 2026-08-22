@@ -356,6 +356,33 @@ halves carried different things.
 Three classes, one shape: **attribution records** (which control plane did what), **run records**
 (Feature 016), and **egress events** (Feature 012).
 
+### What gets attributed, and where it lands
+
+Only when the CLI runs **inside a control plane** — on your own machine you are the actor, and a
+record saying so on every `list` would bury the ones that matter.
+
+| Action | Lands on |
+|---|---|
+| `up`, `stop`, `start` | the **target environment's** runs volume, on its host |
+| `list`, `inventory list`, `runs list` | the **control plane's own** runs volume |
+
+**Reads are attributed too.** A read is how an attacker finds what to act on, so a trail recording
+only writes answers *"what was changed"* and not *"what was looked at"* — and an investigation starts
+with the second question.
+
+A fleet-wide read gets **one** record, not one per environment: a read of twenty environments is one
+action, and twenty records would overcount reads against writes. The record names what the read saw,
+and says so explicitly if that list was truncated.
+
+**`doctor` is exempt.** A record is a write, and `doctor` is read-only *by composition* — a test
+walks its call graph and asserts it reaches no writer. That guarantee wins, because a diagnostic that
+changes things is one you have to think about before running. The cost: the trail cannot tell you who
+ran a preflight.
+
+**A host that cannot be written to never fails the action.** The gap is reported and the action is
+visible as unrecorded — you asked a question, and refusing to answer because bookkeeping failed
+inverts the priority.
+
 ## The export state — what the client can actually observe
 
 Every record carries one, and it is `pending` at birth.
