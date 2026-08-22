@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -5468,15 +5469,51 @@ def _host_collector_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/v1/logs"
 
 
-def _collector_url(port: int) -> str:
-    """A URL for the collector that resolves FROM INSIDE a container.
+@functools.lru_cache(maxsize=1)
+def _container_to_host_address() -> str:
+    """The address a CONTAINER uses to reach this machine — MEASURED, not assumed.
 
-    `host.docker.internal` on Docker Desktop / Lima; the default gateway
-    otherwise. Resolved once here so a failure to reach the collector is a
-    harness problem with a name, not an export that silently reads as fail-open —
-    which would make every test below pass for the wrong reason.
+    `host.docker.internal` is a Docker-Desktop/Lima convenience. On a plain Linux
+    daemon (GitHub's runners) it does not resolve at all, so every export became
+    `failed` on an unreachable endpoint — and the collector tests then asserted
+    `rejected` and got `failed`. CI went red while the same tests passed on macOS,
+    which is the worst split: the authoritative tier disagreeing with the one a
+    developer runs.
+
+    So the candidates are PROBED from inside a real container and the first that
+    answers is used. Failing that, this dies naming every address it tried —
+    because the alternative is an unreachable collector that reads as fail-open,
+    which would make every export test pass for the wrong reason.
     """
-    return f"http://host.docker.internal:{port}/v1/logs"
+    candidates = ["host.docker.internal"]
+    # The default bridge gateway, which is how a Linux container reaches its host.
+    gw = subprocess.run(
+        [RUNTIME, "network", "inspect", "bridge", "-f",
+         "{{range .IPAM.Config}}{{.Gateway}}{{end}}"],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    if gw.returncode == 0 and gw.stdout.strip():
+        candidates.append(gw.stdout.strip())
+    candidates.append("172.17.0.1")  # the conventional default, as a last resort
+
+    for host in candidates:
+        probe = subprocess.run(
+            [RUNTIME, "run", "--rm", "--entrypoint", "sh", CONTROL_PLANE_IMAGE, "-c",
+             f"getent hosts {host} >/dev/null 2>&1 && echo RESOLVES"],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        if "RESOLVES" in probe.stdout:
+            return host
+    pytest.fail(
+        f"no address lets a container reach this machine; tried {candidates}. "
+        f"Every export test would otherwise pass for the wrong reason, reading an "
+        f"unreachable collector as fail-open."
+    )
+
+
+def _collector_url(port: int) -> str:
+    """A URL for the collector that resolves FROM INSIDE a container."""
+    return f"http://{_container_to_host_address()}:{port}/v1/logs"
 
 
 def _settings(acc, **keys) -> None:
