@@ -69,10 +69,35 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # THE TAG STATE BEFORE, so the question below is "did THIS RUN release"
+          # and not "does HEAD happen to carry a tag".
+          #
+          # The previous check asked the latter, and it is true for the wrong
+          # reason on exactly one commit: the release commit PSR itself creates.
+          # A push of that commit starts another run, PSR correctly finds nothing
+          # releasable — and the pre-existing tag it made a moment ago satisfied
+          # "HEAD carries a v-tag", so publish ran against a `dist` that was never
+          # built and failed with "No such file or directory: dist".
+          #
+          # The result was a red release run after EVERY successful release. That
+          # is worse than it sounds: a pipeline that is always red on its own
+          # output teaches you to stop reading it, and the next failure that
+          # matters arrives looking exactly like the noise.
+          before="$(git tag --points-at HEAD | grep '^v' | sort || true)"
           uvx --from python-semantic-release semantic-release version
-          # A release happened iff HEAD now carries a v-tag (PSR commits then tags).
-          if git tag --points-at HEAD | grep -q '^v'; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
+          after="$(git tag --points-at HEAD | grep '^v' | sort || true)"
+          # A release happened iff a NEW v-tag appeared on HEAD during this run.
+          if [ "${before}" != "${after}" ]; then
+            # AND the artifacts exist. PSR builds them as part of `version`, so
+            # their absence means the release did not complete the way this step
+            # assumes — and uploading nothing is not a success worth reporting.
+            if [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ]; then
+              echo "released=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "released=false" >> "$GITHUB_OUTPUT"
+              echo "::error::a new tag appeared but dist/ is empty — refusing to claim a publish"
+              exit 1
+            fi
           else
             echo "released=false" >> "$GITHUB_OUTPUT"
             echo "No releasable commits since the last release — nothing to publish."
