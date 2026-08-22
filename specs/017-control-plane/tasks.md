@@ -102,12 +102,12 @@ cannot fail:
 
 ### Tests for User Story 1
 
-- [ ] T016 [P] [US1] Acceptance S1 — from outside the container, SSH in and run `list` then `stop`,
+- [X] T016 [P] [US1] Acceptance S1 — from outside the container, SSH in and run `list` then `stop`,
       configuring nothing on arrival (C1, SC-001)
-- [ ] T017 [P] [US1] Acceptance S2 — with one unreachable permitted host, it is **named as
+- [X] T017 [P] [US1] Acceptance S2 — with one unreachable permitted host, it is **named as
       unreachable**, never omitted (C2, SC-002). A short list that looks complete is worse than an
       error, because the operator acts on absence
-- [ ] T018 [P] [US1] Acceptance S11 — at 80 columns every management command is legible (C11, SC-007)
+- [X] T018 [P] [US1] Acceptance S11 — at 80 columns every management command is legible (C11, SC-007)
 
 ### Implementation for User Story 1
 
@@ -139,9 +139,9 @@ that is visible before deploying.
       granted anything, nesting and revocation both stop meaning what the spec says
 - [X] T025 [P] [US2] Acceptance S3 — the private key is `0600`, **encrypted at rest**, and no
       `PRIVATE KEY` appears anywhere on the operator's disk (C3, SC-008)
-- [ ] T026 [P] [US2] Acceptance S7 — `revoke` ends access with no per-host manual reconfiguration
+- [X] T026 [P] [US2] Acceptance S7 — `revoke` ends access with no per-host manual reconfiguration
       (C7, SC-005)
-- [ ] T027 [P] [US2] Acceptance S5 — after stop/start the key is **locked** and the environment is
+- [X] T027 [P] [US2] Acceptance S5 — after stop/start the key is **locked** and the environment is
       usable once the passphrase is supplied, with no reconfiguration and without the operator's own
       machine (C5, FR-012)
 
@@ -176,7 +176,7 @@ that is visible before deploying.
 
 - [X] T035 [P] [US3] Acceptance S8 — `panic --destroy` from inside reports the control plane as
       **excluded**, names how to stop it instead, and leaves it running (C9, SC-010, SC-006)
-- [ ] T036 [P] [US3] Acceptance S10 — silent on a PATCH difference; **advisory** when the control
+- [X] T036 [P] [US3] Acceptance S10 — silent on a PATCH difference; **advisory** when the control
       plane is newer; **REFUSED** when the environment is newer, naming redeploy as the remedy
       (C10, SC-012)
 - [X] T037 [P] [US3] Hermetic test of the semver rule by precedence, including that
@@ -287,7 +287,7 @@ and the drift would be invisible because each leg still looks correct alone.
       excluded (SC-017). **Both positions**, at the receiver: a switch verified in one position may not
       be wired at all
 
-- [ ] T065 [P] Acceptance S15 — **`run_id` exports regardless of the task setting**, so a collector
+- [X] T065 [P] Acceptance S15 — **`run_id` exports regardless of the task setting**, so a collector
       record can always be matched to its local counterpart (SC-019, C18f). Correlation is what makes
       excluding the task text cheap rather than lossy: without it, the exclusion removes the reason to
       look at the record at all
@@ -350,7 +350,7 @@ and the drift would be invisible because each leg still looks correct alone.
       carries `!` (the control-plane base-image change) for reader visibility; with
       `major_on_zero = false` that is still a **MINOR** bump pre-1.0, not a major one. Additive: a
       command, a second image, an export path; nothing removed and no flag changes meaning
-- [ ] T080 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`**,
+- [X] T080 Run `scripts/quality-gate.sh` **unpiped**, then the full acceptance tier with **no `-k`**,
       then walk **every scenario in `quickstart.md`** by hand — named as a file rather than a range,
       because a range silently narrows the moment a scenario is added, and the scenarios added last
       are the ones each described as the only check that catches its failure.
@@ -453,3 +453,29 @@ being comparable at all.
   durable copy nowhere but the operator's password manager
 - **Scope is where the key is authorised**, so no task enforces scope inside the container - that
   would be a control that cannot control
+
+---
+
+## T080 — the closing gates, as run
+
+- **`scripts/quality-gate.sh` unpiped: exit 0.** Read unpiped deliberately; `| tail` reports tail's.
+- **Full acceptance tier, no `-k`: 148 passed, 2 skipped, 0 failed** (53 min). The two skips are the
+  Hetzner provisioning scenarios, which need a billable cloud account and `HCLOUD_TOKEN`.
+- **Hermetic tier: 1474 passed.**
+- **Every quickstart scenario S1–S20 has passing acceptance coverage**, verified by scanning the
+  scenario ids against the acceptance module rather than by reading down the list. That scan is what
+  found the two gaps this feature would otherwise have shipped with: S19 (reconciliation) and S20
+  (the retry distinction) were covered hermetically, which made the scenario list *look* complete.
+
+**What the tier caught that nothing else could**, recorded because the tally is the argument for
+running it rather than trusting a green hermetic suite:
+
+| Defect | Why only a real run found it |
+|---|---|
+| The control-plane image could not install its own package | pip SKIPS incompatible releases and resolves to an ancient one — no error |
+| The image had no container runtime client | `detect_runtime()` dies, so the container that manages containers managed nothing |
+| The deploy path passed no build args | `build` worked; only `up` was broken, plus a silent Feature 013 label gap |
+| An unreachable collector was marked `rejected` (terminal) | The export "worked" either way; only the resulting STATE differs |
+| The reconciliation window excluded the records it was meant to cover | Reported divergence on a healthy system |
+| `stop` was impossible from a control plane | `list` worked, so the split was invisible from either side |
+| A shadowed test helper silently regressed three Feature 016 tests | Nothing failed at import; attribution needed a baseline at v0.31.0 |

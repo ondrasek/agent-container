@@ -5431,6 +5431,12 @@ def _collector_run_ids(log: Path) -> list[str]:
     C18f puts them precisely so they can be found without digging through a body.
     """
     ids: list[str] = []
+    if not log.exists():
+        # NO POST ARRIVED. An empty list, not a crash: "the collector received
+        # nothing" is a legitimate outcome that a caller's assertion should get to
+        # report with its own message, and a FileNotFoundError here would blame the
+        # harness for what may be a real product silence.
+        return ids
     for line in log.read_text("utf-8", "replace").splitlines():
         if not line.strip():
             continue
@@ -5445,6 +5451,21 @@ def _collector_run_ids(log: Path) -> list[str]:
                     if value:
                         ids.append(str(value))
     return sorted(set(ids))
+
+
+def _host_collector_url(port: int) -> str:
+    """A URL for the collector that resolves FROM THE OPERATOR'S MACHINE.
+
+    THE SAME COLLECTOR HAS TWO ADDRESSES, and which one is correct depends on who
+    exports. A container reaches it through `host.docker.internal`; the CLI on the
+    host reaches it on loopback, where that name does not resolve at all.
+
+    `telemetry retry` exports from the HOST, so it needs this one. Using the
+    container's address there makes the retry fail on an unreachable endpoint —
+    which is indistinguishable from the record legitimately staying `failed`, and
+    is exactly how the first version of the S20 test read as a product bug.
+    """
+    return f"http://127.0.0.1:{port}/v1/logs"
 
 
 def _collector_url(port: int) -> str:
@@ -5960,3 +5981,55 @@ def test_the_two_legs_RECONCILE_over_a_window(acc):
         f"divergence was detected but the record was not NAMED: {data2}"
     )
     assert r2.returncode != 0, "a divergent reconciliation exited 0"
+
+
+def test_S20_rejected_is_not_retried_and_failed_IS(acc):
+    """S20 / C15 / R10 — the retry distinction, against real collectors.
+
+    Hermetic tests pin `export_state_is_retryable`. This shows the consequence
+    that matters: `telemetry retry` must leave a REFUSED record alone and pick up
+    an UNREACHABLE one. Collapsing the two would either repeat a refusal forever
+    or permanently abandon a recoverable record, and both look like working
+    software until someone counts.
+
+    Two runs, two receivers: one that refuses (terminal) and one that is not
+    listening (retryable). Then a working collector is pointed at, and only the
+    retryable record may move.
+    """
+    with _collector("refuse", 9551):
+        _settings(acc, otlp_endpoint=_collector_url(9551))
+        _exporting_headless_run(acc, "s20rej", "refused-record")
+        acc.cli(["telemetry", "collect"])
+
+    # Nothing listening on 9552 — unreachable, therefore `failed` and retryable.
+    _settings(acc, otlp_endpoint=_collector_url(9552))
+    _exporting_headless_run(acc, "s20fail", "failed-record")
+    acc.cli(["telemetry", "collect"])
+
+    states = _record_states(acc)
+    assert "rejected" in states, f"no refused record to test with: {states}"
+    assert "failed" in states or "pending" in states, f"no retryable record: {states}"
+
+    # A collector that ACCEPTS. `retry` may move the retryable record and must not
+    # touch the terminal one.
+    with _collector("accept", 9553) as log:
+        # THE HOST address: `retry` exports from the operator's machine, not from a
+        # container, so `host.docker.internal` would not resolve and the retry
+        # would fail for a reason that has nothing to do with the retry rule.
+        _settings(acc, otlp_endpoint=_host_collector_url(9553))
+        r = acc.cli(["telemetry", "retry", "--json"])
+        assert r.returncode == 0, f"retry failed:\n{r.stderr}"
+        received = _collector_run_ids(log)
+        retry_payload = r.stdout
+
+    after = _record_states(acc)
+    assert "rejected" in after, (
+        f"the REFUSED record was retried and its terminal state overwritten: {after}. "
+        f"A refusal will be refused again unchanged; retrying it repeats the refusal."
+    )
+    # And the retryable one is no longer waiting.
+    assert "failed" not in after, f"the retryable record was not retried: {after}"
+    assert received, (
+        f"retry sent nothing to the working collector.\n  retry said: {retry_payload}\n"
+        f"  states before: {states}\n  states after: {after}"
+    )
