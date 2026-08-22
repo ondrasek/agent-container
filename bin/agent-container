@@ -12571,6 +12571,12 @@ def cli_attach(
     # and the exit code belong to ssh — identical to bash `exec ssh`. The argv is
     # built from the SAME ShellAction the print path renders, so `attach --print`
     # is byte-for-byte what execute runs (FR-010 parity, single source).
+    # FR-009a, and recorded BEFORE the exec because there is no after: `execvp`
+    # replaces this process, so a record written later would never be written at
+    # all. The record therefore states that the attach was INITIATED, which is the
+    # honest claim available — and it is the action most worth having, because
+    # attaching is how an operator (or whoever holds the key) gets a shell.
+    record_fleet_attribution("attach", [name])
     os.execvp("ssh", attach_shell_action(user, host, port, window).commands[0])
 
 
@@ -12629,6 +12635,15 @@ def do_logs(name: str, follow: bool, egress: bool = False) -> int:
     for an operator is the same as not existing.
     """
     validate_name(name)
+    # FR-009a: reading a container's log is a management action, and it is one of
+    # the more revealing ones — the boundary log carries every refusal.
+    #
+    # Recorded on the CONTROL PLANE'S OWN volume rather than the target
+    # environment's, because this command has no host record: it acts on the local
+    # runtime (`detect_runtime`), so there is nothing to run a write against. The
+    # environment is NAMED in the record, so the trail still answers "who read
+    # whose log" — it is the location that differs, not the content.
+    record_fleet_attribution("logs", [name])
     rt = detect_runtime()
     target = egress_container_name(name) if egress else container_name(name)
     if egress and not container_exists(rt, target):

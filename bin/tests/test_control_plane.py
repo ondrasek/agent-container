@@ -2131,3 +2131,31 @@ def test_every_driver_the_registry_accepts_has_a_client_in_the_image(wiz):
     df = (Path(wiz.__file__).parents[1] / "image-control-plane" / "Dockerfile").read_text()
     for driver, pkg in (("docker", "docker-cli"), ("podman", "podman-remote")):
         assert pkg in df, f"driver {driver!r} is accepted but has no client in the image"
+
+
+def test_logs_and_attach_are_attributed(wiz):
+    """FR-009a says EVERY management action. These two were the last unattributed
+    reads, and each is constrained in a way that decided where its record lands.
+
+    `logs` has NO host record — it acts on the local runtime — so there is nothing
+    to run a write against on the target's host. `attach` REPLACES THE PROCESS with
+    `execvp`, so a record written after it would never be written at all.
+
+    Both therefore use the control-plane-local writer, with the environment NAMED
+    in the record: the trail still answers "who read whose log", and only the
+    location differs.
+    """
+    src = Path(wiz.__file__).read_text()
+    for func, command in (("do_logs", "logs"), ("cli_attach", "attach")):
+        body = _func_body(src, func)
+        assert f'record_fleet_attribution("{command}", [name])' in body, (
+            f"{func} performs a management action without recording attribution"
+        )
+
+
+def test_attach_records_BEFORE_it_execs(wiz):
+    """`execvp` does not return. A record written after it is a record that never
+    exists, and the trail would then be missing exactly the action that hands
+    someone a shell."""
+    body = _func_body(Path(wiz.__file__).read_text(), "cli_attach")
+    assert body.index('record_fleet_attribution("attach"') < body.index("os.execvp(")
