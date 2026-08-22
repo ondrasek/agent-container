@@ -98,6 +98,22 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      - name: Ensure a podman service, so the podman driver is really covered
+        # The tool's DEFAULT runtime is podman (ADR 0001), and until now EVERY
+        # acceptance test used docker or the implicit local docker daemon — which
+        # is exactly why a control-plane image with no podman client shipped
+        # unnoticed. Installed and STARTED explicitly rather than relying on what
+        # the runner image happens to contain, so the coverage cannot quietly
+        # disappear when a runner image changes.
+        run: |
+          set -eux
+          command -v podman || sudo apt-get update -qq && sudo apt-get install -y -qq podman
+          podman --version
+          systemctl --user enable --now podman.socket 2>/dev/null || \
+            (podman system service --time=0 "unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" &)
+          sleep 3
+          podman system connection add ci "unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" || true
+          podman --connection ci ps
       - name: Run acceptance suite
         # Builds the image (docker preinstalled on ubuntu-latest) and drives real
         # containers through the rootless SSH-identity flows. `-m acceptance`

@@ -6086,3 +6086,115 @@ def test_S20_rejected_is_not_retried_and_failed_IS(acc):
         f"retry sent nothing to the working collector.\n  retry said: {retry_payload}\n"
         f"  states before: {states}\n  states after: {after}"
     )
+
+
+# --- the PODMAN driver path (ADR 0001's default runtime) ---------------------
+#
+# Every other acceptance test uses docker or the implicit local docker daemon, and
+# that blind spot is not hypothetical: it is exactly why a control-plane image with
+# no podman client shipped unnoticed. Podman is this tool's DEFAULT runtime (ADR
+# 0001; `detect_runtime` prefers it on Linux), so the driver seam deserves a real
+# exercise rather than a doctest on its argv.
+
+
+def _podman_connection() -> str | None:
+    """A working podman connection name, or None.
+
+    Prefers one the operator already has; the CI job creates `ci` explicitly. The
+    connection is VERIFIED by asking it something, not merely listed — a stale
+    entry pointing at a dead socket lists fine and answers nothing, which would
+    make this test fail for the wrong reason.
+    """
+    if not shutil.which("podman"):
+        return None
+    listed = subprocess.run(
+        ["podman", "system", "connection", "list", "--format", "{{.Name}}"],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    if listed.returncode != 0:
+        return None
+    for name in [n.strip() for n in listed.stdout.splitlines() if n.strip()]:
+        probe = subprocess.run(
+            ["podman", "--connection", name, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            return name
+    return None
+
+
+@pytest.fixture
+def podman_connection() -> str:
+    """A verified podman connection, REQUIRED IN CI.
+
+    Gated on availability locally, because not every developer machine runs
+    podman. NEVER gated in CI: the whole point of this test is that the default
+    runtime is covered by the authoritative tier, and a skip there would restore
+    the blind spot it exists to close. The CI job installs and starts podman
+    explicitly, so an absence means that step regressed and the failure says so.
+    """
+    name = _podman_connection()
+    if name is None:
+        if os.environ.get("CI"):
+            pytest.fail(
+                "no working podman connection in CI. The acceptance job installs "
+                "and starts one on purpose — if that step changed, this coverage "
+                "vanished with it, and the default runtime went untested."
+            )
+        pytest.skip("no working podman connection on this machine (podman is optional locally)")
+    return name
+
+
+def test_a_podman_host_is_reachable_and_not_reported_unreachable(acc, podman_connection):
+    """The driver seam, end to end, against a real podman engine.
+
+    `driver_runtime_argv` builds `podman --connection <name>` for such a host, and
+    nothing above it had ever been exercised: a missing or broken podman client
+    shows up here as a host reported `unreachable`, which is precisely how the
+    control-plane image's missing client would have surfaced.
+    """
+    add = acc.cli(["host", "add", "pmhost", "--driver", "podman",
+                   "--connection", podman_connection, "--address", "localhost"])  # fmt: skip
+    assert add.returncode == 0, f"could not register a podman host:\n{add.stderr}"
+
+    r = acc.cli(["list", "--json"])
+    assert r.returncode == 0, f"`list` failed with a podman host registered:\n{r.stderr}"
+    data = json.loads(r.stdout).get("data", {})
+    assert "pmhost" not in (data.get("unreachable_hosts") or []), (
+        f"the podman host was reported unreachable, so the podman client or "
+        f"connection is not working: {data}"
+    )
+    assert data.get("complete") is True, f"the listing is incomplete: {data}"
+
+
+def test_the_tool_invokes_podman_for_a_podman_host(acc, podman_connection):
+    """What `list` reaching the host does NOT prove: that podman was what answered.
+
+    A docker daemon on the same machine could satisfy a reachability check while
+    the driver seam silently used the wrong binary. So this asserts the container
+    is visible to PODMAN specifically — the engine named by the host's driver.
+    """
+    add = acc.cli(["host", "add", "pmhost2", "--driver", "podman",
+                   "--connection", podman_connection, "--address", "localhost"])  # fmt: skip
+    assert add.returncode == 0, add.stderr
+    r = acc.cli(["host", "show", "pmhost2", "--json"])
+    assert r.returncode == 0, r.stderr
+    rec = json.loads(r.stdout).get("data", {})
+    assert rec.get("driver") == "podman", f"the driver was not recorded as podman: {rec}"
+    # And the seam builds the podman argv for it, from the record the tool stored.
+    argv = _wiz_driver_argv({"driver": "podman", "context": podman_connection})
+    assert argv[:2] == ["podman", "--connection"], argv
+
+
+def _wiz_driver_argv(host: dict) -> list[str]:
+    """`driver_runtime_argv` from the CLI under test, loaded the way conftest does."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_loader(
+        "_acc_wiz", SourceFileLoader("_acc_wiz", str(SCRIPT_PATH))
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.driver_runtime_argv(host)
