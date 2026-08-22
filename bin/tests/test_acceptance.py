@@ -5494,20 +5494,36 @@ def _container_to_host_address() -> str:
     )  # fmt: skip
     if gw.returncode == 0 and gw.stdout.strip():
         candidates.append(gw.stdout.strip())
-    candidates.append("172.17.0.1")  # the conventional default, as a last resort
+    if "172.17.0.1" not in candidates:
+        candidates.append("172.17.0.1")  # the conventional default, as a last resort
 
-    for host in candidates:
-        probe = subprocess.run(
-            [RUNTIME, "run", "--rm", "--entrypoint", "sh", CONTROL_PLANE_IMAGE, "-c",
-             f"getent hosts {host} >/dev/null 2>&1 && echo RESOLVES"],
-            capture_output=True, text=True, timeout=120,
-        )  # fmt: skip
-        if "RESOLVES" in probe.stdout:
-            return host
+    # REACHABILITY, NOT RESOLUTION. The first version of this probe used
+    # `getent hosts`, which does a REVERSE lookup for an IP literal — so a
+    # perfectly reachable bridge gateway with no PTR record was rejected, and CI
+    # failed with "no address lets a container reach this machine" while the
+    # address sat right there. Measuring the wrong thing loudly is still measuring
+    # the wrong thing.
+    #
+    # So a real listener is opened here and each candidate is asked to CONNECT to
+    # it from inside a container. That is the property the collector tests need,
+    # stated exactly.
+    with socket.socket() as probe_sock:
+        probe_sock.bind(("0.0.0.0", 0))  # noqa: S104 — a listener the container must reach
+        probe_sock.listen(8)
+        probe_port = probe_sock.getsockname()[1]
+        for host in candidates:
+            got = subprocess.run(
+                [RUNTIME, "run", "--rm", "--entrypoint", "bash", CONTROL_PLANE_IMAGE, "-c",
+                 f"timeout 5 bash -c 'exec 3<>/dev/tcp/{host}/{probe_port}' "
+                 f"2>/dev/null && echo CONNECTS"],
+                capture_output=True, text=True, timeout=120,
+            )  # fmt: skip
+            if "CONNECTS" in got.stdout:
+                return host
     pytest.fail(
-        f"no address lets a container reach this machine; tried {candidates}. "
-        f"Every export test would otherwise pass for the wrong reason, reading an "
-        f"unreachable collector as fail-open."
+        f"no address lets a container reach this machine; tried {candidates} against "
+        f"a real listener. Every export test would otherwise pass for the wrong "
+        f"reason, reading an unreachable collector as fail-open."
     )
 
 
