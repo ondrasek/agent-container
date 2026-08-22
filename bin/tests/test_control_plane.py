@@ -2083,3 +2083,51 @@ def test_doctor_is_EXEMPT_and_stays_read_only(wiz):
     # The exemption must be STATED where a reader looks, not merely be true.
     assert "FR-009a EXEMPTION" in body
     assert "THE COST" in body, "the exemption does not state what it costs"
+
+
+# --- the control plane needs BOTH runtime clients ----------------------------
+
+
+def test_the_control_plane_dockerfile_installs_BOTH_runtime_clients(wiz):
+    """The tool's DEFAULT runtime is podman, so docker-cli alone is not enough.
+
+    ADR 0001 chooses Podman; `detect_runtime` prefers podman on Linux (the VPS);
+    the README's VPS setup installs Podman; and `driver_runtime_argv` invokes
+    `podman --connection <name>` for a host registered `driver: podman`. An image
+    with only docker-cli can manage the NON-DEFAULT configuration and nothing else
+    — every command against a podman host dies on a missing binary.
+
+    The acceptance tier cannot catch this: every test registers a docker host or
+    uses the implicit local docker daemon, so the gap is invisible unless a podman
+    host exists. Hence a source-level check.
+    """
+    df = (Path(wiz.__file__).parents[1] / "image-control-plane" / "Dockerfile").read_text()
+    assert "docker-cli" in df
+    assert "podman-remote" in df, (
+        "the control-plane image has no podman client, so it cannot manage a host "
+        "registered with the tool's DEFAULT driver"
+    )
+    # `podman-remote`, NOT `podman`: the latter pulls the local engine this
+    # container must not have (Constitution II).
+    assert not re.search(r"install[^\n]*\bpodman\b(?!-remote)", df), (
+        "the full `podman` package would install a local engine; only the remote "
+        "client belongs here"
+    )
+    # And `podman` must be on PATH under that name, because that is what
+    # `driver_runtime_argv` invokes.
+    assert "/usr/local/bin/podman" in df
+
+
+def test_every_driver_the_registry_accepts_has_a_client_in_the_image(wiz):
+    """Closes the loop rather than listing two names.
+
+    A third driver added to the registry's accepted set would need a client here,
+    and this fails until one is present — the same shape as the Dockerfile census.
+    """
+    src = Path(wiz.__file__).read_text()
+    # The accepted set, read from the validation site rather than restated.
+    m = re.search(r'if driver not in \("docker", "podman"\)', src)
+    assert m, "the accepted driver set moved; update this check"
+    df = (Path(wiz.__file__).parents[1] / "image-control-plane" / "Dockerfile").read_text()
+    for driver, pkg in (("docker", "docker-cli"), ("podman", "podman-remote")):
+        assert pkg in df, f"driver {driver!r} is accepted but has no client in the image"

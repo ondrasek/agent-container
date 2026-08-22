@@ -134,30 +134,41 @@ RUN set -eux; \
     agent-container --help > /dev/null; \
     command -v agent-container
 
-# --- Layer 2b: a container runtime CLIENT --------------------------------------
-# WITHOUT THIS THE CONTROL PLANE CANNOT MANAGE ANYTHING, and the failure is not
+# --- Layer 2b: BOTH container runtime CLIENTS ----------------------------------
+# WITHOUT THESE THE CONTROL PLANE CANNOT MANAGE ANYTHING, and the failure is not
 # subtle: `detect_runtime()` dies with "neither 'podman' nor 'docker' on PATH",
-# so every management command refuses. The first version of this image omitted it
-# and the acceptance test that SSHes in and runs `list` is what found it — no
-# amount of reading the Dockerfile would have, because nothing in it looks
+# so every management command refuses. The first version of this image omitted
+# them and the acceptance test that SSHes in and runs `list` is what found it —
+# no amount of reading the Dockerfile would have, because nothing in it looks
 # missing.
 #
-# The CLIENT ONLY. No daemon, no dockerd, no podman machine: this container talks
-# to a REMOTE daemon over the operator's docker contexts (Feature 002), and a
-# daemon here would need privileges the whole design refuses (Constitution II).
-# `docker-cli` from Debian is the client binary alone.
+# BOTH, and the reason is that the tool's DEFAULT runtime is podman.
+# ADR 0001 chooses Podman; `detect_runtime()` prefers podman on Linux (the VPS);
+# the README's VPS setup installs Podman; and `driver_runtime_argv` invokes
+# `podman --connection <name>` for a host registered `driver: podman`. An image
+# with only `docker-cli` can therefore manage the NON-DEFAULT configuration and
+# nothing else — every command against a podman host dies on a missing binary.
 #
-# `podman-remote` is deliberately NOT installed. It would double the surface for
-# a case the control plane does not have: the hosts it manages are reached
-# through docker contexts, and `detect_runtime` prefers docker on any platform
-# where docker is present. A control plane whose hosts are podman-only can set
-# AGENT_CONTAINER_RUNTIME, and the honest answer then is that this image needs
-# podman-remote added — stated here rather than discovered.
+# The second version of this file installed docker-cli alone and asserted, in a
+# comment, that "the hosts it manages are reached through docker contexts". The
+# project's own ADR contradicts that. The acceptance tier did not catch it either,
+# because every test registers a docker host or the implicit local docker daemon —
+# so the gap is invisible unless a podman host exists.
+#
+# CLIENTS ONLY. No daemon, no dockerd, no `podman machine`: this container talks
+# to a REMOTE engine over the operator's contexts and connections (Feature 002),
+# and a daemon here would need privileges the whole design refuses
+# (Constitution II). `docker-cli` and `podman-remote` are the client binaries
+# alone — `podman-remote` specifically, NOT `podman`, which would pull the local
+# engine this container must not have.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends docker-cli \
+    && apt-get install -y --no-install-recommends docker-cli podman-remote \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
-    && docker --version
+    && docker --version \
+    && podman-remote --version \
+    && ln -s "$(command -v podman-remote)" /usr/local/bin/podman \
+    && podman --version
 
 # --- Layer 3: user + ROOTLESS sshd config -----------------------------------
 # Identical posture to the agent image, and deliberately so: a control plane is
