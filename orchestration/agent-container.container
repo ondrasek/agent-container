@@ -32,6 +32,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
+# THE AGENT PATH ONLY. Feature 017 added a second image and `up --role
+# control-plane`; a control plane is deployed through compose, not through a
+# quadlet unit, and nothing here supervises one. Stated because the file gives a
+# reader no other way to know, and "supervise my control plane with systemd" is a
+# reasonable thing to assume this covers.
+#
+# This name is a SECOND encoding of the CLI's IMAGE_NAME, so a test pins them
+# together: a retag on one side would otherwise leave systemd reporting a failed
+# unit for an image nothing builds, far from the change that caused it.
 Image=localhost/agent-container:latest
 ContainerName=agent-container-${NAME}
 PublishPort=${PORT}:2222

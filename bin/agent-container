@@ -4523,12 +4523,30 @@ def load_hosts_conf() -> dict[str, str]:
 
 
 def hosts_entry(name: str) -> tuple[str, str] | None:
-    """(host, port) from hosts.conf, or None unless BOTH keys are present."""
-    conf = load_hosts_conf()
-    key = name_to_key(name)
-    host, port = conf.get(f"{key}_HOST"), conf.get(f"{key}_PORT")
-    if host and port:
-        return host, port
+    """(address, port) for an environment's remote attach target — FROM THE REGISTRY.
+
+    Feature 001 T036. This read `hosts.conf` DIRECTLY, which made the deprecation
+    note untrue in the one place it mattered: `hosts.json` superseded the flat
+    address book for deploys, and attach kept reading the flat file. An operator
+    with both — the normal state during migration — got deploys from one source
+    and attach from the other, and a stale entry in the old file won every time.
+
+    Now there is exactly ONE reader of `hosts.conf` (`_synthesize_legacy_registry`),
+    which funnels it into the registry when `hosts.json` is absent. So a legacy
+    install resolves identically to before, and an install that has migrated
+    stops consulting the old file at all — which is what "supersedes" means.
+
+    Keyed by `name_to_key(name).lower()` because that is the name the synthesis
+    gives a legacy entry: `MY_BOX_HOST` becomes a pseudo-host `my_box`. The
+    separator differs from the environment's own `my-box`, and that asymmetry is
+    the legacy format's, not something to fix here.
+    """
+    rec = registry_hosts(load_registry()).get(name_to_key(name).lower())
+    if not rec:
+        return None
+    address, port = rec.get("address"), rec.get("port")
+    if address and port:
+        return str(address), str(port)
     return None
 
 
@@ -12178,13 +12196,23 @@ def resolve_attach_target(
         die(f"invalid ssh host '{host_override}'")
     key = name_to_key(name)
 
-    if mode == "remote" and not HOSTS_CONF.is_file():
-        die(f"no hosts config at {HOSTS_CONF} — create it (see docs/agent-container-hosts.example)")
-
     entry = hosts_entry(name)
     if mode == "remote" or (mode == "auto" and entry is not None):
         if entry is None:
-            die(f"no host configured for {name} — add {key}_HOST and {key}_PORT to {HOSTS_CONF}")
+            # The REGISTRY is the source now (T036), so the remedy names it. The
+            # legacy file is still mentioned, because an operator mid-migration
+            # may have entries only there — and telling them to edit a file the
+            # tool no longer reads once hosts.json exists would send them in a
+            # circle.
+            die(
+                f"no remote attach target for '{name}': no registered host named "
+                f"'{name_to_key(name).lower()}' with an address and port",
+                remedy=(
+                    f"agent-container host add {name_to_key(name).lower()} "
+                    f"--docker-context ssh://user@host  (or, while migrating, add "
+                    f"{key}_HOST and {key}_PORT to {HOSTS_CONF} and remove {HOSTS_JSON})"
+                ),
+            )
         host, port = entry
         return user, host_override or host, port, "remote"
 
@@ -12200,7 +12228,8 @@ def resolve_attach_target(
                 f"running? (try: agent-container up {name})"
             )
         die(
-            f"no attach target for {name}; checked {HOSTS_CONF} (no {key}_HOST/{key}_PORT) and {sf}"
+            f"no attach target for '{name}': no registered host named "
+            f"'{name_to_key(name).lower()}' and no local state at {sf}"
         )
     host = host_override or os.environ.get("AGENT_CONTAINER_HOST") or DEFAULT_ATTACH_ADDRESS
     return user, host, port, "local"
@@ -12752,22 +12781,25 @@ def wiz_attach(rt: str) -> None:
         choices.append(
             questionary.Choice(f"{short}  [local :{port}]", value=("local", short, "", ""))
         )
-    conf = load_hosts_conf()
-    for key in sorted(conf):
-        if not key.endswith("_HOST"):
-            continue
-        base = key[: -len("_HOST")]
-        host, port = conf[key], conf.get(f"{base}_PORT")
+    # T036: FROM THE REGISTRY, not `hosts.conf` directly. The picker was the third
+    # reader of that file, and a picker built from a different source than the
+    # resolver can offer a target that then fails to resolve — the two would
+    # disagree exactly when an operator is picking from a menu because they are
+    # not sure what exists.
+    for rname, rec in sorted(registry_hosts(load_registry()).items()):
+        host, port = rec.get("address"), rec.get("port")
         if not (host and port):
+            # A docker/podman host has no attach port of its own; only records
+            # carrying an address AND port are attachable endpoints.
             continue
-        rname = base.lower()  # round-trips through name_to_key for the hint
         choices.append(
             questionary.Choice(
-                f"{rname}  [remote {host}:{port}]", value=("remote", rname, host, port)
+                f"{rname}  [remote {host}:{port}]",
+                value=("remote", rname, str(host), str(port)),
             )
         )
     if not choices:
-        log("nothing to attach to: no running local containers and no hosts.conf entries")
+        log("nothing to attach to: no running local containers and no attachable registered hosts")
         return
 
     sel = questionary.select("attach to", choices=choices).ask()

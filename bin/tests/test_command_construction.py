@@ -563,15 +563,54 @@ def test_resolve_name_is_case_insensitive(wiz):
     assert wiz.resolve_attach_target("My-Box", "remote")[1] == "vps.example.com"
 
 
-def test_resolve_remote_requires_hosts_conf(wiz):
-    with pytest.raises(wiz.Fatal, match="no hosts config"):
+def test_resolve_remote_requires_a_registered_host(wiz):
+    """T036: attach resolves through the REGISTRY, not `hosts.conf` directly.
+
+    The old message named the flat file, which was the symptom of the defect this
+    replaced — `hosts.json` superseded that file for deploys while attach kept
+    reading it, so an operator mid-migration got deploys from one source and
+    attach from the other.
+    """
+    with pytest.raises(wiz.Fatal, match="no remote attach target"):
         wiz.resolve_attach_target("acme", "remote")
 
 
 def test_resolve_remote_requires_both_keys(wiz):
+    """A legacy entry with only _HOST synthesises no usable record, so there is
+    nothing in the registry to attach to — the same outcome as before, reached
+    through the one reader instead of two."""
     write_hosts(wiz, "ACME_HOST=vps.example.com\n")
-    with pytest.raises(wiz.Fatal, match="no host configured for acme"):
+    with pytest.raises(wiz.Fatal, match="no remote attach target"):
         wiz.resolve_attach_target("acme", "remote")
+
+
+def test_a_legacy_hosts_conf_entry_STILL_resolves(wiz):
+    """The migration bridge must keep working, or T036 is a regression dressed up
+    as a cleanup. With no `hosts.json`, the registry is synthesised from
+    `hosts.conf` and attach resolves exactly as it did."""
+    write_hosts(wiz, "ACME_HOST=vps.example.com\nACME_PORT=2222\n")
+    user, host, port, kind = wiz.resolve_attach_target("acme", "remote")
+    assert (host, port, kind) == ("vps.example.com", "2222", "remote")
+
+
+def test_hosts_json_SUPERSEDES_a_stale_hosts_conf_for_attach(wiz):
+    """THE DEFECT T036 FIXES, asserted directly.
+
+    With both files present, attach used to read the flat one — so a stale entry
+    there beat the registry, and the deprecation note was untrue in the one place
+    an operator would notice from a phone.
+    """
+    write_hosts(wiz, "ACME_HOST=stale.example.com\nACME_PORT=9999\n")
+    wiz.HOSTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    wiz.HOSTS_JSON.write_text(
+        '{"version": 1, "default": null, "hosts": {"acme": '
+        '{"driver": "existing-ssh", "context": "", "address": "current.example.com", '
+        '"port": "2200", "provisioning": null, "created_by_tool": false}}}'
+    )
+    _user, host, port, _kind = wiz.resolve_attach_target("acme", "remote")
+    assert (host, port) == ("current.example.com", "2200"), (
+        "attach resolved from the stale hosts.conf while hosts.json was present"
+    )
 
 
 def test_resolve_local_without_state_dies_with_hint(wiz):
@@ -580,7 +619,7 @@ def test_resolve_local_without_state_dies_with_hint(wiz):
 
 
 def test_resolve_auto_with_nothing_dies(wiz):
-    with pytest.raises(wiz.Fatal, match="no attach target for acme"):
+    with pytest.raises(wiz.Fatal, match="no attach target for 'acme'"):
         wiz.resolve_attach_target("acme", "auto")
 
 

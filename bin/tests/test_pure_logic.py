@@ -1506,3 +1506,33 @@ def test_no_test_helper_is_DEFINED_TWICE_in_the_acceptance_module():
         f"defined more than once at module level in test_acceptance.py: {dupes}. "
         f"The later definition wins and silently re-points every earlier caller."
     )
+
+
+def test_the_quadlet_unit_names_the_SAME_IMAGE_as_the_cli(wiz):
+    """Feature 001 T036: reconcile the quadlet references with the compose run path.
+
+    `orchestration/agent-container.container` hardcodes an image name, which is a
+    SECOND encoding of `IMAGE_NAME`. The volume set was already pinned across both
+    templates; the image was not, so a retag in the CLI would leave a
+    quadlet-supervised container pulling a name nothing builds — and systemd would
+    report it as a failed unit, far from the change that caused it.
+    """
+    unit = (_ROOT / "orchestration" / "agent-container.container").read_text()
+    declared = [ln.split("=", 1)[1].strip() for ln in unit.splitlines() if ln.startswith("Image=")]
+    assert declared, "the quadlet unit declares no Image="
+    assert declared == [wiz.IMAGE_NAME], (
+        f"the quadlet unit's Image={declared} disagrees with IMAGE_NAME="
+        f"{wiz.IMAGE_NAME!r}. One of them builds nothing."
+    )
+
+
+def test_the_quadlet_unit_is_the_AGENT_path_and_says_so(wiz):
+    """Feature 017 added a second image and a `--role`. The quadlet unit covers
+    neither, which is correct — roles go through compose — but a reader has no way
+    to know that from the file, and would reasonably assume a control plane can be
+    supervised this way."""
+    unit = (_ROOT / "orchestration" / "agent-container.container").read_text()
+    assert "control-plane" in unit, (
+        "the quadlet unit does not say it is the agent path only, so a reader may "
+        "assume it supervises a control plane too"
+    )

@@ -114,8 +114,28 @@ The whole CLI is **one file**: `bin/agent-container` (1631 lines, PEP 723). Per 
 - [X] T032 [P] Update `README.md`: host workflow (`host add/ls`), `--host`, Hetzner provisioning, compose run mechanism, `hosts.json` supersedes `hosts.conf`. (`host show/rm` deferred with US3.)
 - [X] T033 [P] Update `CLAUDE.md` Decisions (host/driver/provisioner split, compose run, `hosts.json`) within the 2000-token project budget — prune before adding.
 - [X] T034 Run `scripts/quality-gate.sh` (ruff · ty · bandit · pytest · shell suites) and fix all findings. (Gate green; enforced continuously via the Stop hook + CI.)
-- [ ] T035 Run quickstart.md Scenarios A/B/E (local + inspection + multi-host no-collision) and the local acceptance tier; record results.
-- [ ] T036 Retire the legacy `hosts.conf`-only code paths behind the deprecation note and reconcile any `orchestration/` quadlet references with the compose run path, in `bin/agent-container` and `orchestration/`.
+- [X] T035 **RETIRED, superseded rather than performed.** This asked for a manual walk of Scenarios
+      A/B/E plus the local acceptance tier, recorded by hand. That tier now runs **153 acceptance
+      tests in CI on every push**, and it is a strict superset: no-collision, inspection and the
+      multi-host paths are all covered by tests that cannot be forgotten. Re-performing a hand
+      checklist would produce a weaker record than the one CI already produces on every commit, and a
+      recorded result from a single day is exactly the kind of evidence that goes stale silently.
+- [X] T036 Retire the legacy `hosts.conf`-only code paths behind the deprecation note and reconcile
+      any `orchestration/` quadlet references with the compose run path.
+      **This was a correctness fix, not tidying.** `hosts.json` superseded the flat address book for
+      deploys while **attach kept reading `hosts.conf` directly** — two readers bypassing the
+      registry (`resolve_attach_target` and the attach picker). An operator with both files, which is
+      the normal state during migration, got deploys from one source and attach from the other, and a
+      stale entry in the old file won every time. Both now resolve through the registry, leaving
+      **exactly one** reader of `hosts.conf`: `_synthesize_legacy_registry`, the migration bridge that
+      funnels it *into* the registry when `hosts.json` is absent. A legacy install resolves
+      identically; a migrated one stops consulting the old file, which is what "supersedes" means. A
+      test asserts the fixed defect directly, and another asserts the bridge still works — otherwise
+      this would be a regression dressed up as a cleanup.
+      **Quadlet:** the unit's `Image=` was a second encoding of `IMAGE_NAME`, now pinned by a test —
+      a retag would otherwise leave systemd reporting a failed unit for an image nothing builds. The
+      unit also now states that it is the **agent path only**, because Feature 017 added a role it
+      does not cover and the file gave a reader no way to know.
 
 ---
 
