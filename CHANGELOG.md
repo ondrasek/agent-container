@@ -2,6 +2,150 @@
 
 <!-- version list -->
 
+## v0.33.0 (2026-08-22)
+
+### Bug Fixes
+
+- **017**: Two product gaps the acceptance re-run exposed
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`a3c97c8`](https://github.com/ondrasek/agent-container/commit/a3c97c84c211cea64f4db83c56de681ceec2376f))
+
+- **compose**: The deploy path built images with NO build args
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`4013300`](https://github.com/ondrasek/agent-container/commit/4013300ee07bf063e69684c6a200ed931ef3c71b))
+
+- **control-plane**: Remove the stale version pin the 0.32.0 release exposed
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`9c31b48`](https://github.com/ondrasek/agent-container/commit/9c31b4823012d7baf6d6a2dd4d28d21b65a0a402))
+
+- **control-plane**: The base image could not run the package it installs
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`1cda58e`](https://github.com/ondrasek/agent-container/commit/1cda58e059e7897c1eadd743cf2a9c2c0e926b6f))
+
+- **control-plane**: The image could not manage the tool's DEFAULT runtime
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`26f1eaf`](https://github.com/ondrasek/agent-container/commit/26f1eaf30d4d06b9be91c9263218a5f04706c6a4))
+
+- **control-plane**: The image had no container runtime client, so it could manage nothing
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`50716bd`](https://github.com/ondrasek/agent-container/commit/50716bda16ca875c21bed06a5909661f65ab4d59))
+
+- **control-plane**: Wire the control plane's own name, and stop redeploy losing the role
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`373a32f`](https://github.com/ondrasek/agent-container/commit/373a32fae734844ba997fb8d34a5a6f95b7aedfa))
+
+- **test**: A shadowed helper silently regressed three Feature 016 tests
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`d260c1b`](https://github.com/ondrasek/agent-container/commit/d260c1b8b769571780b63db2cd06b2b83c65cd9e))
+
+- **test**: Probe container-to-host REACHABILITY, not name resolution
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`8a79dec`](https://github.com/ondrasek/agent-container/commit/8a79decd81d280d479896a2df293f20127d13f81))
+
+- **test**: The collector tests assumed a Docker-Desktop-only hostname
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`282bbe7`](https://github.com/ondrasek/agent-container/commit/282bbe700975397f2345673c26252aec5d9461cd))
+
+### Documentation
+
+- **017**: Record where the passphrase keygen actually landed
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`3d65f54`](https://github.com/ondrasek/agent-container/commit/3d65f540175fbc33c8257f698ec59facc8233229))
+
+- **017**: The control plane, the dual stack, and CLAUDE.md displacement
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`7a7e58b`](https://github.com/ondrasek/agent-container/commit/7a7e58b8a1685375059672ca6b8837673c4fde6e))
+
+- **constitution**: Ratify Principle VIII — Defaults Belong at the Surface (2.3.0)
+  ([`9d8e9e8`](https://github.com/ondrasek/agent-container/commit/9d8e9e85a9899e73efb8489cc9a392328a27b364))
+
+- **threat-model**: Reconcile Feature 017 -- a sixth trust boundary
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`81405ac`](https://github.com/ondrasek/agent-container/commit/81405ac579ecc239cd0469c1f10305a16da6cc68))
+
+### Features
+
+- **control-plane**: Declared scope, and an out-of-scope action that fails visibly
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`288edbf`](https://github.com/ondrasek/agent-container/commit/288edbf20dd01a669b50bd4fc16cc3ca5174b371))
+
+- **control-plane**: Inject the host registry as non-secret configuration
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`767a2a4`](https://github.com/ondrasek/agent-container/commit/767a2a4deebd12030d2aa5539d3b6ffbb3cf2746))
+
+- **control-plane**: Narrow rendering and named unreachable hosts
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`d7af470`](https://github.com/ondrasek/agent-container/commit/d7af4708a32465203d85761396ca6b6077e7f7e1))
+
+- **control-plane**: Revoke -- withdraw a standing key fleet-wide
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`eb33644`](https://github.com/ondrasek/agent-container/commit/eb33644d6b02cbfa5cad45d9123718ed94f05a6c))
+
+- **control-plane**: The semver rule and panic self-exclusion
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`7685ef9`](https://github.com/ondrasek/agent-container/commit/7685ef9d9e758c3d950ab888a8bc0e9ef011b1a4))
+
+- **observability**: Attribute READ-ONLY actions, closing FR-009a's gap
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`11d4d5d`](https://github.com/ondrasek/agent-container/commit/11d4d5d529d035ef98ec907e4ff433417ed10931))
+
+- **observability**: Attribution on management actions
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`1d5f365`](https://github.com/ondrasek/agent-container/commit/1d5f365829ad7257a8c14e269160f9c5af23b6c1))
+
+- **observability**: Telemetry collect and retry
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`47c2005`](https://github.com/ondrasek/agent-container/commit/47c2005b7a2fa7604137b04bd01a13ce6f7e96d9))
+
+- **observability**: Telemetry reconcile -- do the two legs agree?
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`ccd9d77`](https://github.com/ondrasek/agent-container/commit/ccd9d7717042770e36f68f681e26fce84059c253))
+
+- **observability**: The OTLP export path -- curl, write-time, fail-open
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`8c451b8`](https://github.com/ondrasek/agent-container/commit/8c451b8d5bc24939f60bd110af501e49ce39a6e8))
+
+### Refactoring
+
+- Defaults belong at the surface, not in implementations
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`3714fce`](https://github.com/ondrasek/agent-container/commit/3714fcef692fbdddd5eb72c17b960049e4700a36))
+
+### Testing
+
+- **017**: Close S20 and record the T080 gates — 80/80
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`dffe424`](https://github.com/ondrasek/agent-container/commit/dffe424ddb10fae2757aa7edeb4ccfb0632ee349))
+
+- **017**: In-container acceptance was measuring the RELEASED CLI, not this tree
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`2f45c74`](https://github.com/ondrasek/agent-container/commit/2f45c74cf00ff52280eff576bda9cf4909a25d4b))
+
+- **017**: The 80-column check was also measuring the released CLI
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`111ef49`](https://github.com/ondrasek/agent-container/commit/111ef49203818d8b0548de9443f9caac130e83f2))
+
+- **017**: The acceptance tier -- absences, a refusing collector, and a SIGKILL
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`084fcb0`](https://github.com/ondrasek/agent-container/commit/084fcb0b65f34abb47a41ddfdf9253b05d7056a0))
+
+- **017**: The full tier's 8 failures were one leak and three wrong assumptions
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`b6fab86`](https://github.com/ondrasek/agent-container/commit/b6fab8641853c65e9d4732ec1ca21014617fb16d))
+
+- **017**: The last acceptance scenarios -- US1 end to end, revoke, and locking
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`76a9aef`](https://github.com/ondrasek/agent-container/commit/76a9aef873ff488f85975ef99efc44cdb807401d))
+
+- **017**: The reconciliation acceptance scenario S19 was missing
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`ad040af`](https://github.com/ondrasek/agent-container/commit/ad040afd22a88e864cfed8168683922654ed17c0))
+
+- **017**: Three acceptance failures, three different wrong assumptions
+  ([#017](https://github.com/ondrasek/agent-container/pull/17),
+  [`d1062ab`](https://github.com/ondrasek/agent-container/commit/d1062abbebfd5c5d569f0caa8058a938623783c9))
+
+
 ## v0.32.0 (2026-08-21)
 
 ### Chores
