@@ -7345,9 +7345,7 @@ def build_compose_model(
         # share the filesystem; it refuses the deploy rather than arriving empty.
         # The staged file remains where validation and dedup happen; only its
         # TEXT crosses. Public keys, so the non-secret channel is correct.
-        model_configs["ssh_authorized_keys"] = {
-            "content": authorized_keys_file.read_text()
-        }
+        model_configs["ssh_authorized_keys"] = {"content": authorized_keys_file.read_text()}
     # Feature 017 FR-004/R4: the host registry, for a control plane only.
     #
     # `content:` and NOT `file:`. A `file:` config is a read-only BIND of a local
