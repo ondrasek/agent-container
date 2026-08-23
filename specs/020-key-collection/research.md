@@ -127,6 +127,32 @@ survived.** On macOS with Lima — the setup this project is developed on — `f
 testing locally would have seen `--authorized-key` succeed and written a docstring saying so. The
 claim is not careless; it is true of the environment it was formed in and untested outside it.
 
+**SETTLED, 2026-08-23 — `file:` does NOT cross.** Measured with the existing Lima VM by staging
+the config file OUTSIDE the one shared mount. `~/.lima/docker/lima.yaml` mounts `~` and nothing
+else, so `/tmp/...` is invisible to the daemon — a genuinely unshared path without needing a remote
+host at all. A compose project with `configs: {ak: {file: /tmp/.../ak.txt}}` against that daemon:
+
+```
+Error response from daemon: invalid mount config for type "bind":
+bind source path does not exist: /tmp/claude/t001/ak.txt
+```
+
+So a `file:` config **is** a bind, resolved **daemon-side**. `build_compose_model`'s docstring was
+right; `stage_ssh_injection`'s was wrong and is corrected (T002).
+
+**Two corrections to this document's own earlier reasoning.** (a) It predicted the failure would be
+a silent empty arrival — "`--authorized-key` silently admits nobody on a remote host". Wrong: the
+daemon **refuses the deploy** with the error above. Loud, not silent, which makes the pre-existing
+defect far less dangerous than claimed, though still a defect. (b) The earlier note that Lima "cannot
+answer the question" was too pessimistic — it cannot answer it via a path under `$HOME`, but the VM
+answers it perfectly well via a path outside the mount. The mount was never the obstacle; assuming
+the staging location was fixed was.
+
+**Wider than 020, and left alone deliberately**: Feature 003's `injected_configs` still use `file:`
+(`model_configs[cfg_name] = {"file": str(local_file)}`), so any deploy carrying 003-injected
+material to a non-sharing daemon fails the same way. Out of scope here, loud rather than silent, and
+deserving its own fix rather than a silent fold-in.
+
 **What would actually settle it**: a daemon that does not share the host filesystem — a real remote
 Docker/Podman context, or a Lima VM configured without the `$HOME` mount. Until then C20 stays open
 and T002's docstring correction stays unmade, because correcting it either way would be asserting

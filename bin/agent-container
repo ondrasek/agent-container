@@ -7340,7 +7340,14 @@ def build_compose_model(
     model_configs: dict = {}
     if authorized_keys_file is not None:
         svc_configs.append({"source": "ssh_authorized_keys", "target": INJECT_AUTHORIZED_KEYS_PATH})
-        model_configs["ssh_authorized_keys"] = {"file": str(authorized_keys_file)}
+        # `content:` and NOT `file:` — MEASURED (020, C20). A `file:` config is a
+        # bind resolved daemon-side, so it cannot reach a daemon that does not
+        # share the filesystem; it refuses the deploy rather than arriving empty.
+        # The staged file remains where validation and dedup happen; only its
+        # TEXT crosses. Public keys, so the non-secret channel is correct.
+        model_configs["ssh_authorized_keys"] = {
+            "content": authorized_keys_file.read_text()
+        }
     # Feature 017 FR-004/R4: the host registry, for a control plane only.
     #
     # `content:` and NOT `file:`. A `file:` config is a read-only BIND of a local
@@ -9423,8 +9430,15 @@ def _egress_sort_key(event: dict) -> tuple[str, str, str, str]:
 
 def stage_ssh_injection(host: str, name: str, authorized_keys: list[Path]) -> Path | None:
     """Stage the injected authorized_keys as a LOCAL file under the per-host state
-    dir, returned for the compose model to reference as a config (transfers over a
-    remote context; a bind resolves empty on a remote host).
+    dir. The compose model INLINES its text (`configs: {content:}`); it does NOT
+    reference this path.
+
+    An earlier version of this docstring claimed a staged path "transfers over a
+    remote context". That was wrong, and measured wrong (Feature 020, C20): a
+    compose `configs: {file:}` entry is materialised as a BIND and resolved on the
+    DAEMON side, so a daemon that cannot see the path refuses outright --
+    `invalid mount config for type "bind": bind source path does not exist`. It
+    does not "resolve empty" either; it fails the deploy. Hence `content:`.
 
     Staged **0644**: compose exposes the source file's mode into the container,
     where the unprivileged `dev` user reads it — and dev's uid (1000) need NOT equal

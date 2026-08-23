@@ -30,14 +30,14 @@ acceptance tier is `pytest -m acceptance bin/tests`. Two images: `image/`, `imag
 **Purpose**: One measurement decides whether a later task is a refactor or a bug fix. Doing it first
 costs one deploy; doing it last means the commit history describes the change wrongly.
 
-- [ ] T001 Deploy an environment over a genuinely remote context with `--authorized-key` using today's
+- [X] T001 Deploy an environment over a genuinely remote context with `--authorized-key` using today's
   `configs: {file:}` path, and record in `specs/020-key-collection/research.md` (R4) whether
   `/run/agent-container/authorized_keys` arrives non-empty in the container. A local podman socket does
   NOT exercise this — the daemon must not share the filesystem.
-- [ ] T002 Based on T001, correct whichever docstring is wrong — `build_compose_model`'s "measured" claim
+- [X] T002 Based on T001, correct whichever docstring is wrong — `build_compose_model`'s "measured" claim
   or `stage_ssh_injection`'s "transfers over a remote context" claim — in `bin/agent-container` (C22).
   Both cannot stay; the next reader will trust the wrong one.
-- [ ] T003 If T001 shows `file:` never crossed, open the finding explicitly: `--authorized-key` has been
+- [X] T003 If T001 shows `file:` never crossed, open the finding explicitly: `--authorized-key` has been
   silently admitting nobody on remote hosts, and 017's host registry chose `content:` on the strength of
   a claim that was right. Record it in research.md R4 as a **pre-existing defect**, to be committed as
   its own `fix` and not folded into this feature (plan.md Principle VII note).
@@ -78,7 +78,7 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
 
 - [X] T008 [P] Apply T005 and T006 to `image-control-plane/entrypoint.sh` (FR-003). A control plane is the
   case this feature exists for, so it must not be the one that lags.
-- [ ] T009 Move the `ssh_authorized_keys` compose config from `{"file": ...}` to `{"content": ...}` in
+- [X] T009 Move the `ssh_authorized_keys` compose config from `{"file": ...}` to `{"content": ...}` in
   `build_compose_model` in `bin/agent-container`, and reduce `stage_ssh_injection` to producing the
   text rather than a staged path (C18, C19). Keep it on the **config** channel, never `secrets` — public
   keys are public, and labelling them secret misrepresents them (FR-010).
@@ -89,7 +89,7 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   precedent is `read_text()` plus a textual assertion — which cannot fail when the shell logic is wrong.
   Grep-the-source coverage for the mechanism the whole feature rests on is the exact defect shape 020
   exists to remove. Extending an already-wired harness also means **no new gate entry is needed**.
-- [ ] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
+- [X] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
   resolution, entry validation, admit-set assembly, and compose-model shape. No assertion in this file may
   stand in for entrypoint behaviour — that belongs in T010's executing section.
 - [X] T012 [P] ~~Add a parity test~~ **ALREADY EXISTS — no new test written.** The block carries
@@ -99,7 +99,7 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   duplicated working infrastructure. What this DID require: `test_guards_can_fail` corrupted the union's
   dedup `awk` to prove the guard fails, and that line no longer exists — the fixture was retargeted onto
   `AK_END_ID`, deliberately staying on a line whose divergence changes who can log in.
-- [ ] T013 [P] Assert in `bin/tests/test_key_collection.py` that the generated compose model has **no**
+- [X] T013 [P] Assert in `bin/tests/test_key_collection.py` that the generated compose model has **no**
   `file:` key for `ssh_authorized_keys` (C19), and that the entry never appears under `secrets` (C18).
 
 **Checkpoint**: `--authorized-key` still works end to end, and a key removed from the *flags* and

@@ -70,11 +70,26 @@ def test_the_model_can_no_longer_carry_a_private_host_key(wiz):
         wiz.build_compose_model("acme", "/repo", host_key_file="/anything")
 
 
-def test_authorized_keys_maps_to_config(wiz, tmp_path):
+def test_authorized_keys_is_inlined_not_referenced_by_path(wiz, tmp_path):
+    """The admit set rides `content:`, never `file:` — Feature 020, C19/C20.
+
+    MEASURED, not reasoned: a `configs: {file:}` entry is materialised as a bind
+    and resolved on the DAEMON side, so a daemon that does not share the operator's
+    filesystem refuses the deploy outright (`invalid mount config for type "bind":
+    bind source path does not exist`). Public keys are text and non-secret, so the
+    admit set is inlined and crosses any context.
+
+    This assertion previously required `["file"] == str(ak)`. It was inverted, not
+    deleted: a path reference here is a remote-deploy failure, and nothing else
+    would notice it coming back.
+    """
     ak = tmp_path / "acme.authorized_keys"
-    ak.write_text("ssh-ed25519 AAAA... user@host")
+    body = "ssh-ed25519 AAAA... user@host\n"
+    ak.write_text(body)
     m = wiz.build_compose_model("acme", "/repo", authorized_keys_file=ak)
-    assert m["configs"]["ssh_authorized_keys"]["file"] == str(ak)
+    assert m["configs"]["ssh_authorized_keys"] == {"content": body}
+    assert "file" not in m["configs"]["ssh_authorized_keys"]
+    assert str(ak) not in json.dumps(m)  # the staging path must not leak into the model
     svc_configs = m["services"]["agent"]["configs"]
     assert svc_configs == [
         {"source": "ssh_authorized_keys", "target": wiz.INJECT_AUTHORIZED_KEYS_PATH}
@@ -82,14 +97,32 @@ def test_authorized_keys_maps_to_config(wiz, tmp_path):
 
 
 def test_no_secret_material_inline(wiz, tmp_path):
-    # No credential VALUE may appear in the serialized model — only `file:` refs.
+    """A credential VALUE must never appear in the serialized model.
+
+    Retargeted by Feature 020 onto Feature 003's `injected_configs`, which is the
+    channel that actually carries secrets. It used to use `authorized_keys` as a
+    "stand-in for any staged material" — but public keys are not secret and are now
+    deliberately inlined (C19), so that file could no longer carry the assertion
+    without contradicting the requirement.
+
+    The rule this pins is the DISTINCTION, which is the real design decision:
+    secret material is referenced by path, public material is inlined.
+    """
     secret = "TOP-SECRET-CREDENTIAL-BYTES"
+    cred = tmp_path / "push_known_hosts"
+    cred.write_text(secret)
     ak = tmp_path / "acme.authorized_keys"
-    ak.write_text(secret)  # stand-in for any staged material
-    m = wiz.build_compose_model("acme", "/repo", authorized_keys_file=ak)
+    ak.write_text("ssh-ed25519 AAAA... public\n")
+    m = wiz.build_compose_model(
+        "acme",
+        "/repo",
+        authorized_keys_file=ak,
+        injected_configs=[("push_known_hosts", cred, "/run/agent-container/known_hosts")],
+    )
     blob = json.dumps(m)
-    assert secret not in blob  # only the path is referenced, not the contents
-    assert str(ak) in blob
+    assert secret not in blob  # secret: referenced by path, never inlined
+    assert str(cred) in blob
+    assert "ssh-ed25519 AAAA... public" in blob  # public: inlined, so it crosses
 
 
 def test_output_is_valid_json_and_deterministic(wiz, tmp_path):
