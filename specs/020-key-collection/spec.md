@@ -32,6 +32,8 @@ cannot fix it. Feature 017 makes this sharper: a control plane exists to be reac
 
 - Q: Where does a key injected by the existing `keys` command live relative to the collection's managed block? → A: Inside it. The collection is the sole authority, and a `keys` grant lasts only until the next recreate. This changes what `keys` currently means.
 
+- Q: Does a declared-but-empty collection warn, prompt, or pass silently? → A: Warn and proceed, naming the file. The declaration is honoured; the operator is told the environment will admit nobody.
+
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -119,6 +121,13 @@ admitted; a query names the same set for a running environment.
   resulting set MUST be stated so neither source appears to have won silently.
 - **FR-009**: An **undeclared** collection MUST behave exactly as today (no auto-injection), and MUST
   be distinguishable from a **declared-empty** collection, which admits nobody.
+- **FR-017**: A **declared-empty** collection MUST be **honoured and warned about**, naming the file
+  and saying the environment will admit nobody. It MUST NOT prompt and MUST NOT refuse: an empty
+  declaration is a legitimate instruction for a headless environment, and refusing without a tty would
+  break unattended deploys that intend exactly this. The **undeclared** path MUST NOT gain this warning
+  — today an environment deployed with no keys at all is silent, and FR-009 requires that stay true.
+  The asymmetry is deliberate: the warning exists because a hand-edited file can be **truncated by
+  accident**, and where there is no file there is nothing to truncate.
 - **FR-010**: Public keys MUST travel as **non-secret configuration** and MUST NOT be treated as
   secrets. They are public by construction; classifying them as secrets would imply protections that
   mislead about what they are.
@@ -177,6 +186,9 @@ admitted; a query names the same set for a running environment.
   fabricated from the projection MUST fail.
 - **SC-007**: An undeclared collection changes nothing about today's behaviour — an environment
   deployed with `--authorized-key` alone admits exactly that key.
+- **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
+  environment admits nobody. The same deploy with **no** collection declared produces **no** such
+  warning — the two runs are distinguishable in output, not merely in behaviour.
 - **SC-009**: A key granted with `keys` is admitted immediately and is **refused after a recreate**,
   in **100%** of attempts. No tool-created grant outlives the collection.
 - **SC-010**: A key added by hand inside the environment is still admitted after a recreate. The tool
