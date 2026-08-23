@@ -1,0 +1,292 @@
+---
+
+description: "Task list for feature 020 — public-key collection, auto-injected"
+---
+
+# Tasks: Public-key collection, auto-injected
+
+**Input**: `specs/020-key-collection/` — spec.md, plan.md, research.md, data-model.md, contracts/cli.md, quickstart.md
+
+**Tests**: included, and not optional here. The spec's decisive requirements (FR-006, FR-014, FR-015)
+are all cases where *a check can pass while the thing it names is broken*, which is the failure this
+feature exists to remove. A contract without a test that can fail is not evidence.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: parallelisable — different file, no dependency on an incomplete task
+- **[Story]**: US1–US4 from spec.md
+
+## Path Conventions
+
+Single-file CLI at `bin/agent-container`; hermetic tests in `bin/tests/`; the CI-authoritative
+acceptance tier is `pytest -m acceptance bin/tests`. Two images: `image/`, `image-control-plane/`.
+
+**Never edit the tree while the acceptance tier runs** — it re-reads the CLI per invocation.
+
+---
+
+## Phase 1: Settle the unknown (blocks the injection channel)
+
+**Purpose**: One measurement decides whether a later task is a refactor or a bug fix. Doing it first
+costs one deploy; doing it last means the commit history describes the change wrongly.
+
+- [ ] T001 Deploy an environment over a genuinely remote context with `--authorized-key` using today's
+  `configs: {file:}` path, and record in `specs/020-key-collection/research.md` (R4) whether
+  `/run/agent-container/authorized_keys` arrives non-empty in the container. A local podman socket does
+  NOT exercise this — the daemon must not share the filesystem.
+- [ ] T002 Based on T001, correct whichever docstring is wrong — `build_compose_model`'s "measured" claim
+  or `stage_ssh_injection`'s "transfers over a remote context" claim — in `bin/agent-container` (C22).
+  Both cannot stay; the next reader will trust the wrong one.
+- [ ] T003 If T001 shows `file:` never crossed, open the finding explicitly: `--authorized-key` has been
+  silently admitting nobody on remote hosts, and 017's host registry chose `content:` on the strength of
+  a claim that was right. Record it in research.md R4 as a **pre-existing defect**, to be committed as
+  its own `fix` and not folded into this feature (plan.md Principle VII note).
+
+---
+
+## Phase 2: Foundational (blocks every user story)
+
+**Purpose**: The managed region and the injection channel. Nothing about the collection works, and
+FR-006 cannot hold, until the container stops unioning keys onto its volume.
+
+- [ ] T004 Define the region sentinels and the replace-not-merge rule as named constants in
+  `bin/agent-container` (e.g. `KEY_REGION_BEGIN`, `KEY_REGION_END`), with a comment stating that this
+  region is **replaced every boot** and that `~/.ssh/config`'s identically-styled block is
+  **write-once** — same idiom, opposite rule (C21).
+- [ ] T005 Replace the union in `image/entrypoint.sh` with a region rewrite: parse `~/.ssh/authorized_keys`
+  into before-region / region / after-region, emit the injected admit set as the new region, preserve
+  before and after byte-for-byte, write atomically. Delete the `cat` persisted + injected + env union and
+  the `awk 'NF && !seen[$0]++'` write-back that made removal impossible.
+- [ ] T006 Refuse rather than repair a malformed region in `image/entrypoint.sh`: a `BEGIN` with no `END`
+  (or the reverse) must fail the boot naming the file, never guess a boundary (C17). Guessing risks
+  deleting an operator's keys, which is worse than not starting.
+- [ ] T007 [P] Apply T005 and T006 to `image-control-plane/entrypoint.sh` (FR-003). A control plane is the
+  case this feature exists for, so it must not be the one that lags.
+- [ ] T008 Move the `ssh_authorized_keys` compose config from `{"file": ...}` to `{"content": ...}` in
+  `build_compose_model` in `bin/agent-container`, and reduce `stage_ssh_injection` to producing the
+  text rather than a staged path (C18, C19). Keep it on the **config** channel, never `secrets` — public
+  keys are public, and labelling them secret misrepresents them (FR-010).
+- [ ] T009 [P] Add `bin/tests/test_key_collection.py` with region-parser unit tests: exactly one pair after
+  a rewrite, content outside preserved, malformed region refused, empty region legal (C13, C17, C27).
+- [ ] T010 [P] Assert in `bin/tests/test_key_collection.py` that the generated compose model has **no**
+  `file:` key for `ssh_authorized_keys` (C19), and that the entry never appears under `secrets` (C18).
+
+**Checkpoint**: `--authorized-key` still works end to end, and a key removed from the *flags* and
+redeployed is gone. FR-006 now holds for flags; the collection is not involved yet.
+
+---
+
+## Phase 3: US1 — Every new environment is reachable from every device (P1)
+
+**Goal**: register keys once; every `up` admits them with no flags.
+
+**Independent test**: three keys registered at user level, `up` naming none, all three private halves
+connect (quickstart S1).
+
+- [ ] T011 [US1] Add `authorized_keys_candidates(cwd)` to `bin/agent-container`, returning project-then-user
+  paths (`<project>/.agent-container/authorized_keys`, `~/.config/agent-container/authorized_keys`),
+  mirroring `settings_candidates` so "where does a project keep its files" keeps one answer. Read whatever
+  is there; **require no registration command** (FR-011) — `cat key.pub >> …/authorized_keys` is the whole
+  enrolment flow, and no part of this feature may depend on the tool having written the file.
+- [ ] T012 [US1] Add `resolve_key_collection(cwd)` to `bin/agent-container` returning the **three distinct
+  states** — `None` for undeclared, an empty list for declared-empty, entries otherwise (FR-009,
+  Constitution VIII). A reader reports absence; it must not substitute a default.
+- [ ] T013 [US1] Add `validate_public_key_line(line)` to `bin/agent-container` using `ssh-keygen -l`, returning
+  type, comment and fingerprint. Treat the line as opaque otherwise, so `authorized_keys` options
+  (`from=`, `command=`, `restrict`) pass through unharmed.
+- [ ] T014 [US1] Refuse a malformed entry in `bin/agent-container` naming the **file and line number**, before
+  any runtime call (FR-004, C6, C9). A key that silently fails to admit is a lockout found from the
+  device that cannot fix it. Assert **no container exists** afterwards, not just a non-zero exit (SC-004).
+- [ ] T015 [US1] Refuse a **private** key in `bin/agent-container` with a message saying explicitly that the
+  entry is private, and ensure zero bytes of it reach a staged artifact or log (FR-005, C7, SC-005). This
+  is the one mistake here whose cost is not recoverable by editing a file. The test must **grep the state
+  directory** for private-key material rather than trusting the refusal (quickstart S5).
+- [ ] T016 [US1] Refuse an unreadable or vanished collection file before any runtime call, naming the path
+  (FR-012, C8).
+- [ ] T017 [US1] Add `resolved_admit_set(cwd, flag_keys)` to `bin/agent-container`: the winning collection
+  **plus** `--authorized-key`, order-preserving, de-duplicated, each entry **attributed to its source**
+  (FR-008, C11).
+- [ ] T018 [US1] Wire `resolved_admit_set` into the `up` and `redeploy` paths in `bin/agent-container` for
+  **both roles** (FR-001, FR-003, C5), passing the text to the `content:` config from T008.
+- [ ] T019 [US1] Warn once on a **declared-empty** collection, naming the file and saying the environment
+  will admit nobody — and do **not** prompt or refuse (FR-017, C4). Leave the **undeclared** path silent:
+  today an `up` with no keys is already silent and FR-009 requires that stay true.
+- [ ] T020 [P] [US1] Hermetic tests in `bin/tests/test_key_collection.py` for C1 (user-level resolution), C3
+  (undeclared ⇒ no config entry at all), C4 (declared-empty honoured and warned), C5 (both roles),
+  C10/C11 (statement content and attribution). Include SC-007 — undeclared plus `--authorized-key` alone
+  admits exactly that key — and FR-011: a collection hand-written with no tool involvement resolves.
+- [ ] T021 [P] [US1] Hermetic tests in `bin/tests/test_key_collection.py` for C6–C9: malformed refused with
+  line number, private refused, unreadable refused — each asserting the refusal path **reaches no runtime
+  call**, not merely that the exit code is non-zero. The exit code alone would pass on the wrong reason.
+- [ ] T022 [P] [US1] Distinguish C3 from C4 in a single test in `bin/tests/test_key_collection.py`: the two
+  runs must differ in **output**, not only in behaviour (SC-011). Absent, defaulted and declared-empty
+  collapsing into one is precisely what Constitution VIII forbids.
+- [ ] T023 [US1] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S1: three registered keys,
+  `up` with zero key flags, all three connect (SC-001).
+
+**Checkpoint**: US1 is deliverable. This is the MVP.
+
+---
+
+## Phase 4: US2 — A project can override the collection (P1)
+
+**Goal**: a project narrows the admit set; a client repo does not inherit personal devices.
+
+**Independent test**: user collection of three, project collection of one, deploy inside the project
+admits exactly one (quickstart S2).
+
+- [ ] T024 [US2] Make the winning file win **entirely** in `resolve_key_collection` in `bin/agent-container` —
+  file-level, not per-key (FR-002). Merging would let a project widen and never narrow, and narrowing is
+  the whole point of US2. Comment why this differs from `resolve_settings_key`'s per-key fallthrough:
+  a collection is **one** value, a settings file is many.
+- [ ] T025 [P] [US2] Hermetic test in `bin/tests/test_key_collection.py` for C2: with both levels declared,
+  the project set is admitted and **no entry** of the user set appears.
+- [ ] T026 [US2] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S2 (SC-002): the two
+  non-project keys are **refused**, asserted by attempted connection rather than by absent lines.
+
+**Checkpoint**: US1 + US2 deliverable.
+
+---
+
+## Phase 5: US3 — Removing a device removes its access (P1)
+
+**Goal**: the requirement the feature turns on. Removal must actually revoke, and nothing the tool
+grants may outlive the collection.
+
+**Independent test**: deploy with two keys, remove one, recreate, the removed key is refused
+(quickstart S3).
+
+- [ ] T027 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C15/SC-003: remove a key, recreate,
+  and assert the **SSH attempt is refused** — not merely that the line is absent. Verify the `ssh` volume
+  **survived** the cycle; a pass obtained by destroying the volume proves nothing.
+- [ ] T028 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py` for C14/C16/FR-016/SC-010: a line added by
+  hand outside the region survives a down/up byte-for-byte, and a collection that becomes **absent**
+  empties the region rather than leaving a stale set.
+- [ ] T029 [US3] Change `inject_keys` in `bin/agent-container` to write **inside** the managed region rather
+  than appending to the file (FR-015, C25). The tool must not create a grant it cannot revoke; today's
+  append is removable only by `--purge`, which destroys the environment's own SSH identity.
+- [ ] T030 [US3] State at injection time, in `bin/agent-container`, that a `keys add` grant lasts **until the
+  next recreate** (FR-015). A changed guarantee that is not said out loud is a trap for whoever relied on
+  the old one.
+- [ ] T031 [P] [US3] Test in `bin/tests/test_key_collection.py` for C27: after an injection the region markers
+  still form **exactly one pair**. An injection that appended past `END` would satisfy "admitted
+  immediately" and silently fail "gone after recreate" — the two halves must be pinned separately.
+- [ ] T032 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C25/C26/FR-016/SC-009: a `keys add` grant is
+  admitted immediately, refused after a recreate, while a hand-added key survives. Both halves in one
+  test — a change asserting only the first will cheerfully delete an operator's keys.
+- [ ] T033 [US3] Add `start_collection_drift()` to `bin/agent-container`: on `start`, compare the resolved
+  collection against the set the deployment was **created with**, and warn naming the differing keys and
+  `redeploy` (FR-013, C23). Do **not** re-resolve or re-apply — `start` is a resume, and re-applying would
+  silently turn it into a deploy.
+- [ ] T034 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py` for C23/SC-008: after removing a key,
+  `stop` then `start` still admits the old set **and** the operator was told so. Assert the warning; its
+  absence is the defect, since the container's own boot rewrites the region and makes the stale set look
+  freshly authoritative.
+
+**Checkpoint**: FR-006 holds against the collection, against `keys`, and against a resume. This is the
+first point at which the feature is honest.
+
+---
+
+## Phase 6: US4 — See what will be admitted, before deploying (P2)
+
+**Goal**: the admit set is visible before creation and afterwards, and the "afterwards" reading is
+observed rather than assumed.
+
+**Independent test**: a pre-deploy statement names each key; a query names the same set for a running
+environment (quickstart S6, SC-006).
+
+- [ ] T035 [US4] Add `report_admit_set()` to `bin/agent-container`: pre-deploy, print `fingerprint  comment`
+  per entry plus the source file, never the full blob (FR-007, C10). A fingerprint identifies a device; a
+  blob is noise.
+- [ ] T036 [US4] Create the `keys` typer subgroup in `bin/agent-container` — `keys show <name>`, `keys ls` —
+  following the noun-plus-verb idiom of `ssh-key show` / `host ls` / `runs list` (FR-018, C28).
+- [ ] T037 [US4] Move the grant form to `keys add <name> --authorized-key` in `bin/agent-container` (FR-018).
+  Required, not cosmetic: `show`, `ls` and `add` all satisfy `validate_name`, so a bare positional beside a
+  subcommand would make an environment named `show` permanently unreachable through the group. Add a test
+  that the **old bare form no longer grants** (C30) — a silently-still-working old form is how a breaking
+  change goes unnoticed until someone depends on both.
+- [ ] T038 [US4] Add `report_admit_set_observed()` to `bin/agent-container`: print **projected** (re-resolved)
+  and **observed** (read from the environment's region) side by side and state disagreement; report
+  observed as **`undetermined`** when the environment is unreachable, never backfilled from the projection
+  (FR-014, C24). Share the comparison with T033 rather than building it twice.
+- [ ] T039 [US4] Do **not** attach admit-set output to `ssh-key show` in `bin/agent-container` (FR-018). That
+  command reports the environment's **outbound** identity; merging inbound authorisation into it is the
+  direction confusion this spec avoids elsewhere.
+- [ ] T040 [P] [US4] Hermetic tests in `bin/tests/test_key_collection.py` for C24: projected and observed both
+  printed, disagreement stated, and an unreachable environment yielding `undetermined` — with an explicit
+  assertion that the projection never silently fills the observed slot.
+- [ ] T041 [P] [US4] Test in `bin/tests/test_key_collection.py` for C29 using an environment literally named
+  `show`: its admit set is queryable and a key can be granted to it (SC-012). The collision is the reason
+  for the layout, so it is the case that must be tested rather than reasoned about.
+- [ ] T042 [US4] Acceptance test in `bin/tests/test_acceptance.py` for C12/SC-006: compare the printed
+  fingerprints against `ssh-keygen -l` over the container's **actual region** — never against the input
+  file, which would compare a projection with itself and report agreement it never checked.
+- [ ] T043 [P] [US4] Test the completions and CLI surface in `bin/tests/` for the new `keys` verbs, and assert
+  every new short flag has a long form (repo convention, with a test that can fail).
+
+**Checkpoint**: all four stories deliverable.
+
+---
+
+## Phase 7: Polish & Cross-Cutting
+
+- [ ] T044 [P] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S7 / C20: the admit set arrives
+  non-empty in a container deployed over a **remote** context. Skip locally, **fail in CI** — the pattern
+  017 used for `podman_connection`, because a test that skips everywhere proves nothing.
+- [ ] T045 [P] Document the collection in `docs/credentials.md`: the two levels, project-replaces-user, the
+  three states, `keys show`/`ls`/`add`, and the recreate-scoped grant.
+- [ ] T046 [P] Reconcile `docs/threat-model.md` with this feature (Constitution requirement): one file now
+  determines access to every environment, and the mitigations are refuse-early, state-before-deploy and
+  warn-on-empty. Name the residual risk rather than implying it was removed.
+- [ ] T047 [P] Update `README.md` where it shows repeated `--authorized-key` flags on `up`.
+- [ ] T048 Add a one-line pointer to `CLAUDE.md` for feature 020 under the decisions list, and **prune before
+  adding** — the file is at ~1950 tokens against a 2000 limit. Measure with a tokenizer; `chars/4`
+  understates by ~7%.
+- [ ] T049 Note both breaking changes in the release commit body: a `keys` grant no longer survives a
+  recreate (FR-015) and `keys <name>` becomes `keys add <name>` (FR-018, C30). Pre-1.0 these are MINOR bumps,
+  which is exactly why the version number will not say it and the notes must.
+- [ ] T050 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then run the acceptance tier
+  separately (`pytest -m acceptance bin/tests`; on macOS+Lima the work dir must be Lima-shared). Run the
+  **full** suite, not just the new tests — a changed contract is exactly when a pre-existing test still
+  pins the old shape, and this feature changes two shipped commands.
+
+---
+
+## Dependencies
+
+```
+Phase 1 (T001–T003)  ─┐
+                      ├─> Phase 2 (T004–T010) ─> Phase 3 US1 ─> Phase 4 US2
+                      │                                     └─> Phase 5 US3 ─> Phase 6 US4
+                      └── T008 needs T001's answer            (T038 reuses T033)
+                                                                             └─> Phase 7
+```
+
+- **T001 gates T008.** The channel choice is the same edit either way; only the commit's description
+  and separateness depend on the measurement.
+- **Phase 2 gates everything.** Until the union is gone, FR-006 cannot hold and a collection would add
+  access it could never remove.
+- **US2, US3 independent of each other**; both need US1's resolver.
+- **US4's T038 reuses T033's comparison** — same projected-vs-created-with mechanism.
+- **T027/T032 must not run while the tree is being edited** (acceptance tier re-reads the CLI).
+
+## Parallel opportunities
+
+- Phase 1: none — T001 is a single measurement whose answer the rest reads.
+- Phase 2: T007 (control-plane entrypoint) ∥ T009 ∥ T010 after T004–T006.
+- Phase 3: T020 ∥ T021 ∥ T022 once T011–T019 land.
+- Phase 5: T028 ∥ T031 ∥ T034; T027 first, since it defines the harness the others reuse.
+- Phase 6: T040 ∥ T041 ∥ T043.
+- Phase 7: T044 ∥ T045 ∥ T046 ∥ T047.
+
+## Implementation strategy
+
+**MVP is Phase 1 + Phase 2 + Phase 3 (US1)** — register once, deploy with no flags. But note what the
+MVP does *not* yet include: US3. Shipping US1 alone would mean the collection **adds** access and
+does not yet demonstrably remove it, which is the exact asymmetry the spec's checklist flagged. Phase 2
+makes removal work; Phase 5 proves it. **Do not release after Phase 3 without Phase 5's tests**, or the
+feature will pass its own acceptance criteria while its hardest requirement is unverified.
+
+**Highest-risk area**: the managed region now has **two writers** — deploy-time (T005) and `keys add`
+(T029). C27/T031 exists for exactly that, and it is where this feature is most likely to go wrong.
