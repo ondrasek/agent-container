@@ -130,7 +130,22 @@ host key — now lives on the per-container `-ssh` volume (mounted at
 it survives every recreate (no more `REMOTE HOST IDENTIFICATION HAS CHANGED`
 churn, since the host key is stable too). Pick whichever injection path fits:
 
-**At launch — `up --authorized-key`:**
+**Declare your devices ONCE — the key collection (Feature 020):**
+
+```sh
+for d in iPhone iPad Macbook; do cat ~/.ssh/$d.pub; done \
+  >> ~/.config/agent-container/authorized_keys
+agent-container up acme            # no key flags; all three devices connect
+```
+
+Plain `authorized_keys` format, at the user level or per project
+(`<project>/.agent-container/authorized_keys`, which **replaces** the user file so a
+project can narrow the set). **Removing a key and recreating ends its access**;
+anything you added by hand inside the environment survives. `agent-container keys
+show acme` prints what the collection says *and* what the environment actually
+holds. See [docs/credentials.md](docs/credentials.md#the-key-collection--declare-devices-once-feature-020).
+
+**Per deployment — `up --authorized-key`:**
 
 ```bash
 agent-container up acme --authorized-key ~/.ssh/id_ed25519.pub
@@ -142,7 +157,7 @@ entrypoint before sshd starts.
 **Into an already-running container — `agent-container keys`:**
 
 ```bash
-agent-container keys acme --authorized-key ~/.ssh/id_ed25519.pub
+agent-container keys add acme --authorized-key ~/.ssh/id_ed25519.pub
 ```
 
 No recreate: the key is streamed over stdin (never on argv), merged with dedup,
@@ -866,7 +881,7 @@ Layers are ordered cheapest-to-rebuild last, so an edit to the entrypoint (which
 
 - No `.env` content, `GH_TOKEN`, API keys, or any other secret. Credentials are injected at `run` time only.
 - No SSH host key baked into the image. The entrypoint generates an ed25519 key (or installs an injected one) onto the per-container `-ssh` volume, so the identity **persists** across `down`/`up` instead of being regenerated each launch.
-- No `~/.ssh/authorized_keys` content for `dev` in the image. The operator injects it at run time — `up --authorized-key`, `agent-container keys <name>`, or `SSH_AUTHORIZED_KEYS` in the env-file — and it too persists on the `-ssh` volume (inject once, not on every recreate).
+- No `~/.ssh/authorized_keys` content for `dev` in the image. The operator declares it in a key collection (Feature 020) or injects it at run time — `up --authorized-key`, `agent-container keys add <name>`, or `SSH_AUTHORIZED_KEYS` in the env-file. The tool-managed portion is **rewritten on every boot** from the collection, so removing a key and recreating withdraws it; anything outside that region is preserved.
 - No `sudo` / root at runtime. The image is **rootless**: sshd runs as `dev` on port 2222 and all dependencies are baked at build time (agents never `apt install`), so root is never needed.
 - No `.devcontainer/` configs. SSH + tmux is the only supported attach path.
 
@@ -897,7 +912,7 @@ The image itself enforces none of this — that's item C's entrypoint and item E
 
 1. **Debug override.** If the operator passes arguments (`docker run image bash`), the entrypoint `exec`s them and the rest of the flow is skipped.
 2. **Env-var validation.** Required vars must be set and non-empty; missing ones cause an immediate non-zero exit with a message naming the offender. Values are **never logged**.
-3. **SSH host key + authorized_keys (rootless).** The host key is an ed25519 key under `~/.ssh/hostkeys` — dev-owned, on the persisted `-ssh` volume — so a container keeps a **stable** identity across `down`/`up` while different containers differ. It is **generated in the container and never leaves**: the entrypoint keeps the persisted key or creates one, and derives the world-readable `.pub` the tool captures at deploy to pin (Feature 018). `authorized_keys` is assembled as a deduped union of the persisted file plus any injected source (`up --authorized-key`, `SSH_AUTHORIZED_KEYS`). No root or `sudo` is involved.
+3. **SSH host key + authorized_keys (rootless).** The host key is an ed25519 key under `~/.ssh/hostkeys` — dev-owned, on the persisted `-ssh` volume — so a container keeps a **stable** identity across `down`/`up` while different containers differ. It is **generated in the container and never leaves**: the entrypoint keeps the persisted key or creates one, and derives the world-readable `.pub` the tool captures at deploy to pin (Feature 018). `authorized_keys` holds a tool-managed region, **replaced on every boot** from the resolved admit set (the key collection plus any `--authorized-key`/`SSH_AUTHORIZED_KEYS`); content outside the region is preserved byte-for-byte. It used to be a union with the persisted file, which meant a key injected once could never be withdrawn. No root or `sudo` is involved.
 4. **Git identity + credential helper.** Configures `user.name`, `user.email`, `init.defaultBranch=main`, `pull.rebase=false`, and the HTTPS credential helper that returns `${GH_TOKEN}` from process env. The helper is a shell function stored verbatim in `~/.gitconfig` and **scoped to `https://github.com`** (`credential.https://github.com.helper`) so the token is never handed to any other host; the token itself is never written to disk in the container.
 5. **sshd.** Started in the background as the `dev` user (rootless — no `sudo`), daemonized (not `-D`). Listens on the unprivileged port **2222** inside the container, using the host key + pidfile under the dev-owned `~/.ssh` volume; the orchestration layer maps this to the operator-facing host port (the hashed `2200 +` value, unchanged).
 6. **tmux session.** A detached session named `main` is created on first launch. Its windows are built from `AGENT_CONTAINER_TMUX_WINDOWS` (space-separated names, default `shell edit agents`); each window is a **bare shell** (no agent is auto-started). Set `AGENT_CONTAINER_TMUX_WINDOWS=""` (empty) to opt out and get a single window. Window names are validated against `[A-Za-z0-9._-]+`; invalid ones are skipped. The layout is built only when the session is first created, so a container restart never duplicates windows. Attach from a client with `ssh -t user@host -p <port> tmux attach -t main` (or `agent-container attach <name> --window <w>` to land in a specific window). The tmux config dir `~/.config/tmux` is a per-container volume, so a `tmux.conf` (and tpm plugins) you drop there persist across `down`/`up`.

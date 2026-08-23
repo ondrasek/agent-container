@@ -29,15 +29,12 @@ re-summarise them here.
   printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a missing
   referenced file must `die` **before** compose. On-volume `auth.json` is **operator-login only**; a
   `--task` is **not** a credential channel. **No private SSH key is injected at all** (see below).
-- **The supported-agent list is single-sourced** (`AGENTS`); tests pin the completions and every
-  Dockerfile to it, failing on drift and naming what to update.
-- **Defaults belong at the SURFACE** (Constitution VIII) — a flag, a reader's CALLER, a constructor;
-  each **named**. A reader reports **absence**; absent ≠ defaulted ≠ declared-empty.
-- **A named volume's mount point must exist in the image, dev-owned** — else the runtime creates it
-  `root:root` and rootless can't write it. Both images.
-- **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently (only `build`
-  needs a checkout). **PyYAML is the one third-party dep**; `yaml.safe_load` **only** — never a regex
-  over a structured format. Justify new deps against Constitution VI.
+- **The supported-agent list is single-sourced** (`AGENTS`); tests pin completions + every Dockerfile.
+  **Mirror any CLI surface change in both completions** — tests catch parity, not staleness.
+- **Defaults belong at the SURFACE** (Constitution VIII) — each **named**. A reader reports
+  **absence**; absent ≠ defaulted ≠ declared-empty ≠ unexamined.
+- **Packaging:** PyPI as `agent_container`; `REPO_ROOT` resolves location-independently. **PyYAML is
+  the one third-party dep**; `yaml.safe_load` **only** — never a regex over a structured format.
 
 - **Egress enforcement is packet-level and says so.** Default-deny in a netns shared with the **egress
   sidecar**, which alone holds `NET_ADMIN`; squid **splices, never bumps**. A declaration governs
@@ -48,13 +45,15 @@ re-summarise them here.
   nothing wires it; the `~/.ssh/config` **block** is write-once. `--purge`/`ssh-key rotate` is the
   revocation boundary. A first SSH clone-on-start can't clone — exit **3**, worded to forbid the
   teardown it invites.
+- **The admit set is DECLARED; the region is REWRITTEN (020).** `authorized_keys` both levels, project
+  **replaces** user; resolve+validate at the SURFACE. The container replaces a sentinel region each boot,
+  preserving all outside it — a union can't revoke. Same idiom as `~/.ssh/config`, **opposite** rule;
+  markers matched by **prefix**. The tool creates no access it cannot withdraw. **Projected AND
+  observed**; stopped ⇒ `undetermined`, never empty.
 - **The inventory remembers what we CREATED; `panic` acts on it.** Durable, **flat**, capped by count
   **not age**. `panic` enumerates from it, stops by **compose project label** (so does `stop` with no
   local compose file), verifies by **observation**. **Unreachable ⇒ `undetermined`, never `stopped`**
   and fails the run; an **unverified destroy writes no outcome**.
-- **A run's account outlives its container.** Container writes to the runs volume, CLI ingests on next
-  contact, **teardown drains before removing volumes**; *unknown* usage never `0`.
-
 - **Observability is TWO LEGS, ONE PAYLOAD** (017). Local trail unconditional; export is `curl`,
   **write-time**, **fail-open**, **zero** deps — protocol only, **never** a backend package.
   `accepted` = *this endpoint accepted this record*, nothing more; **2xx is not acceptance**;
@@ -67,7 +66,8 @@ re-summarise them here.
 - **`doctor` is read-only BY COMPOSITION** — never reaches a writer (a test walks the call graph);
   `unknown` **never exits 1**; a credential is checked by DECLARATION, never resolved.
 - **Every substantive merge to `main` is a release.** python-semantic-release bumps from Conventional
-  Commits (`feat`→minor, `fix`→patch, **breaking→minor pre-1.0**), tags and publishes via OIDC.
+  Commits (`feat`→minor, `fix`→patch, **breaking→minor pre-1.0**) — so a breaking change must SAY so in
+  the body; the version won't.
 
 ### Where the detail lives
 

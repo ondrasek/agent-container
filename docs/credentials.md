@@ -173,6 +173,72 @@ Nothing SSH-related is baked into the image. Three injection channels feed the
 
 Every channel above carries **public** keys only.
 
+### The key collection — declare devices once (Feature 020)
+
+An `authorized_keys` file at either config level is auto-injected into every
+environment the tool creates, with no per-deployment flag:
+
+| Level | Path |
+|---|---|
+| Project | `<project root>/.agent-container/authorized_keys` |
+| User | `~/.config/agent-container/authorized_keys` |
+
+Plain OpenSSH `authorized_keys` format, so enrolling a device is
+`cat ~/.ssh/id_ed25519.pub >> ~/.config/agent-container/authorized_keys`. No tool
+command needs to have written the file.
+
+**The project file REPLACES the user file entirely** — it is not merged per key. A
+collection is one value, so a project can *narrow* the set and not merely widen it;
+a client repository must not inherit an operator's personal phone.
+
+**Three states, kept distinct** (Constitution VIII):
+
+| State | Behaviour |
+|---|---|
+| No file at either level | Undeclared. No auto-injection — exactly today's behaviour. |
+| File exists, no entries | **Declared empty**: admits nobody. Honoured, and **warned about**. |
+| File with entries | Those keys are admitted. |
+
+Declared-empty is warned about and undeclared is silent, and that asymmetry is
+deliberate: a hand-edited file can be truncated by accident, and where there is no
+file there is nothing to truncate.
+
+**Removal revokes.** The container rewrites a delimited region of its
+`authorized_keys` on every boot, so a key removed from the collection is gone after
+a recreate. Content *outside* that region — anything you added by hand inside the
+environment — is preserved byte-for-byte. The tool removes what it wrote and
+nothing else.
+
+**The two managed blocks have OPPOSITE update rules**, which is worth knowing before
+editing either. The `authorized_keys` region is **replaced every boot** (a region
+never rewritten could not revoke). The `~/.ssh/config` block is **write-once** (an
+agent's own settings must survive). Both carry `# BEGIN agent-container` markers, and
+both say in-line which they are.
+
+Inspect and grant:
+
+```sh
+agent-container keys show <name>    # projected vs observed, and whether they agree
+agent-container keys ls             # every environment on a host
+agent-container keys add <name> --authorized-key k.pub   # until the next recreate
+```
+
+`keys show` prints both what the collection *says* and what the environment
+*actually holds*, because answering from the collection alone would compare a
+projection with itself. A stopped or unreachable environment reads `undetermined`,
+never "empty" — "nobody is authorised" and "we did not look" are different answers.
+
+**A `keys add` grant lasts only until the next recreate.** The tool does not create
+access it cannot withdraw; to make a key permanent, put it in the collection.
+
+`start` resumes and does not re-apply the collection, so if the collection changed
+it **warns** and names `redeploy`. Without that warning the environment would come
+back admitting its old set while looking freshly configured.
+
+**A malformed entry, or a PRIVATE key, refuses the deploy before anything is
+created** — naming the file and line. A key that silently fails to admit is a
+lockout discovered from the device that cannot fix it.
+
 ### The host key is captured, not supplied (Feature 018)
 
 The container **generates its own** ed25519 host key on the persisted `~/.ssh`

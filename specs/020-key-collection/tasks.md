@@ -284,22 +284,22 @@ environment (quickstart S6, SC-006).
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] T048 [P] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S7 / C20: the admit set arrives
+- [X] T048 [P] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S7 / C20: the admit set arrives
   non-empty in a container deployed over a **remote** context. Skip locally, **fail in CI** — the pattern
   017 used for `podman_connection`, because a test that skips everywhere proves nothing.
-- [ ] T049 [P] Document the collection in `docs/credentials.md`: the two levels, project-replaces-user, the
+- [X] T049 [P] Document the collection in `docs/credentials.md`: the two levels, project-replaces-user, the
   three states, `keys show`/`ls`/`add`, and the recreate-scoped grant.
-- [ ] T050 [P] Reconcile `docs/threat-model.md` with this feature (Constitution requirement): one file now
+- [X] T050 [P] Reconcile `docs/threat-model.md` with this feature (Constitution requirement): one file now
   determines access to every environment, and the mitigations are refuse-early, state-before-deploy and
   warn-on-empty. Name the residual risk rather than implying it was removed.
-- [ ] T051 [P] Update `README.md` where it shows repeated `--authorized-key` flags on `up`.
-- [ ] T052 Add a one-line pointer to `CLAUDE.md` for feature 020 under the decisions list, and **prune before
+- [X] T051 [P] Update `README.md` where it shows repeated `--authorized-key` flags on `up`.
+- [X] T052 Add a one-line pointer to `CLAUDE.md` for feature 020 under the decisions list, and **prune before
   adding** — the file is at ~1950 tokens against a 2000 limit. Measure with a tokenizer; `chars/4`
   understates by ~7%.
-- [ ] T053 Note both breaking changes in the release commit body: a `keys` grant no longer survives a
+- [X] T053 Note both breaking changes in the release commit body: a `keys` grant no longer survives a
   recreate (FR-015) and `keys <name>` becomes `keys add <name>` (FR-018, C30). Pre-1.0 these are MINOR bumps,
   which is exactly why the version number will not say it and the notes must.
-- [ ] T054 If any **new** `bin/tests/test_*.sh` file was added after all (T010 deliberately avoids one),
+- [X] T054 If any **new** `bin/tests/test_*.sh` file was added after all (T010 deliberately avoids one),
   wire it into `scripts/quality-gate.sh` in **both** places — a `run_check` line near L178 **and** an entry
   in the failure-message map near L42. A shell test with only one of the two either never runs or fails
   with no guidance; either way the gate reports something other than what happened.
