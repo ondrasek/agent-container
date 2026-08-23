@@ -102,9 +102,9 @@ admitted; a query names the same set for a running environment.
 - **A key already authorised on a long-lived container** that is later removed from the collection —
   see FR-006; the current union-with-persisted behaviour makes this the feature's hardest requirement.
 - **A duplicate key** across the collection and a flag, or listed twice — admitted once, no error.
-- **A key granted by `keys` on a running environment, then a recreate** — the grant is **gone**
-  (FR-015). Deliberate: a grant the collection cannot revoke is the one thing FR-006 forbids, and
-  `keys` today creates exactly that.
+- **Access granted to a running environment, then a recreate** — the grant is **gone** (FR-015).
+  Deliberate: access the collection cannot withdraw is the one thing FR-006 forbids, and the tool
+  currently creates exactly that.
 - **A key added by hand from inside the environment** — **survives** recreation (FR-016). The tool
   replaces only the region it wrote.
 - **The collection is edited, then `stop` + `start` rather than `redeploy`** — `start` resumes and does
@@ -130,9 +130,9 @@ admitted; a query names the same set for a running environment.
 - **FR-005**: A **private key** in the collection MUST be refused with an explicit statement that it
   is private, and MUST NOT be transmitted anywhere.
 - **FR-006**: Removing a key from the collection and recreating the environment MUST **end that key's
-  access**. The tool MUST NOT rely on the container's existing `authorized_keys` union, which today
-  preserves every key ever injected — under that behaviour a collection could add access and never
-  remove it, and the operator would believe otherwise.
+  access**. Today's behaviour retains every key the tool has ever granted, so this MUST NOT be assumed
+  to follow — it MUST be demonstrated. Without it a collection could grant access and never withdraw it,
+  while the operator believed otherwise.
 - **FR-007**: The set of keys an environment will admit MUST be **stated before deployment** and
   **queryable afterwards**, identified by something an operator can recognise (comment/fingerprint),
   never by opaque blob alone.
@@ -158,17 +158,14 @@ admitted; a query names the same set for a running environment.
   **`undetermined`** — never as agreement, and never silently replaced by the projection. A query that
   answered from the projection alone would compare a projection with itself and report agreement it
   never checked.
-- **FR-015**: A key injected by the `keys` command into a running environment MUST land **within the
-  tool-managed region** of the environment's authorised keys, so that recreating the environment
-  removes it. **The tool MUST NOT create a grant it cannot revoke.** `keys` MUST state at injection
-  that the grant lasts **until the next recreate**. This is a **change to the existing behaviour** of
-  `keys`, which today appends to the persisted file permanently — a grant removable only by `--purge`,
-  which destroys the environment's own SSH identity. That path is the documented opposite of FR-006 and
-  MUST NOT survive this feature.
-- **FR-016**: Content the tool did not write — a key added by hand from inside the environment — MUST
-  be preserved across recreation. FR-015 constrains what the **tool** grants; it does not make the tool
-  the owner of a file an operator may also edit. The tool's region is delimited and replaced; anything
-  outside it is not the tool's to remove.
+- **FR-015**: Access granted to a **running** environment MUST NOT outlive that environment's next
+  recreation, and the grant MUST say so when it is made. **The tool MUST NOT create access it cannot
+  later withdraw.** This **changes existing behaviour**: such a grant is currently permanent, undoable
+  only by destroying the environment outright — which also destroys the environment's own identity. An
+  escape hatch from FR-006 that the tool itself provides MUST NOT survive this feature.
+- **FR-016**: Access the operator granted **themselves**, from inside the environment, MUST survive
+  recreation. FR-015 governs what the **tool** grants; it does not make the tool the owner of
+  everything in the environment. What the tool did not create is not the tool's to remove.
 - **FR-017**: A **declared-empty** collection MUST be **honoured and warned about**, naming the file
   and saying the environment will admit nobody. It MUST NOT prompt and MUST NOT refuse: an empty
   declaration is a legitimate instruction for a headless environment, and refusing without a tty would
@@ -176,24 +173,26 @@ admitted; a query names the same set for a running environment.
   — today an environment deployed with no keys at all is silent, and FR-009 requires that stay true.
   The asymmetry is deliberate: the warning exists because a hand-edited file can be **truncated by
   accident**, and where there is no file there is nothing to truncate.
-- **FR-018**: The admit-set query MUST be exposed as a **`keys` subgroup** — `keys show <name>` for
-  one environment and `keys ls` across them — following the noun-plus-verb idiom every other group in
-  this tool already uses (`ssh-key show`, `host ls`, `runs list`). The existing grant form
-  `keys <name> --authorized-key` MUST move to **`keys add <name> --authorized-key`**. This is required,
-  not cosmetic: `show`, `ls` and `add` are all legal environment names, so a bare positional beside a
-  subcommand would make an environment named `show` permanently unreachable through this group. The
-  query MUST NOT be attached to `ssh-key show`, which reports the environment's **outbound** identity —
-  the opposite direction, and conflating the two in one output is the confusion this feature is careful
-  to avoid elsewhere.
+- **FR-018**: Querying and granting MUST each have their **own named command**, and **no valid
+  environment name may become unreachable** as a result of how those commands are named. Meeting the
+  second half **changes the existing grant command's spelling**, which MUST be released as a breaking
+  change. The query MUST NOT be folded into the command that reports an environment's **outbound**
+  identity: that is the opposite direction, and presenting both as one answer invites exactly the
+  confusion this feature avoids elsewhere.
 - **FR-019**: A **stopped** environment MUST report its observed set as **`undetermined`**, not as
   empty. Observation requires reaching inside a running environment; a stopped one has not been
   examined, and "nobody is authorised" is a materially different claim from "we did not look". An
-  **empty** observed set MUST therefore mean a running environment whose managed region is genuinely
-  empty. Three states again, and the same rule as FR-009: absent, empty and unexamined do not collapse.
+  **empty** observed set MUST therefore mean a running environment that genuinely admits nobody. Three states again, and the same rule as FR-009: absent, empty and unexamined do not collapse.
 - **FR-020**: A query spanning **many** environments MUST report each one's outcome independently and
   MUST NOT fail the whole listing because one environment could not be reached. An unreachable
   environment appears as `undetermined` **in its own row**, and the query's exit status MUST NOT claim
   success for environments it never examined.
+
+**Where the mechanism lives.** This section states what must be true for the operator. *How* — the
+delimited region within the environment's authorised keys, its update rule, the command names, and the
+file the created-with set is read from — is specified in `data-model.md`, `contracts/cli.md` and
+`plan.md`. That separation is deliberate: these requirements should stay true if the mechanism is
+replaced.
 
 ### Key entities
 
@@ -226,16 +225,16 @@ admitted; a query names the same set for a running environment.
 - **SC-008**: After removing a key and running `stop` then `start`, the operator is told the admit set
   is out of date and which key differs, in **100%** of such resumes. No resume reports agreement while
   admitting a removed key.
-- **SC-009**: A key granted with `keys` is admitted immediately and is **refused after a recreate**,
+- **SC-009**: A key granted to a running environment is admitted immediately and is **refused after a recreate**,
   in **100%** of attempts. No tool-created grant outlives the collection.
 - **SC-010**: A key added by hand inside the environment is still admitted after a recreate. The tool
   removes what it wrote and nothing else.
 - **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
   environment admits nobody. The same deploy with **no** collection declared produces **no** such
   warning — the two runs are distinguishable in output, not merely in behaviour.
-- **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
-  queryable and a key can be granted to it. No legal environment name is made unreachable by the
-  command layout.
+- **SC-012**: An environment whose name collides with a command verb is fully usable — its admit set is
+  queryable and a key can be granted to it. **No valid environment name** is made unreachable by how the
+  commands are named.
 - **SC-013**: A stopped environment's observed set reads `undetermined`, and is distinguishable in
   output from a running environment whose region is empty. Neither is ever reported as the other.
 - **SC-014**: With one environment unreachable and three reachable, a listing reports four rows — three

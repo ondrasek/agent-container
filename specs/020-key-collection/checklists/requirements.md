@@ -8,7 +8,7 @@
 
 - [x] No implementation details (languages, frameworks, APIs)
 - [x] Focused on user value and business needs
-- [ ] Written for non-technical stakeholders
+- [x] Written for non-technical stakeholders
 - [x] All mandatory sections completed
 
 ## Requirement Completeness
@@ -83,3 +83,23 @@ the goal. Fourteen prose uses of the old term survived it. That is the same defe
 feature exists to remove, committed by the instrument checking for it, and it is the reason the
 quickstart's success-criteria coverage was audited by enumerating **all fourteen** criteria
 rather than by re-reading the diff: six had no scenario, and two analysis passes had missed them.
+
+**Readability item RESOLVED, 2026-08-23 — by moving mechanism out, not by diluting requirements.**
+The item was previously failed on purpose, on the argument that the detail which made three
+clarifications findable could not survive a general-reader rewrite. That argument was wrong about
+*where* the detail had to live. The requirements now state what must be true for the operator; the
+delimited region, its update rule, the command spellings and the file the created-with set is read
+from are specified in `data-model.md`, `contracts/cli.md` and `plan.md`, which is where the template
+intends them. Nothing was lost — each mechanism fact was checked to still exist elsewhere before the
+spec stopped stating it.
+
+The tell that this was the right fix: two *other* items — "no implementation details" and "no
+implementation details leak into specification" — were marked passing the whole time the spec
+carried union internals and a name-charset argument. Failing one item honestly while leaving its two
+near-duplicates checked was itself an inconsistency, and de-mechanising resolves all three at once
+rather than trading one against another.
+
+**Command names were deliberately kept.** For a CLI, the command surface *is* the user interface, so
+naming it is no more an implementation detail than "the checkout button" would be for a web app. The
+`## Clarifications` entries were also left verbatim: they are a decision log, and rewriting a record
+of what was asked and answered would falsify it.
