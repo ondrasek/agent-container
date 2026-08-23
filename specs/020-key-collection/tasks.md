@@ -89,7 +89,7 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   precedent is `read_text()` plus a textual assertion — which cannot fail when the shell logic is wrong.
   Grep-the-source coverage for the mechanism the whole feature rests on is the exact defect shape 020
   exists to remove. Extending an already-wired harness also means **no new gate entry is needed**.
-- [ ] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
+- [X] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
   resolution, entry validation, admit-set assembly, and compose-model shape. No assertion in this file may
   stand in for entrypoint behaviour — that belongs in T010's executing section.
 - [X] T012 [P] ~~Add a parity test~~ **ALREADY EXISTS — no new test written.** The block carries
@@ -119,45 +119,45 @@ redeployed is gone. FR-006 now holds for flags; the collection is not involved y
 **Independent test**: three keys registered at user level, `up` naming none, all three private halves
 connect (quickstart S1).
 
-- [ ] T014 [US1] Add `authorized_keys_candidates(cwd)` to `bin/agent-container`, returning project-then-user
+- [X] T014 [US1] Add `authorized_keys_candidates(cwd)` to `bin/agent-container`, returning project-then-user
   paths (`<project>/.agent-container/authorized_keys`, `~/.config/agent-container/authorized_keys`),
   mirroring `settings_candidates` so "where does a project keep its files" keeps one answer. Read whatever
   is there; **require no registration command** (FR-011) — `cat key.pub >> …/authorized_keys` is the whole
   enrolment flow, and no part of this feature may depend on the tool having written the file.
-- [ ] T015 [US1] Add `resolve_key_collection(cwd)` to `bin/agent-container` returning the **three distinct
+- [X] T015 [US1] Add `resolve_key_collection(cwd)` to `bin/agent-container` returning the **three distinct
   states** — `None` for undeclared, an empty list for declared-empty, entries otherwise (FR-009,
   Constitution VIII). A reader reports absence; it must not substitute a default.
-- [ ] T016 [US1] Add `validate_public_key_line(line)` to `bin/agent-container` using `ssh-keygen -l`, returning
+- [X] T016 [US1] Add `validate_public_key_line(line)` to `bin/agent-container` using `ssh-keygen -l`, returning
   type, comment and fingerprint. Treat the line as opaque otherwise, so `authorized_keys` options
   (`from=`, `command=`, `restrict`) pass through unharmed.
-- [ ] T017 [US1] Refuse a malformed entry in `bin/agent-container` naming the **file and line number**, before
+- [X] T017 [US1] Refuse a malformed entry in `bin/agent-container` naming the **file and line number**, before
   any runtime call (FR-004, C6, C9). A key that silently fails to admit is a lockout found from the
   device that cannot fix it. Assert **no container exists** afterwards, not just a non-zero exit (SC-004).
-- [ ] T018 [US1] Refuse a **private** key in `bin/agent-container` with a message saying explicitly that the
+- [X] T018 [US1] Refuse a **private** key in `bin/agent-container` with a message saying explicitly that the
   entry is private, and ensure zero bytes of it reach a staged artifact or log (FR-005, C7, SC-005). This
   is the one mistake here whose cost is not recoverable by editing a file. The test must **grep the state
   directory** for private-key material rather than trusting the refusal (quickstart S5).
-- [ ] T019 [US1] Refuse an unreadable or vanished collection file before any runtime call, naming the path
+- [X] T019 [US1] Refuse an unreadable or vanished collection file before any runtime call, naming the path
   (FR-012, C8).
-- [ ] T020 [US1] Add `resolved_admit_set(cwd, flag_keys)` to `bin/agent-container`: the winning collection
+- [X] T020 [US1] Add `resolved_admit_set(cwd, flag_keys)` to `bin/agent-container`: the winning collection
   **plus** `--authorized-key`, order-preserving, de-duplicated, each entry **attributed to its source**
   (FR-008, C11).
-- [ ] T021 [US1] Wire `resolved_admit_set` into the `up` and `redeploy` paths in `bin/agent-container` for
+- [X] T021 [US1] Wire `resolved_admit_set` into the `up` and `redeploy` paths in `bin/agent-container` for
   **both roles** (FR-001, FR-003, C5), passing the text to the `content:` config from T009.
-- [ ] T022 [US1] Warn once on a **declared-empty** collection, naming the file and saying the environment
+- [X] T022 [US1] Warn once on a **declared-empty** collection, naming the file and saying the environment
   will admit nobody — and do **not** prompt or refuse (FR-017, C4). Leave the **undeclared** path silent:
   today an `up` with no keys is already silent and FR-009 requires that stay true.
-- [ ] T023 [P] [US1] Hermetic tests in `bin/tests/test_key_collection.py` for C1 (user-level resolution), C3
+- [X] T023 [P] [US1] Hermetic tests in `bin/tests/test_key_collection.py` for C1 (user-level resolution), C3
   (undeclared ⇒ no config entry at all), C4 (declared-empty honoured and warned), C5 (both roles),
   C10/C11 (statement content and attribution). Include SC-007 — undeclared plus `--authorized-key` alone
   admits exactly that key — and FR-011: a collection hand-written with no tool involvement resolves.
-- [ ] T024 [P] [US1] Hermetic tests in `bin/tests/test_key_collection.py` for C6–C9: malformed refused with
+- [X] T024 [P] [US1] Hermetic tests in `bin/tests/test_key_collection.py` for C6–C9: malformed refused with
   line number, private refused, unreadable refused — each asserting the refusal path **reaches no runtime
   call**, not merely that the exit code is non-zero. The exit code alone would pass on the wrong reason.
-- [ ] T025 [P] [US1] Distinguish C3 from C4 in a single test in `bin/tests/test_key_collection.py`: the two
+- [X] T025 [P] [US1] Distinguish C3 from C4 in a single test in `bin/tests/test_key_collection.py`: the two
   runs must differ in **output**, not only in behaviour (SC-011). Absent, defaulted and declared-empty
   collapsing into one is precisely what Constitution VIII forbids.
-- [ ] T026 [US1] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S1: three registered keys,
+- [X] T026 [US1] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S1: three registered keys,
   `up` with zero key flags, all three connect (SC-001).
 
 **Checkpoint**: US1 is deliverable. This is the MVP.

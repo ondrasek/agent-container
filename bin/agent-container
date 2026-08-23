@@ -57,7 +57,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 
 import questionary
 import typer
@@ -5612,6 +5612,181 @@ def settings_candidates(cwd: Path | None = None) -> list[Path]:
     return [*project, CONFIG_DIR / SETTINGS_FILENAME]
 
 
+# --- Feature 020: the public-key collection ----------------------------------
+# Same filename at both config levels, project winning ENTIRELY (011's contract).
+AUTHORIZED_KEYS_FILENAME = "authorized_keys"
+
+
+def authorized_keys_candidates(cwd: Path | None = None) -> list[Path]:
+    """Discovery order: project config directory first, then user config.
+
+    Mirrors `settings_candidates` so "where does a project keep its files" keeps one
+    answer. The format is OpenSSH `authorized_keys` — lines, not YAML — so the
+    operator enrols a device with `cat key.pub >> …/authorized_keys` and no tool
+    command is required to have written the file (FR-011).
+
+    >>> [p.name for p in authorized_keys_candidates(Path("/nonexistent-xyz"))]
+    ['authorized_keys']
+    """
+    pcd = project_config_dir(cwd or Path.cwd())
+    project = [pcd / AUTHORIZED_KEYS_FILENAME] if pcd is not None else []
+    return [*project, CONFIG_DIR / AUTHORIZED_KEYS_FILENAME]
+
+
+def resolve_key_collection(cwd: Path | None = None) -> tuple[Path, list[str]] | None:
+    """The winning collection as (source file, key lines), or None if UNDECLARED.
+
+    THREE STATES, and they must stay distinguishable (Constitution VIII):
+      None            -> undeclared; no file at either level. Changes nothing.
+      (path, [])      -> DECLARED EMPTY; admits nobody. A legitimate instruction.
+      (path, [k, …])  -> declared.
+
+    The winning FILE wins entirely — not merged per key. A collection is ONE value,
+    unlike `settings.yaml` where each key is its own setting, so a project must be
+    able to NARROW the set and not merely widen it (FR-002). That is the whole point
+    of the project-level override: a client repository must not inherit an
+    operator's personal phone.
+
+    Comments and blank lines are dropped; everything else is returned verbatim,
+    because `authorized_keys` options (`from=`, `command=`, `restrict`) are legal
+    and none of our business.
+    """
+    for candidate in authorized_keys_candidates(cwd):
+        if not candidate.is_file():
+            continue
+        try:
+            body = candidate.read_text()
+        except OSError as e:
+            # FR-012: refuse before any runtime call, naming the path.
+            die(f"could not read the key collection {candidate}: {e}")
+        lines = [ln.strip() for ln in body.splitlines()]
+        return candidate, [ln for ln in lines if ln and not ln.startswith("#")]
+    return None
+
+
+def validate_public_key_line(line: str, source: str, lineno: int) -> str:
+    """The key's fingerprint, or `die` naming the file and LINE NUMBER (FR-004).
+
+    A PRIVATE key is refused with an explicit statement that it is private
+    (FR-005). `~/.ssh/id_ed25519` and `~/.ssh/id_ed25519.pub` differ by four
+    characters, the mistake is one `cat` away, and it is the only error here whose
+    cost is not recoverable by editing a file.
+
+    Validated with `ssh-keygen -l`, which understands the options prefix, so a line
+    carrying `from=` or `restrict` passes untouched.
+    """
+    if "PRIVATE KEY" in line:
+        die(
+            f"{source}:{lineno} looks like a PRIVATE key. A collection holds PUBLIC "
+            f"keys only (the `.pub` half). Remove this entry; nothing was sent anywhere."
+        )
+    with tempfile.NamedTemporaryFile("w", suffix=".pub", delete=False) as fh:
+        fh.write(line + "\n")
+        probe = Path(fh.name)
+    try:
+        r = subprocess.run(
+            [shutil.which("ssh-keygen") or "ssh-keygen", "-l", "-f", str(probe)],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            die(
+                f"{source}:{lineno} is not a valid SSH public key. A key that silently "
+                f"fails to admit is a lockout discovered from the device that cannot fix "
+                f"it, so this refuses the deploy instead. Entry: {line[:60]!r}"
+            )
+        return r.stdout.split()[1] if len(r.stdout.split()) > 1 else r.stdout.strip()
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+class AdmitEntry(NamedTuple):
+    """One line of the resolved admit set, with where it came from.
+
+    `source` is carried so the pre-deploy statement can attribute each entry and
+    neither the collection nor `--authorized-key` appears to have won silently
+    (FR-008).
+    """
+
+    line: str
+    fingerprint: str
+    comment: str
+    source: str
+
+
+def resolved_admit_set(
+    flag_keys: list[Path], cwd: Path | None = None
+) -> tuple[list[AdmitEntry], Path | None, bool]:
+    """(admit set, collection file or None, collection_declared).
+
+    The collection PLUS `--authorized-key`, order-preserving and de-duplicated on
+    key material. Every entry is validated before any runtime call, so a malformed
+    or private entry refuses while nothing has been created (FR-004/FR-005/C9).
+
+    The third element distinguishes an UNDECLARED collection from a declared-empty
+    one; a bare `len(...) == 0` cannot, and the caller needs the difference to
+    decide whether to warn (FR-009, FR-017).
+    """
+    entries: list[AdmitEntry] = []
+    seen: set[str] = set()
+
+    def add(line: str, source: str, lineno: int) -> None:
+        fp = validate_public_key_line(line, source, lineno)
+        parts = line.split()
+        material = " ".join(parts[:2]) if len(parts) >= 2 else line
+        if material in seen:
+            return  # a duplicate is admitted once, and is not an error
+        seen.add(material)
+        entries.append(AdmitEntry(line, fp, parts[-1] if len(parts) > 2 else "", source))
+
+    resolved = resolve_key_collection(cwd)
+    collection_file = resolved[0] if resolved else None
+    for i, line in enumerate(resolved[1] if resolved else [], start=1):
+        add(line, str(collection_file), i)
+    for p in flag_keys:
+        pk = p.expanduser()
+        if not pk.is_file():
+            die(f"--authorized-key: {p} does not exist or is not a file")
+        for i, line in enumerate(pk.read_text().splitlines(), start=1):
+            if line.strip() and not line.strip().startswith("#"):
+                add(line.strip(), f"--authorized-key {p}", i)
+    return entries, collection_file, resolved is not None
+
+
+def report_admit_set(
+    entries: list[AdmitEntry], collection_file: Path | None, declared: bool
+) -> None:
+    """State the admit set BEFORE the deploy (FR-007), by fingerprint and comment.
+
+    Never the full blob: a fingerprint identifies a device, a blob is noise.
+
+    A DECLARED-EMPTY collection is honoured and WARNED about (FR-017) — it is a
+    legitimate instruction for a headless environment and also a lockout, so an
+    operator who meant it loses nothing by being told and one who did not has been
+    saved from an environment they cannot enter. The UNDECLARED path stays silent:
+    an environment deployed with no keys at all is silent today, and FR-009 requires
+    that stay true, so the asymmetry is deliberate. The warning exists because a
+    hand-edited file can be truncated by accident, and where there is no file there
+    is nothing to truncate.
+    """
+    if declared and not entries:
+        warn(
+            f"the key collection {collection_file} is EMPTY — this environment will "
+            f"admit nobody. That is honoured as declared; remove the file instead if "
+            f"you meant 'no declaration'."
+        )
+        return
+    if not entries:
+        return  # undeclared and no flags: today's behaviour, silently
+    if collection_file is not None:
+        log(f"admitting {len(entries)} key(s); collection: {collection_file}")
+    else:
+        log(f"admitting {len(entries)} key(s)")
+    for e in entries:
+        label = e.comment or "(no comment)"
+        log(f"  {e.fingerprint}  {label}  [{e.source}]")
+
+
 def resolve_settings_key(key: str, cwd: Path | None = None) -> object | None:
     """The value of `key` from the winning settings file, or None if undeclared.
 
@@ -9426,7 +9601,7 @@ def _egress_sort_key(event: dict) -> tuple[str, str, str, str]:
     )
 
 
-def stage_ssh_injection(host: str, name: str, authorized_keys: list[Path]) -> Path | None:
+def stage_ssh_injection(host: str, name: str, admit_lines: list[str]) -> Path | None:
     """Stage the injected authorized_keys as a LOCAL file under the per-host state
     dir. The compose model INLINES its text (`configs: {content:}`); it does NOT
     reference this path.
@@ -9453,16 +9628,13 @@ def stage_ssh_injection(host: str, name: str, authorized_keys: list[Path]) -> Pa
     d.mkdir(parents=True, exist_ok=True)
     d.chmod(0o700)
     ak_file: Path | None = None
-    if authorized_keys:
-        blob = ""
-        for p in authorized_keys:
-            pk = p.expanduser()
-            if not pk.is_file():
-                die(f"--authorized-key: {p} does not exist or is not a file")
-            text = pk.read_text()
-            blob += text if text.endswith("\n") else text + "\n"
+    if admit_lines:
+        # Already resolved, validated and de-duplicated by `resolved_admit_set` at
+        # the CLI surface — Feature 020. Reading and validating files HERE would put
+        # the refusal deep in the deploy path, after the point where "nothing has
+        # been created yet" stops being true (C9).
         ak_file = d / f"{name}.authorized_keys"
-        ak_file.write_text(blob)
+        ak_file.write_text("".join(line + "\n" for line in admit_lines))
         ak_file.chmod(0o644)
     return ak_file
 
@@ -9855,7 +10027,7 @@ def compose_up_exec(
     name: str,
     env_file: Path | list[Path],
     mounts: list[str],
-    authorized_keys: list[Path],
+    admit_lines: list[str],
     redeploy: bool = False,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
@@ -9889,7 +10061,7 @@ def compose_up_exec(
         # ran this pre-check at all).
         log(f"port {port} is busy; waiting for it to be released…")
         wait_port_released(port)
-    ak_file = stage_ssh_injection(host_name, name, authorized_keys)
+    ak_file = stage_ssh_injection(host_name, name, admit_lines)
     injected = stage_push_injection(host_name, name, known_hosts)  # US1, ephemeral
     # US2 (T012): convention-discovered model/API key files, staged ephemerally to
     # INJECT_APIKEY_DIR/<provider> (H1/FR-012). Automatic — no flags; env/.env still works.
@@ -10439,6 +10611,12 @@ def do_up(
 
         # The image builds on the host via compose (`up --build`) — no pre-built
         # image or registry needed. Serialized against concurrent lifecycle ops (FR-017).
+        # Feature 020: resolve and STATE the admit set HERE — at the surface, before
+        # anything is created. `resolved_admit_set` validates every entry, so a
+        # malformed or private key refuses while "nothing exists yet" is still true
+        # (C9), and the operator sees which devices are about to be admitted (FR-007).
+        _admit, _coll, _declared = resolved_admit_set(authorized_keys or [])
+        report_admit_set(_admit, _coll, _declared)
         with deployment_lock(host_name, name):
             compose_up_exec(
                 host_name,
@@ -10446,7 +10624,7 @@ def do_up(
                 name,
                 env_file,
                 resolved_mounts,
-                authorized_keys or [],
+                [e.line for e in _admit],
                 known_hosts=known_hosts,
                 spec=spec,
                 extra_injected_configs=extra_injected_configs,
@@ -10809,6 +10987,12 @@ def do_redeploy(
         # never gets a half-configured environment built from files we no longer read.
         refuse_superseded_layout(name)
         env_file = _resolve_env_files(name, env_file_override)
+        # Feature 020: resolve and STATE the admit set HERE — at the surface, before
+        # anything is created. `resolved_admit_set` validates every entry, so a
+        # malformed or private key refuses while "nothing exists yet" is still true
+        # (C9), and the operator sees which devices are about to be admitted (FR-007).
+        _admit, _coll, _declared = resolved_admit_set(authorized_keys or [])
+        report_admit_set(_admit, _coll, _declared)
         with deployment_lock(host_name, name):
             compose_up_exec(
                 host_name,
@@ -10816,7 +11000,7 @@ def do_redeploy(
                 name,
                 env_file,
                 resolved_mounts,
-                authorized_keys or [],
+                [e.line for e in _admit],
                 redeploy=True,
                 known_hosts=known_hosts,
                 spec=spec,

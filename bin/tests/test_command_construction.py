@@ -661,11 +661,17 @@ def test_gather_rows_marks_orphaned_state_files_stale(wiz, monkeypatch):
 
 
 def test_stage_ssh_injection_writes_local_files(wiz, tmp_path):
-    p1 = tmp_path / "a.pub"
-    p1.write_text("ssh-ed25519 AAAAA a\n")
-    p2 = tmp_path / "b.pub"
-    p2.write_text("ssh-ed25519 BBBBB b")  # no trailing newline -> normalized
-    ak_file = wiz.stage_ssh_injection("local", "acme", [p1, p2])
+    """Feature 020 moved resolution OUT of here: this takes resolved lines now.
+
+    It used to read `--authorized-key` files itself. Reading and validating them at
+    this depth put the refusal inside the deploy path, past the point where
+    "nothing has been created yet" is still true — so that work moved up to
+    `resolved_admit_set` at the CLI surface (Constitution VIII), and this function
+    only writes what it is handed.
+    """
+    ak_file = wiz.stage_ssh_injection(
+        "local", "acme", ["ssh-ed25519 AAAAA a", "ssh-ed25519 BBBBB b"]
+    )
     assert ak_file.read_text() == "ssh-ed25519 AAAAA a\nssh-ed25519 BBBBB b\n"
     # 0644: compose exposes the source mode into the container, where dev
     # (uid 1000 != host uid) must read it. Public keys, so 0644 costs nothing —
@@ -679,9 +685,17 @@ def test_stage_ssh_injection_none_when_absent(wiz):
     assert wiz.stage_ssh_injection("local", "acme", []) is None
 
 
-def test_stage_ssh_injection_rejects_missing_files(wiz, tmp_path):
+def test_a_missing_authorized_key_file_is_still_rejected_but_at_the_surface(wiz, tmp_path):
+    """The rejection MOVED; it did not disappear (Feature 020).
+
+    `stage_ssh_injection` no longer opens files, so it can no longer refuse a
+    missing one. The refusal now happens in `resolved_admit_set`, which runs before
+    the deployment lock — strictly better, because it fires while nothing has been
+    created. Retargeted rather than deleted: a guard whose test is dropped along
+    with its old home is a guard nobody notices losing.
+    """
     with pytest.raises(wiz.Fatal, match="--authorized-key"):
-        wiz.stage_ssh_injection("local", "acme", [tmp_path / "nope.pub"])
+        wiz.resolved_admit_set([tmp_path / "nope.pub"], cwd=tmp_path)
 
 
 def test_keys_streams_secrets_over_stdin_never_argv(wiz, monkeypatch, tmp_path):
