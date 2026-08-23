@@ -49,11 +49,11 @@ costs one deploy; doing it last means the commit history describes the change wr
 **Purpose**: The managed region and the injection channel. Nothing about the collection works, and
 FR-006 cannot hold, until the container stops unioning keys onto its volume.
 
-- [ ] T004 Define the region sentinels and the replace-not-merge rule as named constants in
+- [X] T004 Define the region sentinels and the replace-not-merge rule as named constants in
   `bin/agent-container` (e.g. `KEY_REGION_BEGIN`, `KEY_REGION_END`), with a comment stating that this
   region is **replaced every boot** and that `~/.ssh/config`'s identically-styled block is
   **write-once** — same idiom, opposite rule (C21).
-- [ ] T005 Replace the union in `image/entrypoint.sh` with a region rewrite: parse `~/.ssh/authorized_keys`
+- [X] T005 Replace the union in `image/entrypoint.sh` with a region rewrite: parse `~/.ssh/authorized_keys`
   into before-region / region / after-region, emit the injected admit set as the new region, preserve
   before and after byte-for-byte, write atomically. Delete the `cat` persisted + injected + env union and
   the `awk 'NF && !seen[$0]++'` write-back that made removal impossible. **Decide and state two things the
@@ -62,10 +62,10 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   the operator's line — otherwise a recreate leaves the key authorised anyway and FR-006 fails silently.
   (b) `SSH_AUTHORIZED_KEYS` is tool-supplied per boot, so its content belongs **inside** the region, not
   outside; say so where it is read, or the next reader will assume it persists.
-- [ ] T006 Refuse rather than repair a malformed region in `image/entrypoint.sh`: a `BEGIN` with no `END`
+- [X] T006 Refuse rather than repair a malformed region in `image/entrypoint.sh`: a `BEGIN` with no `END`
   (or the reverse) must fail the boot naming the file, never guess a boundary (C17). Guessing risks
   deleting an operator's keys, which is worse than not starting.
-- [ ] T007 Rewrite section **7e** of `bin/tests/test_entrypoint.sh` from union semantics to region
+- [X] T007 Rewrite section **7e** of `bin/tests/test_entrypoint.sh` from union semantics to region
   semantics. It currently EXECUTES the entrypoint and asserts `"ssh: authorized_keys deduped union has 2
   keys"` — the exact behaviour T005 deletes — and it runs in the quality gate as `shell-entrypoint`, so
   Phase 2 turns the gate red here whether or not anyone planned for it. Worse, its fixture puts `PUB1` in
@@ -76,13 +76,13 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   delete the section — a removed assertion leaves nobody watching, which is the reason 7c/7d were inverted
   rather than dropped.
 
-- [ ] T008 [P] Apply T005 and T006 to `image-control-plane/entrypoint.sh` (FR-003). A control plane is the
+- [X] T008 [P] Apply T005 and T006 to `image-control-plane/entrypoint.sh` (FR-003). A control plane is the
   case this feature exists for, so it must not be the one that lags.
 - [ ] T009 Move the `ssh_authorized_keys` compose config from `{"file": ...}` to `{"content": ...}` in
   `build_compose_model` in `bin/agent-container`, and reduce `stage_ssh_injection` to producing the
   text rather than a staged path (C18, C19). Keep it on the **config** channel, never `secrets` — public
   keys are public, and labelling them secret misrepresents them (FR-010).
-- [ ] T010 [P] Add region assertions as a new section **7f** of `bin/tests/test_entrypoint.sh` — which
+- [X] T010 [P] Add region assertions as a new section **7f** of `bin/tests/test_entrypoint.sh` — which
   **executes** the entrypoint against stubs and already owns `authorized_keys` assembly: exactly one marker
   pair after a rewrite, content outside preserved, malformed region refused, empty region legal (C13, C17,
   C27). **Deliberately not a Python test.** The region parser is shell, and this repo's Python-vs-entrypoint
@@ -92,11 +92,13 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
 - [ ] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
   resolution, entry validation, admit-set assembly, and compose-model shape. No assertion in this file may
   stand in for entrypoint behaviour — that belongs in T010's executing section.
-- [ ] T012 [P] Assert in `bin/tests/test_key_collection.py` that the region logic in `image/entrypoint.sh`
-  and `image-control-plane/entrypoint.sh` is **identical**, failing with a diff and naming both files. The
-  control-plane entrypoint has no executing harness of its own, so parity with the one that does is what
-  keeps T008 from silently drifting. A **textual** comparison is honest here — the claim is "these two texts
-  agree", which text can prove — unlike a textual assertion standing in for behaviour.
+- [X] T012 [P] ~~Add a parity test~~ **ALREADY EXISTS — no new test written.** The block carries
+  `# SHARED-BLOCK BEGIN authorized_keys (drift-guarded; see test_pure_logic)`, and
+  `test_pure_logic._shared_block` already compares it across both entrypoints, with two
+  `test_guards_can_fail.py` tests proving the guard can fail. Writing a second parity test would have
+  duplicated working infrastructure. What this DID require: `test_guards_can_fail` corrupted the union's
+  dedup `awk` to prove the guard fails, and that line no longer exists — the fixture was retargeted onto
+  `AK_END_ID`, deliberately staying on a line whose divergence changes who can log in.
 - [ ] T013 [P] Assert in `bin/tests/test_key_collection.py` that the generated compose model has **no**
   `file:` key for `ssh_authorized_keys` (C19), and that the entry never appears under `secrets` (C18).
 

@@ -1005,16 +1005,67 @@ chmod 0644 "${HOSTKEY}.pub"
 # repeated boots and overlapping sources don't accumulate duplicates.
 # SHARED-BLOCK BEGIN authorized_keys (drift-guarded; see test_pure_logic)
 AUTHKEYS="${SSH_DIR}/authorized_keys"
-_akt="$(mktemp)"
-[[ -f "${AUTHKEYS}" ]] && cat "${AUTHKEYS}" >> "${_akt}"
-[[ -f "${INJECT_DIR}/authorized_keys" ]] && cat "${INJECT_DIR}/authorized_keys" >> "${_akt}"
-[[ -n "${SSH_AUTHORIZED_KEYS:-}" ]] && printf '%s\n' "${SSH_AUTHORIZED_KEYS}" >> "${_akt}"
-if [[ -s "${_akt}" ]]; then
-    awk 'NF && !seen[$0]++' "${_akt}" > "${AUTHKEYS}"
-    chmod 0600 "${AUTHKEYS}"
-    log "authorized_keys assembled ($(grep -c . "${AUTHKEYS}") key(s))"
+# This region is REPLACED on every boot. `~/.ssh/config`'s identically-styled
+# block is WRITE-ONCE (an agent's own settings must survive) — same idiom,
+# OPPOSITE update rule, so both sites say which they are. A region that is never
+# rewritten cannot revoke; a block that is rewritten would discard agent settings.
+# DETECTED by stable prefix, WRITTEN with the hint. The hint invites editing, so
+# if detection required the whole decorated line an operator who reworded it would
+# ORPHAN the region: its keys would become outside-content — permanent and
+# unrevocable — while a fresh region was appended below. FR-006 failing silently.
+AK_BEGIN_ID="# BEGIN agent-container managed keys"
+AK_END_ID="# END agent-container managed keys"
+AK_BEGIN="${AK_BEGIN_ID} — replaced on every boot; edit outside this region"
+AK_END="${AK_END_ID}"
+# What the TOOL grants THIS boot. Deliberately NOT unioned with the persisted
+# file: a union retains every key ever injected, so removing a key from the
+# source could never withdraw access (Feature 020, FR-006). SSH_AUTHORIZED_KEYS
+# is supplied per boot, so it belongs INSIDE the region, not outside it.
+_akr="$(mktemp)"
+[[ -f "${INJECT_DIR}/authorized_keys" ]] && cat "${INJECT_DIR}/authorized_keys" >> "${_akr}"
+[[ -n "${SSH_AUTHORIZED_KEYS:-}" ]] && printf '%s\n' "${SSH_AUTHORIZED_KEYS}" >> "${_akr}"
+_akb=0
+_ake=0
+if [[ -f "${AUTHKEYS}" ]]; then
+    _akb="$(awk -v b="${AK_BEGIN_ID}" 'index($0, b) == 1 { n++ } END { print n + 0 }' "${AUTHKEYS}")"
+    _ake="$(awk -v e="${AK_END_ID}" 'index($0, e) == 1 { n++ } END { print n + 0 }' "${AUTHKEYS}")"
 fi
-rm -f "${_akt}"
+# REFUSE rather than repair: a lone or repeated sentinel means the region's extent
+# is unknown, and guessing a boundary risks deleting keys the operator added.
+if [[ "${_akb}" != "${_ake}" ]] || [[ "${_akb}" -gt 1 ]]; then
+    rm -f "${_akr}"
+    die "authorized_keys has a malformed managed region (${_akb} begin, ${_ake} end marker(s)); refusing to rewrite it. Edit ${AUTHKEYS} so the markers form exactly one pair, or delete both marker lines."
+fi
+if [[ -s "${_akr}" ]] || [[ -f "${AUTHKEYS}" ]]; then
+    # Content outside the region is NOT the tool's to remove (FR-016).
+    _ako="$(mktemp)"
+    if [[ -f "${AUTHKEYS}" ]]; then
+        awk -v b="${AK_BEGIN_ID}" -v e="${AK_END_ID}" \
+            'index($0, b) == 1 { inside = 1; next } index($0, e) == 1 { inside = 0; next } !inside { print }' \
+            "${AUTHKEYS}" > "${_ako}"
+    fi
+    # A key the operator keeps OUTSIDE the region wins: we drop OUR duplicate, not
+    # their line, so a recreate still withdraws what the tool granted while their
+    # line survives. Dropping theirs would leave the key authorised after removal
+    # and fail FR-006 silently.
+    _akf="$(mktemp)"
+    {
+        cat "${_ako}"
+        printf '%s\n' "${AK_BEGIN}"
+        # FILENAME, not the usual NR == FNR: that idiom INVERTS when the first
+        # file is empty (NR and FNR both restart), and an empty _ako is exactly
+        # the fresh-deploy case — every granted key would be classified as
+        # already-present and dropped, authorising nobody on first boot.
+        awk -v ako="${_ako}" 'FILENAME == ako { if (NF) outside[$0] = 1; next }
+             NF && !($0 in outside) && !seen[$0]++ { print }' "${_ako}" "${_akr}"
+        printf '%s\n' "${AK_END}"
+    } > "${_akf}"
+    mv "${_akf}" "${AUTHKEYS}"
+    chmod 0600 "${AUTHKEYS}"
+    log "authorized_keys managed region rewritten ($(awk 'NF && $0 !~ /^#/' "${AUTHKEYS}" | wc -l | tr -d ' ') key(s) authorized)"
+    rm -f "${_ako}"
+fi
+rm -f "${_akr}"
 # SHARED-BLOCK END authorized_keys
 
 # sshd's privilege-separation directory (/run/sshd) is created root-owned at

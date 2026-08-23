@@ -153,10 +153,15 @@ def test_shared_block_guard_fails_when_the_copies_diverge(wiz, fake_root):
     covers who can log in to the control plane, so a vacuous version would be
     the most expensive kind of false comfort.
     """
+    # The divergence is planted on the line that decides where the managed region
+    # ENDS. Feature 020 replaced the old union (whose dedup `awk` this test used to
+    # corrupt) with a region rewrite; the target moved with it, deliberately staying
+    # on a line whose divergence would change who can log in rather than on an
+    # incidental one, so the guard is still proven against a consequential edit.
     _corrupt(
         fake_root / "image-control-plane" / "entrypoint.sh",
-        "awk 'NF && !seen[$0]++'",
-        "cat",
+        'AK_END_ID="# END agent-container managed keys"',
+        'AK_END_ID="# END"',
     )
     with pytest.raises(AssertionError, match="has DRIFTED"):
         tpl.test_shared_entrypoint_blocks_are_identical_across_images("authorized_keys")

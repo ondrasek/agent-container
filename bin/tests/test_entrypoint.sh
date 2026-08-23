@@ -320,14 +320,82 @@ if [[ -f "${HK}.pub" ]]; then ok; else bad "ssh: the .pub the tool captures exis
 check_eq "ssh: the .pub is world-readable for capture" "644" "$(perm "${HK}.pub")"
 check_eq "ssh: the PRIVATE key stays 0600" "600" "$(perm "${HK}")"
 
-# 7e. authorized_keys: deduped union of the persisted file + the env source.
+# 7e. authorized_keys is a MANAGED REGION, not a union (Feature 020, FR-006).
+# REWRITTEN, not deleted. The union this replaced retained every key ever injected,
+# so removing a key from the source could never withdraw access — and an assertion
+# that merely disappears leaves nobody watching for the union's return, which is
+# why 7c/7d were inverted rather than dropped.
 reset_session; reset_ssh
 PUB1="ssh-ed25519 AAAAKEY1 laptop"; PUB2="ssh-ed25519 AAAAKEY2 desktop"
-mkdir -p "${HOMEDIR}/.ssh"; printf '%s\n' "${PUB1}" > "${AK}"      # pre-existing persisted key
-TEST_ENV_AUTHKEYS="$(printf '%s\n%s\n%s' "${PUB1}" "${PUB1}" "${PUB2}")"  # dup PUB1 + new PUB2
+AK_B='BEGIN agent-container managed keys'; AK_E='END agent-container managed keys'
+printf '%s\n%s\n' "${PUB1}" "${PUB2}" > "${INJECTDIR}/authorized_keys"
 run_entrypoint __unset__
-check_eq "ssh: authorized_keys deduped union has 2 keys" "2" "$(grep -c . "${AK}")"
-if grep -qxF "${PUB1}" "${AK}" && grep -qxF "${PUB2}" "${AK}"; then ok; else bad "ssh: both unique keys present"; fi
+check_eq "ssh: the region holds both granted keys" "2" "$(grep -c '^ssh-' "${AK}")"
+check_eq "ssh: exactly one region BEGIN marker" "1" "$(grep -c "${AK_B}" "${AK}")"
+check_eq "ssh: exactly one region END marker" "1" "$(grep -c "${AK_E}" "${AK}")"
+check_eq "ssh: authorized_keys stays 0600" "600" "$(perm "${AK}")"
+
+# 7e2. REMOVAL REVOKES. This is the assertion the union made impossible, and the
+# whole reason the region exists: drop PUB2 from the source, recreate, and it must
+# be GONE rather than retained from the persisted file.
+reset_session
+printf '%s\n' "${PUB1}" > "${INJECTDIR}/authorized_keys"
+run_entrypoint __unset__
+if grep -qxF "${PUB2}" "${AK}"; then bad "ssh: a key removed from the source is STILL authorized (FR-006)"; else ok; fi
+if grep -qxF "${PUB1}" "${AK}"; then ok; else bad "ssh: the still-granted key vanished with it"; fi
+
+# 7e3. SSH_AUTHORIZED_KEYS is supplied per boot, so it belongs INSIDE the region.
+# Outside, it would persist after the env var stopped being set — the same
+# never-revocable grant in a different disguise.
+reset_session; reset_ssh
+TEST_ENV_AUTHKEYS="${PUB2}"
+run_entrypoint __unset__
+if sed -n "/${AK_B}/,/${AK_E}/p" "${AK}" | grep -qxF "${PUB2}"; then ok; else bad "ssh: the env-supplied key landed outside the region"; fi
+TEST_ENV_AUTHKEYS=""
+
+# --- 7f. The region's boundary: what the tool owns, and what it must not touch --
+# 7f1. Content the tool did not write SURVIVES (FR-016). FR-015 governs what the
+# tool grants; it does not make the tool the owner of a file the operator edits.
+reset_session; reset_ssh
+HAND="ssh-ed25519 AAAAHAND operator"
+printf '%s\n' "${PUB1}" > "${INJECTDIR}/authorized_keys"
+run_entrypoint __unset__
+printf '%s\n' "${HAND}" >> "${AK}"          # as if added by hand from inside
+reset_session
+run_entrypoint __unset__
+if grep -qxF "${HAND}" "${AK}"; then ok; else bad "ssh: a hand-added key outside the region was DELETED"; fi
+
+# 7f2. A key present BOTH inside and outside: OUR duplicate goes, THEIRS stays, so
+# a recreate still withdraws what the tool granted while their line survives.
+# Dropping theirs instead would leave the key authorized after removal — FR-006
+# failing silently, which is the worst of the available bugs.
+reset_session; reset_ssh
+printf '%s\n' "${PUB1}" > "${INJECTDIR}/authorized_keys"
+run_entrypoint __unset__
+printf '%s\n' "${PUB1}" > "${AK}.tmp"; cat "${AK}" >> "${AK}.tmp"; mv "${AK}.tmp" "${AK}"
+reset_session
+run_entrypoint __unset__
+check_eq "ssh: a key held inside and outside appears once" "1" "$(grep -cxF "${PUB1}" "${AK}")"
+if sed -n "/${AK_B}/,/${AK_E}/p" "${AK}" | grep -qxF "${PUB1}"; then bad "ssh: kept OUR copy instead of the operator's line"; else ok; fi
+
+# 7f3. A collection that becomes absent EMPTIES the region rather than leaving a
+# stale set behind (C16) — and still does not touch what is outside it.
+reset_session
+: > "${INJECTDIR}/authorized_keys"
+run_entrypoint __unset__
+check_eq "ssh: an absent source empties the region" "0" "$(sed -n "/${AK_B}/,/${AK_E}/p" "${AK}" | grep -c '^ssh-')"
+if grep -qxF "${PUB1}" "${AK}"; then ok; else bad "ssh: emptying the region removed the operator's own line"; fi
+
+# 7f4. A malformed region is REFUSED, never repaired (C17). One sentinel without
+# its pair means the extent is unknown, and guessing a boundary risks deleting
+# keys the operator added themselves.
+reset_session; reset_ssh
+mkdir -p "${HOMEDIR}/.ssh"                              # reset_ssh removed it
+printf '# %s\n%s\n' "${AK_B}" "${PUB1}" > "${AK}"     # BEGIN with no END
+run_entrypoint __unset__
+if log_has 'malformed managed region'; then ok; else bad "ssh: a half-marked region was rewritten instead of refused"; fi
+if grep -qxF "${PUB1}" "${AK}"; then ok; else bad "ssh: refusing to rewrite still lost a key"; fi
+reset_ssh
 
 # --- 8. The agent's own SSH key pair (Feature 019) ---------------------------
 # GENERATED HERE and never supplied. The assertions INVERT rather than disappear:

@@ -111,6 +111,27 @@ cross, then `--authorized-key` silently admits nobody on a remote host, and the
 collection built on the same channel would inherit that exact failure on the host
 where a lockout is hardest to recover from.
 
+**Measurement attempts, 2026-08-23 — still UNSETTLED, and now with two ruled-out routes.**
+
+1. *Remote host over `dbg-ctx`* — blocked. The host's SSH key has **changed**, so the context
+   refuses to connect. Not worked around: 018's own rule is that a host-key mismatch **refuses,
+   never prompts**, and that the tool leaves the operator's `~/.ssh/known_hosts` untouched.
+   Clearing that entry to obtain a measurement would perform the failure this project refuses.
+2. *Podman over the local Lima VM* — **cannot answer the question**, proven rather than assumed.
+   A probe file written to the staging directory was read successfully from inside a container,
+   so the VM **shares `$HOME`**. A `file:` config pointing under `$HOME` therefore resolves here
+   whether or not it would resolve against a daemon that shares nothing.
+
+That second result is worth more than a failed attempt: **it explains how the contradiction
+survived.** On macOS with Lima — the setup this project is developed on — `file:` works. Anyone
+testing locally would have seen `--authorized-key` succeed and written a docstring saying so. The
+claim is not careless; it is true of the environment it was formed in and untested outside it.
+
+**What would actually settle it**: a daemon that does not share the host filesystem — a real remote
+Docker/Podman context, or a Lima VM configured without the `$HOME` mount. Until then C20 stays open
+and T002's docstring correction stays unmade, because correcting it either way would be asserting
+something still unmeasured.
+
 **Consequence for scope**: settling this is **inside** 020, not adjacent to it.
 020's admit set flows through this config entry; choosing its form is unavoidable.
 So the plan does two things, in order:
