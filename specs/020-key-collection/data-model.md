@@ -101,3 +101,38 @@ or cannot revoke.
 The union in the current entrypoint (`cat` persisted + injected + env, `awk`
 de-dupe, write back) is what this replaces. That union is why removal cannot
 currently revoke.
+
+
+---
+
+## 5. Created-with admit set (derived, per deployment)
+
+**Location**: the generated compose file, `host_state_dir(<host>)/<name>.compose.yaml`.
+
+FR-013 and FR-014 both compare the current collection against *the set the deployment
+was created with*, so that set must be readable after the deploy. It already is, and
+**no new state is introduced**:
+
+- Once the `ssh_authorized_keys` config uses **`content:`** (R4), the admit set is
+  stored **inline in the compose file** rather than referenced by path. Reading it back
+  is parsing a file the tool already wrote and already owns.
+- That file is already the deployment's **existence record** — `do_start` refuses with
+  *"no deployment named …"* when it is missing. So a deleted compose file produces the
+  failure it produces today, and FR-013 adds no new failure mode on top of it.
+
+**This makes the `content:` decision load-bearing twice.** It was chosen in R4 because a
+`file:` config may not cross a remote context; it is *also* what puts the created-with
+set where FR-013 and FR-014 can read it. Under `file:` the compose file would hold only
+a path — pointing at a staged file that the next deploy overwrites, so "what was this
+created with" would answer "whatever it was last staged with", which is the current
+resolution, not the historical one. **A comparison against that is a comparison against
+itself** — the same defect SC-006 was rewritten to avoid.
+
+| Read | Source | When unavailable |
+|---|---|---|
+| **projected** | resolve the collection now | collection absent ⇒ undeclared, not empty |
+| **created-with** | parse `<name>.compose.yaml` | absent ⇒ there is no deployment; report that, not agreement |
+| **observed** | read the region inside the environment | unreachable or stopped ⇒ **`undetermined`** |
+
+Three reads, three distinct absence answers. Collapsing any pair of them is what
+Constitution VIII forbids.
