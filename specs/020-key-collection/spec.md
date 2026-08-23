@@ -23,6 +23,12 @@ failure is not that it is tedious — it is that **forgetting is silent**. A con
 the iPhone key works perfectly until the operator is holding the iPhone, which is exactly when they
 cannot fix it. Feature 017 makes this sharper: a control plane exists to be reached from a phone.
 
+## Clarifications
+
+### Session 2026-08-23
+
+- Q: When the operator removes a key, then `stop` and `start` rather than `redeploy`, what must happen? → A: `start` compares the resolved collection against what the deployment was created with; on drift it warns, names which keys differ, and points to `redeploy`. Resume semantics unchanged.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### US1 — Every new environment is reachable from every device (P1)
@@ -71,6 +77,11 @@ admitted; a query names the same set for a running environment.
 - **A key already authorised on a long-lived container** that is later removed from the collection —
   see FR-006; the current union-with-persisted behaviour makes this the feature's hardest requirement.
 - **A duplicate key** across the collection and a flag, or listed twice — admitted once, no error.
+- **The collection is edited, then `stop` + `start` rather than `redeploy`** — `start` resumes and does
+  not re-resolve, so the environment still admits the set it was created with. The container's own
+  boot rewrites its key block, which makes that stale set *look* freshly authoritative. `start` MUST
+  therefore report the drift (FR-013); staying silent would reproduce the exact failure FR-006 exists
+  to fix, one command over.
 
 ## Requirements *(mandatory)*
 
@@ -106,6 +117,11 @@ admitted; a query names the same set for a running environment.
   the tool MUST read whatever is there rather than requiring registration through it.
 - **FR-012**: A collection referencing a **missing file** MUST refuse the deploy before any runtime
   call, naming the path.
+- **FR-013**: `start` MUST compare the resolved collection against the set the deployment was
+  **created with** and, when they differ, **warn** and name the differing keys and `redeploy` as the
+  remedy. `start` MUST NOT re-resolve or re-apply the collection — it is a resume, and re-applying
+  would silently turn it into a deploy. The warning is what keeps a stale admit set from passing as a
+  current one.
 
 ### Key entities
 
@@ -130,6 +146,9 @@ admitted; a query names the same set for a running environment.
   collection.
 - **SC-007**: An undeclared collection changes nothing about today's behaviour — an environment
   deployed with `--authorized-key` alone admits exactly that key.
+- **SC-008**: After removing a key and running `stop` then `start`, the operator is told the admit set
+  is out of date and which key differs, in **100%** of such resumes. No resume reports agreement while
+  admitting a removed key.
 
 ## Assumptions
 
@@ -156,4 +175,5 @@ admitted; a query names the same set for a running environment.
 
 - Distributing or generating device private keys.
 - Any per-environment allow/deny beyond project-level override.
-- Revoking access on a **running** container without recreating it.
+- Revoking access on a container without recreating it — whether **running** or merely **resumed**
+  via `start`. `start` reports the drift (FR-013) rather than acting on it.
