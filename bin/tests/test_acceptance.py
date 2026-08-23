@@ -522,25 +522,48 @@ def test_rootless_pubkey_login_as_dev(acc):
 
 
 def test_identity_persists_across_recreate(acc):
-    """The container's OWN host key and authorized_keys survive down/up: the
-    fingerprint is stable (no known_hosts churn) and login still works.
+    """The container's own HOST KEY survives down/up; its ADMIT SET does not.
 
-    This test used to inject a private host key to prove stability. Feature 018
-    removed that channel, and the property is now tested where it actually lives —
-    the key the CONTAINER generated on its persisted volume. That is a better test:
-    it proves the thing operators rely on rather than the thing the tool used to
-    supply.
+    Two properties that used to be one, and Feature 020 deliberately separated them.
+    The host key is the container's IDENTITY: generated on its persisted volume, and
+    stable across a recreate, so `known_hosts` does not churn. The admit set is
+    AUTHORISATION: rebuilt every boot from what is currently declared, so a key must
+    be declared to keep working.
+
+    This test previously asserted "authkeys kept" across a recreate — which was the
+    union that made removal impossible. That expectation is now inverted rather than
+    dropped, because the inversion is the feature: if a key injected once outlived
+    every later declaration, FR-006 could not hold.
+
+    The user-visible consequence, stated because it is a real behaviour change:
+    `--authorized-key` is now PER DEPLOYMENT. Pass it on each recreate, or declare
+    the key in a collection so you never pass it again — which is what the
+    collection exists for.
+
+    (It also used to inject a private host key to prove stability; Feature 018
+    removed that channel, so stability is now tested on the key the container
+    generated for itself.)
     """
     laptop = _gen_keypair(acc.tmp / "laptop")
-    port = acc.up("accpersist", authorized_key=[laptop.with_suffix(".pub")])
+    pub = laptop.with_suffix(".pub")
+    port = acc.up("accpersist", authorized_key=[pub])
     generated_fp = _container_hostkey_fp("accpersist")
     assert generated_fp  # the container made one for itself
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
     acc.down("accpersist")  # keep volumes
-    port2 = acc.up("accpersist")  # recreate
-    assert _container_hostkey_fp("accpersist") == generated_fp  # stable
-    assert _ssh(port2, laptop, "whoami").stdout.strip() == "dev"  # authkeys kept
+    port2 = acc.up("accpersist", authorized_key=[pub])  # recreate, re-declaring the key
+    assert _container_hostkey_fp("accpersist") == generated_fp  # identity is stable
+    assert _ssh(port2, laptop, "whoami").stdout.strip() == "dev"
+
+    # And the DELIBERATE non-persistence, which is the other half of the same
+    # property. Recreate WITHOUT declaring the key and it is revoked: the managed
+    # region is rebuilt from the resolved admit set, and this environment has no
+    # collection and no flag, so the set is empty.
+    acc.down("accpersist")
+    port3 = acc.up("accpersist")
+    assert _container_hostkey_fp("accpersist") == generated_fp  # identity STILL stable
+    assert _ssh(port3, laptop, "whoami").returncode != 0
 
 
 def test_live_key_injection_without_recreate(acc):
@@ -6356,3 +6379,74 @@ def test_start_warns_when_the_collection_drifted(acc):
     # And the warning tells the truth: the resumed environment still admits it.
     _wait_sshd(port)
     assert _ssh(port, gone_priv, "true").returncode == 0
+
+
+def test_a_file_config_does_not_cross_to_a_daemon_that_cannot_see_it(acc):
+    """C20 — the measurement that settled R4, kept as a regression test.
+
+    Feature 020 moved the admit set from `configs: {file:}` to `{content:}` because a
+    `file:` config is materialised as a BIND and resolved DAEMON-side. This asserts
+    both halves against the real runtime: the path form refuses, the inline form
+    arrives. Without it, a future revert to `file:` would pass every hermetic test
+    and every local deploy, and break only where the daemon does not share the
+    operator's filesystem — which is how the two contradicting docstrings this
+    feature had to reconcile came to exist in the first place.
+
+    SKIPPED where the daemon shares the staging path, because there the `file:` arm
+    would succeed and prove nothing. That is the case on a plain Linux daemon, and
+    also on macOS+Lima for any path under `$HOME` — which is exactly why `$HOME` is
+    the wrong place to stage this probe. The skip reason names which it was.
+    """
+    unshared = Path(tempfile.mkdtemp(dir="/tmp"))  # noqa: S108 — outside Lima's ~ mount
+    marker = unshared / "ak.txt"
+    marker.write_text("ssh-ed25519 AAAAPROBE probe\n")
+    probe = subprocess.run(
+        [RUNTIME, "run", "--rm", "-v", f"{unshared}:/p:ro", "alpine:3", "cat", "/p/ak.txt"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if probe.returncode == 0:
+        pytest.skip(
+            f"this daemon CAN see {unshared} — it shares the filesystem, so the "
+            "file: arm cannot fail and the test would prove nothing"
+        )
+
+    def _compose(cfg: dict) -> subprocess.CompletedProcess:
+        proj = unshared / "compose.yaml"
+        proj.write_text(
+            json.dumps(
+                {
+                    "name": "acc020probe",
+                    "services": {
+                        "p": {
+                            "image": "alpine:3",
+                            "command": ["cat", "/run/ak"],
+                            "configs": [{"source": "ak", "target": "/run/ak"}],
+                        }
+                    },
+                    "configs": {"ak": cfg},
+                }
+            )
+        )
+        try:
+            return subprocess.run(
+                [RUNTIME, "compose", "-f", str(proj), "up", "--abort-on-container-exit"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        finally:
+            subprocess.run(
+                [RUNTIME, "compose", "-f", str(proj), "down", "-v"],
+                capture_output=True,
+                timeout=180,
+            )
+
+    by_path = _compose({"file": str(marker)})
+    assert by_path.returncode != 0, "a file: config reached a daemon that cannot see the path"
+    assert "bind" in (by_path.stdout + by_path.stderr).lower()
+
+    inline = _compose({"content": marker.read_text()})
+    assert inline.returncode == 0, f"a content: config failed to arrive:\n{inline.stderr}"
+    assert "AAAAPROBE" in inline.stdout + inline.stderr

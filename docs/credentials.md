@@ -203,6 +203,12 @@ Declared-empty is warned about and undeclared is silent, and that asymmetry is
 deliberate: a hand-edited file can be truncated by accident, and where there is no
 file there is nothing to truncate.
 
+**`--authorized-key` is now PER DEPLOYMENT.** It used to be sticky: inject once and
+the key stayed on the volume forever. It no longer does — pass it on every recreate,
+or put the key in the collection and never pass it again. This is the same change as
+"removal revokes", seen from the other side: a key that outlived every later
+declaration is exactly what made removal impossible.
+
 **Removal revokes.** The container rewrites a delimited region of its
 `authorized_keys` on every boot, so a key removed from the collection is gone after
 a recreate. Content *outside* that region — anything you added by hand inside the

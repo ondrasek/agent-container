@@ -275,7 +275,7 @@ environment (quickstart S6, SC-006).
 - [X] T046 [US4] Acceptance test in `bin/tests/test_acceptance.py` for C12/SC-006: compare the printed
   fingerprints against `ssh-keygen -l` over the container's **actual region** — never against the input
   file, which would compare a projection with itself and report agreement it never checked.
-- [ ] T047 [P] [US4] Test the completions and CLI surface in `bin/tests/` for the new `keys` verbs, and assert
+- [X] T047 [P] [US4] Test the completions and CLI surface in `bin/tests/` for the new `keys` verbs, and assert
   every new short flag has a long form (repo convention, with a test that can fail).
 
 **Checkpoint**: all four stories deliverable.
@@ -303,7 +303,7 @@ environment (quickstart S6, SC-006).
   wire it into `scripts/quality-gate.sh` in **both** places — a `run_check` line near L178 **and** an entry
   in the failure-message map near L42. A shell test with only one of the two either never runs or fails
   with no guidance; either way the gate reports something other than what happened.
-- [ ] T055 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then run the acceptance tier
+- [X] T055 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then run the acceptance tier
   separately (`pytest -m acceptance bin/tests`; on macOS+Lima the work dir must be Lima-shared). Run the
   **full** suite, not just the new tests — a changed contract is exactly when a pre-existing test still
   pins the old shape, and this feature changes two shipped commands.

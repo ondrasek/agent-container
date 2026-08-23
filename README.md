@@ -145,7 +145,8 @@ anything you added by hand inside the environment survives. `agent-container key
 show acme` prints what the collection says *and* what the environment actually
 holds. See [docs/credentials.md](docs/credentials.md#the-key-collection--declare-devices-once-feature-020).
 
-**Per deployment — `up --authorized-key`:**
+**Per deployment — `up --authorized-key`** (and it *is* per deployment now: pass it
+on each recreate, or use the collection above):
 
 ```bash
 agent-container up acme --authorized-key ~/.ssh/id_ed25519.pub
