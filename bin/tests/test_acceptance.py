@@ -442,7 +442,8 @@ def acc(_image):
         assert r.returncode == 0, f"down {name} failed:\n{r.stderr}"
 
     def keys(name, *, authorized_key=None):
-        argv = [*AGENT_CONTAINER, "keys", name]
+        # `keys ADD` since Feature 020 — the group's grant verb.
+        argv = [*AGENT_CONTAINER, "keys", "add", name]
         for ak in authorized_key or []:
             argv += ["--authorized-key", str(ak)]
         r = _run_cli(argv, state_dir)
@@ -560,7 +561,7 @@ def test_live_key_injection_without_recreate(acc):
     assert _ssh(port, laptop, "whoami").stdout.strip() == "dev"
 
     # And the removed flag refuses, naming the reason (FR-002).
-    r = acc.cli(["keys", "acclive", "--host-key", str(laptop)])
+    r = acc.cli(["keys", "add", "acclive", "--host-key", str(laptop)])
     assert r.returncode != 0
     assert "captures the PUBLIC key" in r.stderr
 
@@ -6198,3 +6199,160 @@ def _wiz_driver_argv(host: dict) -> list[str]:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.driver_runtime_argv(host)
+
+
+# --- Feature 020: the key collection, end to end -----------------------------
+
+
+def _devkey(dirpath: Path, comment: str) -> tuple[Path, Path]:
+    """A real ed25519 keypair on disk. Returns (private, public)."""
+    priv = dirpath / f"id_{comment}"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(priv)],
+        check=True,
+    )
+    return priv, priv.with_suffix(".pub")
+
+
+def _collection(acc) -> Path:
+    """The user-level collection under the fixture's ISOLATED config dir."""
+    d = _config_dir_of(acc.state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "authorized_keys"
+
+
+def test_collection_admits_every_declared_device_with_no_flags(acc):
+    """SC-001/C1: register three keys once, deploy with ZERO key flags."""
+    a_priv, a_pub = _devkey(acc.work, "iPhone")
+    b_priv, b_pub = _devkey(acc.work, "iPad")
+    c_priv, c_pub = _devkey(acc.work, "Macbook")
+    _collection(acc).write_text("".join(p.read_text() for p in (a_pub, b_pub, c_pub)))
+    port = acc.up("acckc")  # no --authorized-key at all
+    for priv, who in ((a_priv, "iPhone"), (b_priv, "iPad"), (c_priv, "Macbook")):
+        r = _ssh(port, priv, "true")
+        assert r.returncode == 0, f"{who} was refused:\n{r.stderr}"
+
+
+def test_removing_a_key_from_the_collection_revokes_it(acc):
+    """SC-003/C15 — the requirement this whole feature turns on.
+
+    Asserts the SSH attempt is REFUSED, not merely that a line is absent: an absent
+    line with a stale volume, or a still-authorized duplicate, would satisfy a
+    grep-based check while the device still got in. The `ssh` volume must SURVIVE
+    the cycle, or the test would be proving that `--purge` works.
+    """
+    keep_priv, keep_pub = _devkey(acc.work, "laptop")
+    gone_priv, gone_pub = _devkey(acc.work, "ipad")
+    coll = _collection(acc)
+    coll.write_text(keep_pub.read_text() + gone_pub.read_text())
+    port = acc.up("accrevoke")
+    assert _ssh(port, gone_priv, "true").returncode == 0, "ipad should start out admitted"
+    vols_before = acc.volumes_of("accrevoke")
+
+    coll.write_text(keep_pub.read_text())  # the device is lost; drop it
+    acc.down("accrevoke")  # NOT --purge: the volume must survive
+    port = acc.up("accrevoke")
+    assert acc.volumes_of("accrevoke") == vols_before, "the ssh volume was recreated"
+
+    assert _ssh(port, keep_priv, "true").returncode == 0, "the kept key lost access too"
+    r = _ssh(port, gone_priv, "true")
+    assert r.returncode != 0, "a key removed from the collection STILL logs in (FR-006)"
+
+
+def test_a_hand_added_key_survives_a_recreate(acc):
+    """C26/SC-010: the tool removes what it wrote and nothing else."""
+    priv, pub = _devkey(acc.work, "laptop")
+    hand_priv, hand_pub = _devkey(acc.work, "byhand")
+    _collection(acc).write_text(pub.read_text())
+    port = acc.up("acchand")
+    # Add it from INSIDE, the way an operator would.
+    r = _ssh(port, priv, f"printf '%s' '{hand_pub.read_text().strip()}' >> ~/.ssh/authorized_keys")
+    assert r.returncode == 0, r.stderr
+    assert _ssh(port, hand_priv, "true").returncode == 0
+
+    acc.down("acchand")
+    port = acc.up("acchand")
+    assert _ssh(port, hand_priv, "true").returncode == 0, "a hand-added key was deleted (FR-016)"
+
+
+def test_a_keys_add_grant_does_not_survive_a_recreate(acc):
+    """SC-009/C25: the tool creates no access it cannot withdraw."""
+    priv, pub = _devkey(acc.work, "laptop")
+    guest_priv, guest_pub = _devkey(acc.work, "guest")
+    _collection(acc).write_text(pub.read_text())
+    port = acc.up("accgrant")
+    acc.keys("accgrant", authorized_key=[guest_pub])
+    assert _ssh(port, guest_priv, "true").returncode == 0, "the grant did not take effect"
+
+    acc.down("accgrant")
+    port = acc.up("accgrant")
+    r = _ssh(port, guest_priv, "true")
+    assert r.returncode != 0, "a `keys add` grant outlived a recreate (FR-015)"
+    assert _ssh(port, priv, "true").returncode == 0, "the collection's own key was lost"
+
+
+def test_a_private_key_in_the_collection_refuses_before_anything_exists(acc):
+    """SC-005/C7/C9: refused, said to be private, and nothing is created."""
+    priv, _ = _devkey(acc.work, "oops")
+    _collection(acc).write_text(priv.read_text())  # the PRIVATE half, by mistake
+    r = acc.up("accpriv", wait=False)
+    assert r.returncode != 0
+    assert "PRIVATE" in (r.stdout + r.stderr).upper()
+    listed = acc.cli(["list"])
+    assert "accpriv" not in listed.stdout
+
+
+def test_declared_empty_warns_and_admits_nobody(acc):
+    """SC-011/C4: honoured as declared, and said out loud."""
+    _collection(acc).write_text("# every device retired\n")
+    r = acc.up("accempty", wait=False)
+    assert r.returncode == 0, r.stderr
+    assert "EMPTY" in (r.stdout + r.stderr).upper()
+
+
+def test_keys_show_agrees_with_what_the_environment_actually_holds(acc):
+    """SC-006/C12: the agreement is established by reading the ENVIRONMENT.
+
+    Compared against the container's own region rather than against the input file,
+    which would compare a projection with itself.
+    """
+    priv, pub = _devkey(acc.work, "laptop")
+    _collection(acc).write_text(pub.read_text())
+    port = acc.up("accshow")
+    shown = acc.cli(["keys", "show", "accshow"])
+    assert shown.returncode == 0, shown.stderr
+    # log() goes to STDERR (eprint), so the report is not on stdout.
+    assert "agree:      yes" in shown.stdout + shown.stderr, shown.stdout + shown.stderr
+
+    inside = _ssh(port, priv, "cat ~/.ssh/authorized_keys")
+    assert pub.read_text().split()[1] in inside.stdout
+
+
+def test_a_stopped_environment_reads_undetermined_not_empty(acc):
+    """SC-013/C31: "nobody is authorised" and "we did not look" are different."""
+    _, pub = _devkey(acc.work, "laptop")
+    _collection(acc).write_text(pub.read_text())
+    acc.up("accstop")
+    acc.cli(["stop", "accstop"])
+    shown = acc.cli(["keys", "show", "accstop"])
+    combined = shown.stdout + shown.stderr
+    assert "undetermined" in combined, combined
+    assert "agree:" not in combined, "a verdict was claimed without a reading"
+
+
+def test_start_warns_when_the_collection_drifted(acc):
+    """SC-008/C23: a resume must SAY the admit set is stale rather than look fresh."""
+    keep_priv, keep_pub = _devkey(acc.work, "laptop")
+    gone_priv, gone_pub = _devkey(acc.work, "ipad")
+    coll = _collection(acc)
+    coll.write_text(keep_pub.read_text() + gone_pub.read_text())
+    port = acc.up("accdrift")
+    coll.write_text(keep_pub.read_text())
+    acc.cli(["stop", "accdrift"])
+    started = acc.cli(["start", "accdrift"])
+    combined = started.stdout + started.stderr
+    assert "collection has changed" in combined, combined
+    assert "redeploy" in combined
+    # And the warning tells the truth: the resumed environment still admits it.
+    _wait_sshd(port)
+    assert _ssh(port, gone_priv, "true").returncode == 0

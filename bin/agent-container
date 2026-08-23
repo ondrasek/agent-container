@@ -10912,7 +10912,6 @@ def do_stop(name: str, host: str | None = None) -> None:
         die(
             f"no deployment named '{name}' on {host_name} to stop (deploy it: agent-container up {name})"
         )
-    warn_on_collection_drift(host_name, name)  # FR-013: report drift, never re-apply
     override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
@@ -11119,6 +11118,7 @@ def do_start(name: str, host: str | None = None) -> None:
             entity=name,
             remedy=f"agent-container up {name}",
         )
+    warn_on_collection_drift(host_name, name)  # FR-013: report drift, never re-apply
     override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)

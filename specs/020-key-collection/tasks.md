@@ -175,9 +175,9 @@ admits exactly one (quickstart S2).
   file-level, not per-key (FR-002). Merging would let a project widen and never narrow, and narrowing is
   the whole point of US2. Comment why this differs from `resolve_settings_key`'s per-key fallthrough:
   a collection is **one** value, a settings file is many.
-- [ ] T028 [P] [US2] Hermetic test in `bin/tests/test_key_collection.py` for C2: with both levels declared,
+- [X] T028 [P] [US2] Hermetic test in `bin/tests/test_key_collection.py` for C2: with both levels declared,
   the project set is admitted and **no entry** of the user set appears.
-- [ ] T029 [US2] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S2 (SC-002): the two
+- [X] T029 [US2] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S2 (SC-002): the two
   non-project keys are **refused**, asserted by attempted connection rather than by absent lines.
 
 **Checkpoint**: US1 + US2 deliverable.
@@ -198,16 +198,16 @@ grants may outlive the collection.
 - [X] T031 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py` for C16/FR-016/SC-010: a line added by
   hand outside the region survives a down/up byte-for-byte, and a collection that becomes **absent**
   empties the region rather than leaving a stale set.
-- [ ] T032 [US3] Change `inject_keys` in `bin/agent-container` to write **inside** the managed region rather
+- [X] T032 [US3] Change `inject_keys` in `bin/agent-container` to write **inside** the managed region rather
   than appending to the file (FR-015, C25). The tool must not create a grant it cannot revoke; today's
   append is removable only by `--purge`, which destroys the environment's own SSH identity.
-- [ ] T033 [US3] State at injection time, in `bin/agent-container`, that a `keys add` grant lasts **until the
+- [X] T033 [US3] State at injection time, in `bin/agent-container`, that a `keys add` grant lasts **until the
   next recreate** (FR-015). A changed guarantee that is not said out loud is a trap for whoever relied on
   the old one.
 - [X] T034 [P] [US3] Test in `bin/tests/test_key_collection.py` for C27: after an injection the region markers
   still form **exactly one pair**. An injection that appended past `END` would satisfy "admitted
   immediately" and silently fail "gone after recreate" — the two halves must be pinned separately.
-- [ ] T035 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C25/C26/SC-009: a `keys add` grant is
+- [X] T035 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C25/C26/SC-009: a `keys add` grant is
   admitted immediately, refused after a recreate, while a hand-added key survives. Both halves in one
   test — a change asserting only the first will cheerfully delete an operator's keys.
 - [X] T036 [US3] Add `start_collection_drift()` to `bin/agent-container`: on `start`, compare the resolved
@@ -269,7 +269,7 @@ environment (quickstart S6, SC-006).
   environment renders `undetermined` and a running-but-empty region renders empty, distinguishably; and a
   listing with one unreachable environment among several still reports every row and does not exit claiming
   success for the row it never examined.
-- [ ] T045 [P] [US4] Test in `bin/tests/test_key_collection.py` for C29 using an environment literally named
+- [X] T045 [P] [US4] Test in `bin/tests/test_key_collection.py` for C29 using an environment literally named
   `show`: its admit set is queryable and a key can be granted to it (SC-012). The collision is the reason
   for the layout, so it is the case that must be tested rather than reasoned about.
 - [X] T046 [US4] Acceptance test in `bin/tests/test_acceptance.py` for C12/SC-006: compare the printed
