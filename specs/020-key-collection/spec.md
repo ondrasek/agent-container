@@ -123,22 +123,6 @@ admitted; a query names the same set for a running environment.
   resulting set MUST be stated so neither source appears to have won silently.
 - **FR-009**: An **undeclared** collection MUST behave exactly as today (no auto-injection), and MUST
   be distinguishable from a **declared-empty** collection, which admits nobody.
-- **FR-018**: The admit-set query MUST be exposed as a **`keys` subgroup** — `keys show <name>` for
-  one environment and `keys ls` across them — following the noun-plus-verb idiom every other group in
-  this tool already uses (`ssh-key show`, `host ls`, `runs list`). The existing grant form
-  `keys <name> --authorized-key` MUST move to **`keys add <name> --authorized-key`**. This is required,
-  not cosmetic: `show`, `ls` and `add` are all legal environment names, so a bare positional beside a
-  subcommand would make an environment named `show` permanently unreachable through this group. The
-  query MUST NOT be attached to `ssh-key show`, which reports the environment's **outbound** identity —
-  the opposite direction, and conflating the two in one output is the confusion this feature is careful
-  to avoid elsewhere.
-- **FR-017**: A **declared-empty** collection MUST be **honoured and warned about**, naming the file
-  and saying the environment will admit nobody. It MUST NOT prompt and MUST NOT refuse: an empty
-  declaration is a legitimate instruction for a headless environment, and refusing without a tty would
-  break unattended deploys that intend exactly this. The **undeclared** path MUST NOT gain this warning
-  — today an environment deployed with no keys at all is silent, and FR-009 requires that stay true.
-  The asymmetry is deliberate: the warning exists because a hand-edited file can be **truncated by
-  accident**, and where there is no file there is nothing to truncate.
 - **FR-010**: Public keys MUST travel as **non-secret configuration** and MUST NOT be treated as
   secrets. They are public by construction; classifying them as secrets would imply protections that
   mislead about what they are.
@@ -146,6 +130,17 @@ admitted; a query names the same set for a running environment.
   the tool MUST read whatever is there rather than requiring registration through it.
 - **FR-012**: A collection referencing a **missing file** MUST refuse the deploy before any runtime
   call, naming the path.
+- **FR-013**: `start` MUST compare the resolved collection against the set the deployment was
+  **created with** and, when they differ, **warn** and name the differing keys and `redeploy` as the
+  remedy. `start` MUST NOT re-resolve or re-apply the collection — it is a resume, and re-applying
+  would silently turn it into a deploy. The warning is what keeps a stale admit set from passing as a
+  current one.
+- **FR-014**: The post-deploy query MUST report **both** the **projected** admit set (re-resolved from
+  the collection) and the **observed** admit set (read from the environment itself), and MUST state
+  when they **disagree**. When the environment cannot be reached, the observed set MUST be reported as
+  **`undetermined`** — never as agreement, and never silently replaced by the projection. A query that
+  answered from the projection alone would compare a projection with itself and report agreement it
+  never checked.
 - **FR-015**: A key injected by the `keys` command into a running environment MUST land **within the
   tool-managed region** of the environment's authorised keys, so that recreating the environment
   removes it. **The tool MUST NOT create a grant it cannot revoke.** `keys` MUST state at injection
@@ -157,17 +152,22 @@ admitted; a query names the same set for a running environment.
   be preserved across recreation. FR-015 constrains what the **tool** grants; it does not make the tool
   the owner of a file an operator may also edit. The tool's region is delimited and replaced; anything
   outside it is not the tool's to remove.
-- **FR-014**: The post-deploy query MUST report **both** the **projected** admit set (re-resolved from
-  the collection) and the **observed** admit set (read from the environment itself), and MUST state
-  when they **disagree**. When the environment cannot be reached, the observed set MUST be reported as
-  **`undetermined`** — never as agreement, and never silently replaced by the projection. A query that
-  answered from the projection alone would compare a projection with itself and report agreement it
-  never checked.
-- **FR-013**: `start` MUST compare the resolved collection against the set the deployment was
-  **created with** and, when they differ, **warn** and name the differing keys and `redeploy` as the
-  remedy. `start` MUST NOT re-resolve or re-apply the collection — it is a resume, and re-applying
-  would silently turn it into a deploy. The warning is what keeps a stale admit set from passing as a
-  current one.
+- **FR-017**: A **declared-empty** collection MUST be **honoured and warned about**, naming the file
+  and saying the environment will admit nobody. It MUST NOT prompt and MUST NOT refuse: an empty
+  declaration is a legitimate instruction for a headless environment, and refusing without a tty would
+  break unattended deploys that intend exactly this. The **undeclared** path MUST NOT gain this warning
+  — today an environment deployed with no keys at all is silent, and FR-009 requires that stay true.
+  The asymmetry is deliberate: the warning exists because a hand-edited file can be **truncated by
+  accident**, and where there is no file there is nothing to truncate.
+- **FR-018**: The admit-set query MUST be exposed as a **`keys` subgroup** — `keys show <name>` for
+  one environment and `keys ls` across them — following the noun-plus-verb idiom every other group in
+  this tool already uses (`ssh-key show`, `host ls`, `runs list`). The existing grant form
+  `keys <name> --authorized-key` MUST move to **`keys add <name> --authorized-key`**. This is required,
+  not cosmetic: `show`, `ls` and `add` are all legal environment names, so a bare positional beside a
+  subcommand would make an environment named `show` permanently unreachable through this group. The
+  query MUST NOT be attached to `ssh-key show`, which reports the environment's **outbound** identity —
+  the opposite direction, and conflating the two in one output is the confusion this feature is careful
+  to avoid elsewhere.
 
 ### Key entities
 
@@ -197,19 +197,19 @@ admitted; a query names the same set for a running environment.
   fabricated from the projection MUST fail.
 - **SC-007**: An undeclared collection changes nothing about today's behaviour — an environment
   deployed with `--authorized-key` alone admits exactly that key.
-- **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
-  queryable and a key can be granted to it. No legal environment name is made unreachable by the
-  command layout.
-- **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
-  environment admits nobody. The same deploy with **no** collection declared produces **no** such
-  warning — the two runs are distinguishable in output, not merely in behaviour.
+- **SC-008**: After removing a key and running `stop` then `start`, the operator is told the admit set
+  is out of date and which key differs, in **100%** of such resumes. No resume reports agreement while
+  admitting a removed key.
 - **SC-009**: A key granted with `keys` is admitted immediately and is **refused after a recreate**,
   in **100%** of attempts. No tool-created grant outlives the collection.
 - **SC-010**: A key added by hand inside the environment is still admitted after a recreate. The tool
   removes what it wrote and nothing else.
-- **SC-008**: After removing a key and running `stop` then `start`, the operator is told the admit set
-  is out of date and which key differs, in **100%** of such resumes. No resume reports agreement while
-  admitting a removed key.
+- **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
+  environment admits nobody. The same deploy with **no** collection declared produces **no** such
+  warning — the two runs are distinguishable in output, not merely in behaviour.
+- **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
+  queryable and a key can be granted to it. No legal environment name is made unreachable by the
+  command layout.
 
 ## Assumptions
 
