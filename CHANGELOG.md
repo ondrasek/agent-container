@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.36.0 (2026-08-23)
+
+### Documentation
+
+- **keys**: Break 020 into 50 tasks across seven phases
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`0eff872`](https://github.com/ondrasek/agent-container/commit/0eff872bee04ec7854fc63f98fdda5a0dda3419b))
+
+- **keys**: Honour a declared-empty collection, and warn about it
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`f1a89cd`](https://github.com/ondrasek/agent-container/commit/f1a89cd1f191af0a9192e0318306fe25bd68c6fb))
+
+- **keys**: Put the admit-set query in a `keys` subgroup
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`9cc446d`](https://github.com/ondrasek/agent-container/commit/9cc446dd8bc449e35530843b6714815400ab24c7))
+
+- **keys**: Restore numeric order in the 020 requirement lists
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`4ba24b1`](https://github.com/ondrasek/agent-container/commit/4ba24b18c0a56a4c6bef008daf5b1677c9234340))
+
+
 ## v0.35.0 (2026-08-23)
 
 ### Documentation
