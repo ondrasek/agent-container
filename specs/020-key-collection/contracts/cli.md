@@ -57,19 +57,16 @@ so neither appears to have won silently (FR-008).
 
 **C12** — What the pre-deploy statement listed and what the container actually
 admits **agree** for an unchanged collection (SC-006). The test compares the printed
-fingerprints against `ssh-keygen -l` over the container's managed block — not
+fingerprints against `ssh-keygen -l` over the container's managed region — not
 against the input file, which would be circular.
 
 ---
 
-## The managed block
+## The managed region
 
 **C13** — The container's `~/.ssh/authorized_keys` contains exactly one
 `# BEGIN agent-container managed keys` / `# END` pair, and the admit set lies
 between them.
-
-**C14** — A line placed in `authorized_keys` **outside** the block survives a
-down/up cycle byte-for-byte.
 
 **C15** — A key present in the collection at first boot and **removed** before a
 recreate is **absent from the block** afterwards — and an SSH attempt with that key
@@ -114,15 +111,26 @@ not a courtesy (FR-013).
 disagreement. With the environment unreachable, observed is **`undetermined`**; a test
 asserts it is never backfilled from the projection (FR-014).
 
+**C31** — A **stopped** environment reports observed as `undetermined`; a **running** environment
+with an empty region reports an empty observed set. A test asserts the two render differently
+(FR-019). Reporting a stopped environment as empty would claim nobody is authorised on the
+strength of not having looked.
+
+**C32** — `keys ls` with one unreachable environment among several still reports every row, the
+unreachable one as `undetermined`, and does not exit claiming success for environments it never
+examined (FR-020).
+
 **C25** — A key injected by `keys` is admitted immediately and is **absent after a
 recreate**, with the SSH attempt refused. `keys` states at injection that the grant lasts
 until the next recreate (FR-015).
 
-**C26** — A key added **by hand from inside** the environment survives a recreate
-byte-for-byte (FR-016). C25 and C26 must both hold: the tool removes what it wrote and
-nothing else.
+**C26** — A line the tool did not write survives a recreate **byte-for-byte**, whether it was
+placed there by hand from inside the environment or was already in the file before the region
+existed (FR-016). C25 and C26 must both hold: the tool removes what it wrote and nothing else.
+*(Absorbs the former C14, which stated the same contract for a down/up cycle; one contract,
+tested once.)*
 
-**C27** — `inject_keys` writes **within** the delimited region. A test asserts the region
+**C27** — `inject_keys` writes **within** the managed region. A test asserts the region
 markers still form exactly one pair afterwards — an injection that appended past the `END`
 marker would satisfy C25's "admitted immediately" and silently fail C25's second half.
 
@@ -139,7 +147,7 @@ the one case that must be pinned rather than reasoned about.
 
 ---
 
-**C21** — Both managed-block sites (`~/.ssh/config`, `~/.ssh/authorized_keys`) state
+**C21** — Both managed-region sites (`~/.ssh/config`, `~/.ssh/authorized_keys`) state
 in-line whether they are **write-once** or **replaced every boot**, and why. Same
 idiom, opposite rule; an unlabelled pair is a defect waiting to happen.
 

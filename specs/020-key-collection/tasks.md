@@ -188,7 +188,7 @@ grants may outlive the collection.
 - [ ] T030 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C15/SC-003: remove a key, recreate,
   and assert the **SSH attempt is refused** — not merely that the line is absent. Verify the `ssh` volume
   **survived** the cycle; a pass obtained by destroying the volume proves nothing.
-- [ ] T031 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py` for C14/C16/FR-016/SC-010: a line added by
+- [ ] T031 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py` for C16/FR-016/SC-010: a line added by
   hand outside the region survives a down/up byte-for-byte, and a collection that becomes **absent**
   empties the region rather than leaving a stale set.
 - [ ] T032 [US3] Change `inject_keys` in `bin/agent-container` to write **inside** the managed region rather
@@ -200,7 +200,7 @@ grants may outlive the collection.
 - [ ] T034 [P] [US3] Test in `bin/tests/test_key_collection.py` for C27: after an injection the region markers
   still form **exactly one pair**. An injection that appended past `END` would satisfy "admitted
   immediately" and silently fail "gone after recreate" — the two halves must be pinned separately.
-- [ ] T035 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C25/C26/FR-016/SC-009: a `keys add` grant is
+- [ ] T035 [US3] Acceptance test in `bin/tests/test_acceptance.py` for C25/C26/SC-009: a `keys add` grant is
   admitted immediately, refused after a recreate, while a hand-added key survives. Both halves in one
   test — a change asserting only the first will cheerfully delete an operator's keys.
 - [ ] T036 [US3] Add `start_collection_drift()` to `bin/agent-container`: on `start`, compare the resolved
@@ -233,32 +233,42 @@ environment (quickstart S6, SC-006).
   per entry plus the source file, never the full blob (FR-007, C10). A fingerprint identifies a device; a
   blob is noise.
 - [ ] T039 [US4] Create the `keys` typer subgroup in `bin/agent-container` — `keys show <name>`, `keys ls` —
-  following the noun-plus-verb idiom of `ssh-key show` / `host ls` / `runs list` (FR-018, C28).
+  following the noun-plus-verb idiom of `ssh-key show` / `host ls` / `runs list` (FR-018, C28). `keys ls`
+  MUST report **every** row and survive an unreachable environment, marking that row `undetermined` rather
+  than aborting the listing or exiting as if it had examined what it never reached (FR-020, C32).
 - [ ] T040 [US4] Move the grant form to `keys add <name> --authorized-key` in `bin/agent-container` (FR-018).
   Required, not cosmetic: `show`, `ls` and `add` all satisfy `validate_name`, so a bare positional beside a
   subcommand would make an environment named `show` permanently unreachable through the group. Add a test
   that the **old bare form no longer grants** (C30) — a silently-still-working old form is how a breaking
   change goes unnoticed until someone depends on both.
 - [ ] T041 [US4] Add `report_admit_set_observed()` to `bin/agent-container`: print **projected** (re-resolved)
-  and **observed** (read from the environment's region) side by side and state disagreement; report
+  and **observed** side by side and state disagreement. Read the observed set with
+  `driver_runtime_argv(host_rec) + ["exec", cname, "cat", "/home/dev/.ssh/authorized_keys"]` — the same shape
+  Feature 018 uses to capture the public host key — gated on `container_running()`. Report
   observed as **`undetermined`** when the environment is unreachable, never backfilled from the projection
   (FR-014, C24). Share the created-with read with T036 rather than building it twice (data-model.md §5).
   **Three reads, three distinct absence answers**: collection absent ⇒ undeclared; compose file absent ⇒
   no such deployment; environment unreachable ⇒ `undetermined`. Collapsing any pair is the Constitution
-  VIII failure.
+  VIII failure. A **stopped** environment is `undetermined`, never empty (FR-019, C31): observation needs a
+  running environment, and "nobody is authorised" is a different claim from "we did not look". An empty
+  observed set therefore means a *running* environment whose region is genuinely empty.
 - [ ] T042 [US4] Do **not** attach admit-set output to `ssh-key show` in `bin/agent-container` (FR-018). That
   command reports the environment's **outbound** identity; merging inbound authorisation into it is the
   direction confusion this spec avoids elsewhere.
 - [ ] T043 [P] [US4] Hermetic tests in `bin/tests/test_key_collection.py` for C24: projected and observed both
   printed, disagreement stated, and an unreachable environment yielding `undetermined` — with an explicit
   assertion that the projection never silently fills the observed slot.
-- [ ] T044 [P] [US4] Test in `bin/tests/test_key_collection.py` for C29 using an environment literally named
+- [ ] T044 [P] [US4] Test in `bin/tests/test_key_collection.py` for C31/C32/SC-013/SC-014: a stopped
+  environment renders `undetermined` and a running-but-empty region renders empty, distinguishably; and a
+  listing with one unreachable environment among several still reports every row and does not exit claiming
+  success for the row it never examined.
+- [ ] T045 [P] [US4] Test in `bin/tests/test_key_collection.py` for C29 using an environment literally named
   `show`: its admit set is queryable and a key can be granted to it (SC-012). The collision is the reason
   for the layout, so it is the case that must be tested rather than reasoned about.
-- [ ] T045 [US4] Acceptance test in `bin/tests/test_acceptance.py` for C12/SC-006: compare the printed
+- [ ] T046 [US4] Acceptance test in `bin/tests/test_acceptance.py` for C12/SC-006: compare the printed
   fingerprints against `ssh-keygen -l` over the container's **actual region** — never against the input
   file, which would compare a projection with itself and report agreement it never checked.
-- [ ] T046 [P] [US4] Test the completions and CLI surface in `bin/tests/` for the new `keys` verbs, and assert
+- [ ] T047 [P] [US4] Test the completions and CLI surface in `bin/tests/` for the new `keys` verbs, and assert
   every new short flag has a long form (repo convention, with a test that can fail).
 
 **Checkpoint**: all four stories deliverable.
@@ -267,26 +277,26 @@ environment (quickstart S6, SC-006).
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] T047 [P] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S7 / C20: the admit set arrives
+- [ ] T048 [P] Acceptance test in `bin/tests/test_acceptance.py` for quickstart S7 / C20: the admit set arrives
   non-empty in a container deployed over a **remote** context. Skip locally, **fail in CI** — the pattern
   017 used for `podman_connection`, because a test that skips everywhere proves nothing.
-- [ ] T048 [P] Document the collection in `docs/credentials.md`: the two levels, project-replaces-user, the
+- [ ] T049 [P] Document the collection in `docs/credentials.md`: the two levels, project-replaces-user, the
   three states, `keys show`/`ls`/`add`, and the recreate-scoped grant.
-- [ ] T049 [P] Reconcile `docs/threat-model.md` with this feature (Constitution requirement): one file now
+- [ ] T050 [P] Reconcile `docs/threat-model.md` with this feature (Constitution requirement): one file now
   determines access to every environment, and the mitigations are refuse-early, state-before-deploy and
   warn-on-empty. Name the residual risk rather than implying it was removed.
-- [ ] T050 [P] Update `README.md` where it shows repeated `--authorized-key` flags on `up`.
-- [ ] T051 Add a one-line pointer to `CLAUDE.md` for feature 020 under the decisions list, and **prune before
+- [ ] T051 [P] Update `README.md` where it shows repeated `--authorized-key` flags on `up`.
+- [ ] T052 Add a one-line pointer to `CLAUDE.md` for feature 020 under the decisions list, and **prune before
   adding** — the file is at ~1950 tokens against a 2000 limit. Measure with a tokenizer; `chars/4`
   understates by ~7%.
-- [ ] T052 Note both breaking changes in the release commit body: a `keys` grant no longer survives a
+- [ ] T053 Note both breaking changes in the release commit body: a `keys` grant no longer survives a
   recreate (FR-015) and `keys <name>` becomes `keys add <name>` (FR-018, C30). Pre-1.0 these are MINOR bumps,
   which is exactly why the version number will not say it and the notes must.
-- [ ] T053 If any **new** `bin/tests/test_*.sh` file was added after all (T010 deliberately avoids one),
+- [ ] T054 If any **new** `bin/tests/test_*.sh` file was added after all (T010 deliberately avoids one),
   wire it into `scripts/quality-gate.sh` in **both** places — a `run_check` line near L178 **and** an entry
   in the failure-message map near L42. A shell test with only one of the two either never runs or fails
   with no guidance; either way the gate reports something other than what happened.
-- [ ] T054 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then run the acceptance tier
+- [ ] T055 Run `scripts/quality-gate.sh` and read its exit code **unpiped**, then run the acceptance tier
   separately (`pytest -m acceptance bin/tests`; on macOS+Lima the work dir must be Lima-shared). Run the
   **full** suite, not just the new tests — a changed contract is exactly when a pre-existing test still
   pins the old shape, and this feature changes two shipped commands.
@@ -317,8 +327,8 @@ Phase 1 (T001–T003)  ─┐
 - Phase 2: T007 (rewrite 7e) ∥ T008 (control-plane entrypoint) ∥ T010 ∥ T011 ∥ T012 ∥ T013 after T004–T006.
 - Phase 3: T023 ∥ T024 ∥ T025 once T014–T022 land.
 - Phase 5: T031 ∥ T034 ∥ T037; T030 first, since it defines the harness the others reuse.
-- Phase 6: T043 ∥ T044 ∥ T046.
-- Phase 7: T047 ∥ T048 ∥ T049 ∥ T050.
+- Phase 6: T043 ∥ T045 ∥ T047.
+- Phase 7: T048 ∥ T049 ∥ T050 ∥ T051.
 
 ## Implementation strategy
 

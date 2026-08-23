@@ -30,7 +30,7 @@ cannot fix it. Feature 017 makes this sharper: a control plane exists to be reac
 - Q: When the operator removes a key, then `stop` and `start` rather than `redeploy`, what must happen? → A: `start` compares the resolved collection against what the deployment was created with; on drift it warns, names which keys differ, and points to `redeploy`. Resume semantics unchanged.
 - Q: Does the post-deploy admit-set query observe the container or re-resolve the config? → A: Both, reported side by side. Disagreement is stated, not inferred; an unreachable container yields `undetermined` for the observed set, never a claim of agreement.
 
-- Q: Where does a key injected by the existing `keys` command live relative to the collection's managed block? → A: Inside it. The collection is the sole authority, and a `keys` grant lasts only until the next recreate. This changes what `keys` currently means.
+- Q: Where does a key injected by the existing `keys` command live relative to the collection's managed region? → A: Inside it. The collection is the sole authority, and a `keys` grant lasts only until the next recreate. This changes what `keys` currently means.
 
 - Q: Does a declared-but-empty collection warn, prompt, or pass silently? → A: Warn and proceed, naming the file. The declaration is honoured; the operator is told the environment will admit nobody.
 
@@ -141,6 +141,15 @@ admitted; a query names the same set for a running environment.
   **`undetermined`** — never as agreement, and never silently replaced by the projection. A query that
   answered from the projection alone would compare a projection with itself and report agreement it
   never checked.
+- **FR-019**: A **stopped** environment MUST report its observed set as **`undetermined`**, not as
+  empty. Observation requires reaching inside a running environment; a stopped one has not been
+  examined, and "nobody is authorised" is a materially different claim from "we did not look". An
+  **empty** observed set MUST therefore mean a running environment whose managed region is genuinely
+  empty. Three states again, and the same rule as FR-009: absent, empty and unexamined do not collapse.
+- **FR-020**: A query spanning **many** environments MUST report each one's outcome independently and
+  MUST NOT fail the whole listing because one environment could not be reached. An unreachable
+  environment appears as `undetermined` **in its own row**, and the query's exit status MUST NOT claim
+  success for environments it never examined.
 - **FR-015**: A key injected by the `keys` command into a running environment MUST land **within the
   tool-managed region** of the environment's authorised keys, so that recreating the environment
   removes it. **The tool MUST NOT create a grant it cannot revoke.** `keys` MUST state at injection
@@ -207,6 +216,10 @@ admitted; a query names the same set for a running environment.
 - **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
   environment admits nobody. The same deploy with **no** collection declared produces **no** such
   warning — the two runs are distinguishable in output, not merely in behaviour.
+- **SC-013**: A stopped environment's observed set reads `undetermined`, and is distinguishable in
+  output from a running environment whose region is empty. Neither is ever reported as the other.
+- **SC-014**: With one environment unreachable and three reachable, a listing reports four rows — three
+  with observed sets and one `undetermined` — and does not abort after the failure.
 - **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
   queryable and a key can be granted to it. No legal environment name is made unreachable by the
   command layout.
@@ -217,8 +230,15 @@ admitted; a query names the same set for a running environment.
   host registry does.
 - **The two-level contract is Feature 011's** — same filename at both levels, project winning. No new
   layout location is introduced.
-- **Devices are identified by the key's own comment** where present; the tool does not invent a
-  device registry.
+- **Devices are identified by the key's own comment** where present, and by **fingerprint** where the
+  comment is absent; the tool does not invent a device registry. A key with no comment is legal and must
+  remain usable — it is merely harder for the operator to recognise, which is their choice to make.
+- **A project-level collection is committed to the repository unless the project ignores it.** Nothing
+  in this feature ignores it, and public keys are public, so this is safe rather than a leak — but it is
+  a consequence worth stating: a committed collection means every collaborator's environments admit that
+  set, which is what makes US2's "client project" case work, and also means adding a personal key there
+  shares it. An operator who wants per-collaborator collections ignores the file and each keeps their own
+  at user level.
 - **Rotation is out of scope.** Replacing a key is editing the collection and recreating; there is no
   scheduled rotation.
 - **`ssh-agent` forwarding, certificate authorities and OIDC-based SSH are out of scope.** A CA would

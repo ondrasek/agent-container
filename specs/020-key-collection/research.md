@@ -5,7 +5,7 @@ project has already set and paid for.
 
 ---
 
-## R1 — The union is the feature's central obstacle, and a MANAGED BLOCK resolves it
+## R1 — The union is the feature's central obstacle, and a MANAGED REGION resolves it
 
 **Finding**: the entrypoint assembles `authorized_keys` as a union and **writes the
 union back to the persisted file**:
@@ -32,7 +32,7 @@ destroys the volume, which takes the container's own SSH identity (019) with it.
 "To un-authorise a phone, destroy the environment's identity" is not a revocation
 story.
 
-**Decision**: a **sentinel-delimited managed block** inside `authorized_keys`:
+**Decision**: a **sentinel-delimited managed region** inside `authorized_keys`:
 
 ```
 # BEGIN agent-container managed keys (replaced on every boot; edit outside this block)

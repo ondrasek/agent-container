@@ -63,7 +63,7 @@ ssh -i "$CLAUDE_JOB_DIR/tmp/iPad" -o IdentitiesOnly=yes -o IdentityAgent=none \
 **Expect**: **non-zero** — permission denied. And the other two still work.
 
 This is the scenario the current union-based entrypoint fails: the key persists on
-the `ssh` volume and would still admit. If this passes, the managed block works;
+the `ssh` volume and would still admit. If this passes, the managed region works;
 if it passes only because the volume was destroyed, the test is invalid — the
 volume must survive the cycle. Verify it did:
 
@@ -84,7 +84,7 @@ agent-container down demo && agent-container up demo
 agent-container exec demo -- grep -c iPad ~/.ssh/authorized_keys
 ```
 
-**Expect**: `1`. The line sits outside the managed block and is untouched, even
+**Expect**: `1`. The line sits outside the managed region and is untouched, even
 though `iPad` is no longer in the collection. Managed and hand-authored coexist.
 
 ---

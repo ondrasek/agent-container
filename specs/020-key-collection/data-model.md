@@ -72,7 +72,7 @@ which devices are about to be admitted (FR-007).
 
 ---
 
-## 4. The managed block (in-container state)
+## 4. The managed region (in-container state)
 
 Written to `~/.ssh/authorized_keys` on the persisted `ssh` volume:
 
