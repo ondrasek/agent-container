@@ -28,6 +28,8 @@ cannot fix it. Feature 017 makes this sharper: a control plane exists to be reac
 ### Session 2026-08-23
 
 - Q: When the operator removes a key, then `stop` and `start` rather than `redeploy`, what must happen? → A: `start` compares the resolved collection against what the deployment was created with; on drift it warns, names which keys differ, and points to `redeploy`. Resume semantics unchanged.
+- Q: Does the post-deploy admit-set query observe the container or re-resolve the config? → A: Both, reported side by side. Disagreement is stated, not inferred; an unreachable container yields `undetermined` for the observed set, never a claim of agreement.
+
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -117,6 +119,12 @@ admitted; a query names the same set for a running environment.
   the tool MUST read whatever is there rather than requiring registration through it.
 - **FR-012**: A collection referencing a **missing file** MUST refuse the deploy before any runtime
   call, naming the path.
+- **FR-014**: The post-deploy query MUST report **both** the **projected** admit set (re-resolved from
+  the collection) and the **observed** admit set (read from the environment itself), and MUST state
+  when they **disagree**. When the environment cannot be reached, the observed set MUST be reported as
+  **`undetermined`** — never as agreement, and never silently replaced by the projection. A query that
+  answered from the projection alone would compare a projection with itself and report agreement it
+  never checked.
 - **FR-013**: `start` MUST compare the resolved collection against the set the deployment was
   **created with** and, when they differ, **warn** and name the differing keys and `redeploy` as the
   remedy. `start` MUST NOT re-resolve or re-apply the collection — it is a resume, and re-applying
@@ -128,7 +136,10 @@ admitted; a query names the same set for a running environment.
 - **Key collection** — an ordered set of SSH public keys, declared at user or project level, each
   with an operator-recognisable label.
 - **Resolved admit set** — what an environment will actually admit: the winning collection plus any
-  `--authorized-key`, deduped. This is the thing FR-007 states and FR-006 constrains.
+  `--authorized-key`, deduped. This is the thing FR-007 states and FR-006 constrains. It exists in two
+  forms that must never be conflated: **projected** (computed from the collection) and **observed**
+  (read from the environment). Before deployment only the projection exists; afterwards both do, and
+  FR-014 requires both be reported.
 
 ## Success Criteria *(mandatory)*
 
@@ -142,8 +153,10 @@ admitted; a query names the same set for a running environment.
   names the offending entry.
 - **SC-005**: A private key in the collection is refused, and **zero** bytes of it reach any container,
   log, or generated artifact.
-- **SC-006**: The admit set is visible before deployment and after, and the two agree for an unchanged
-  collection.
+- **SC-006**: The admit set is visible before deployment and after. For an unchanged collection the
+  **projected and observed** sets agree, and that agreement is established by reading the
+  **environment** — not by re-resolving the same file twice. A test in which the observed set is
+  fabricated from the projection MUST fail.
 - **SC-007**: An undeclared collection changes nothing about today's behaviour — an environment
   deployed with `--authorized-key` alone admits exactly that key.
 - **SC-008**: After removing a key and running `stop` then `start`, the operator is told the admit set
