@@ -30,6 +30,8 @@ cannot fix it. Feature 017 makes this sharper: a control plane exists to be reac
 - Q: When the operator removes a key, then `stop` and `start` rather than `redeploy`, what must happen? → A: `start` compares the resolved collection against what the deployment was created with; on drift it warns, names which keys differ, and points to `redeploy`. Resume semantics unchanged.
 - Q: Does the post-deploy admit-set query observe the container or re-resolve the config? → A: Both, reported side by side. Disagreement is stated, not inferred; an unreachable container yields `undetermined` for the observed set, never a claim of agreement.
 
+- Q: Where does a key injected by the existing `keys` command live relative to the collection's managed block? → A: Inside it. The collection is the sole authority, and a `keys` grant lasts only until the next recreate. This changes what `keys` currently means.
+
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -79,6 +81,11 @@ admitted; a query names the same set for a running environment.
 - **A key already authorised on a long-lived container** that is later removed from the collection —
   see FR-006; the current union-with-persisted behaviour makes this the feature's hardest requirement.
 - **A duplicate key** across the collection and a flag, or listed twice — admitted once, no error.
+- **A key granted by `keys` on a running environment, then a recreate** — the grant is **gone**
+  (FR-015). Deliberate: a grant the collection cannot revoke is the one thing FR-006 forbids, and
+  `keys` today creates exactly that.
+- **A key added by hand from inside the environment** — **survives** recreation (FR-016). The tool
+  replaces only the region it wrote.
 - **The collection is edited, then `stop` + `start` rather than `redeploy`** — `start` resumes and does
   not re-resolve, so the environment still admits the set it was created with. The container's own
   boot rewrites its key block, which makes that stale set *look* freshly authoritative. `start` MUST
@@ -119,6 +126,17 @@ admitted; a query names the same set for a running environment.
   the tool MUST read whatever is there rather than requiring registration through it.
 - **FR-012**: A collection referencing a **missing file** MUST refuse the deploy before any runtime
   call, naming the path.
+- **FR-015**: A key injected by the `keys` command into a running environment MUST land **within the
+  tool-managed region** of the environment's authorised keys, so that recreating the environment
+  removes it. **The tool MUST NOT create a grant it cannot revoke.** `keys` MUST state at injection
+  that the grant lasts **until the next recreate**. This is a **change to the existing behaviour** of
+  `keys`, which today appends to the persisted file permanently — a grant removable only by `--purge`,
+  which destroys the environment's own SSH identity. That path is the documented opposite of FR-006 and
+  MUST NOT survive this feature.
+- **FR-016**: Content the tool did not write — a key added by hand from inside the environment — MUST
+  be preserved across recreation. FR-015 constrains what the **tool** grants; it does not make the tool
+  the owner of a file an operator may also edit. The tool's region is delimited and replaced; anything
+  outside it is not the tool's to remove.
 - **FR-014**: The post-deploy query MUST report **both** the **projected** admit set (re-resolved from
   the collection) and the **observed** admit set (read from the environment itself), and MUST state
   when they **disagree**. When the environment cannot be reached, the observed set MUST be reported as
@@ -159,6 +177,10 @@ admitted; a query names the same set for a running environment.
   fabricated from the projection MUST fail.
 - **SC-007**: An undeclared collection changes nothing about today's behaviour — an environment
   deployed with `--authorized-key` alone admits exactly that key.
+- **SC-009**: A key granted with `keys` is admitted immediately and is **refused after a recreate**,
+  in **100%** of attempts. No tool-created grant outlives the collection.
+- **SC-010**: A key added by hand inside the environment is still admitted after a recreate. The tool
+  removes what it wrote and nothing else.
 - **SC-008**: After removing a key and running `stop` then `start`, the operator is told the admit set
   is out of date and which key differs, in **100%** of such resumes. No resume reports agreement while
   admitting a removed key.
@@ -181,12 +203,19 @@ admitted; a query names the same set for a running environment.
 - **Feature 011** (two-level configuration) — the resolution contract.
 - **Feature 017** (control plane) — the motivating consumer, and the precedent for injecting
   non-secret configuration inline.
+- **The `keys` command** — behaviour changes under FR-015. Not a dependency so much as a casualty:
+  it is the one existing surface that creates inbound access, and it cannot keep doing so on terms the
+  collection cannot undo.
 - **Feature 019** (agent SSH key pair) — unaffected. That key is the container's own outbound
   identity; this feature is about inbound authorisation.
 
 ## Out of scope
 
 - Distributing or generating device private keys.
+- **In scope, and stated here because it looks out of scope:** the existing `keys` command changes
+  behaviour (FR-015). Its grants become recreate-scoped rather than permanent. This is a **breaking
+  change to a shipped command** and must be released as such — pre-1.0, that is a MINOR bump, and the
+  commit and release notes must say plainly that a `keys` grant no longer survives a recreate.
 - Any per-environment allow/deny beyond project-level override.
 - Revoking access on a container without recreating it — whether **running** or merely **resumed**
   via `start`. `start` reports the drift (FR-013) rather than acting on it.

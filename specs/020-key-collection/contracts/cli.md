@@ -103,6 +103,31 @@ it is settled by observation on a real remote target, not by reading either one.
 
 ## Documentation
 
+## Resume, query and out-of-band grants
+
+**C23** — After the collection changes, `start` **warns** and names the differing keys and
+`redeploy`; it does **not** re-resolve or re-apply. A test asserts the resumed environment
+still admits the old set *and* that the operator was told so — the warning is the contract,
+not a courtesy (FR-013).
+
+**C24** — The post-deploy query prints **projected** and **observed** sets and states
+disagreement. With the environment unreachable, observed is **`undetermined`**; a test
+asserts it is never backfilled from the projection (FR-014).
+
+**C25** — A key injected by `keys` is admitted immediately and is **absent after a
+recreate**, with the SSH attempt refused. `keys` states at injection that the grant lasts
+until the next recreate (FR-015).
+
+**C26** — A key added **by hand from inside** the environment survives a recreate
+byte-for-byte (FR-016). C25 and C26 must both hold: the tool removes what it wrote and
+nothing else.
+
+**C27** — `inject_keys` writes **within** the delimited region. A test asserts the region
+markers still form exactly one pair afterwards — an injection that appended past the `END`
+marker would satisfy C25's "admitted immediately" and silently fail C25's second half.
+
+---
+
 **C21** — Both managed-block sites (`~/.ssh/config`, `~/.ssh/authorized_keys`) state
 in-line whether they are **write-once** or **replaced every boot**, and why. Same
 idiom, opposite rule; an unlabelled pair is a defect waiting to happen.

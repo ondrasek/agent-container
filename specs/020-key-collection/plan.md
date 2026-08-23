@@ -69,7 +69,7 @@ realistic ceiling and no part of the design cares.
 | **IV. Deterministic Identity** | Pass | Same collection ⇒ same admit set. The block is content-derived, so it is reproducible rather than accumulated. |
 | **V. Durable Spec** | Pass | spec/plan/research/data-model/contracts/quickstart under `specs/020-key-collection/`; the operator-facing behaviour lands in `docs/credentials.md` (SSH identity) with the managed-block rule stated at both code sites (C21). |
 | **VI. Least Dependencies** | Pass | Zero new dependencies. A YAML or JSON collection format was rejected partly on this ground (R2). |
-| **VII. Continuous Deployment** | Pass | Conventional Commits; `feat(keys)` ⇒ MINOR. **If C20 shows `file:` never crossed a remote context, the `--authorized-key` fix is a breaking-behaviour correction and must be committed and described as its own `fix`, not folded into the feature.** |
+| **VII. Continuous Deployment** | **Pass, with two things that must be said out loud** | Conventional Commits; `feat(keys)` ⇒ MINOR. (a) **FR-015 breaks a shipped command**: a `keys` grant no longer survives a recreate. Pre-1.0 that is still a MINOR bump, which is exactly why the release notes must say it in words — the version number will not. (b) **If C20 shows `file:` never crossed a remote context**, the `--authorized-key` fix is a separate breaking-behaviour correction and gets its own `fix` commit, not a fold-in. |
 | **VIII. Defaults Belong at the Surface** | **Pass — and it is load-bearing here** | Three states stay distinct: absent (undeclared), declared-empty, declared-N. The empty case is a legitimate instruction *and* a lockout, so it is honoured **and warned about** (R6, C4). No reader may substitute a default for absence; the delivery boundary decides, and a test pins C3 against C4 so the two can never collapse. |
 
 **No violations. Complexity Tracking is therefore empty and omitted.**
@@ -105,6 +105,9 @@ bin/agent-container            # resolution, validation, statement, compose mode
   ├── validate_public_key_line()     # NEW — ssh-keygen -l; private-key refusal
   ├── resolved_admit_set()           # NEW — collection ∪ --authorized-key, attributed
   ├── report_admit_set()             # NEW — fingerprint + comment + source, pre-deploy
+  ├── report_admit_set_observed()    # NEW — projected vs observed, `undetermined` when unreachable (C24)
+  ├── start_collection_drift()       # NEW — warn-only comparison on resume (C23)
+  ├── inject_keys()                  # CHANGED — writes INSIDE the managed region (C25, C27)
   ├── stage_ssh_injection()          # CHANGED — feeds content:, not a staged file path
   └── build_compose_model()          # CHANGED — ssh_authorized_keys via content:
 
@@ -134,7 +137,14 @@ The order is forced by the two findings, not by convenience:
    valuable and testable with `--authorized-key` alone, before any collection
    exists.
 3. **Resolution + validation + statement in the CLI** — the operator-facing feature.
-4. **Docs and the two block-rule comments** (C21, C22).
+4. **`inject_keys` moves inside the region** (FR-015, C25/C27) — after the block exists, since
+   there is nothing to write inside until then. The paired test C26 must land in the same
+   change: the two halves ("tool grants are revocable", "hand-added keys are not the tool's
+   to remove") are one boundary, and a change that asserts only the first will happily
+   delete an operator's keys.
+5. **Resume drift and the observed query** (FR-013/FR-014, C23/C24) — both are comparisons
+   against the created-with set, so they share a mechanism and should not be built twice.
+6. **Docs and the two block-rule comments** (C21, C22).
 
 Step 2 before step 3 is deliberate: if the collection landed first, US1 would pass
 and US3 would fail, which is the failure mode the spec's own checklist warned about.
@@ -145,6 +155,11 @@ and US3 would fail, which is the failure mode the spec's own checklist warned ab
   *does* cross, then 017's "measured" claim is the wrong one, and that finding
   reaches beyond this feature — the host registry chose `content:` on the strength
   of it. Worth reporting either way.
+- **FR-015 is the clarification that most changes the shape of the work**, and it arrived
+  after this plan was first written. It turns `keys` from an untouched command into a
+  modified one, and it means the managed region has *two* writers (deploy-time and
+  `keys`-time) rather than one. Two writers to one delimited region is where C27 comes from
+  and is the likeliest place for this feature to go wrong.
 - **`authorized_keys` options syntax** (`command=`, `from=`, `restrict`) is legal in
   the format and unexercised by any scenario here. The plan treats a line as opaque
   and validates via `ssh-keygen -l`, which handles options — but no contract pins
