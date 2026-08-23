@@ -198,11 +198,22 @@ test_tool() {
     assert_has "${tool}:panic-preview" "--preview" "${COMPREPLY[@]}"
     run_comp "${func}" "${tool}" "inventory" ""
     assert_has "${tool}:inventory-list" "list" "${COMPREPLY[@]}"
-    run_comp "${func}" "${tool}" "keys" "--"
-    assert_lacks "${tool}:keys-no-hostkey" "--host-key" "${COMPREPLY[@]}"
-    assert_has "${tool}:keys-flag"   "--authorized-key" "${COMPREPLY[@]}"
+    # Feature 020 made `keys` a GROUP (add/show/ls). These assertions moved with it
+    # rather than being dropped: completing a container name straight after `keys`
+    # would now offer an argument the command does not take, and that is precisely
+    # the drift Principle IV's completions clause exists to catch.
     run_comp "${func}" "${tool}" "keys" ""
-    assert_has "${tool}:keys-name"   "acme" "${COMPREPLY[@]}"     # local running names
+    assert_has "${tool}:keys-subcommands-add"  "add"  "${COMPREPLY[@]}"
+    assert_has "${tool}:keys-subcommands-show" "show" "${COMPREPLY[@]}"
+    assert_has "${tool}:keys-subcommands-ls"   "ls"   "${COMPREPLY[@]}"
+    assert_lacks "${tool}:keys-not-a-name"     "acme" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "keys" "add" "--"
+    assert_lacks "${tool}:keys-no-hostkey" "--host-key" "${COMPREPLY[@]}"
+    assert_has "${tool}:keys-add-flag" "--authorized-key" "${COMPREPLY[@]}"
+    run_comp "${func}" "${tool}" "keys" "add" ""
+    assert_has "${tool}:keys-add-name" "acme" "${COMPREPLY[@]}"   # local running names
+    run_comp "${func}" "${tool}" "keys" "show" ""
+    assert_has "${tool}:keys-show-name" "acme" "${COMPREPLY[@]}"
 
     # 10) Feature 016: the `runs` group.
     run_comp "${func}" "${tool}" ""

@@ -205,15 +205,33 @@ _agent_container() {
             fi
             ;;
         keys)
+            # A GROUP since Feature 020 (add/show/ls), mirroring ssh-key. Completing a
+            # container name directly after `keys` would offer an argument the command
+            # no longer takes.
+            local ksub2="" k2
+            for (( k2 = i + 1; k2 < cword; k2++ )); do
+                case "${words[k2]}" in
+                    -*) ;;
+                    *) ksub2="${words[k2]}"; break ;;
+                esac
+            done
+            if [[ -z "${ksub2}" ]]; then
+                COMPREPLY=( $(compgen -W "add show ls" -- "${cur}") )
+                return 0
+            fi
             if [[ "${prev}" == "--authorized-key" ]]; then
-                _agent_container_filedir          # both take a file path
+                _agent_container_filedir
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--authorized-key" -- "${cur}") )
+                case "${ksub2}" in
+                    add) COMPREPLY=( $(compgen -W "--authorized-key --json" -- "${cur}") ) ;;
+                    *)   COMPREPLY=( $(compgen -W "--host --json" -- "${cur}") ) ;;
+                esac
                 return 0
             fi
-            __agent_container_add_names __agent_container_names_local # running container; local only
+            [[ "${ksub2}" == "ls" ]] && return 0   # ls takes no environment name
+            __agent_container_add_names __agent_container_names_local
             ;;
         down)
             if [[ "${cur}" == -* ]]; then

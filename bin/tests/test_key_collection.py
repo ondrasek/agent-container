@@ -211,3 +211,110 @@ def test_the_statement_names_fingerprints_never_blobs(wiz, tmp_path, capsys):
     assert "macbook" in combined
     assert entries[0].fingerprint in combined
     assert pub.split()[1] not in combined  # the base64 body must not be printed
+
+
+# --- C23/C24/C31/C32: resume drift, and observe-vs-project -------------------
+
+
+def test_created_with_set_is_read_from_the_compose_file(wiz, tmp_path):
+    """C24 groundwork: the created-with set needs NO new state (data-model §5).
+
+    It is the inlined `content:` in the deployment's own compose file — which is
+    already the deployment's existence record. This is also why `content:` is
+    load-bearing twice: under `file:` this would hold a PATH to a staged file the
+    next deploy overwrites, so "what was this created with" would answer with the
+    CURRENT resolution — a comparison against itself.
+    """
+    pub, _ = _keygen(tmp_path, "laptop")
+    m = wiz.build_compose_model("acme", "/repo", authorized_keys_file=None)
+    m.setdefault("configs", {})["ssh_authorized_keys"] = {"content": pub + "\n"}
+    wiz.write_compose_file("local", "acme", m)
+    assert wiz.created_with_admit_set("local", "acme") == [pub]
+
+
+def test_created_with_is_none_when_there_is_no_deployment(wiz):
+    """Absent compose file means "no such deployment" — a THIRD distinct absence.
+
+    Not undeclared, not undetermined. Collapsing any pair of the three is the
+    Constitution VIII failure this feature keeps meeting.
+    """
+    assert wiz.created_with_admit_set("local", "never-deployed") is None
+
+
+def test_resume_warns_when_the_collection_has_drifted(wiz, tmp_path, capsys):
+    """C23/SC-008: `start` must SAY the admit set is stale, and not re-apply it.
+
+    The container rewrites its managed region on boot, so the set staged at `up`
+    time comes back looking freshly authoritative. Without this warning an operator
+    who removed a key, stopped and started would be told nothing and would still be
+    admitting it — FR-006 failing one command over.
+    """
+    gone_pub, _ = _keygen(tmp_path, "ipad")
+    kept_pub, _ = _keygen(tmp_path, "laptop")
+    m = wiz.build_compose_model("acme", "/repo")
+    m.setdefault("configs", {})["ssh_authorized_keys"] = {"content": f"{kept_pub}\n{gone_pub}\n"}
+    wiz.write_compose_file("local", "acme", m)
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "authorized_keys").write_text(kept_pub + "\n")
+
+    wiz.warn_on_collection_drift("local", "acme")
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert "ipad" in combined  # names WHICH key differs
+    assert "redeploy" in combined  # and the remedy
+    assert "still admits" in combined
+
+
+def test_resume_is_silent_when_the_collection_matches(wiz, tmp_path, capsys):
+    """The warning above must not be firing unconditionally."""
+    pub, _ = _keygen(tmp_path, "laptop")
+    m = wiz.build_compose_model("acme", "/repo")
+    m.setdefault("configs", {})["ssh_authorized_keys"] = {"content": pub + "\n"}
+    wiz.write_compose_file("local", "acme", m)
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "authorized_keys").write_text(pub + "\n")
+    wiz.warn_on_collection_drift("local", "acme")
+    out = capsys.readouterr()
+    assert "has changed" not in (out.out + out.err)
+
+
+def test_an_unreachable_environment_is_undetermined_never_empty(wiz, monkeypatch, capsys):
+    """C31/FR-019/SC-013: unexamined and empty are different claims.
+
+    Reporting a stopped environment as admitting nobody would tell an operator they
+    are locked out on the strength of never having looked. The projection must also
+    never be quietly substituted for the observed reading.
+    """
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda _h: ["docker"])
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *_a, **_k: False)
+    assert wiz.observed_admit_set({}, "acme") is None
+    wiz.report_projected_vs_observed("local", {}, "acme")
+    combined = "".join(capsys.readouterr())
+    assert wiz.UNDETERMINED in combined
+    assert "agree:" not in combined  # no verdict may be claimed without a reading
+
+
+def test_observed_marks_keys_outside_the_region_as_unmanaged(wiz, monkeypatch, tmp_path):
+    """A key outside the region IS admitted but is not revocable by the collection.
+
+    It must be visible as such rather than blending in — otherwise the report
+    implies the collection controls access it does not control.
+    """
+    managed, _ = _keygen(tmp_path, "managed")
+    hand, _ = _keygen(tmp_path, "handadded")
+    body = (
+        f"{hand}\n"
+        f"{wiz.KEY_REGION_BEGIN_ID} — replaced on every boot\n"
+        f"{managed}\n"
+        f"{wiz.KEY_REGION_END_ID}\n"
+    )
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda _h: ["docker"])
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        wiz,
+        "query",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, body, ""),
+    )
+    observed = wiz.observed_admit_set({}, "acme")
+    assert any(ln.startswith(managed) and "unmanaged" not in ln for ln in observed)
+    assert any(ln.startswith(hand) and "unmanaged" in ln for ln in observed)

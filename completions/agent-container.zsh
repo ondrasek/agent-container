@@ -117,7 +117,7 @@ _agent-container() {
         'redeploy:Rebuild the image on the host and recreate (volumes preserved)'
         'stop:Stop a container, keeping it and its volumes'
         'start:Start a previously stopped container'
-        'keys:Inject SSH host key / authorized keys into a running container'
+        'keys:The keys an environment admits — grant, show, list'
         'down:Stop and remove a container'
         'purge:Stop, remove, and delete all per-container volumes'
         'wipe:Remove the container, its volumes, and the locally-built image'
@@ -190,9 +190,13 @@ _agent-container() {
                         '--json[Emit machine-readable JSON]'
                     ;;
                 keys)
-                    _arguments \
-                        '*--authorized-key[Inject an SSH public key (repeatable)]:file:_files' \
+                    # A GROUP since Feature 020 (add/show/ls), mirroring ssh-key.
+                    _arguments '1:command:(add show ls)' \
+                        '*--authorized-key[Grant a public key, until the next recreate]:file:_files' \
+                        '--host[Host the environment runs on]:host:' \
+                        '--json[Emit machine-readable JSON]' \
                         '*:container:__agent_container_names_local'
+                    return 0
                     ;;
                 down)
                     _arguments \

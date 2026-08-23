@@ -10755,6 +10755,12 @@ def down_container(
 # dev-owned). Kept in sync with entrypoint.sh / the Dockerfile HostKey directive.
 CONTAINER_HOSTKEY = "/home/dev/.ssh/hostkeys/ssh_host_ed25519_key"
 CONTAINER_AUTHKEYS = "/home/dev/.ssh/authorized_keys"
+# The region sentinels, matched by stable PREFIX — the written marker carries a
+# human-readable hint, and requiring the whole decorated line would mean an operator
+# rewording that hint silently orphans the region. Kept in step with both
+# entrypoints' SHARED-BLOCK by a test.
+KEY_REGION_BEGIN_ID = "# BEGIN agent-container managed keys"
+KEY_REGION_END_ID = "# END agent-container managed keys"
 
 
 def inject_keys(rt: str, name: str, authorized_keys: list[Path]) -> None:
@@ -10772,17 +10778,44 @@ def inject_keys(rt: str, name: str, authorized_keys: list[Path]) -> None:
         pk = p.expanduser()
         if not pk.is_file():
             die(f"--authorized-key: {p} does not exist or is not a file")
+        # Feature 020 FR-015: land INSIDE the tool-managed region, so recreating the
+        # environment removes this grant. THE TOOL MUST NOT CREATE ACCESS IT CANNOT
+        # WITHDRAW — appending outside the region (what this used to do) produced a
+        # grant undoable only by `--purge`, which destroys the environment's own SSH
+        # identity. That was the documented opposite of FR-006.
+        #
+        # The region markers are matched by stable PREFIX, matching the entrypoint:
+        # the written marker carries a human-readable hint, and requiring the whole
+        # decorated line would mean an operator rewording the hint silently orphans
+        # the region.
         append_sh = (
-            f"umask 077; mkdir -p /home/dev/.ssh; cat >> {CONTAINER_AUTHKEYS}; "
-            f"awk 'NF && !seen[$0]++' {CONTAINER_AUTHKEYS} > {CONTAINER_AUTHKEYS}.tmp && "
-            f"mv {CONTAINER_AUTHKEYS}.tmp {CONTAINER_AUTHKEYS}; chmod 600 {CONTAINER_AUTHKEYS}"
+            "set -e; umask 077; mkdir -p /home/dev/.ssh; "
+            f'f={CONTAINER_AUTHKEYS}; touch "$f"; k="$(cat)"; '
+            "b='# BEGIN agent-container managed keys'; "
+            "e='# END agent-container managed keys'; "
+            'if grep -qxF "$k" "$f"; then exit 0; fi; '
+            'if grep -q -- "^$b" "$f"; then '
+            '  awk -v k="$k" -v e="$e" '
+            "'index($0, e) == 1 && !ins { print k; ins = 1 } { print }' "
+            '  "$f" > "$f.n"; '
+            "else "
+            '  { cat "$f"; '
+            "    printf '%s\n%s\n%s\n' "
+            '      "$b — replaced on every boot; edit outside this region" "$k" "$e"; '
+            '  } > "$f.n"; '
+            "fi; "
+            'mv "$f.n" "$f"; chmod 600 "$f"'
         )
         r = subprocess.run(
             [rt, "exec", "-i", cname, "bash", "-lc", append_sh], input=pk.read_bytes()
         )
         if r.returncode != 0:
             die(f"failed to inject authorized key {p}")
-        log(f"injected authorized key {pk.name} into {cname}")
+        log(
+            f"injected authorized key {pk.name} into {cname} — this grant lasts "
+            f"UNTIL THE NEXT RECREATE. To make it permanent, add the key to the "
+            f"collection instead (agent-container keys show {name})."
+        )
 
 
 def cli_keys(name: str, authorized_keys: list[Path]) -> None:
@@ -10879,6 +10912,7 @@ def do_stop(name: str, host: str | None = None) -> None:
         die(
             f"no deployment named '{name}' on {host_name} to stop (deploy it: agent-container up {name})"
         )
+    warn_on_collection_drift(host_name, name)  # FR-013: report drift, never re-apply
     override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
@@ -10889,6 +10923,188 @@ def do_stop(name: str, host: str | None = None) -> None:
     # FR-009a: AFTER the action, so the record states what happened rather than
     # what was attempted. A no-op unless this CLI runs inside a control plane.
     record_attribution(host_name, host_rec, name, "stop")
+
+
+def created_with_admit_set(host: str, name: str) -> list[str] | None:
+    """The admit set the deployment was CREATED WITH, or None if unknowable.
+
+    Read from the generated compose file, where Feature 020 inlines it as
+    `configs.ssh_authorized_keys.content`. NO NEW STATE: that file is already the
+    deployment's existence record — `do_start` refuses with "no deployment named …"
+    when it is missing — so a deleted one produces the failure it produces today.
+
+    This is why `content:` is load-bearing twice. Under `file:` the compose file
+    would hold only a PATH, pointing at a staged file the next deploy overwrites, so
+    "what was this created with" would answer with the CURRENT resolution — a
+    comparison against itself, which is what SC-006 was rewritten to forbid.
+
+    Parsed with `yaml.safe_load`, never a regex over a structured format.
+    """
+    import yaml  # deferred, as every other yaml consumer in this file does
+
+    f = compose_file_path(host, name)
+    if not f.is_file():
+        return None
+    try:
+        doc = yaml.safe_load(f.read_text()) or {}
+    except OSError, yaml.YAMLError:
+        return None
+    cfg = ((doc.get("configs") or {}).get("ssh_authorized_keys") or {}).get("content")
+    if cfg is None:
+        return None
+    return [ln for ln in cfg.splitlines() if ln.strip()]
+
+
+UNDETERMINED = "undetermined"
+
+
+def observed_admit_set(host_rec: dict, name: str) -> list[str] | None:
+    """The keys the environment ACTUALLY admits, or None meaning `undetermined`.
+
+    None is NOT "empty" (FR-019). Observation requires reaching inside a RUNNING
+    environment, so a stopped or unreachable one has not been examined — and
+    "nobody is authorised" is a materially different claim from "we did not look".
+    Reporting the first as the second would tell an operator they are locked out on
+    the strength of never having checked. Same rule the inventory already follows:
+    unreachable means undetermined, never stopped.
+
+    Read with exec-and-cat, the shape Feature 018 uses to capture the public host
+    key, so a remote host answers the same way a local one does.
+    """
+    base = driver_runtime_argv(host_rec)
+    cname = container_name(name)
+    if not runtime_container_exists(base, cname):
+        return None
+    try:
+        r = query(base + ["exec", cname, "cat", CONTAINER_AUTHKEYS], timeout=RUNS_PROBE_TIMEOUT)
+    except OSError, subprocess.SubprocessError:
+        return None
+    if r.returncode != 0:
+        return None
+    inside, out = False, []
+    for ln in r.stdout.splitlines():
+        if ln.startswith(KEY_REGION_BEGIN_ID):
+            inside = True
+            continue
+        if ln.startswith(KEY_REGION_END_ID):
+            inside = False
+            continue
+        if ln.strip() and not ln.startswith("#"):
+            out.append((ln.strip(), inside))
+    # Everything admitted, marked by whether the tool put it there. A key OUTSIDE
+    # the region is admitted and is not revocable by editing the collection, so it
+    # must be visible as such rather than blending in.
+    return [ln if managed else f"{ln}\t(unmanaged)" for ln, managed in out]
+
+
+def _fp_or_raw(line: str) -> str:
+    """A fingerprint + comment for display, falling back to the raw line.
+
+    Falls back rather than dying: this is a REPORT. A line the local `ssh-keygen`
+    cannot parse is still something the environment admits, and hiding it because we
+    could not pretty-print it would be the report lying about the admit set.
+    """
+    raw = line.split("\t")[0]
+    suffix = "  (unmanaged — not revocable by editing the collection)" if "\t" in line else ""
+    try:
+        fp = validate_public_key_line(raw, "<observed>", 0)
+    except Fatal:
+        return f"  {raw[:48]}…  (unparseable){suffix}"
+    parts = raw.split()
+    return f"  {fp}  {parts[-1] if len(parts) > 2 else '(no comment)'}{suffix}"
+
+
+def report_projected_vs_observed(host: str, host_rec: dict, name: str) -> None:
+    """Print BOTH readings and state disagreement (FR-014).
+
+    Answering from the projection alone would compare a projection with itself and
+    report an agreement it never checked — the defect SC-006 was rewritten to
+    forbid. Three reads, three distinct absence answers: the collection absent means
+    undeclared, the compose file absent means no such deployment, an unreachable
+    environment means `undetermined`. Collapsing any pair is the Constitution VIII
+    failure this feature keeps running into.
+    """
+    try:
+        entries, coll, declared = resolved_admit_set([])
+        projected: list[str] | None = [e.line for e in entries]
+    except Fatal as e:
+        warn(f"the key collection cannot be resolved: {e}")
+        projected, coll, declared = None, None, False
+    log(f"{name}:")
+    if projected is None:
+        log("  projected:  (collection unreadable)")
+    elif not declared and not projected:
+        log("  projected:  (no collection declared)")
+    else:
+        src = f" [{coll}]" if coll else ""
+        log(f"  projected:  {len(projected)} key(s){src}")
+        for ln in projected:
+            log(_fp_or_raw(ln))
+    observed = observed_admit_set(host_rec, name)
+    if observed is None:
+        log(f"  observed:   {UNDETERMINED} (not running, or unreachable)")
+        return
+    log(f"  observed:   {len(observed)} key(s)")
+    for ln in observed:
+        log(_fp_or_raw(ln))
+    if projected is None:
+        return
+    obs_material = {ln.split("\t")[0] for ln in observed}
+    proj_material = set(projected)
+    if obs_material == proj_material:
+        log("  agree:      yes")
+        return
+    log("  agree:      NO — the environment does not admit what the collection says")
+    for missing in sorted(proj_material - obs_material):
+        log(f"    in the collection, NOT admitted: {_fp_or_raw(missing).strip()}")
+    for extra in sorted(obs_material - proj_material):
+        log(f"    admitted, NOT in the collection: {_fp_or_raw(extra).strip()}")
+
+
+def warn_on_collection_drift(host: str, name: str) -> None:
+    """On resume, WARN when the collection no longer matches what was deployed.
+
+    `start` is a resume: it must NOT re-resolve or re-apply, because re-applying
+    would silently turn it into a deploy and contradict its own "no recreation, no
+    rebuild" contract. But staying silent is worse. The container rewrites its
+    managed region on boot, so the set staged at `up` time comes back looking
+    freshly authoritative — an operator who removed a key, stopped and started would
+    be told nothing and would still be admitting it. That is the failure FR-006
+    exists to fix, one command over (FR-013).
+
+    A collection that has since become UNREADABLE must not block a resume, so a
+    validation failure degrades to a warning here rather than a `die`. Refusing to
+    resume over an unrelated edit would be the tool picking the wrong risk.
+    """
+    created = created_with_admit_set(host, name)
+    if created is None:
+        return
+    try:
+        entries, _, _ = resolved_admit_set([])
+    except Fatal as e:
+        warn(f"cannot compare the key collection against this deployment: {e}")
+        return
+    current = [e.line for e in entries]
+    if current == created:
+        return
+    gone = [k for k in created if k not in current]
+    added = [k for k in current if k not in created]
+
+    def _label(k: str) -> str:
+        parts = k.split()
+        return parts[-1] if len(parts) > 2 else (parts[1][:16] if len(parts) > 1 else k)
+
+    bits = []
+    if gone:
+        bits.append(f"no longer in the collection: {', '.join(_label(k) for k in gone)}")
+    if added:
+        bits.append(f"newly in the collection: {', '.join(_label(k) for k in added)}")
+    warn(
+        f"the key collection has changed since {name} was deployed "
+        f"({'; '.join(bits)}). `start` RESUMES and does not re-apply it, so this "
+        f"environment still admits the set it was created with. Run "
+        f"`agent-container redeploy {name}` to apply the change."
+    )
 
 
 def do_start(name: str, host: str | None = None) -> None:
@@ -16660,10 +16876,24 @@ def up(
     )
 
 
-@app.command()
-def keys(
-    name: str = typer.Argument(..., help="Container short name."),
-    host_key: Path | None = typer.Option(
+keys_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "The keys an environment ADMITS — the collection, and what it actually holds. "
+        "Noun-plus-verb like `ssh-key` and `host`, and for a reason: `show`, `ls` and "
+        "`add` are all legal environment names, so a bare `keys <name>` beside a "
+        "subcommand would make an environment called `show` unreachable through this "
+        "group. Distinct from `ssh-key`, which reports the agent's OUTBOUND identity — "
+        "the opposite direction."
+    ),
+)
+app.add_typer(keys_app, name="keys")
+
+
+@keys_app.command("add")
+def keys_add(
+    name: str = typer.Argument(..., help="Environment short name."),
+    host_key: str | None = typer.Option(
         None,
         "--host-key",
         hidden=True,
@@ -16672,17 +16902,75 @@ def keys(
     authorized_key: list[Path] = typer.Option(
         None,
         "--authorized-key",
-        help="Append an SSH public key to authorized_keys in the running "
-        "container (repeatable; deduped; persists on the ~/.ssh volume).",
+        help="Grant an SSH public key access to the RUNNING environment (repeatable, "
+        "deduped). The grant lasts UNTIL THE NEXT RECREATE — add the key to the "
+        "collection to make it permanent.",
     ),
     as_json: bool = JSON_OPT,
 ) -> None:
-    """Inject SSH host key / authorized keys into a RUNNING container (no recreate)."""
+    """Grant a key to a RUNNING environment, until its next recreate.
+
+    Was `keys <name> --authorized-key` (Feature 020 renamed it; see the group help).
+    The grant now lands inside the tool-managed region, so recreating removes it: the
+    tool must not create access it cannot withdraw.
+    """
     set_json_mode(as_json)
     if host_key is not None:
-        refuse_removed_host_key("keys --host-key")
+        refuse_removed_host_key("keys add --host-key")
     cli_keys(name, authorized_key or [])
     emit_action("keys", name=name)
+
+
+@keys_app.command("show")
+def keys_show(
+    name: str = typer.Argument(..., help="Environment short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the environment runs on."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """What will this environment admit, and what does it actually admit?
+
+    Prints BOTH the projected set (re-resolved from the collection) and the observed
+    set (read from the environment), and states whether they agree. Answering from
+    the projection alone would compare a projection with itself.
+    """
+    set_json_mode(as_json)
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    report_projected_vs_observed(host_name, host_rec, name)
+
+
+@keys_app.command("ls")
+def keys_ls(
+    host: str | None = typer.Option(None, "--host", help="Host the environment runs on."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """The admit set of every deployed environment on a host.
+
+    Every row is reported. One unreachable environment shows `undetermined` in its
+    own row and does NOT sink the listing — and the exit status must not claim
+    success for rows never examined (FR-020).
+    """
+    set_json_mode(as_json)
+    host_name, host_rec = resolve_deploy_host(host)
+    names = sorted(
+        f.name[: -len(".compose.yaml")] for f in host_state_dir(host_name).glob("*.compose.yaml")
+    )
+    if not names:
+        log(f"no deployments recorded on {host_name}")
+        return
+    undetermined = 0
+    for n in names:
+        report_projected_vs_observed(host_name, host_rec, n)
+        if observed_admit_set(host_rec, n) is None:
+            undetermined += 1
+    if undetermined:
+        # NOT a success. Exiting 0 here would report a complete answer for
+        # environments that were never examined.
+        warn(
+            f"{undetermined} of {len(names)} environment(s) could not be observed; "
+            f"their admit sets are {UNDETERMINED}."
+        )
+        raise typer.Exit(1)
 
 
 @app.command()
