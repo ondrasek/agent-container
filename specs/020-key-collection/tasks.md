@@ -89,7 +89,7 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   precedent is `read_text()` plus a textual assertion — which cannot fail when the shell logic is wrong.
   Grep-the-source coverage for the mechanism the whole feature rests on is the exact defect shape 020
   exists to remove. Extending an already-wired harness also means **no new gate entry is needed**.
-- [X] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
+- [ ] T011 [P] Add `bin/tests/test_key_collection.py` for the parts that genuinely are Python: collection
   resolution, entry validation, admit-set assembly, and compose-model shape. No assertion in this file may
   stand in for entrypoint behaviour — that belongs in T010's executing section.
 - [X] T012 [P] ~~Add a parity test~~ **ALREADY EXISTS — no new test written.** The block carries
@@ -99,8 +99,13 @@ FR-006 cannot hold, until the container stops unioning keys onto its volume.
   duplicated working infrastructure. What this DID require: `test_guards_can_fail` corrupted the union's
   dedup `awk` to prove the guard fails, and that line no longer exists — the fixture was retargeted onto
   `AK_END_ID`, deliberately staying on a line whose divergence changes who can log in.
-- [X] T013 [P] Assert in `bin/tests/test_key_collection.py` that the generated compose model has **no**
-  `file:` key for `ssh_authorized_keys` (C19), and that the entry never appears under `secrets` (C18).
+- [X] T013 [P] Assert that the generated compose model has **no** `file:` key for `ssh_authorized_keys`
+  (C19) and that the entry never appears under `secrets` (C18). **Landed in `bin/tests/test_compose.py`,
+  not `test_key_collection.py`** — that file already owns every compose-model assertion, and splitting
+  them would leave two places to look. Also inverted the pre-existing
+  `test_authorized_keys_maps_to_config` (which required `["file"] == str(ak)`) and retargeted
+  `test_no_secret_material_inline` onto Feature 003's `injected_configs`, since public keys can no
+  longer carry a "no secrets inline" assertion.
 
 **Checkpoint**: `--authorized-key` still works end to end, and a key removed from the *flags* and
 redeployed is gone. FR-006 now holds for flags; the collection is not involved yet.
