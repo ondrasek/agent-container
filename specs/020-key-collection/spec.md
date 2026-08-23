@@ -37,6 +37,23 @@ cannot fix it. Feature 017 makes this sharper: a control plane exists to be reac
 - Q: Which command answers "what will this environment admit?" → A: A new `keys` subgroup — `keys show <name>` for one environment, `keys ls` across them. Consequence, decided from the codebase's own noun-plus-verb idiom rather than asked: the existing grant form `keys <name> --authorized-key` moves to `keys add <name> --authorized-key`, because `show`/`ls`/`add` are all legal environment names and a bare positional beside a subcommand would make an environment named `show` unreachable.
 
 
+### Review 2026-08-23 (post-plan analysis, not a clarification round)
+
+Four requirements below came from reading the artifacts against the code rather than from
+asking a question, and they are recorded separately so nobody looks for a clarification
+that never happened:
+
+- **Observation needs a running environment** (FR-019, FR-020, SC-013, SC-014) — FR-014 said
+  the observed set reads `undetermined`
+  when the environment "cannot be reached" without saying what reaching it means. Observation
+  needs an exec, so a **stopped** environment cannot be observed at all; reporting it as empty
+  would claim nobody is authorised on the strength of not having looked. FR-020 followed: one
+  unreachable environment must not sink a listing, nor let it exit as though every row had been
+  examined.
+
+Also settled without new requirements: a project-level collection is **committed** unless the
+project ignores it (§Assumptions), and a key with **no comment** is identified by fingerprint.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### US1 — Every new environment is reachable from every device (P1)
@@ -92,7 +109,7 @@ admitted; a query names the same set for a running environment.
   replaces only the region it wrote.
 - **The collection is edited, then `stop` + `start` rather than `redeploy`** — `start` resumes and does
   not re-resolve, so the environment still admits the set it was created with. The container's own
-  boot rewrites its key block, which makes that stale set *look* freshly authoritative. `start` MUST
+  boot rewrites its key region, which makes that stale set *look* freshly authoritative. `start` MUST
   therefore report the drift (FR-013); staying silent would reproduce the exact failure FR-006 exists
   to fix, one command over.
 
@@ -141,15 +158,6 @@ admitted; a query names the same set for a running environment.
   **`undetermined`** — never as agreement, and never silently replaced by the projection. A query that
   answered from the projection alone would compare a projection with itself and report agreement it
   never checked.
-- **FR-019**: A **stopped** environment MUST report its observed set as **`undetermined`**, not as
-  empty. Observation requires reaching inside a running environment; a stopped one has not been
-  examined, and "nobody is authorised" is a materially different claim from "we did not look". An
-  **empty** observed set MUST therefore mean a running environment whose managed region is genuinely
-  empty. Three states again, and the same rule as FR-009: absent, empty and unexamined do not collapse.
-- **FR-020**: A query spanning **many** environments MUST report each one's outcome independently and
-  MUST NOT fail the whole listing because one environment could not be reached. An unreachable
-  environment appears as `undetermined` **in its own row**, and the query's exit status MUST NOT claim
-  success for environments it never examined.
 - **FR-015**: A key injected by the `keys` command into a running environment MUST land **within the
   tool-managed region** of the environment's authorised keys, so that recreating the environment
   removes it. **The tool MUST NOT create a grant it cannot revoke.** `keys` MUST state at injection
@@ -177,6 +185,15 @@ admitted; a query names the same set for a running environment.
   query MUST NOT be attached to `ssh-key show`, which reports the environment's **outbound** identity —
   the opposite direction, and conflating the two in one output is the confusion this feature is careful
   to avoid elsewhere.
+- **FR-019**: A **stopped** environment MUST report its observed set as **`undetermined`**, not as
+  empty. Observation requires reaching inside a running environment; a stopped one has not been
+  examined, and "nobody is authorised" is a materially different claim from "we did not look". An
+  **empty** observed set MUST therefore mean a running environment whose managed region is genuinely
+  empty. Three states again, and the same rule as FR-009: absent, empty and unexamined do not collapse.
+- **FR-020**: A query spanning **many** environments MUST report each one's outcome independently and
+  MUST NOT fail the whole listing because one environment could not be reached. An unreachable
+  environment appears as `undetermined` **in its own row**, and the query's exit status MUST NOT claim
+  success for environments it never examined.
 
 ### Key entities
 
@@ -216,13 +233,13 @@ admitted; a query names the same set for a running environment.
 - **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
   environment admits nobody. The same deploy with **no** collection declared produces **no** such
   warning — the two runs are distinguishable in output, not merely in behaviour.
+- **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
+  queryable and a key can be granted to it. No legal environment name is made unreachable by the
+  command layout.
 - **SC-013**: A stopped environment's observed set reads `undetermined`, and is distinguishable in
   output from a running environment whose region is empty. Neither is ever reported as the other.
 - **SC-014**: With one environment unreachable and three reachable, a listing reports four rows — three
   with observed sets and one `undetermined` — and does not abort after the failure.
-- **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
-  queryable and a key can be granted to it. No legal environment name is made unreachable by the
-  command layout.
 
 ## Assumptions
 

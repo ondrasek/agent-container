@@ -77,7 +77,7 @@ which devices are about to be admitted (FR-007).
 Written to `~/.ssh/authorized_keys` on the persisted `ssh` volume:
 
 ```
-# BEGIN agent-container managed keys
+# BEGIN agent-container managed keys — replaced on every boot; edit outside this region
 <one line per admit-set entry>
 # END agent-container managed keys
 ```
@@ -87,13 +87,13 @@ byte-for-byte.
 
 | Transition | Result |
 |---|---|
-| Key added to collection, recreate | appears in the block |
-| Key removed from collection, recreate | **gone from the block** — access ends (FR-006) |
-| Collection becomes absent | block is emptied, not left stale |
-| Hand-added key outside the block | survives every boot |
+| Key added to collection, recreate | appears in the region |
+| Key removed from collection, recreate | **gone from the region** — access ends (FR-006) |
+| Collection becomes absent | region is emptied, not left stale |
+| Hand-added key outside the region | survives every boot |
 | Malformed pre-existing file (one marker, no pair) | refuse to rewrite; report it rather than guess a boundary |
 
-**This block is rewritten; `~/.ssh/config`'s identically-styled block is
+**This region is rewritten; `~/.ssh/config`'s identically-styled block is
 write-once.** Both sites must state which they are — same sentinel idiom, opposite
 update rule, and a reader who assumes the wrong one either loses an agent's settings
 or cannot revoke.

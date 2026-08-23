@@ -45,7 +45,8 @@ declared-empty meaningful, and Feature 017 established that public material ride
 channel. Inventing a clarification round for settled questions would be theatre.
 
 **Clarification session 2026-08-23 — one item REGRESSED, deliberately.** Five questions were
-answered and integrated (FR-013 through FR-018, SC-008 through SC-012). Fifteen of sixteen items
+answered and integrated (FR-013 through FR-018, SC-008 through SC-012 — FR-019/FR-020 and
+SC-013/SC-014 came later, from the post-plan analysis round, not from a question). Fifteen of sixteen items
 still pass; *"written for non-technical stakeholders"* no longer does, and it is being reported
 rather than quietly re-checked.
 
@@ -67,3 +68,18 @@ cannot revoke, which changes the shipped `keys` command (FR-015), while content 
 write survives (FR-016). Declared-empty is honoured and warned about, and the undeclared path stays
 silent because it already is (FR-017). The query lands in a `keys` subgroup, forcing the grant form
 to `keys add`, because a bare positional would strand an environment named `show` (FR-018).
+
+**Post-plan analysis, 2026-08-23 — two rounds, and the second one mostly found the first
+one's repairs.** Round 1 raised two CRITICAL items: an existing *executing* test
+(`test_entrypoint.sh` §7e) pinned the union the design deletes, and FR-013/FR-014 compared
+against a "created-with" set that no artifact gave a home. Both are closed — the second by
+recording that the generated compose file already holds it inline, which made the `content:`
+decision load-bearing twice rather than once.
+
+Round 2 found six more, **five of them introduced or left by round 1's own repairs**. The
+one worth keeping on the record: the terminology sweep was reported clean after grepping for
+the exact strings that had just been replaced — a check that could only confirm the edit, never
+the goal. Fourteen prose uses of the old term survived it. That is the same defect shape this
+feature exists to remove, committed by the instrument checking for it, and it is the reason the
+quickstart's success-criteria coverage was audited by enumerating **all fourteen** criteria
+rather than by re-reading the diff: six had no scenario, and two analysis passes had missed them.

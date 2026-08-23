@@ -35,18 +35,18 @@ story.
 **Decision**: a **sentinel-delimited managed region** inside `authorized_keys`:
 
 ```
-# BEGIN agent-container managed keys (replaced on every boot; edit outside this block)
+# BEGIN agent-container managed keys — replaced on every boot; edit outside this region
 <resolved admit set>
 # END agent-container managed keys
 ```
 
-Everything outside the block is preserved byte-for-byte; the block is **replaced**,
+Everything outside the region is preserved byte-for-byte; the region is **replaced**,
 not merged. Adding and removing both work, and a hand-added key survives.
 
 **This is not a new idiom** — the entrypoint already manages `~/.ssh/config` with
 `# BEGIN agent-container` sentinels. The difference is deliberate and must be
 stated: that block is **write-once** (an agent's own settings must survive),
-whereas this one is **rewritten every boot**, because a block that is never
+whereas this one is **rewritten every boot**, because a region that is never
 rewritten cannot revoke. Two blocks with the same sentinel style and opposite
 update rules is exactly the kind of thing a later reader gets wrong, so both sites
 must say which they are.

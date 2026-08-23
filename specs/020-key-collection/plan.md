@@ -39,7 +39,7 @@ admit set inside a managed region on the existing `ssh` volume. No new volume, n
 state file, no registry entry.
 
 **Testing**: `pytest` hermetic tier (`bin/tests/`) for resolution, validation and
-compose-model shape; `pytest -m acceptance` for the block semantics, the revocation
+compose-model shape; `pytest -m acceptance` for the region semantics, the revocation
 that FR-006 turns on, and the remote-context arrival.
 
 **Target Platform**: Linux containers under Podman/Docker, rootless; macOS and Linux
@@ -66,11 +66,11 @@ realistic ceiling and no part of the design cares.
 | **I. Ephemerality** | **Pass, and improves it** | The managed region is derived from the operator's file on every boot. What the volume holds stops being authoritative — which is precisely the fix for FR-006. |
 | **II. Least Privilege / Immutable Runtime** | Pass | No new capability, no new package, no runtime `apt`. The container writes only its own `~/.ssh/authorized_keys`, as it does today. |
 | **III. Least Exposure** | Pass | Public keys, on the non-secret config channel, staged 0644 because `dev` must read them. **The private-key refusal (C7) exists so a mis-`cat` never becomes an exposure** — the only way private material could enter this path. |
-| **IV. Deterministic Identity** | Pass | Same collection ⇒ same admit set. The block is content-derived, so it is reproducible rather than accumulated. |
+| **IV. Deterministic Identity** | Pass | Same collection ⇒ same admit set. The region is content-derived, so it is reproducible rather than accumulated. |
 | **V. Durable Spec** | Pass | spec/plan/research/data-model/contracts/quickstart under `specs/020-key-collection/`; the operator-facing behaviour lands in `docs/credentials.md` (SSH identity) with the managed-region rule stated at both code sites (C21). |
 | **VI. Least Dependencies** | Pass | Zero new dependencies. A YAML or JSON collection format was rejected partly on this ground (R2). |
 | **VII. Continuous Deployment** | **Pass, with two things that must be said out loud** | Conventional Commits; `feat(keys)` ⇒ MINOR. (a) **FR-015 and FR-018 both break a shipped command**: a `keys` grant no longer survives a recreate. Pre-1.0 that is still a MINOR bump, which is exactly why the release notes must say it in words — the version number will not. (b) **If C20 shows `file:` never crossed a remote context**, the `--authorized-key` fix is a separate breaking-behaviour correction and gets its own `fix` commit, not a fold-in. |
-| **VIII. Defaults Belong at the Surface** | **Pass — and it is load-bearing here** | Three states stay distinct: absent (undeclared), declared-empty, declared-N. The empty case is a legitimate instruction *and* a lockout, so it is honoured **and warned about** (R6, C4). No reader may substitute a default for absence; the delivery boundary decides, and a test pins C3 against C4 so the two can never collapse. |
+| **VIII. Defaults Belong at the Surface** | **Pass — and it is load-bearing in THREE places** | (1) FR-009: absent (undeclared) vs declared-empty vs declared-N; the empty case is a legitimate instruction *and* a lockout, so it is honoured **and warned about** (R6, C4), with a test pinning C3 against C4 so they cannot collapse. (2) FR-014: projected vs observed, never one standing in for the other. (3) FR-019: unexamined (`undetermined`) vs genuinely empty — "nobody is authorised" and "we did not look" are different claims. A key collection is almost entirely absence questions, which is why this principle keeps recurring here rather than appearing once. |
 
 **No violations. Complexity Tracking is therefore empty and omitted.**
 
@@ -113,12 +113,16 @@ bin/agent-container            # resolution, validation, statement, compose mode
   └── build_compose_model()          # CHANGED — ssh_authorized_keys via content:
 
 image/entrypoint.sh                  # CHANGED — managed region replaces the union
-image-control-plane/entrypoint.sh    # CHANGED — same block, same role coverage
+image-control-plane/entrypoint.sh    # CHANGED — same region, same role coverage
 
-bin/tests/test_key_collection.py     # NEW — hermetic: C1..C11, C13..C19
-bin/tests/test_acceptance.py         # EXTENDED — C12, C15, C20 (the ones only a real run can prove)
+bin/tests/test_entrypoint.sh         # CHANGED — EXECUTES the entrypoint against stubs
+  ├── section 7e                     # REWRITTEN — union assertions become region assertions
+  └── section 7f                     # NEW — C13/C17/C27: one marker pair, outside preserved, malformed refused
+bin/tests/test_key_collection.py     # NEW — hermetic, PYTHON-side only: C1..C12, C18..C19, C24, C28..C32
+                                     #       plus entrypoint PARITY (agent vs control-plane region logic)
+bin/tests/test_acceptance.py         # EXTENDED — C12, C15, C16, C20, C23, C25, C26 (only a real run proves these)
 
-docs/credentials.md                  # CHANGED — the collection, and the two block rules
+docs/credentials.md                  # CHANGED — the collection, and both update rules
 ```
 
 **Structure Decision**: no new module and no new file in the CLI — the project is a
@@ -126,6 +130,15 @@ single-file CLI by design, and the collection is five small functions next to th
 existing `settings_candidates`/`resolve_settings_key` pair it deliberately mirrors.
 The one new test file matches the per-feature convention (`test_control_plane.py`,
 `test_doctor.py`).
+
+**The test split is load-bearing, not stylistic.** The region parser is **shell**, so it
+is tested by the harness that **executes** shell (`test_entrypoint.sh`). This repo's
+alternative precedent — a Python test that `read_text()`s the entrypoint and asserts on
+its source — cannot fail when the shell logic is wrong, and grep-the-source coverage for
+the mechanism the whole feature rests on is the exact defect shape 020 exists to remove.
+`test_key_collection.py` therefore holds only what genuinely is Python, plus one textual
+**parity** check between the two entrypoints — where a textual assertion is honest,
+because the claim is that two texts agree, which text can prove.
 
 ## Phase sequencing
 
@@ -137,18 +150,31 @@ The order is forced by the two findings, not by convenience:
 2. **Managed region in the entrypoint** — the revocation fix. It is independently
    valuable and testable with `--authorized-key` alone, before any collection
    exists.
-3. **Resolution + validation + statement in the CLI** — the operator-facing feature.
-4. **`inject_keys` moves inside the region** (FR-015, C25/C27) — after the block exists, since
+3. **Rewrite `test_entrypoint.sh` §7e in the same change as step 2.** That section
+   EXECUTES the entrypoint and asserts the union step 2 deletes, and it runs in the
+   quality gate — so the gate goes red here whether or not anyone planned for it. Its
+   fixture also places one key in both the persisted file and the env source, so the
+   count changes and the failure reads as "the new code is broken" when the old contract
+   is merely still pinned. Rewritten, never deleted: a removed assertion leaves nobody
+   watching, which is why 7c/7d were inverted rather than dropped.
+4. **Resolution + validation + statement in the CLI** — the operator-facing feature.
+5. **`inject_keys` moves inside the region** (FR-015, C25/C27) — after the region exists, since
    there is nothing to write inside until then. The paired test C26 must land in the same
    change: the two halves ("tool grants are revocable", "hand-added keys are not the tool's
    to remove") are one boundary, and a change that asserts only the first will happily
    delete an operator's keys.
-5. **Resume drift and the observed query** (FR-013/FR-014, C23/C24) — both are comparisons
+6. **Resume drift and the observed query** (FR-013/FR-014, C23/C24) — both are comparisons
    against the created-with set, so they share a mechanism and should not be built twice.
-6. **Docs and the two block-rule comments** (C21, C22).
+7. **Docs and the two update-rule comments** (C21, C22) — write-once vs replaced-every-boot,
+   plus the threat-model row and the CLAUDE.md pointer the constitution requires in the same
+   change as the behaviour.
 
-Step 2 before step 3 is deliberate: if the collection landed first, US1 would pass
+Step 2 before step 4 is deliberate: if the collection landed first, US1 would pass
 and US3 would fail, which is the failure mode the spec's own checklist warned about.
+
+**These seven steps map onto the seven phases of `tasks.md`** (steps 2 and 3 are one
+phase — Foundational — because they must land together). If the two ever disagree,
+`tasks.md` is the executable one and this list is the stale one.
 
 ## What could still be wrong
 

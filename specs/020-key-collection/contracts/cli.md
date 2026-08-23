@@ -69,17 +69,17 @@ against the input file, which would be circular.
 between them.
 
 **C15** — A key present in the collection at first boot and **removed** before a
-recreate is **absent from the block** afterwards — and an SSH attempt with that key
+recreate is **absent from the region** afterwards — and an SSH attempt with that key
 is **refused**. This is FR-006, and the test must assert the refused connection, not
 merely the absent line: an absent line with a stale `authorized_keys.d` entry or a
 cached session would still admit.
 
-**C16** — A collection that becomes absent empties the block rather than leaving the
+**C16** — A collection that becomes absent empties the region rather than leaving the
 previous set in place.
 
 **C17** — An `authorized_keys` with a `BEGIN` marker and no `END` (or the reverse) is
 **refused, not repaired** — the tool reports the file rather than guessing where the
-block ends and risking deleting an operator's keys.
+region ends and risking deleting an operator's keys.
 
 ---
 
