@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.35.0 (2026-08-23)
+
+### Documentation
+
+- **keys**: Make the post-deploy admit-set query observe, not re-resolve
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`ebb7e06`](https://github.com/ondrasek/agent-container/commit/ebb7e06d25fc97e02d81f46a6372bbeb586482e3))
+
+- **keys**: Plan the public-key collection
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`70071dc`](https://github.com/ondrasek/agent-container/commit/70071dc54d4d3ce4d90a2c29cbf3179fc5e14074))
+
+- **keys**: Specify what `start` does with a drifted collection
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`b502134`](https://github.com/ondrasek/agent-container/commit/b50213472e70c66fba292fa03eed1a280f00c682))
+
+- **keys**: Tool-created grants become revocable by the collection
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`6ca257c`](https://github.com/ondrasek/agent-container/commit/6ca257cc3b3b79add00c23a5c739f3ab08334a46))
+
+
 ## v0.34.1 (2026-08-22)
 
 ### Bug Fixes
