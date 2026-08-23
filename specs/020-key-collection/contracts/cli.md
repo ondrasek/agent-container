@@ -126,6 +126,17 @@ nothing else.
 markers still form exactly one pair afterwards — an injection that appended past the `END`
 marker would satisfy C25's "admitted immediately" and silently fail C25's second half.
 
+**C28** — `keys show <name>` prints the projected and observed sets for one environment;
+`keys ls` prints them across all known environments. Neither is reachable as a bare
+positional, and `ssh-key show` gains no admit-set output (FR-018).
+
+**C29** — An environment named `show` is queryable and grantable through the `keys` group. A
+test uses that exact name — the collision is the reason the layout is what it is, so it is
+the one case that must be pinned rather than reasoned about.
+
+**C30** — `keys add <name> --authorized-key` grants; the old bare form `keys <name>
+--authorized-key` no longer grants. The release notes say so.
+
 ---
 
 **C21** — Both managed-block sites (`~/.ssh/config`, `~/.ssh/authorized_keys`) state

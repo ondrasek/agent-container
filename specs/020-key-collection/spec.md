@@ -34,6 +34,8 @@ cannot fix it. Feature 017 makes this sharper: a control plane exists to be reac
 
 - Q: Does a declared-but-empty collection warn, prompt, or pass silently? → A: Warn and proceed, naming the file. The declaration is honoured; the operator is told the environment will admit nobody.
 
+- Q: Which command answers "what will this environment admit?" → A: A new `keys` subgroup — `keys show <name>` for one environment, `keys ls` across them. Consequence, decided from the codebase's own noun-plus-verb idiom rather than asked: the existing grant form `keys <name> --authorized-key` moves to `keys add <name> --authorized-key`, because `show`/`ls`/`add` are all legal environment names and a bare positional beside a subcommand would make an environment named `show` unreachable.
+
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -121,6 +123,15 @@ admitted; a query names the same set for a running environment.
   resulting set MUST be stated so neither source appears to have won silently.
 - **FR-009**: An **undeclared** collection MUST behave exactly as today (no auto-injection), and MUST
   be distinguishable from a **declared-empty** collection, which admits nobody.
+- **FR-018**: The admit-set query MUST be exposed as a **`keys` subgroup** — `keys show <name>` for
+  one environment and `keys ls` across them — following the noun-plus-verb idiom every other group in
+  this tool already uses (`ssh-key show`, `host ls`, `runs list`). The existing grant form
+  `keys <name> --authorized-key` MUST move to **`keys add <name> --authorized-key`**. This is required,
+  not cosmetic: `show`, `ls` and `add` are all legal environment names, so a bare positional beside a
+  subcommand would make an environment named `show` permanently unreachable through this group. The
+  query MUST NOT be attached to `ssh-key show`, which reports the environment's **outbound** identity —
+  the opposite direction, and conflating the two in one output is the confusion this feature is careful
+  to avoid elsewhere.
 - **FR-017**: A **declared-empty** collection MUST be **honoured and warned about**, naming the file
   and saying the environment will admit nobody. It MUST NOT prompt and MUST NOT refuse: an empty
   declaration is a legitimate instruction for a headless environment, and refusing without a tty would
@@ -186,6 +197,9 @@ admitted; a query names the same set for a running environment.
   fabricated from the projection MUST fail.
 - **SC-007**: An undeclared collection changes nothing about today's behaviour — an environment
   deployed with `--authorized-key` alone admits exactly that key.
+- **SC-012**: An environment named `show` is fully usable through the `keys` group — its admit set is
+  queryable and a key can be granted to it. No legal environment name is made unreachable by the
+  command layout.
 - **SC-011**: A declared-empty collection deploys successfully, warns once naming the file, and the
   environment admits nobody. The same deploy with **no** collection declared produces **no** such
   warning — the two runs are distinguishable in output, not merely in behaviour.
@@ -226,7 +240,8 @@ admitted; a query names the same set for a running environment.
 - Distributing or generating device private keys.
 - **In scope, and stated here because it looks out of scope:** the existing `keys` command changes
   behaviour (FR-015). Its grants become recreate-scoped rather than permanent. This is a **breaking
-  change to a shipped command** and must be released as such — pre-1.0, that is a MINOR bump, and the
+  change to a shipped command**, as does FR-018 renaming its grant form to `keys add`. Both must be
+  released as such — pre-1.0, that is a MINOR bump, and the
   commit and release notes must say plainly that a `keys` grant no longer survives a recreate.
 - Any per-environment allow/deny beyond project-level override.
 - Revoking access on a container without recreating it — whether **running** or merely **resumed**

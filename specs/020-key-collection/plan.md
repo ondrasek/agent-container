@@ -69,7 +69,7 @@ realistic ceiling and no part of the design cares.
 | **IV. Deterministic Identity** | Pass | Same collection ⇒ same admit set. The block is content-derived, so it is reproducible rather than accumulated. |
 | **V. Durable Spec** | Pass | spec/plan/research/data-model/contracts/quickstart under `specs/020-key-collection/`; the operator-facing behaviour lands in `docs/credentials.md` (SSH identity) with the managed-block rule stated at both code sites (C21). |
 | **VI. Least Dependencies** | Pass | Zero new dependencies. A YAML or JSON collection format was rejected partly on this ground (R2). |
-| **VII. Continuous Deployment** | **Pass, with two things that must be said out loud** | Conventional Commits; `feat(keys)` ⇒ MINOR. (a) **FR-015 breaks a shipped command**: a `keys` grant no longer survives a recreate. Pre-1.0 that is still a MINOR bump, which is exactly why the release notes must say it in words — the version number will not. (b) **If C20 shows `file:` never crossed a remote context**, the `--authorized-key` fix is a separate breaking-behaviour correction and gets its own `fix` commit, not a fold-in. |
+| **VII. Continuous Deployment** | **Pass, with two things that must be said out loud** | Conventional Commits; `feat(keys)` ⇒ MINOR. (a) **FR-015 and FR-018 both break a shipped command**: a `keys` grant no longer survives a recreate. Pre-1.0 that is still a MINOR bump, which is exactly why the release notes must say it in words — the version number will not. (b) **If C20 shows `file:` never crossed a remote context**, the `--authorized-key` fix is a separate breaking-behaviour correction and gets its own `fix` commit, not a fold-in. |
 | **VIII. Defaults Belong at the Surface** | **Pass — and it is load-bearing here** | Three states stay distinct: absent (undeclared), declared-empty, declared-N. The empty case is a legitimate instruction *and* a lockout, so it is honoured **and warned about** (R6, C4). No reader may substitute a default for absence; the delivery boundary decides, and a test pins C3 against C4 so the two can never collapse. |
 
 **No violations. Complexity Tracking is therefore empty and omitted.**
@@ -107,6 +107,7 @@ bin/agent-container            # resolution, validation, statement, compose mode
   ├── report_admit_set()             # NEW — fingerprint + comment + source, pre-deploy
   ├── report_admit_set_observed()    # NEW — projected vs observed, `undetermined` when unreachable (C24)
   ├── start_collection_drift()       # NEW — warn-only comparison on resume (C23)
+  ├── keys_app (typer group)         # NEW — keys show / keys ls / keys add (C28..C30)
   ├── inject_keys()                  # CHANGED — writes INSIDE the managed region (C25, C27)
   ├── stage_ssh_injection()          # CHANGED — feeds content:, not a staged file path
   └── build_compose_model()          # CHANGED — ssh_authorized_keys via content:

@@ -8,7 +8,7 @@
 
 - [x] No implementation details (languages, frameworks, APIs)
 - [x] Focused on user value and business needs
-- [x] Written for non-technical stakeholders
+- [ ] Written for non-technical stakeholders
 - [x] All mandatory sections completed
 
 ## Requirement Completeness
@@ -43,3 +43,27 @@ merge-vs-replace for project override, and whether keys are secrets — both hav
 has already committed to: Constitution VIII (absent ≠ defaulted ≠ declared-empty) makes
 declared-empty meaningful, and Feature 017 established that public material rides the non-secret
 channel. Inventing a clarification round for settled questions would be theatre.
+
+**Clarification session 2026-08-23 — one item REGRESSED, deliberately.** Five questions were
+answered and integrated (FR-013 through FR-018, SC-008 through SC-012). Fifteen of sixteen items
+still pass; *"written for non-technical stakeholders"* no longer does, and it is being reported
+rather than quietly re-checked.
+
+FR-015 and FR-016 now turn on a **tool-managed region** within the environment's authorised keys,
+and FR-018 turns on the fact that `show`, `ls` and `add` are legal environment names. That is
+mechanism, and a non-technical reader will not follow it. The alternative was to state the
+requirements at a level a general reader could follow — which is exactly the level at which the
+union defect, the vacuous SC-006 comparison, and the `show`-name collision are all invisible. Three
+of the five clarifications this session produced were only findable *below* that level.
+
+So the trade is stated instead of hidden: this spec is written for someone who will implement or
+review it, and the readability item is failed on purpose. If a stakeholder-facing summary is wanted,
+it belongs beside this document, not in place of it.
+
+**What the session changed, in one line each.** `start` must report a drifted collection rather than
+resume silently (FR-013). The post-deploy query must observe the environment, not re-resolve the
+file, or SC-006 compares a projection with itself (FR-014). The tool must not create a grant it
+cannot revoke, which changes the shipped `keys` command (FR-015), while content the tool did not
+write survives (FR-016). Declared-empty is honoured and warned about, and the undeclared path stays
+silent because it already is (FR-017). The query lands in a `keys` subgroup, forcing the grant form
+to `keys add`, because a bare positional would strand an environment named `show` (FR-018).
