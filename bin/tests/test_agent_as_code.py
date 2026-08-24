@@ -552,7 +552,10 @@ def test_stage_credentials_provider_apikey_file_channel(wiz, tmp_path, monkeypat
     assert (
         "sk-anthropic" not in cfgname and "sk-anthropic" not in target
     )  # secret not in names/targets
-    assert staged.read_text() == "sk-anthropic" and (staged.stat().st_mode & 0o777) == 0o600
+    # Constitution IX: the value is a DELIVERABLE, not a staged file. It is pushed
+    # into the running container over SSH, so there is no path to stat — and no
+    # plaintext file on disk to have a mode at all, which is the improvement.
+    assert staged == "sk-anthropic"
 
 
 def test_stage_credentials_env_delivery_merges_base(wiz, tmp_path, monkeypatch):
@@ -651,7 +654,7 @@ def test_apikey_trailing_newline_stripped(wiz, tmp_path, monkeypatch):
     ext.write_text("sk-ant-key\n")  # file ends in a newline
     creds = [{"name": "anthropic", "source": "file", "path": str(ext)}]
     configs, _env, _ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
-    assert configs[0][1].read_text() == "sk-ant-key"  # no trailing newline in the apikey file
+    assert configs[0][1] == "sk-ant-key"  # no trailing newline in the delivered value
 
 
 def test_config_tokens_and_staged_files_injective(wiz, tmp_path):
@@ -660,12 +663,16 @@ def test_config_tokens_and_staged_files_injective(wiz, tmp_path):
     (root / ".agent-container" / "a-b.yaml").write_text("environments: []\n")
     (root / ".agent-container" / "a_b.yaml").write_text("environments: []\n")
     entries = wiz.stage_agent_container_spec("local", "acme", root)
-    tokens = [t for t, _f, _tg in entries]
-    staged = [str(f) for _t, f, _tg in entries]
-    targets = [tg for _t, _f, tg in entries]
+    tokens = [t for t, _c, _tg in entries]
+    targets = [tg for _t, _c, tg in entries]
     assert len(tokens) == len(set(tokens))  # unique config resource names
-    assert len(staged) == len(set(staged))  # unique staged files
     assert len(targets) == len(set(targets))  # unique in-container targets
+    # The "unique staged files" arm is gone with the staged files themselves
+    # (Constitution IX): nothing is written to disk to collide. The injective
+    # property that still matters is the pair above — two distinct spec files must
+    # not land on one config name or one in-container target, or one would silently
+    # win. `content` is deliberately NOT checked for uniqueness: two spec files with
+    # identical bytes are legitimately identical.
 
 
 # --- US3: drift, converge, scoped teardown (FR-008/009/010, SC-003/006/007) ---
@@ -1151,7 +1158,7 @@ def test_delivery_strips_trailing_newline_for_apikey_and_env(wiz, tmp_path, monk
     monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: "sk-value\n")
     creds = [{"name": "anthropic", "source": "command", "argv": ["x"]}]
     configs, _e, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
-    assert configs[0][1].read_text() == "sk-value"  # stripped
+    assert configs[0][1] == "sk-value"  # stripped
     creds = [{"name": "MYVAR", "source": "onepassword", "vault": "v", "item": "i", "field": "f"}]
     _c, env_file, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert env_file.read_text().rstrip("\n").endswith("MYVAR=sk-value")  # no stray newline

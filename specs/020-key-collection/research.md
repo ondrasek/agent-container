@@ -203,3 +203,49 @@ cannot enter.
 
 `--authorized-key` remains additive to the resolved collection, and the resulting
 set is stated — so neither source appears to have won silently (FR-008).
+
+
+---
+
+## R7 — The 003 `file:` defect, fixed by DELIVERY (Constitution IX)
+
+`configs: {file:}` was measured (C20) to be a daemon-side bind, so every injected
+config failed against a daemon that could not see the operator's filesystem. The
+first repair attempted — inline everything — was reverted: it would have written API
+keys into the file that describes the deployment. Constitution IX was ratified from
+that near-miss.
+
+**What shipped.** Public material (known_hosts, canonical config, the aac spec, the
+task) is inlined as `content:` — it is public, and inline is the only form that
+crosses. Secret material (provider API keys, declared credential keys) never enters
+the model at all: `split_injected` routes it to `deliver_secrets`, which pushes it
+into the already-running container through the runtime channel. For a remote host
+that channel is carried inside the context's `ssh://` transport, so it is
+authenticated and encrypted **without the tool holding any key of its own** — the
+container's key pair stays inside the container and only its public half is ever
+captured, which is for VERIFYING which container answered, the opposite direction
+from authenticating to one.
+
+**The ordering obligation.** The entrypoint consumes credentials at boot, so it now
+waits for a delivery sentinel — but only when the CLI says to expect one, so a
+deployment declaring no secrets is unaffected. sshd also moved earlier and became
+unconditional: it is the primary interaction surface, and a headless run is exactly
+when an operator needs to look inside a container they cannot attach to.
+
+**Delivery runs as the container's root and hands each file to `dev` at 0400.**
+`/run/agent-container` is the runtime's own root-owned mount point, so `dev` cannot
+create a directory beneath it. This grants the AGENT nothing — it is the operator's
+existing daemon access acting from outside, and under rootless podman the
+container's root is the operator's own uid.
+
+**Verified on both runtimes**: the delivery test passes under docker AND under the
+podman `lima` connection, asserting that the key is absent from the compose file and
+from every file under the state dir, and present inside the container at 0400 owned
+by `dev`.
+
+**Open, and recorded rather than smoothed over**: under the rootless-podman-over-Lima
+acceptance harness, `agent-container logs` returns rc=0 with **no output at all**, so
+a container's own log lines cannot be observed there. The headless-sshd assertion is
+therefore measured on docker and skipped — with that reason named — under podman. It
+is a harness observability gap, not evidence that sshd fails to start; worth closing
+because several other assertions could silently become unobservable the same way.

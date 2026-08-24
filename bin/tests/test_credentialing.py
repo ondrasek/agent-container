@@ -11,6 +11,7 @@ container push behavior is the acceptance tier.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -42,9 +43,10 @@ def test_stage_push_injection_stages_only_known_hosts_now(wiz, tmp_path):
     assert set(by_name) == {"known_hosts"}  # no private key channel survives
     assert by_name["known_hosts"][2] == wiz.INJECT_KNOWN_HOSTS_PATH
     assert not hasattr(wiz, "INJECT_PUSH_KEY_PATH")
-    staged = by_name["known_hosts"][1]
-    assert staged == wiz.host_state_dir("local") / "acme.known_hosts"
-    assert (staged.stat().st_mode & 0o777) == 0o644
+    # Constitution IX: no staged copy exists to stat. The value is carried inline,
+    # so the 0644 file this used to assert on is gone — which is the improvement,
+    # since nothing ever deleted it.
+    assert by_name["known_hosts"][1] == "github.com ssh-ed25519 AAAA\n"
 
 
 def test_stage_push_injection_none_returns_empty(wiz):
@@ -74,11 +76,13 @@ def test_stage_push_injection_missing_known_hosts_dies(wiz, tmp_path):
 def test_build_compose_model_emits_injected_configs(wiz, tmp_path):
     push = tmp_path / "acme.known_hosts"
     push.write_bytes(b"github.com ssh-ed25519 AAAA")
-    injected = [("known_hosts", push, wiz.INJECT_KNOWN_HOSTS_PATH)]
+    injected = [("known_hosts", push.read_text(), wiz.INJECT_KNOWN_HOSTS_PATH)]
     model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=injected)
     svc = model["services"]["agent"]
     assert {"source": "known_hosts", "target": wiz.INJECT_KNOWN_HOSTS_PATH} in svc["configs"]
-    assert model["configs"]["known_hosts"] == {"file": str(push)}
+    # `content:`, never `file:` — a file: config is a bind resolved daemon-side and
+    # cannot reach a daemon that does not share the operator's filesystem (measured).
+    assert model["configs"]["known_hosts"] == {"content": push.read_text()}
 
 
 def test_push_key_is_its_own_channel(wiz, tmp_path):
@@ -94,23 +98,40 @@ def test_push_key_is_its_own_channel(wiz, tmp_path):
     push.write_bytes(b"PUSHKEY")
     model = wiz.build_compose_model(
         "acme", tmp_path / "repo",
-        injected_configs=[("known_hosts", push, wiz.INJECT_KNOWN_HOSTS_PATH)],
+        injected_configs=[("known_hosts", "PUSHKEY", wiz.INJECT_KNOWN_HOSTS_PATH)],
     )  # fmt: skip
     targets = {c["source"]: c["target"] for c in model["services"]["agent"]["configs"]}
     assert targets == {"known_hosts": wiz.INJECT_KNOWN_HOSTS_PATH}
-    assert model["configs"]["known_hosts"]["file"] == str(push)
+    assert model["configs"]["known_hosts"] == {"content": "PUSHKEY"}
 
 
-def test_no_secret_value_inlined_in_compose_model(wiz, tmp_path):
-    """FR-011: the compose model references the key by FILE path, never inlines the
-    secret bytes."""
-    push = tmp_path / "acme.push_key"
-    push.write_bytes(b"SUPERSECRETKEYBYTES")
-    model = wiz.build_compose_model(
-        "acme", tmp_path / "repo",
-        injected_configs=[("known_hosts", push, wiz.INJECT_KNOWN_HOSTS_PATH)],
-    )  # fmt: skip
-    assert "SUPERSECRETKEYBYTES" not in json.dumps(model)
+def test_secrets_never_reach_the_compose_model_at_all(wiz, tmp_path):
+    """Feature 003's FR-011 required the model to reference credentials by FILE path
+    rather than inline them. Feature 020 MEASURED that a `file:` config is a bind
+    resolved daemon-side, so that mechanism cannot reach a daemon which does not
+    share the operator's filesystem — it refuses the deploy outright. The mechanism
+    and remote delivery were mutually exclusive.
+
+    Constitution IX resolves it by removing the premise: a secret does not belong in
+    the deployment description in EITHER form. `split_injected` routes public
+    material to the model and secret material to `deliver_secrets`, which pushes it
+    into the already-running container over SSH.
+
+    So the assertion is stronger than FR-011's, not weaker: not "referenced rather
+    than inlined", but ABSENT — no path, no value, nothing.
+    """
+    entries = [
+        ("known_hosts", "github.com ssh-ed25519 PUBLIC", wiz.INJECT_KNOWN_HOSTS_PATH),
+        ("apikey_anthropic", "sk-ant-SUPERSECRET", f"{wiz.INJECT_APIKEY_DIR}/anthropic"),
+    ]
+    public, secrets = wiz.split_injected(entries)
+    assert [e[0] for e in public] == ["known_hosts"]
+    assert secrets == [(f"{wiz.INJECT_APIKEY_DIR}/anthropic", "sk-ant-SUPERSECRET")]
+    model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=public)
+    dumped = json.dumps(model)
+    assert "sk-ant-SUPERSECRET" not in dumped
+    assert "apikey_anthropic" not in dumped  # not even the NAME of a secret
+    assert "github.com ssh-ed25519 PUBLIC" in dumped  # public material still rides
 
 
 # --- CLI threading (T007) ----------------------------------------------------
@@ -197,9 +218,14 @@ def test_stage_apikey_injection_ephemeral_target(wiz, tmp_path):
     assert target == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
     assert target.startswith("/run/")  # ephemeral, not a volume mount
     assert "/home/dev/" not in target  # never a per-agent volume path
-    assert staged == wiz.host_state_dir("local") / "acme.apikey.anthropic"
-    assert staged.read_bytes() == src.read_bytes()
-    assert (staged.stat().st_mode & 0o777) == 0o644
+    assert staged == src.read_text()  # carried as a value, not a staged path
+    # THE load-bearing half: no plaintext copy is left on disk anywhere.
+    leaked = [
+        f
+        for f in wiz.host_state_dir("local").rglob("*")
+        if f.is_file() and "sk-ant-SECRET" in f.read_text(errors="ignore")
+    ]
+    assert leaked == [], f"plaintext key written to disk: {leaked}"
 
 
 def test_stage_apikey_injection_none_returns_empty(wiz, tmp_path):
@@ -207,17 +233,15 @@ def test_stage_apikey_injection_none_returns_empty(wiz, tmp_path):
 
 
 def test_apikey_value_never_inlined_in_compose_model(wiz, tmp_path):
-    """FR-011: the compose model references the staged key by FILE path — the secret
-    bytes are never inlined, and the target stays under /run (ephemeral)."""
-    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    src = wiz.CONFIG_DIR / "acme.openai.key"
-    src.write_bytes(b"sk-oai-SUPERSECRET")
-    entries = wiz.stage_apikey_injection("local", "acme", cwd=tmp_path)
-    model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=entries)
-    dumped = json.dumps(model)
-    assert "sk-oai-SUPERSECRET" not in dumped  # never inlined (FR-011)
-    targets = {c["source"]: c["target"] for c in model["services"]["agent"]["configs"]}
-    assert targets["apikey_openai"] == f"{wiz.INJECT_APIKEY_DIR}/openai"
+    """Superseded by `test_secrets_never_reach_the_compose_model_at_all`.
+
+    This asserted FR-011's mechanism — that the value be referenced by path rather
+    than inlined. Both halves of that are now wrong: canonical config is PUBLIC and
+    is deliberately inlined so it can reach a daemon that shares no filesystem, and
+    a real secret is not in the description at all. Kept as a pointer rather than
+    deleted, so the reason the old assertion vanished is discoverable.
+    """
+    assert hasattr(wiz, "split_injected")
 
 
 def test_apikey_env_delivery_unaffected(wiz, tmp_path):
@@ -253,10 +277,13 @@ def test_compose_up_exec_threads_discovered_apikeys(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "port_free", lambda p: True)
     monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
+    delivered: list = []
+    monkeypatch.setattr(wiz, "deliver_secrets", lambda *a: delivered.append(a[-1]))
     host_rec = {"driver": "docker", "context": ""}
     wiz.compose_up_exec("local", host_rec, "acme", tmp_path / "acme.env", [], None, [])
-    sources = {e[0] for e in (captured["injected"] or [])}
-    assert "apikey_anthropic" in sources
+    # Discovery still happens automatically (no flags); the key is now DELIVERED
+    # rather than described, so assert it reached the delivery path.
+    assert delivered and delivered[0][0][0] == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
 
 
 # --- US3: canonical config fresh each deploy; runtime state persists (T015) ----
@@ -331,9 +358,9 @@ def test_stage_config_injection_targets(wiz, tmp_path):
         targets["config_claude_servers_mcp_json"]
         == f"{wiz.INJECT_CONFIG_DIR}/.claude/servers.mcp.json"
     )
-    for _n, staged, target in entries:
+    for _n, content, target in entries:
         assert target.startswith(wiz.INJECT_CONFIG_DIR + "/")
-        assert (staged.stat().st_mode & 0o777) == 0o644
+        assert isinstance(content, str)  # inline, so there is no file to stat
 
 
 def test_stage_config_injection_absent_returns_empty(wiz, tmp_path):
@@ -341,12 +368,15 @@ def test_stage_config_injection_absent_returns_empty(wiz, tmp_path):
 
 
 def test_canonical_config_value_never_inlined(wiz, tmp_path):
-    """FR-011: canonical config is referenced by FILE path — its contents are never
-    inlined into the compose model."""
-    _config_src(tmp_path)
-    entries = wiz.stage_config_injection("local", "acme", cwd=tmp_path)
-    model = wiz.build_compose_model("acme", tmp_path / "repo", injected_configs=entries)
-    assert "MCPMARKER" not in json.dumps(model)
+    """Superseded by `test_secrets_never_reach_the_compose_model_at_all`.
+
+    This asserted FR-011's mechanism — that the value be referenced by path rather
+    than inlined. Both halves of that are now wrong: canonical config is PUBLIC and
+    is deliberately inlined so it can reach a daemon that shares no filesystem, and
+    a real secret is not in the description at all. Kept as a pointer rather than
+    deleted, so the reason the old assertion vanished is discoverable.
+    """
+    assert hasattr(wiz, "split_injected")
 
 
 def test_compose_up_exec_threads_canonical_config(wiz, monkeypatch, tmp_path):
@@ -500,45 +530,38 @@ def test_missing_discovered_canonical_config_dies_before_any_compose_call(
     assert tripped == []
 
 
-def test_all_material_staged_locally_before_compose_up(wiz, monkeypatch, tmp_path):
-    """FR-017: every kind of injected material (push key, known_hosts, discovered
-    API key, discovered canonical config) is staged to a LOCAL file that already
-    exists on disk by the time the compose model is built — so when the compose
-    call itself later fails, nothing was half-provisioned into a running agent."""
+def test_public_material_is_described_and_secret_material_is_not(wiz, monkeypatch, tmp_path):
+    """What compose_up_exec threads into the model, and what it withholds.
+
+    This test used to assert that ALL material was staged locally before compose up.
+    Half of that premise is gone: nothing is staged at all now (no local file for the
+    daemon to open), and secrets are withheld from the model entirely.
+    """
+    captured: dict = {}
     monkeypatch.chdir(tmp_path)
-    kh = tmp_path / "kh"
-    kh.write_text("github.com ssh-ed25519 AAAA\n")
     wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     (wiz.CONFIG_DIR / "acme.anthropic.key").write_bytes(b"sk-ant-SECRET")
-    _config_src(tmp_path)
-    captured: dict = {}
-
-    def _build(name, build_ctx, *a, **k):
-        captured["injected"] = k.get("injected_configs")
-        return {"name": name, "services": {"agent": {}}, "volumes": {}}
-
-    monkeypatch.setattr(wiz, "build_compose_model", _build)
+    monkeypatch.setattr(
+        wiz, "build_compose_model",
+        lambda name, ctx, *a, **k: (
+            captured.update(injected=k.get("injected_configs")),
+            {"name": name, "services": {"agent": {}}, "volumes": {}},
+        )[1],
+    )  # fmt: skip
     monkeypatch.setattr(wiz, "resolve_build_context", lambda *a, **k: tmp_path / "repo")
     monkeypatch.setattr(wiz, "write_compose_file", lambda *a, **k: tmp_path / "c.yaml")
     monkeypatch.setattr(wiz, "resolve_sidecar_override", lambda n: None)
+    monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["true"])
     monkeypatch.setattr(wiz, "port_free", lambda p: True)
-    monkeypatch.setattr(wiz, "driver_up_argv", lambda *a, **k: ["false"])  # compose FAILS
     monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
-    with pytest.raises(wiz.Fatal, match="compose"):
-        wiz.compose_up_exec(
-            "local", _HOST_REC, "acme", tmp_path / "acme.env", [], None, [], known_hosts=kh,
-        )  # fmt: skip
-    injected = captured["injected"]
-    assert injected  # build_compose_model was reached with the full staged set
-    sources = {e[0] for e in injected}
-    # `push_key` is absent by construction now (Feature 019) — the remaining staged
-    # material is the forge's known_hosts and the model/API keys.
-    assert {"known_hosts", "apikey_anthropic"} <= sources
-    assert "push_key" not in sources
-    assert any(s.startswith("config_") for s in sources)  # canonical config too
-    for _n, staged, _t in injected:
-        assert staged.is_file()  # staged to a real LOCAL file before compose ran
+    delivered: list = []
+    monkeypatch.setattr(wiz, "deliver_secrets", lambda *a: delivered.append(a[-1]))
+    wiz.compose_up_exec("local", {"driver": "docker", "context": ""}, "acme",
+                        tmp_path / "acme.env", [], None, [])  # fmt: skip
+    described = {e[0] for e in (captured["injected"] or [])}
+    assert "apikey_anthropic" not in described  # withheld from the description
+    assert delivered and delivered[0] == [(f"{wiz.INJECT_APIKEY_DIR}/anthropic", "sk-ant-SECRET")]
 
 
 def test_a_per_repo_deploy_key_is_now_what_the_TOOL_does(wiz):
@@ -565,23 +588,15 @@ def test_a_per_repo_deploy_key_is_now_what_the_TOOL_does(wiz):
 
 
 def test_opencode_key_is_never_inlined_in_the_compose_descriptor(wiz, tmp_path):
-    """FR-011 / Constitution III. The compose descriptor is exactly where an
-    env-delivered secret leaks (it is written to disk and read by `inspect`), so
-    the key must ride as a FILE reference, never as bytes or an `environment:`
-    value."""
-    key = tmp_path / "acme.anthropic.key"
-    key.write_bytes(b"sk-ant-OPENCODE-SECRET-BYTES")
-    model = wiz.build_compose_model(
-        "acme", tmp_path / "repo",
-        environment=wiz.ExecSpec(agent="opencode").compose_environment(),
-        injected_configs=[("anthropic_key", key, "/run/agent-container/apikeys/anthropic")],
-    )  # fmt: skip
-    blob = json.dumps(model)
-    assert "sk-ant-OPENCODE-SECRET-BYTES" not in blob
-    env = model["services"]["agent"].get("environment", {})
-    assert not any("sk-ant" in str(v) for v in env.values())
-    # The agent selection itself is not a secret and SHOULD be present.
-    assert env.get("AGENT_CONTAINER_AGENT") == "opencode"
+    """Superseded by `test_secrets_never_reach_the_compose_model_at_all`.
+
+    This asserted FR-011's mechanism — that the value be referenced by path rather
+    than inlined. Both halves of that are now wrong: canonical config is PUBLIC and
+    is deliberately inlined so it can reach a daemon that shares no filesystem, and
+    a real secret is not in the description at all. Kept as a pointer rather than
+    deleted, so the reason the old assertion vanished is discoverable.
+    """
+    assert hasattr(wiz, "split_injected")
 
 
 def test_opencode_key_discovery_uses_the_shared_convention(wiz, tmp_path):
@@ -866,3 +881,104 @@ def test_a_stale_staged_private_key_is_removed_and_reported(wiz, capsys):
 def test_removing_a_stale_key_is_silent_when_there_is_none(wiz, capsys):
     wiz.remove_stale_staged_host_key("local", "acme")
     assert capsys.readouterr().err == ""
+
+
+# --- Constitution IX: delivery, not description ------------------------------
+
+
+def test_split_routes_by_target_not_by_config_name(wiz):
+    """The classifier keys on WHERE material lands, not what it is called.
+
+    The target is the same string the entrypoint reads, so a new producer writing
+    into the api-key directory is classified as secret without having to remember to
+    name itself a certain way. A name-prefix rule would let a producer opt out of
+    being treated as secret by accident.
+    """
+    entries = [
+        ("innocuous_name", "sk-SECRET", f"{wiz.INJECT_APIKEY_DIR}/anthropic"),
+        ("apikey_looking_name", "public", f"{wiz.INJECT_CONFIG_DIR}/.claude/x.json"),
+    ]
+    public, secrets = wiz.split_injected(entries)
+    assert [t for t, _v in secrets] == [f"{wiz.INJECT_APIKEY_DIR}/anthropic"]
+    assert [n for n, _c, _t in public] == ["apikey_looking_name"]
+
+
+def test_delivery_streams_values_on_stdin_never_argv(wiz, monkeypatch):
+    """A value on argv is world-readable through the process table."""
+    calls: list = []
+
+    def _fake_run(argv, **kw):
+        calls.append((argv, kw.get("input")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(wiz.subprocess, "run", _fake_run)
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda h: ["docker"])
+    wiz.deliver_secrets("local", {}, "acme", [("/run/agent-container/apikeys/x", "sk-SECRET")])
+    assert calls, "nothing was delivered"
+    for argv, _stdin in calls:
+        assert "sk-SECRET" not in " ".join(argv), "secret appeared on argv"
+    assert any(stdin == b"sk-SECRET" for _a, stdin in calls), "value never reached stdin"
+
+
+def test_the_sentinel_is_written_last(wiz, monkeypatch):
+    """The container is BLOCKED on the sentinel, so writing it early would release
+    the wait onto a partial set — which from inside is indistinguishable from a
+    completed delivery."""
+    order: list = []
+
+    def _fake_run(argv, **kw):
+        order.append("sentinel" if ".delivered" in " ".join(argv) else "value")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(wiz.subprocess, "run", _fake_run)
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda h: ["docker"])
+    wiz.deliver_secrets(
+        "local", {}, "acme",
+        [("/run/agent-container/apikeys/a", "1"), ("/run/agent-container/apikeys/b", "2")],
+    )  # fmt: skip
+    assert order == ["value", "value", "sentinel"]
+
+
+def test_a_failed_value_never_releases_the_wait(wiz, monkeypatch):
+    """If a value fails to land, the container must NOT be told delivery finished."""
+    seen: list = []
+
+    def _fake_run(argv, **kw):
+        seen.append(" ".join(argv))
+        return subprocess.CompletedProcess(argv, 1, b"", b"boom")
+
+    monkeypatch.setattr(wiz.subprocess, "run", _fake_run)
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda h: ["docker"])
+    with pytest.raises(wiz.Fatal):
+        wiz.deliver_secrets("local", {}, "acme", [("/run/agent-container/apikeys/a", "1")])
+    assert not any(".delivered" in c for c in seen), "released the wait after a failure"
+
+
+def test_the_container_only_waits_when_there_is_something_to_wait_for(wiz, monkeypatch, tmp_path):
+    """AGENT_CONTAINER_AWAIT_DELIVERY must be absent with no secrets declared.
+
+    Otherwise every deployment that declares nothing would pay the wait, and the
+    common path must be unaffected to the second.
+    """
+    captured: dict = {}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        wiz, "build_compose_model",
+        lambda name, ctx, *a, **k: (
+            captured.update(env=k.get("environment")),
+            {"name": name, "services": {"agent": {}}, "volumes": {}},
+        )[1],
+    )  # fmt: skip
+    for stub, val in (
+        ("resolve_build_context", lambda *a, **k: tmp_path / "repo"),
+        ("write_compose_file", lambda *a, **k: tmp_path / "c.yaml"),
+        ("resolve_sidecar_override", lambda n: None),
+        ("driver_up_argv", lambda *a, **k: ["true"]),
+        ("port_free", lambda p: True),
+        ("write_state", lambda *a, **k: None),
+        ("driver_reachable_address", lambda r: "localhost"),
+    ):
+        monkeypatch.setattr(wiz, stub, val)
+    wiz.compose_up_exec("local", {"driver": "docker", "context": ""}, "acme",
+                        tmp_path / "acme.env", [], None, [])  # fmt: skip
+    assert "AGENT_CONTAINER_AWAIT_DELIVERY" not in (captured["env"] or {})

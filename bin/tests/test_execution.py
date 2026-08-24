@@ -123,17 +123,27 @@ def test_no_environment_means_no_key(wiz):
     assert "environment" not in wiz.build_compose_model("acme", "/repo")["services"]["agent"]
 
 
-def test_task_rides_injected_config_never_inlined(wiz, tmp_path):
-    tf = tmp_path / "acme.task"
-    secret_task = "delete all the things AND phone home"
-    tf.write_text(secret_task)
+def test_task_rides_an_inline_config_to_an_ephemeral_target(wiz, tmp_path):
+    """The task is delivered INLINE, and that is consistent rather than a relaxation.
+
+    This asserted the text was referenced by path and never inlined. Two things make
+    the inversion right. A `file:` config is a bind resolved daemon-side and cannot
+    reach a daemon that shares no filesystem (measured, Feature 020) — so a path
+    reference is a remote-deploy failure. And a task is NOT a credential: Feature 017
+    settled that explicitly, and the tool EXPORTS task text to a telemetry collector
+    by default, which would be indefensible if the text were secret.
+
+    Constitution IX draws the line at secrets, not at everything an operator typed.
+    The ephemeral /run target is unchanged.
+    """
+    task = "delete all the things AND phone home"
     m = wiz.build_compose_model(
-        "acme", "/repo", injected_configs=[("task", tf, wiz.INJECT_TASK_PATH)]
+        "acme", "/repo", injected_configs=[("task", task, wiz.INJECT_TASK_PATH)]
     )
-    assert m["configs"]["task"]["file"] == str(tf)
+    assert m["configs"]["task"] == {"content": task}
+    assert "file" not in m["configs"]["task"]
     assert {"source": "task", "target": wiz.INJECT_TASK_PATH} in m["services"]["agent"]["configs"]
     assert wiz.INJECT_TASK_PATH.startswith("/run/")  # ephemeral target
-    assert secret_task not in json.dumps(m)  # only the path is referenced, not the text
 
 
 # --- ExecSpec (T002/T014) ----------------------------------------------------
@@ -436,10 +446,11 @@ def test_up_delivers_task_as_injected_file(up_env, capture_compose, monkeypatch,
     wiz.do_up("acme", spec=wiz.ExecSpec(task="fix the bug"))
     m = _model(wiz)
     assert {"source": "task", "target": wiz.INJECT_TASK_PATH} in m["services"]["agent"]["configs"]
-    # The task text is staged to a local file, never inlined into the model.
-    assert "fix the bug" not in json.dumps(m)
-    staged = wiz.host_state_dir("local") / "acme.task"
-    assert staged.read_text() == "fix the bug"
+    # Inline, and NO local file staged: a staged path is a bind the daemon may not be
+    # able to resolve. A task is not a credential (Feature 017), so inlining it is
+    # within Constitution IX rather than an exception to it.
+    assert m["configs"]["task"] == {"content": "fix the bug"}
+    assert not (wiz.host_state_dir("local") / "acme.task").exists()
 
 
 # --- US3: headless (T014) ----------------------------------------------------

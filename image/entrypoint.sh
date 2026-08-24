@@ -1071,6 +1071,53 @@ rm -f "${_akr}"
 # sshd's privilege-separation directory (/run/sshd) is created root-owned at
 # build time; a rootless sshd only needs it to exist, not to write to it.
 
+# --- 2b2. sshd — ALWAYS, and BEFORE anything that consumes a credential -------
+# sshd is the primary interaction surface with the agent, so it runs in EVERY mode,
+# headless included: a headless run is exactly when an operator needs to look inside
+# a container they cannot attach to. It used to start in section 4, after the
+# credential stages and only in interactive mode.
+#
+# Placed HERE, immediately after the admit set is written, for two reasons: the
+# authorised keys must exist before the door opens, and the delivery channel must be
+# listening before section 2c waits for a delivery to arrive through it.
+#
+# Daemonized (no -D) so the entrypoint continues to the remaining stages. Runs as
+# dev (rootless) on unprivileged 2222, host key + pidfile on the dev-owned ~/.ssh
+# volume. AGENT_CONTAINER_SSHD lets the test harness substitute a stub.
+"${AGENT_CONTAINER_SSHD:-/usr/sbin/sshd}"
+log "sshd listening"
+
+# --- 2c. Await out-of-band credential delivery (Constitution IX) -------------
+# Secrets are NOT part of the deployment description: the CLI pushes them INTO
+# this container after it starts, so nothing secret is written into a file that
+# describes the deployment or staged for that description to reference.
+#
+# The consequence is an ordering obligation here. Everything below that consumes
+# a pushed credential must wait for delivery to finish, or it reads a file that
+# has not arrived and silently falls back as though nothing was declared.
+#
+# Gated on the CLI SAYING to expect delivery. Absent variable means no wait at
+# all, so every deployment that declares no secrets is byte-for-byte unaffected —
+# this must not add a second to the common path.
+DELIVERY_SENTINEL="${INJECT_DIR}/.delivered"
+if [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]]; then
+    _dw=0
+    _dw_max="${AGENT_CONTAINER_DELIVERY_TIMEOUT:-90}"
+    while [[ ! -f "${DELIVERY_SENTINEL}" ]] && ((_dw < _dw_max)); do
+        sleep 1
+        _dw=$((_dw + 1))
+    done
+    if [[ -f "${DELIVERY_SENTINEL}" ]]; then
+        log "credential delivery complete after ${_dw}s"
+    else
+        # Continue rather than die. The env/.env channels may still supply what is
+        # needed, so refusing to start would break a container that could work;
+        # and a container that says exactly what failed to arrive is easier to
+        # diagnose than one that never came up. Loud, not fatal.
+        log "WARNING: credential delivery did not complete within ${_dw_max}s — continuing WITHOUT the pushed secrets; agents may fall back to env/.env"
+    fi
+fi
+
 # --- 3. Git identity + credential helper ------------------------------------
 # Identity is non-secret; logging the name is fine. Email is also non-secret
 # but we still don't echo it — keep the log surface minimal.
@@ -1505,23 +1552,15 @@ run_headless_agent() {
 }
 
 if [[ "${AGENT_CONTAINER_MODE}" == "headless" ]]; then
-    # A headless run needs neither sshd nor tmux — output is retrieved via
-    # `compose logs` and the result is the container exit code (research R5).
+    # No tmux — output is retrieved via `compose logs` and the result is the
+    # container exit code (research R5). sshd IS running: it started in section 2b2,
+    # because it is the primary interaction surface with the agent and a headless run
+    # is precisely when an operator needs to look inside one they cannot attach to.
     log "headless mode: running agent '${AGENT_CONTAINER_AGENT:-claude}' as the container workload"
     run_headless_agent "${AGENT_CONTAINER_AGENT:-claude}"
     # run_headless_agent always exits, by its own `exit` or by its trap's.
     die "headless agent did not run"
 fi
-
-# --- 4. sshd (interactive mode) ---------------------------------------------
-# Daemonize (no -D) so the entrypoint can continue to start tmux and tail.
-# Started as the dev user (rootless) — sshd listens on the unprivileged port
-# 2222 with its host key + pidfile under the dev-owned ~/.ssh volume.
-# sshd's own logs go to stderr / syslog per the image's sshd_config.
-# AGENT_CONTAINER_SSHD lets the test harness substitute a stub; production
-# leaves it unset so the default is the real sshd binary.
-"${AGENT_CONTAINER_SSHD:-/usr/sbin/sshd}"
-log "sshd listening"
 
 # --- 5. tmux session --------------------------------------------------------
 # Detached session named 'main'. On first creation, build a configurable set of

@@ -343,7 +343,15 @@ run_entry AGENT_CONTAINER_MODE=headless AGENT_CONTAINER_AGENT=claude
 rc=$?
 check_eq "US3: container exits with the agent's exit code (FR-002/SC-004)" "7" "${rc}"
 if agent_has 'claude -p run the tests'; then ok; else bad "US3: headless claude invoked with -p <task>"; fi
-if sshd_ran; then bad "US3: sshd must NOT run in headless mode"; else ok; fi
+# INVERTED, deliberately. sshd is the primary interaction surface with the agent, so
+# it now runs in EVERY mode — a headless run is exactly when an operator needs to look
+# inside a container they cannot attach to. It also has to be listening before the
+# credential stages, because delivered secrets arrive through the running container
+# (Constitution IX) rather than through its description.
+#
+# Not deleted: an assertion that merely disappears leaves nobody watching for the old
+# behaviour returning, and "headless quietly stopped exposing sshd" would be invisible.
+if sshd_ran; then ok; else bad "US3: sshd must run in headless mode too (it is the interaction surface)"; fi
 check_eq "US3: no tmux session in headless mode" "0" "$(cap_count 'new-session')"
 
 # --- US3: headless success exits 0 -------------------------------------------

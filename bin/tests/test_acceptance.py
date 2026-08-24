@@ -6450,3 +6450,100 @@ def test_a_file_config_does_not_cross_to_a_daemon_that_cannot_see_it(acc):
     inline = _compose({"content": marker.read_text()})
     assert inline.returncode == 0, f"a content: config failed to arrive:\n{inline.stderr}"
     assert "AAAAPROBE" in inline.stdout + inline.stderr
+
+
+# --- Constitution IX: secrets delivered, not described -----------------------
+
+
+def test_an_api_key_reaches_the_container_without_entering_its_description(acc):
+    """The 003 `file:` defect, fixed — end to end, against the real runtime.
+
+    A discovered provider key must (a) NOT appear anywhere in the compose file that
+    describes the deployment, and (b) still arrive inside the container. Before this,
+    (b) was achieved by a `configs: {file:}` bind — which fails outright against a
+    daemon that cannot see the operator's filesystem — and it put the plaintext in a
+    0644 staged file that nothing ever deleted.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    secret = "sk-ant-ACCEPTANCE-SECRET"
+    (cfg / "accix.anthropic.key").write_text(secret)
+    _, pub = _devkey(acc.work, "laptop")
+    (cfg / "authorized_keys").write_text(pub.read_text())
+
+    port = acc.up("accix")
+
+    # (a) absent from the description, and from every other file on the host side.
+    compose = acc.state_dir / "agent-container" / "local" / "accix.compose.yaml"
+    assert secret not in compose.read_text(), "the secret is in the deployment description"
+    leaked = [
+        f
+        for f in (acc.state_dir / "agent-container" / "local").rglob("*")
+        if f.is_file() and secret in f.read_text(errors="ignore")
+    ]
+    assert leaked == [], f"plaintext staged on disk: {leaked}"
+
+    # (b) but it DID arrive, at the ephemeral target, readable only by dev.
+    priv = acc.work / "id_laptop"
+    got = _ssh(port, priv, "cat /run/agent-container/apikeys/anthropic")
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == secret
+    mode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container/apikeys/anthropic")
+    assert mode.stdout.strip() == "400 dev", f"delivered as {mode.stdout.strip()!r}"
+
+
+def test_sshd_is_available_in_headless_mode(acc):
+    """sshd is the primary interaction surface, so it runs in EVERY mode.
+
+    A headless run is precisely when an operator needs to look inside a container
+    they cannot attach to — and it is also how a delivered secret gets in, since
+    delivery reaches a running container rather than its description.
+    """
+    _, pub = _devkey(acc.work, "laptop")
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "authorized_keys").write_text(pub.read_text())
+    ws = _fake_agent(acc, "acchl", "sleep 45")
+    acc.up(
+        "acchl",
+        mode="headless",
+        agent="claude",
+        task="stay up",
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        wait=False,
+    )
+    # Assert the CONTRACT — that the entrypoint starts sshd in headless mode — not
+    # that the host can reach the published port. Reachability is a port-publishing
+    # property of the runtime (it differs between docker and rootless podman) and
+    # asserting it here would make this test fail for a reason that has nothing to do
+    # with the behaviour it names.
+    out = None
+    for _ in range(60):
+        out = acc.cli(["logs", "acchl", "--no-follow"])
+        if "sshd listening" in out.stdout + out.stderr:
+            break
+        time.sleep(1)
+    else:
+        combined = (out.stdout + out.stderr) if out else ""
+        if RUNTIME.endswith("podman") and not combined.strip():
+            # NOT a pass disguised as a skip. The `logs` call SUCCEEDS (rc=0) and
+            # returns nothing at all under the rootless-podman-over-Lima harness, so
+            # this environment cannot observe the container's own output — which is
+            # what this assertion reads. Skipping the unobservable case, rather than
+            # weakening the assertion for every runtime or leaving a red test that
+            # names a behaviour it did not actually measure.
+            #
+            # The behaviour IS verified on docker, in this same test. The gap is
+            # recorded in specs/020-key-collection/research.md so it is findable
+            # rather than folklore.
+            pytest.skip(
+                "this podman harness returns empty container logs (rc=0, no output), "
+                "so 'sshd listening' cannot be observed here; asserted on docker"
+            )
+        raise AssertionError(
+            "headless container never logged 'sshd listening' — sshd is the primary "
+            f"interaction surface and must run in every mode. logs rc="
+            f"{out.returncode if out else 'n/a'} output={combined[-400:]!r}"
+        )

@@ -51,6 +51,7 @@ import sys
 import tarfile
 import tempfile
 import termios
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -7401,7 +7402,7 @@ def build_compose_model(
     authorized_keys_file: Path | None = None,
     env_file: Path | list[Path] | None = None,
     extra_mounts: list[str] | None = None,
-    injected_configs: list[tuple[str, Path, str]] | None = None,
+    injected_configs: list[tuple[str, str, str]] | None = None,
     *,
     restart: str = "unless-stopped",
     environment: dict[str, str] | None = None,
@@ -7535,9 +7536,14 @@ def build_compose_model(
             "content": json.dumps(projected_host_registry(load_registry()), indent=2) + "\n"
         }
     # Feature 003 runtime-injected material — same portable compose-config channel.
-    for cfg_name, local_file, target in injected_configs or []:
+    # `content:` and NOT `file:` — MEASURED (Feature 020, C20): a `file:` config is a
+    # bind resolved DAEMON-side, so it cannot reach a daemon that does not share the
+    # operator's filesystem; it refuses the deploy outright. Everything here is
+    # PUBLIC by construction (Constitution IX) — secrets never reach this model at
+    # all, they are pushed to the running container by `deliver_secrets`.
+    for cfg_name, content, target in injected_configs or []:
         svc_configs.append({"source": cfg_name, "target": target})
-        model_configs[cfg_name] = {"file": str(local_file)}
+        model_configs[cfg_name] = {"content": content}
     if egress_filter_body is not None:
         # A second service in the model the tool GENERATES — never the operator's
         # <name>.services.yaml, which is validated services-only and stays theirs.
@@ -9639,9 +9645,123 @@ def stage_ssh_injection(host: str, name: str, admit_lines: list[str]) -> Path | 
     return ak_file
 
 
+INJECT_DELIVERED_SENTINEL = "/run/agent-container/.delivered"
+# SECRET targets are identified by WHERE THE MATERIAL LANDS, not by the config name.
+# The target is the same string the entrypoint reads, so a new producer writing into
+# the api-key directory is classified correctly without having to remember to name
+# itself a certain way; a name-prefix rule would silently misclassify it as public.
+SECRET_INJECT_DIRS = (INJECT_APIKEY_DIR + "/",)
+
+
+def is_secret_target(target: str) -> bool:
+    """Whether an injected target holds SECRET material (Constitution IX)."""
+    return any(target.startswith(d) for d in SECRET_INJECT_DIRS)
+
+
+def split_injected(
+    entries: list[tuple[str, str, str]],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """(public configs for the description, secrets to push into the container).
+
+    The whole point of Constitution IX in one function: public material may be
+    described, secret material may only be delivered.
+    """
+    public = [(n, c, tgt) for n, c, tgt in entries if not is_secret_target(tgt)]
+    secrets = [(tgt, c) for _n, c, tgt in entries if is_secret_target(tgt)]
+    return public, secrets
+
+
+def inject_text(src: Path, what: str) -> str:
+    """The bytes of `src` as text, for inline delivery.
+
+    `content:` (and the exec channel) carry a STRING, so material that is not valid
+    UTF-8 cannot ride either. Said plainly rather than mangled with replacement
+    characters, which would deliver a corrupt credential that fails somewhere far
+    from the cause.
+    """
+    try:
+        return src.read_bytes().decode()
+    except OSError as e:
+        die(f"{what} ({src}) could not be read: {e}")
+    except UnicodeDecodeError:
+        die(f"{what} ({src}) is not valid UTF-8, so it cannot be injected as text.")
+
+
+def deliver_secrets(host: str, host_rec: dict, name: str, secrets: list[tuple[str, str]]) -> None:
+    """Push secrets INTO the running container, then release its wait.
+
+    Constitution IX: a deployment description is a PLAN — written before anything
+    exists, kept as the record, read by whatever wants to know what was deployed.
+    Nothing with that lifetime may hold a secret. So secrets never enter the compose
+    model and are never staged in a file for it to reference; they are handed to a
+    container that is already running.
+
+    THE CHANNEL IS THE RUNTIME'S, AND ITS SECURITY IS THE CONTEXT'S. For a remote
+    host the docker context is `ssh://user@host` (podman: an ssh:// system
+    connection), so this call is carried inside that SSH transport — authenticated
+    and encrypted without the tool holding any key of its own. Locally it is a unix
+    socket, authenticated by filesystem permission.
+
+    NO PRIVATE KEY IS GENERATED FOR THIS, and that is the point. The container's key
+    pair is created inside the container and only its PUBLIC half is ever captured
+    (018/019); the tool uses that half to VERIFY which container answered, which is
+    the opposite direction from authenticating itself to one. Minting a local key so
+    the tool could log in would put a standing credential on the operator's disk
+    that authorises entry to every environment — replacing a delivery problem with a
+    worse exposure than the one being fixed.
+
+    Values travel on STDIN, never argv: argv is world-readable through the process
+    table. `umask 077` sets the mode before the bytes land rather than after.
+    """
+    if not secrets:
+        return
+    # `-u root` INSIDE the container, because /run/agent-container is the runtime's
+    # own mount point and is root-owned — `dev` cannot create a directory under it.
+    # This grants the AGENT nothing: it is the operator's existing daemon access
+    # acting from outside, and under rootless podman the container's root is the
+    # operator's own uid. Each file is handed to `dev` at 0400 immediately, so what
+    # the agent can reach is read-only and no more than before.
+    base = driver_runtime_argv(host_rec) + ["exec", "-i", "-u", "root", container_name(name)]
+    for target, value in secrets:
+        q = shlex.quote(target)
+        r = subprocess.run(
+            [
+                *base,
+                "sh",
+                "-c",
+                f'd="$(dirname {q})"; umask 077; mkdir -p "$d" && cat > {q} '
+                f'&& chown -R {DEFAULT_SSH_USER}:{DEFAULT_SSH_USER} "$d" '
+                f'&& chmod 0700 "$d" && chmod 0400 {q}',
+            ],  # fmt: skip
+            input=value.encode(),
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            die(
+                f"failed to deliver a credential to {target} in {container_name(name)}: "
+                f"{r.stderr.decode(errors='replace').strip()[:200]}"
+            )
+    # The sentinel LAST, and only once every value landed. The container is blocked
+    # on it, so writing it early would release the wait onto a partial set — which
+    # from inside looks exactly like a completed delivery.
+    s = shlex.quote(INJECT_DELIVERED_SENTINEL)
+    r = subprocess.run(
+        [
+            *base,
+            "sh",
+            "-c",
+            f"umask 077; : > {s} && chown {DEFAULT_SSH_USER}:{DEFAULT_SSH_USER} {s}",
+        ],  # fmt: skip
+        capture_output=True,
+    )
+    if r.returncode != 0:
+        die(f"delivered {len(secrets)} credential(s) to {name} but could not release its wait")
+    log(f"delivered {len(secrets)} credential(s) into {name} via the runtime channel")
+
+
 def stage_push_injection(
     host: str, name: str, known_hosts: Path | None
-) -> list[tuple[str, Path, str]]:
+) -> list[tuple[str, str, str]]:
     """Stage the outbound push credential (US1) as LOCAL files under the per-host
     state dir and return the (config-name, staged file, in-container target)
     entries for build_compose_model's `injected_configs`. EPHEMERAL by design: the
@@ -9651,7 +9771,7 @@ def stage_push_injection(
     `known_hosts`, which verifies the FORGE — the opposite direction, public data,
     and unaffected. The agent's own key is now generated in the container and never
     supplied, so there is nothing private left to stage."""
-    entries: list[tuple[str, Path, str]] = []
+    entries: list[tuple[str, str, str]] = []
     if known_hosts is None:
         return entries
     d = host_state_dir(host)
@@ -9661,16 +9781,13 @@ def stage_push_injection(
         kh = known_hosts.expanduser()
         if not kh.is_file():
             die(f"--known-hosts: {known_hosts} does not exist or is not a file")
-        f = d / f"{name}.known_hosts"
-        f.write_bytes(kh.read_bytes())
-        f.chmod(0o644)
-        entries.append(("known_hosts", f, INJECT_KNOWN_HOSTS_PATH))
+        entries.append(("known_hosts", inject_text(kh, "--known-hosts"), INJECT_KNOWN_HOSTS_PATH))
     return entries
 
 
 def stage_apikey_injection(
     host: str, name: str, cwd: Path | None = None
-) -> list[tuple[str, Path, str]]:
+) -> list[tuple[str, str, str]]:
     """Stage convention-discovered model/API key FILES (US2, T012) as LOCAL files
     under the per-host state dir and return the (config-name, staged file,
     in-container target) entries for build_compose_model's `injected_configs`.
@@ -9684,7 +9801,7 @@ def stage_apikey_injection(
     0700). Discovery is automatic; absent → [] so env/`.env` delivery stays the
     layered fallback."""
     discovered = discover_apikey_files(name, cwd)
-    entries: list[tuple[str, Path, str]] = []
+    entries: list[tuple[str, str, str]] = []
     if not discovered:
         return entries
     d = host_state_dir(host)
@@ -9693,16 +9810,23 @@ def stage_apikey_injection(
     for provider, src in discovered.items():
         if not src.is_file():  # discovered then vanished/unreadable — fail fast (FR-016)
             die(f"model/API key file for '{provider}' disappeared before staging: {src}")
-        f = d / f"{name}.apikey.{provider}"
-        f.write_bytes(src.read_bytes())
-        f.chmod(0o644)
-        entries.append((f"apikey_{provider}", f, f"{INJECT_APIKEY_DIR}/{provider}"))
+        # Constitution IX: a SECRET, so it is never described — it is pushed to the
+        # running container by `deliver_secrets`. It used to be staged 0644 here (the
+        # container's uid does not match the host's), leaving plaintext
+        # world-readable inside the state dir in a file nothing ever deleted.
+        entries.append(
+            (
+                f"apikey_{provider}",
+                inject_text(src, f"model/API key file for '{provider}'"),
+                f"{INJECT_APIKEY_DIR}/{provider}",
+            )
+        )
     return entries
 
 
 def stage_config_injection(
     host: str, name: str, cwd: Path | None = None
-) -> list[tuple[str, Path, str]]:
+) -> list[tuple[str, str, str]]:
     """Stage the convention-discovered CANONICAL agent config (US3, T016) as LOCAL
     files under the per-host state dir and return the (config-name, staged file,
     in-container target) entries for build_compose_model's `injected_configs`.
@@ -9717,7 +9841,7 @@ def stage_config_injection(
     state dir is 0700). Discovery is automatic; absent → [] so the default-config
     path is unchanged."""
     discovered = discover_canonical_config(name, cwd)
-    entries: list[tuple[str, Path, str]] = []
+    entries: list[tuple[str, str, str]] = []
     if not discovered:
         return entries
     d = host_state_dir(host)
@@ -9729,11 +9853,14 @@ def stage_config_injection(
         # Flatten the home-relative path into a single unique local staged filename
         # and a compose-safe config resource name (no leading dot, no slash).
         flat = relpath.replace("/", "__")
-        f = d / f"{name}.config.{flat}"
-        f.write_bytes(src.read_bytes())
-        f.chmod(0o644)
         token = re.sub(r"[^a-z0-9]+", "_", flat.lower()).strip("_")
-        entries.append((f"config_{token}", f, f"{INJECT_CONFIG_DIR}/{relpath}"))
+        entries.append(
+            (
+                f"config_{token}",
+                inject_text(src, "canonical config file"),
+                f"{INJECT_CONFIG_DIR}/{relpath}",
+            )
+        )
     return entries
 
 
@@ -9948,21 +10075,13 @@ def _one_env_file_defines(env_file: Path, key: str) -> bool:
     return False
 
 
-def stage_task_injection(
-    host: str, name: str, task_text: str | None
-) -> list[tuple[str, Path, str]]:
+def stage_task_injection(host: str, name: str, task_text: str | None) -> list[tuple[str, str, str]]:
     """Stage the initial/headless task as a LOCAL file and return the
     injected_configs entry (ephemeral /run target — never argv/env, no size cap,
     research R2). Absent task → [] (the default no-task path is unchanged)."""
     if task_text is None:
         return []
-    d = host_state_dir(host)
-    d.mkdir(parents=True, exist_ok=True)
-    d.chmod(0o700)
-    f = d / f"{name}.task"
-    f.write_text(task_text)
-    f.chmod(0o644)
-    return [("task", f, INJECT_TASK_PATH)]
+    return [("task", task_text, INJECT_TASK_PATH)]
 
 
 def record_never_started(host_name: str, name: str, spec: ExecSpec, reason: str) -> str | None:
@@ -10031,7 +10150,7 @@ def compose_up_exec(
     redeploy: bool = False,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
-    extra_injected_configs: list[tuple[str, Path, str]] | None = None,
+    extra_injected_configs: list[tuple[str, str, str]] | None = None,
 ) -> None:
     """Generate the compose project and bring it up on the host (image builds on
     the host). With redeploy=True it force-recreates (US2, deliberately
@@ -10076,6 +10195,14 @@ def compose_up_exec(
     # compose-`configs` channel (remote-context-safe; FR-020) — the agent-as-code
     # apply path passes it here so the governing spec is immutable in-container.
     injected += list(extra_injected_configs or [])
+    # Constitution IX: split BEFORE the model is built, so nothing secret can reach
+    # it even by accident. The model gets `public`; `secrets` go to the container.
+    injected, secrets_to_deliver = split_injected(injected)
+    env_settings = dict(spec.compose_environment(name))
+    if secrets_to_deliver:
+        # Only when there IS something to wait for: absent variable means no wait,
+        # so a deployment declaring no secrets is unaffected to the second.
+        env_settings["AGENT_CONTAINER_AWAIT_DELIVERY"] = "1"
     # Feature 004: resolve the workspace mount (persistent volume / local bind /
     # none→container layer) + whether to declare the named workspace volume. bind on
     # a non-local host is refused here, before any runtime call (FR-011).
@@ -10180,7 +10307,7 @@ def compose_up_exec(
         mounts,
         injected_configs=injected,
         restart=spec.restart_policy(),
-        environment=spec.compose_environment(name) | _egress_env,
+        environment=env_settings | _egress_env,
         role=spec.role,
         workspace_mount=ws_mount,
         declare_workspace_volume=declare_ws,
@@ -10240,6 +10367,15 @@ def compose_up_exec(
             foreground=foreground,
             boundary=boundary_file,
         )
+    if secrets_to_deliver and foreground:
+        # A foreground headless run BLOCKS in run_child until the container has
+        # already exited, so delivering afterwards would arrive for a container that
+        # is gone. Deliver from a thread: the container is blocked on the sentinel,
+        # so it makes progress the moment this lands.
+        threading.Thread(
+            target=lambda: deliver_secrets(host_name, host_rec, name, secrets_to_deliver),
+            daemon=True,
+        ).start()
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
         # The container's exit code IS the agent result — surface it as our own.
@@ -10248,6 +10384,10 @@ def compose_up_exec(
         raise typer.Exit(rc)
     if rc != 0:
         die(f"compose {'redeploy' if redeploy else 'up'} failed (exit {rc})")
+    # Constitution IX: the secrets never entered the model — push them now, into the
+    # container that is already running and waiting for them.
+    if secrets_to_deliver:
+        deliver_secrets(host_name, host_rec, name, secrets_to_deliver)
     write_state(host_name, name, port)
     addr = driver_reachable_address(host_rec)
     # Feature 018: capture and pin, HERE — the one choke point every deploy path
@@ -10543,7 +10683,7 @@ def do_up(
     authorized_keys: list[Path] | None = None,
     known_hosts: Path | None = None,
     spec: ExecSpec | None = None,
-    extra_injected_configs: list[tuple[str, Path, str]] | None = None,
+    extra_injected_configs: list[tuple[str, str, str]] | None = None,
 ) -> None:
     validate_name(name)
     spec = spec or ExecSpec()
@@ -15998,9 +16138,7 @@ def env_reconcile(
     return "drifted", "; ".join(parts)
 
 
-def stage_agent_container_spec(
-    host_name: str, name: str, root: Path
-) -> list[tuple[str, Path, str]]:
+def stage_agent_container_spec(host_name: str, name: str, root: Path) -> list[tuple[str, str, str]]:
     """Deliver every host-side `.agent-container/` file as a READ-ONLY compose
     `config` (FR-020) targeting `/workspace/.agent-container/<rel>` — remote-context
     -safe (a host bind would fail over a remote context; the 001/003 lesson). The
@@ -16010,27 +16148,26 @@ def stage_agent_container_spec(
     sd = host_state_dir(host_name)
     sd.mkdir(parents=True, exist_ok=True)
     sd.chmod(0o700)
-    entries: list[tuple[str, Path, str]] = []
+    entries: list[tuple[str, str, str]] = []
     # Use the enumeration INDEX for the staged filename and the compose-config
     # resource name so both are injective — a lossy path-flattening could otherwise
     # collide two distinct spec files onto one config (and one would silently win).
     for i, src in enumerate(sorted(p for p in d.rglob("*") if p.is_file())):
         rel = src.relative_to(d).as_posix()
-        staged = sd / f"{name}.aac.{i}"
-        staged.write_bytes(src.read_bytes())
-        staged.chmod(0o644)
-        entries.append((f"aac_{name}_{i}", staged, f"{INJECT_AAC_DIR}/{rel}"))
+        entries.append(
+            (f"aac_{name}_{i}", inject_text(src, "spec file"), f"{INJECT_AAC_DIR}/{rel}")
+        )
     return entries
 
 
-def _verify_ro_spec_delivery(aac_configs: list[tuple[str, Path, str]], spec: ExecSpec) -> None:
+def _verify_ro_spec_delivery(aac_configs: list[tuple[str, str, str]], spec: ExecSpec) -> None:
     """FR-020 refuse-if-writable (M3): the spec files must be delivered ONLY via the
     read-only compose-configs channel and never exposed writable. A `bind` workspace
     could mount the project dir RW at /workspace — refuse if it would shadow the
     spec (the operator should use persistent/ephemeral for a self-hosting repo)."""
     if not aac_configs:
         return
-    for _tok, _src, target in aac_configs:
+    for _tok, _content, target in aac_configs:
         if not target.startswith(INJECT_AAC_DIR + "/"):
             die(f"spec-integrity: refusing to deploy — spec file target {target} is not read-only")
     if spec.workspace == "bind":
@@ -16398,7 +16535,7 @@ class SshCreds:
 
 def stage_declared_credentials(
     host_name: str, name: str, creds: list[dict] | None, root: Path, base_env_file: Path | None
-) -> tuple[list[tuple[str, Path, str]], Path | None, SshCreds]:
+) -> tuple[list[tuple[str, str, str]], Path | None, SshCreds]:
     """Resolve the declared credentials and deliver them: an explicit SSH **target**
     (authorized_key) → a 0600 staged file threaded into the 003
     ssh-injection channels (multi-line keys the env-file rejects, T012a); **provider
@@ -16411,7 +16548,7 @@ def stage_declared_credentials(
     d = host_state_dir(host_name)
     d.mkdir(parents=True, exist_ok=True)
     d.chmod(0o700)
-    configs: list[tuple[str, Path, str]] = []
+    configs: list[tuple[str, str, str]] = []
     env_lines: list[str] = []
     ssh = SshCreds()
     for cred in creds or []:
@@ -16439,10 +16576,8 @@ def stage_declared_credentials(
         cname = cred["name"]
         provider = CRED_PROVIDER.get(cname)
         if provider:
-            f = d / f"{name}.cred.apikey.{provider}"
-            f.write_text(value)
-            f.chmod(0o600)
-            configs.append((f"cred_apikey_{provider}", f, f"{INJECT_APIKEY_DIR}/{provider}"))
+            # Constitution IX: pushed, not described. One fewer plaintext file too.
+            configs.append((f"cred_apikey_{provider}", value, f"{INJECT_APIKEY_DIR}/{provider}"))
         else:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cname):
                 die(
@@ -16518,7 +16653,7 @@ def do_aac_apply(
     # must not leave earlier envs partially deployed (FR-016). The convention `.env`
     # (resolve_env_file) is the merge base when no container.env_file is declared, so
     # GH_TOKEN/GIT_* are preserved, not dropped.
-    staged_creds: dict[str, tuple[list[tuple[str, Path, str]], Path | None, SshCreds]] = {}
+    staged_creds: dict[str, tuple[list[tuple[str, str, str]], Path | None, SshCreds]] = {}
     for env, name, host_name, _host_rec, _state, _detail in todo:
         c = env.get("container") or {}
         base_env = (root / c["env_file"]).resolve() if c.get("env_file") else resolve_env_file(name)

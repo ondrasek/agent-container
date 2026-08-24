@@ -96,33 +96,33 @@ def test_authorized_keys_is_inlined_not_referenced_by_path(wiz, tmp_path):
     ]
 
 
-def test_no_secret_material_inline(wiz, tmp_path):
-    """A credential VALUE must never appear in the serialized model.
+def test_secrets_are_absent_from_the_compose_model(wiz, tmp_path):
+    """Secrets are ABSENT from the deployment description — not merely referenced.
 
-    Retargeted by Feature 020 onto Feature 003's `injected_configs`, which is the
-    channel that actually carries secrets. It used to use `authorized_keys` as a
-    "stand-in for any staged material" — but public keys are not secret and are now
-    deliberately inlined (C19), so that file could no longer carry the assertion
-    without contradicting the requirement.
+    Feature 003's FR-011 required the model to reference credentials by FILE path
+    instead of inlining them. Feature 020 MEASURED that a `file:` config is a bind
+    resolved daemon-side, so it cannot reach a daemon that does not share the
+    operator's filesystem. Mechanism and remote delivery were mutually exclusive.
 
-    The rule this pins is the DISTINCTION, which is the real design decision:
-    secret material is referenced by path, public material is inlined.
+    Constitution IX removes the premise instead of picking a side: a secret has no
+    place in the description in EITHER form. `split_injected` sends public material
+    to the model and secret material to `deliver_secrets`, which pushes it into the
+    already-running container through the runtime channel — carried inside the
+    context's SSH transport for a remote host, and needing no key of the tool's own.
+
+    So this assertion is STRONGER than FR-011's, not weaker: not "referenced rather
+    than inlined" but absent — no path, no value, not even the name.
     """
-    secret = "TOP-SECRET-CREDENTIAL-BYTES"
-    cred = tmp_path / "push_known_hosts"
-    cred.write_text(secret)
-    ak = tmp_path / "acme.authorized_keys"
-    ak.write_text("ssh-ed25519 AAAA... public\n")
-    m = wiz.build_compose_model(
-        "acme",
-        "/repo",
-        authorized_keys_file=ak,
-        injected_configs=[("push_known_hosts", cred, "/run/agent-container/known_hosts")],
-    )
-    blob = json.dumps(m)
-    assert secret not in blob  # secret: referenced by path, never inlined
-    assert str(cred) in blob
-    assert "ssh-ed25519 AAAA... public" in blob  # public: inlined, so it crosses
+    entries = [
+        ("known_hosts", "github.com ssh-ed25519 PUBLIC", wiz.INJECT_KNOWN_HOSTS_PATH),
+        ("apikey_openai", "sk-oai-SUPERSECRET", f"{wiz.INJECT_APIKEY_DIR}/openai"),
+    ]
+    public, secrets = wiz.split_injected(entries)
+    assert secrets == [(f"{wiz.INJECT_APIKEY_DIR}/openai", "sk-oai-SUPERSECRET")]
+    dumped = json.dumps(wiz.build_compose_model("acme", "/repo", injected_configs=public))
+    assert "sk-oai-SUPERSECRET" not in dumped
+    assert "apikey_openai" not in dumped
+    assert "github.com ssh-ed25519 PUBLIC" in dumped
 
 
 def test_output_is_valid_json_and_deterministic(wiz, tmp_path):
