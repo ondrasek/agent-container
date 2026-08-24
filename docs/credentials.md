@@ -222,14 +222,29 @@ root-owned mount point for compose configs and delivery arrives as `dev` with no
 and `/dev/shm`, used by an earlier version, is shared and world-writable, so a 0700
 subdir there still sits in a namespace every other process in the container uses.
 
-**Why not a persistent volume?** Because a volume outlives the container, so a
-credential delivered once would still be there after you stopped declaring it —
-exactly the class of bug Feature 020 removed from `authorized_keys`. Removal would
-become `--purge`, which destroys the environment's own SSH identity, so revoking a key
-would cost you the container's identity. And a compromised agent's window would extend
-past the container's life. The cost of that choice is that a **resume must re-deliver**
-— `start` does, re-resolving the values rather than remembering them, since not storing
-them is the point (FR-012).
+**Credentials PERSIST, one volume each.** A container whose credentials died with it
+could not survive a reboot, a daemon restart, or `restart: unless-stopped` — nothing
+would be present to re-deliver them. So each credential gets its own volume:
+
+```
+agent-container-<name>-cred-apikey-anthropic   ->  …/apikey/anthropic/value
+```
+
+The **name is the lifecycle handle**. `docker volume rm
+agent-container-acme-cred-apikey-anthropic` revokes exactly one credential and touches
+nothing else — not the `ssh` volume, not the other credentials. `--purge` and `wipe`
+find them by prefix, so teardown still removes everything.
+
+**Persistence is only safe because every deploy reconciles.** A volume outlives the
+container, so without pruning, a credential you stopped declaring would still be
+mounted — the config would say it was gone while the container still held it, which is
+exactly the bug Feature 020 removed from `authorized_keys`. Each deploy removes the
+volume of any credential it no longer names, so **the declaration stays the
+authority**. Stop declaring a key and it is gone on the next deploy.
+
+These volumes are deliberately **not** part of the fixed ten-volume identity contract:
+they are dynamic, one per declared credential, so they are addressed by prefix instead.
+
 
 The container waits for delivery before consuming credentials, but **only when the
 tool says to expect it**, so a deployment declaring no secrets is unaffected. The

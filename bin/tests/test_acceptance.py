@@ -6487,14 +6487,18 @@ def test_an_api_key_reaches_the_container_over_ssh_not_through_its_description(a
     ]
     assert leaked == [], f"plaintext staged on disk: {leaked}"
 
-    got = _ssh(port, priv, "cat /run/agent-container-secrets/apikey/anthropic")
+    got = _ssh(port, priv, "cat /run/agent-container-secrets/apikey/anthropic/value")
     assert got.returncode == 0, got.stderr
     assert got.stdout.strip() == secret
-    mode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container-secrets/apikey/anthropic")
+    mode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container-secrets/apikey/anthropic/value")
     assert mode.stdout.strip() == "400 dev", f"delivered as {mode.stdout.strip()!r}"
     # And the directory is PRIVATE — not a shared world-writable space.
-    dmode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container-secrets")
-    assert dmode.stdout.strip() == "700 dev", f"secrets dir is {dmode.stdout.strip()!r}"
+    # On its OWN volume, so it survives the container (see the survival test below).
+    vol = "agent-container-accix-cred-apikey-anthropic"
+    vols = subprocess.run(
+        [RUNTIME, "volume", "ls", "--format", "{{.Name}}"], capture_output=True, text=True
+    ).stdout.splitlines()
+    assert vol in vols, f"credential volume {vol} was not created"
 
 
 def test_delivery_refuses_when_no_identity_is_declared(acc):
@@ -6568,3 +6572,70 @@ def test_sshd_is_available_in_headless_mode(acc):
             f"interaction surface and must run in every mode. logs rc="
             f"{out.returncode if out else 'n/a'} output={combined[-400:]!r}"
         )
+
+
+def test_a_credential_survives_a_restart_with_no_cli_involved(acc):
+    """R8 — the property that made ephemeral credentials untenable.
+
+    A reboot, a daemon restart or `restart: unless-stopped` brings a container back
+    with NO CLI present to deliver anything. So the credential must already be there,
+    and the entrypoint must not sit waiting for a delivery nobody will send.
+
+    Restarted through the RUNTIME directly, not through `agent-container`, because the
+    CLI restarting it is precisely the case that does not need persistence. The
+    credential stays DECLARED throughout: removing its source file would be
+    undeclaring it, which correctly revokes (see the reconciliation test below) and
+    would prove the opposite of what this asserts.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    secret = "sk-ant-SURVIVES-RESTART"
+    (cfg / "accsurv.anthropic.key").write_text(secret)
+    priv, pub = _devkey(acc.work, "delivery")
+    (cfg / "authorized_keys").write_text(pub.read_text())
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {priv}\n")
+
+    port = acc.up("accsurv")
+    path = "/run/agent-container-secrets/apikey/anthropic/value"
+    assert _ssh(port, priv, f"cat {path}").stdout.strip() == secret
+
+    # A bare runtime restart — no agent-container in the loop at all.
+    r = subprocess.run(
+        [RUNTIME, "restart", "agent-container-accsurv"], capture_output=True, text=True, timeout=180
+    )
+    assert r.returncode == 0, r.stderr
+    _wait_sshd(port)  # would time out if the entrypoint blocked on a delivery
+
+    again = _ssh(port, priv, f"cat {path}")
+    assert again.returncode == 0, f"the credential did not survive a restart: {again.stderr}"
+    assert again.stdout.strip() == secret
+
+
+def test_undeclaring_a_credential_removes_its_volume(acc):
+    """Persistence must not become the union bug: the declaration stays authoritative.
+
+    Reconciliation is what makes persistence safe — without it a credential the
+    operator stopped declaring would still be mounted, and the config would be lying.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    keyfile = cfg / "accrev.anthropic.key"
+    keyfile.write_text("sk-ant-TO-BE-REVOKED")
+    priv, pub = _devkey(acc.work, "delivery")
+    (cfg / "authorized_keys").write_text(pub.read_text())
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {priv}\n")
+
+    acc.up("accrev")
+    vol = "agent-container-accrev-cred-apikey-anthropic"
+
+    def _volumes():
+        return subprocess.run(
+            [RUNTIME, "volume", "ls", "--format", "{{.Name}}"], capture_output=True, text=True
+        ).stdout.splitlines()
+
+    assert vol in _volumes()
+
+    keyfile.unlink()  # stop declaring it
+    acc.down("accrev")
+    acc.up("accrev", wait=False)
+    assert vol not in _volumes(), "an undeclared credential kept its volume"

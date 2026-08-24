@@ -522,6 +522,84 @@ def all_volume_mounts(name: str) -> list[str]:
     ]
 
 
+CRED_VOLUME_INFIX = "-cred-"
+
+
+def cred_slug(ref: str) -> str:
+    """A volume-safe slug for a credential ref (`apikey/anthropic` -> `apikey-anthropic`).
+
+    >>> cred_slug("apikey/anthropic")
+    'apikey-anthropic'
+    """
+    return re.sub(r"[^a-z0-9]+", "-", ref.lower()).strip("-")
+
+
+def cred_volume_name(name: str, ref: str) -> str:
+    """The volume holding ONE credential — the lifecycle handle (Principle IV).
+
+    Credentials PERSIST: a container whose credentials died with it could not survive
+    a reboot, a daemon restart, or `restart: unless-stopped`, because nothing would be
+    present to re-deliver them. One volume EACH, rather than one shared volume, so the
+    name is the handle: `docker volume rm agent-container-acme-cred-apikey-anthropic`
+    revokes exactly one credential and touches nothing else.
+
+    Deliberately NOT part of `per_container_volumes`: that list is the fixed identity
+    contract, and these are dynamic — one per declared credential. `--purge` and
+    `wipe` find them by PREFIX instead, which is what makes lifecycle-by-naming work.
+
+    >>> cred_volume_name("acme", "apikey/anthropic")
+    'agent-container-acme-cred-apikey-anthropic'
+    """
+    return f"{CONTAINER_PREFIX}{name}{CRED_VOLUME_INFIX}{cred_slug(ref)}"
+
+
+def cred_volume_prefix(name: str) -> str:
+    """The prefix every credential volume for `name` shares.
+
+    >>> cred_volume_prefix("acme")
+    'agent-container-acme-cred-'
+    """
+    return f"{CONTAINER_PREFIX}{name}{CRED_VOLUME_INFIX}"
+
+
+def existing_cred_volumes(host_rec: dict, name: str) -> list[str]:
+    """Credential volumes the runtime currently holds for `name`, by prefix."""
+    try:
+        r = query(driver_runtime_argv(host_rec) + ["volume", "ls", "--format", "{{.Name}}"])
+    except Fatal, OSError, subprocess.SubprocessError:
+        return []
+    if r.returncode != 0:
+        return []
+    pref = cred_volume_prefix(name)
+    # `or ""`: a runtime that answers with no output is "no volumes", not a crash.
+    return sorted(v.strip() for v in (r.stdout or "").splitlines() if v.strip().startswith(pref))
+
+
+def reconcile_cred_volumes(host_rec: dict, name: str, declared_refs: list[str]) -> list[str]:
+    """Remove credential volumes no longer DECLARED; return what was removed.
+
+    Persistence without reconciliation is the union bug again: the config would say a
+    credential is gone while the container still held it. The declaration stays the
+    authority because every deploy prunes what it no longer names — the same rule as
+    the managed region, which is replaced rather than appended to.
+    """
+    keep = {cred_volume_name(name, r) for r in declared_refs}
+    removed = []
+    for vol in existing_cred_volumes(host_rec, name):
+        if vol in keep:
+            continue
+        r = query(driver_runtime_argv(host_rec) + ["volume", "rm", vol])
+        if r.returncode == 0:
+            removed.append(vol)
+        else:
+            # In use by a running container is the common cause, and it is not fatal:
+            # the next recreate frees it. Saying so beats a silent leftover.
+            warn(f"could not remove undeclared credential volume {vol}: {r.stderr.strip()[:120]}")
+    if removed:
+        log(f"removed {len(removed)} credential volume(s) no longer declared: {', '.join(removed)}")
+    return removed
+
+
 def per_container_volumes(name: str) -> list[str]:
     """All per-container volume NAMES, canonical order; used by --purge.
 
@@ -7410,6 +7488,7 @@ def build_compose_model(
     env_file: Path | list[Path] | None = None,
     extra_mounts: list[str] | None = None,
     injected_configs: list[tuple[str, str, str]] | None = None,
+    cred_refs: list[str] | None = None,
     *,
     restart: str = "unless-stopped",
     environment: dict[str, str] | None = None,
@@ -7503,13 +7582,20 @@ def build_compose_model(
     declared = (
         per_container_volumes(name) if declare_workspace_volume else other_container_volumes(name)
     )
+    # Constitution IX + R8: credentials are DELIVERED (never described) and they
+    # PERSIST, so each gets its own volume mounted at its own directory. One volume
+    # each rather than one shared: the name is then the lifecycle handle, so
+    # `docker volume rm <that one>` revokes exactly one credential.
+    cred_vols = {cred_volume_name(name, ref): ref for ref in cred_refs or []}
+    for vol, ref in cred_vols.items():
+        service["volumes"].append(f"{vol}:{SECRETS_DIR}/{ref}")
     model: dict = {
         "name": compose_project(name),
         "services": {"agent": service},
         # Pin each volume's `name` so compose does NOT prefix it with the project
         # ("<project>_<vol>"); the volume names are the deterministic identity
         # contract (Constitution IV) that `--purge` and the completions rely on.
-        "volumes": {vn: {"name": vn} for vn in declared},
+        "volumes": {vn: {"name": vn} for vn in [*declared, *cred_vols]},
     }
     # Injected SSH identity rides as compose `configs` (NOT `secrets`). Both the
     # host key and authorized_keys are delivered this way because a compose
@@ -9652,7 +9738,7 @@ def stage_ssh_injection(host: str, name: str, admit_lines: list[str]) -> Path | 
     return ak_file
 
 
-INJECT_DELIVERED_SENTINEL = f"{SECRETS_DIR}/sentinel"
+INJECT_DELIVERED_SENTINEL = f"{SECRETS_DIR}/sentinel/value"
 # SECRET targets are identified by WHERE THE MATERIAL LANDS, not by the config name.
 # The target is the same string the entrypoint reads, so a new producer writing into
 # the api-key directory is classified correctly without having to remember to name
@@ -9712,6 +9798,35 @@ def delivery_identity(cwd: Path | None = None) -> Path | None:
     """
     declared = resolve_settings_key(DELIVERY_IDENTITY_SETTING, cwd)
     return Path(str(declared)).expanduser() if declared else None
+
+
+def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
+    """Hand the freshly-mounted credential volumes to `dev`.
+
+    A named volume mounts root-owned unless its mount point already exists in the
+    image, and these paths are dynamic (`<kind>/<provider>`, provider discovered by
+    glob) so the image cannot pre-create them. `dev` therefore cannot write into its
+    own credential volume until someone with root inside the container says so.
+
+    NO SECRET CROSSES THIS CALL — it is a `chown` and nothing else. The values still
+    travel over SSH to the container (Constitution IX); this only makes the
+    destination writable, so the runtime channel carries no credential material even
+    though it is used here. That distinction is the reason this is a separate
+    function rather than a step inside `deliver_secrets`.
+    """
+    if not refs:
+        return
+    paths = shlex.join(f"{SECRETS_DIR}/{r}" for r in refs)
+    argv = driver_runtime_argv(host_rec) + [
+        "exec", "-u", "root", container_name(name),
+        "sh", "-c", f"chown {DEFAULT_SSH_USER}:{DEFAULT_SSH_USER} {paths} && chmod 0700 {paths}",
+    ]  # fmt: skip
+    r = query(argv)
+    if r.returncode != 0:
+        die(
+            f"could not hand the credential volumes of '{name}' to {DEFAULT_SSH_USER}: "
+            f"{(r.stderr or '').strip()[:200]}"
+        )
 
 
 def deliver_secrets(
@@ -10238,6 +10353,31 @@ def compose_up_exec(
     # Constitution IX: split BEFORE the model is built, so nothing secret can reach
     # it even by accident. The model gets `public`; `secrets` go to the container.
     injected, secrets_to_deliver = split_injected(injected)
+    # The logical refs, which are both the volume names and what the receiver is told.
+    _cred_refs = [
+        tgt[len(SECRETS_DIR) + 1 :] if tgt.startswith(SECRETS_DIR + "/") else tgt
+        for tgt, _v in secrets_to_deliver
+    ]
+    # Prune before creating: a credential no longer declared must not survive on a
+    # volume the new deployment would still mount.
+    # Only ask the runtime when this deployment could actually HAVE credential
+    # volumes — either it declares some now, or its previous compose file did. A
+    # deployment that has never had one pays no round-trip, which keeps the common
+    # path free of a call that would otherwise run on every single deploy.
+    _had_creds = False
+    _prev = compose_file_path(host_name, name)
+    if _prev.is_file():
+        _had_creds = CRED_VOLUME_INFIX in _prev.read_text()
+    try:
+        if _cred_refs or _had_creds:
+            reconcile_cred_volumes(host_rec, name, _cred_refs)
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        # Pruning is a reconciliation, not a precondition: a runtime that cannot list
+        # volumes must not block the deploy. Say so instead of failing or pretending.
+        warn(
+            f"could not reconcile credential volumes for {name} ({e}); a credential no "
+            f"longer declared may still be present"
+        )
     env_settings = dict(spec.compose_environment(name))
     if secrets_to_deliver:
         # Only when there IS something to wait for: absent variable means no wait,
@@ -10346,6 +10486,7 @@ def compose_up_exec(
         env_file,
         mounts,
         injected_configs=injected,
+        cred_refs=_cred_refs,
         restart=spec.restart_policy(),
         environment=env_settings | _egress_env,
         role=spec.role,
@@ -10413,7 +10554,10 @@ def compose_up_exec(
         # is gone. Deliver from a thread: the container is blocked on the sentinel,
         # so it makes progress the moment this lands.
         threading.Thread(
-            target=lambda: deliver_secrets(host_name, host_rec, name, secrets_to_deliver),
+            target=lambda: (
+                claim_cred_mounts(host_rec, name, _cred_refs),
+                deliver_secrets(host_name, host_rec, name, secrets_to_deliver),
+            ),
             daemon=True,
         ).start()
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
@@ -10427,6 +10571,7 @@ def compose_up_exec(
     # Constitution IX: the secrets never entered the model — push them now, into the
     # container that is already running and waiting for them.
     if secrets_to_deliver:
+        claim_cred_mounts(host_rec, name, _cred_refs)
         deliver_secrets(host_name, host_rec, name, secrets_to_deliver)
     write_state(host_name, name, port)
     addr = driver_reachable_address(host_rec)
@@ -10868,6 +11013,13 @@ def down_container(
         warn(f"could not confirm container state on {host_name} ({e}); clearing local state anyway")
         exists = False
     vols = per_container_volumes(name)
+    # Lifecycle by naming: credential volumes are dynamic, so they are found by
+    # PREFIX rather than listed in the fixed identity contract.
+    try:
+        if compose_file.is_file() and CRED_VOLUME_INFIX in compose_file.read_text():
+            vols = [*vols, *existing_cred_volumes(host_rec, name)]
+    except (Fatal, OSError, subprocess.SubprocessError) as e:
+        warn(f"could not enumerate credential volumes for {name}: {e}")
 
     if exists or compose_file.is_file():
         log(f"stopping and removing {cname} on {host_name}")
@@ -11315,6 +11467,11 @@ def do_start(name: str, host: str | None = None) -> None:
                 f"compose start failed — if the deployment was disposed, run: agent-container up {name}"
             )
     if _resume_secrets:
+        _refs = [
+            tgt[len(SECRETS_DIR) + 1 :] if tgt.startswith(SECRETS_DIR + "/") else tgt
+            for tgt, _v in _resume_secrets
+        ]
+        claim_cred_mounts(host_rec, name, _refs)
         deliver_secrets(host_name, host_rec, name, _resume_secrets)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     log(

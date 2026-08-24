@@ -30,7 +30,10 @@ case "${ref%%/*}" in
     *) die "unknown secret kind: ${ref%%/*}" ;;
 esac
 
-target="${SECRETS_DIR}/${ref}"
+# <ref>/value: each credential is mounted as its OWN volume, and a volume mounts as a
+# directory, so the value lives in a file inside it. That mount point is also the
+# lifecycle handle — `docker volume rm` on it revokes exactly this one credential.
+target="${SECRETS_DIR}/${ref}/value"
 umask 077
 mkdir -p "$(dirname "${target}")"
 
@@ -39,6 +42,7 @@ mkdir -p "$(dirname "${target}")"
 [[ -L "${target}" ]] && die "refusing: ${target} is a symlink"
 
 if [[ "${ref}" == sentinel* ]]; then
+    mkdir -p "$(dirname "${target}")"
     : > "${target}"
 else
     cat > "${target}"

@@ -283,6 +283,9 @@ def test_compose_up_exec_threads_discovered_apikeys(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
     delivered: list = []
     monkeypatch.setattr(wiz, "deliver_secrets", lambda *a: delivered.append(a[-1]))
+    # A chown on the freshly-mounted volumes; no secret crosses it, and it needs a
+    # real runtime, so it is stubbed like any other runtime call.
+    monkeypatch.setattr(wiz, "claim_cred_mounts", lambda *a: None)
     host_rec = {"driver": "docker", "context": ""}
     wiz.compose_up_exec("local", host_rec, "acme", tmp_path / "acme.env", [], None, [])
     # Discovery still happens automatically (no flags); the key is now DELIVERED
@@ -561,6 +564,9 @@ def test_public_material_is_described_and_secret_material_is_not(wiz, monkeypatc
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
     delivered: list = []
     monkeypatch.setattr(wiz, "deliver_secrets", lambda *a: delivered.append(a[-1]))
+    # A chown on the freshly-mounted volumes; no secret crosses it, and it needs a
+    # real runtime, so it is stubbed like any other runtime call.
+    monkeypatch.setattr(wiz, "claim_cred_mounts", lambda *a: None)
     wiz.compose_up_exec("local", {"driver": "docker", "context": ""}, "acme",
                         tmp_path / "acme.env", [], None, [])  # fmt: skip
     described = {e[0] for e in (captured["injected"] or [])}
@@ -1066,3 +1072,84 @@ def test_the_receiver_refuses_a_traversing_ref():
         assert not pat.fullmatch(bad), f"guard accepted {bad!r}"
     for good in ("apikey/anthropic", "sentinel", "apikey/open-ai_2"):
         assert pat.fullmatch(good), f"guard rejected {good!r}"
+
+
+# --- R8: credentials PERSIST, on one volume each ------------------------------
+
+
+def test_a_credential_volume_is_named_from_its_ref(wiz):
+    """The NAME is the lifecycle handle (Principle IV, and the operator's point).
+
+    One volume per credential rather than one shared volume, so
+    `docker volume rm agent-container-acme-cred-apikey-anthropic` revokes exactly one
+    credential and touches nothing else — not the ssh volume, not the others.
+    """
+    assert wiz.cred_volume_name("acme", "apikey/anthropic") == (
+        "agent-container-acme-cred-apikey-anthropic"
+    )
+    assert wiz.cred_volume_name("acme", "apikey/openai").startswith(wiz.cred_volume_prefix("acme"))
+    # Distinct credentials never collide onto one volume.
+    assert wiz.cred_volume_name("acme", "apikey/a") != wiz.cred_volume_name("acme", "apikey/b")
+
+
+def test_credential_volumes_are_declared_and_mounted_but_not_in_the_identity_contract(wiz):
+    """Dynamic, so they are NOT in the fixed ten-volume list — found by prefix instead.
+
+    Putting them in `per_container_volumes` would make the identity contract depend on
+    which credentials happen to be declared, which is exactly what that contract is
+    for pinning against.
+    """
+    m = wiz.build_compose_model("acme", "/repo", cred_refs=["apikey/anthropic"])
+    vol = wiz.cred_volume_name("acme", "apikey/anthropic")
+    assert m["volumes"][vol] == {"name": vol}
+    assert f"{vol}:{wiz.SECRETS_DIR}/apikey/anthropic" in m["services"]["agent"]["volumes"]
+    assert vol not in wiz.per_container_volumes("acme")
+
+
+def test_no_credentials_declares_no_credential_volumes(wiz):
+    """A deployment without credentials is byte-identical to before."""
+    m = wiz.build_compose_model("acme", "/repo")
+    assert not [v for v in m["volumes"] if wiz.CRED_VOLUME_INFIX in v]
+
+
+def test_reconcile_removes_only_undeclared_credential_volumes(wiz, monkeypatch):
+    """PERSISTENCE WITHOUT RECONCILIATION IS THE UNION BUG AGAIN.
+
+    A volume outlives the container, so without pruning, a credential the operator
+    stopped declaring would still be mounted — config says gone, container still has
+    it. The declaration stays the authority because every deploy prunes what it no
+    longer names, the same rule as the managed region.
+    """
+    keep = wiz.cred_volume_name("acme", "apikey/anthropic")
+    drop = wiz.cred_volume_name("acme", "apikey/openai")
+    other = "agent-container-acme-ssh"  # must never be touched
+    monkeypatch.setattr(
+        wiz, "query",
+        lambda argv, **k: subprocess.CompletedProcess(
+            argv, 0, "\n".join([keep, drop, other]) if "ls" in argv else "", ""
+        ),
+    )  # fmt: skip
+    removed: list = []
+    real_query = wiz.query
+
+    def _q(argv, **k):
+        if argv[-2:-1] == ["rm"] or "rm" in argv:
+            removed.append(argv[-1])
+        return real_query(argv, **k)
+
+    monkeypatch.setattr(wiz, "query", _q)
+    got = wiz.reconcile_cred_volumes({"driver": "docker", "context": ""}, "acme",
+                                     ["apikey/anthropic"])  # fmt: skip
+    assert got == [drop]
+    assert removed == [drop], f"touched more than the undeclared volume: {removed}"
+    assert other not in removed
+
+
+def test_reconcile_with_nothing_declared_removes_them_all(wiz, monkeypatch):
+    """The revocation path: stop declaring a credential and it goes."""
+    vol = wiz.cred_volume_name("acme", "apikey/anthropic")
+    monkeypatch.setattr(
+        wiz, "query",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, vol if "ls" in argv else "", ""),
+    )  # fmt: skip
+    assert wiz.reconcile_cred_volumes({"driver": "docker", "context": ""}, "acme", []) == [vol]

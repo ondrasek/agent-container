@@ -1107,8 +1107,19 @@ log "sshd listening"
 # AGENT_CONTAINER_DELIVER_DIR lets the off-container harness redirect this, the
 # same hook AGENT_CONTAINER_INJECT_DIR provides for the compose-config dir.
 DELIVER_DIR="${AGENT_CONTAINER_DELIVER_DIR:-/run/agent-container-secrets}"
-DELIVERY_SENTINEL="${DELIVER_DIR}/sentinel"
-if [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]]; then
+DELIVERY_SENTINEL="${DELIVER_DIR}/sentinel/value"
+# ALREADY PRESENT means do not wait. Credentials persist on their own volumes, so a
+# reboot, a daemon restart or `restart: unless-stopped` brings this container back with
+# them already mounted — and with no CLI present to deliver anything. Waiting then
+# would burn the timeout and come up broken, which is the failure that made ephemeral
+# credentials untenable in the first place.
+_have_creds=0
+for _d in "${DELIVER_DIR}"/*/*; do
+    [[ -f "${_d}/value" ]] && { _have_creds=1; break; }
+done
+if [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]] && ((_have_creds)); then
+    log "credentials already present on their volumes; not waiting for delivery"
+elif [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]]; then
     _dw=0
     _dw_max="${AGENT_CONTAINER_DELIVERY_TIMEOUT:-90}"
     while [[ ! -f "${DELIVERY_SENTINEL}" ]] && ((_dw < _dw_max)); do
@@ -1258,8 +1269,8 @@ chmod 0600 "${SSH_CONFIG}"
 # here reach the tmux server this entrypoint launches below — where the agents run.
 APIKEY_INJECT_DIR="${DELIVER_DIR}/apikey"
 APIKEY_RUNTIME="${AGENT_CONTAINER_APIKEY_RUNTIME:-/tmp/agent-container-apikeys.$(id -u)}"
-_anthropic_key="${APIKEY_INJECT_DIR}/anthropic"
-_openai_key="${APIKEY_INJECT_DIR}/openai"
+_anthropic_key="${APIKEY_INJECT_DIR}/anthropic/value"
+_openai_key="${APIKEY_INJECT_DIR}/openai/value"
 
 # Claude Code — file-first via apiKeyHelper. The helper is a NON-secret command in
 # ~/.claude/settings.json that CATS the ephemeral injected key at Claude's request
@@ -1337,7 +1348,9 @@ fi
 # redirected when a key is injected, so interactive `pi login` otherwise persists.
 _any_apikey=0
 if [[ -d "${APIKEY_INJECT_DIR}" ]]; then
-    for _k in "${APIKEY_INJECT_DIR}"/*; do
+    # <provider>/value, because each credential now arrives on its OWN volume and a
+    # volume mounts as a directory. The value file inside is what the agents read.
+    for _k in "${APIKEY_INJECT_DIR}"/*/value; do
         [[ -f "${_k}" ]] && { _any_apikey=1; break; }
     done
 fi
