@@ -282,10 +282,10 @@ def test_compose_up_exec_threads_discovered_apikeys(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
     delivered: list = []
-    monkeypatch.setattr(wiz, "deliver_secrets", lambda *a: delivered.append(a[-1]))
+    monkeypatch.setattr(wiz, "deliver_secrets", lambda *a, **k: delivered.append(a[-1]))
     # A chown on the freshly-mounted volumes; no secret crosses it, and it needs a
     # real runtime, so it is stubbed like any other runtime call.
-    monkeypatch.setattr(wiz, "claim_cred_mounts", lambda *a: None)
+    monkeypatch.setattr(wiz, "claim_cred_mounts", lambda *a, **k: None)
     host_rec = {"driver": "docker", "context": ""}
     wiz.compose_up_exec("local", host_rec, "acme", tmp_path / "acme.env", [], None, [])
     # Discovery still happens automatically (no flags); the key is now DELIVERED
@@ -563,10 +563,10 @@ def test_public_material_is_described_and_secret_material_is_not(wiz, monkeypatc
     monkeypatch.setattr(wiz, "write_state", lambda *a, **k: None)
     monkeypatch.setattr(wiz, "driver_reachable_address", lambda r: "localhost")
     delivered: list = []
-    monkeypatch.setattr(wiz, "deliver_secrets", lambda *a: delivered.append(a[-1]))
+    monkeypatch.setattr(wiz, "deliver_secrets", lambda *a, **k: delivered.append(a[-1]))
     # A chown on the freshly-mounted volumes; no secret crosses it, and it needs a
     # real runtime, so it is stubbed like any other runtime call.
-    monkeypatch.setattr(wiz, "claim_cred_mounts", lambda *a: None)
+    monkeypatch.setattr(wiz, "claim_cred_mounts", lambda *a, **k: None)
     wiz.compose_up_exec("local", {"driver": "docker", "context": ""}, "acme",
                         tmp_path / "acme.env", [], None, [])  # fmt: skip
     described = {e[0] for e in (captured["injected"] or [])}

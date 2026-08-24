@@ -889,12 +889,33 @@ def test_the_agent_key_is_generated_in_the_container_and_distinct(acc):
     assert agent_fp != host_fp
 
 
+def _seed_delivery_identity(acc, tag: str) -> Path:
+    """Give the fixture a delivery identity, and admit it (Constitution IX).
+
+    Injecting a credential now REQUIRES one: secrets are pushed over SSH into the
+    running container, so the tool must be authorised to log in. The tool deliberately
+    will not mint a key for this, so a test that injects a credential has to supply
+    one, exactly as an operator does.
+    """
+    priv, pub = _devkey(acc.work, f"delivery-{tag}")
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    existing = (cfg / "authorized_keys").read_text() if (cfg / "authorized_keys").is_file() else ""
+    (cfg / "authorized_keys").write_text(existing + pub.read_text())
+    settings = cfg / "settings.yaml"
+    body = settings.read_text() if settings.is_file() else ""
+    if "delivery_identity" not in body:
+        settings.write_text(body + f"delivery_identity: {priv}\n")
+    return priv
+
+
 def test_apikey_injection_ephemeral_and_off_volume(acc, _image):
     """US2 (FR-006/FR-012 / SC-003/SC-004, H1) against a REAL container: a
     convention-discovered provider key FILE is delivered EPHEMERALLY to the
     injected /run path and is NEVER copied onto the -claude/-codex/-pi volumes;
     Codex and pi have their home dirs redirected to an ephemeral location. (A real
     backend-reaching call, SC-002, is the opt-in tokened extension, not run here.)"""
+    _seed_delivery_identity(acc, "api")
     name = "accapi"
     work = acc.tmp
     state = work / "state"
@@ -932,8 +953,16 @@ def test_apikey_injection_ephemeral_and_off_volume(acc, _image):
             raise AssertionError(f"{e}\n{_container_diag(name)}") from None
 
         # The injected keys are delivered to the EPHEMERAL /run path (a compose config).
-        assert _exec("test", "-f", "/run/agent-container/apikeys/anthropic").returncode == 0
-        assert _exec("test", "-f", "/run/agent-container/apikeys/openai").returncode == 0
+        # FR-012a: on their OWN volumes now, one per credential, not the runtime's
+        # config mount point. Still never on a per-AGENT volume — which is the rule
+        # FR-012 was actually protecting and this test's real subject.
+        assert (
+            _exec("test", "-f", "/run/agent-container-secrets/apikey/anthropic/value").returncode
+            == 0
+        )
+        assert (
+            _exec("test", "-f", "/run/agent-container-secrets/apikey/openai/value").returncode == 0
+        )
 
         # H1/FR-012/SC-004: the key VALUES are NEVER written onto a per-agent volume.
         for vol in ("/home/dev/.claude", "/home/dev/.codex", "/home/dev/.pi"):
@@ -970,6 +999,7 @@ def test_injected_key_preserves_canonical_codex_config(acc, _image):
     canonical config (delivered fresh to ~/.codex) MUST be seeded into that
     redirected home, or the canonical config would be silently inert. Proves the
     ephemeral home carries config.toml while auth stays off the -codex volume."""
+    _seed_delivery_identity(acc, "codexcfg")
     name = "acccodexcfg"
     work = acc.tmp
     state = work / "state"
@@ -1089,6 +1119,7 @@ def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
     boundary. Since Feature 019 the deploy key IS the container's own generated key
     (`ssh-key show`), so there is no injected-key plumbing left for a unit tier to
     prove; what remains to check is on the forge, not in this tool."""
+    _seed_delivery_identity(acc, "rot")
     name = "accrot"
     work = acc.tmp
     state = work / "state"
@@ -1098,7 +1129,7 @@ def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
     new_val = "sk-ant-ROTATE-NEW-SECRET"
     key_file = _userconf(acc) / f"{name}.anthropic.key"
     key_file.write_text(old_val + "\n")
-    inject_path = "/run/agent-container/apikeys/anthropic"
+    inject_path = "/run/agent-container-secrets/apikey/anthropic/value"
     compose_path = state / "agent-container" / "local" / f"{name}.compose.yaml"
     staged_path = state / "agent-container" / "local" / f"{name}.apikey.anthropic"
 
@@ -1153,10 +1184,18 @@ def test_secret_rotation_new_value_in_effect_old_gone(acc, _image):
         # ...the compose file never inlines either value (referenced by path)...
         compose = compose_path.read_text()
         assert old_val not in compose and new_val not in compose
-        # ...and the host-side staged copy was OVERWRITTEN with the new value (no
-        # stale old copy left on the operator's machine either).
-        staged = staged_path.read_text()
-        assert new_val in staged and old_val not in staged
+        # ...and there is NO host-side staged copy at all any more. This used to assert
+        # the staged file was overwritten; Constitution IX removed the staging, so the
+        # stronger property now holds: neither value exists anywhere under the state
+        # dir, not just "the stale one was replaced".
+        assert not staged_path.exists(), f"a staged plaintext copy reappeared: {staged_path}"
+        leaked = [
+            f
+            for f in staged_path.parent.rglob("*")
+            if f.is_file() and (old_val in f.read_text(errors="ignore")
+                                or new_val in f.read_text(errors="ignore"))
+        ]  # fmt: skip
+        assert leaked == [], f"secret plaintext on the host: {leaked}"
     finally:
         cli("wipe", name, "-y", timeout=120)
 

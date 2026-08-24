@@ -465,7 +465,7 @@ CLAUDE_HELPER="${HOMEDIR}/.claude/apikey-helper.sh"
 reset_session; reset_ssh
 APIRT="${SB}/apirt"; rm -rf "${APIRT}"; TEST_APIKEY_RUNTIME="${APIRT}"
 rm -rf "${HOMEDIR}/.claude" "${HOMEDIR}/.codex" "${HOMEDIR}/.pi"
-mkdir -p "${DELIVERDIR}/apikey/anthropic" "${DELIVERDIR}/apikey/openai"
+mkdir -p "${DELIVERDIR}/apikey/anthropic" "${DELIVERDIR}/apikey/openai" "${DELIVERDIR}/sentinel"
 printf 'sk-ant-SECRETVALUE\n' > "${DELIVERDIR}/apikey/anthropic/value"
 printf 'sk-oai-SECRETVALUE\n'  > "${DELIVERDIR}/apikey/openai/value"
 run_entrypoint __unset__

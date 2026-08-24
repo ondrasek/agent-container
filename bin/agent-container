@@ -7616,7 +7616,9 @@ def build_compose_model(
         # share the filesystem; it refuses the deploy rather than arriving empty.
         # The staged file remains where validation and dedup happen; only its
         # TEXT crosses. Public keys, so the non-secret channel is correct.
-        model_configs["ssh_authorized_keys"] = {"content": authorized_keys_file.read_text()}
+        model_configs["ssh_authorized_keys"] = {
+            "content": compose_literal(authorized_keys_file.read_text())
+        }
     # Feature 017 FR-004/R4: the host registry, for a control plane only.
     #
     # `content:` and NOT `file:`. A `file:` config is a read-only BIND of a local
@@ -7638,7 +7640,7 @@ def build_compose_model(
     # all, they are pushed to the running container by `deliver_secrets`.
     for cfg_name, content, target in injected_configs or []:
         svc_configs.append({"source": cfg_name, "target": target})
-        model_configs[cfg_name] = {"content": content}
+        model_configs[cfg_name] = {"content": compose_literal(content)}
     if egress_filter_body is not None:
         # A second service in the model the tool GENERATES — never the operator's
         # <name>.services.yaml, which is validated services-only and stays theirs.
@@ -9766,6 +9768,25 @@ def split_injected(
     return public, secrets
 
 
+def compose_literal(text: str) -> str:
+    """Escape `text` so compose delivers it VERBATIM as inline `content:`.
+
+    Compose interpolates `$VAR` and `${VAR}` in the file it reads, and inline content
+    is part of that file — so an injected task or config carrying a `$` would arrive
+    with the OPERATOR'S environment substituted into it. A `file:` reference never had
+    this problem, so moving to `content:` introduced it; found by the task-round-trip
+    acceptance test, which is exactly what that test is for.
+
+    Doubling is compose's own escape: `$$` yields a literal `$`.
+
+    >>> compose_literal('echo $HOME')
+    'echo $$HOME'
+    >>> compose_literal('cost is 100$')
+    'cost is 100$$'
+    """
+    return text.replace("$", "$$")
+
+
 def inject_text(src: Path, what: str) -> str:
     """The bytes of `src` as text, for inline delivery.
 
@@ -9906,7 +9927,12 @@ def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
 
 
 def deliver_secrets(
-    host: str, host_rec: dict, name: str, secrets: list[tuple[str, str]], port: int | None = None
+    host: str,
+    host_rec: dict,
+    name: str,
+    secrets: list[tuple[str, str]],
+    port: int | None = None,
+    delivery_id: str = "",
 ) -> None:
     """Push secrets INTO the running container over SSH — to the container itself.
 
@@ -9973,7 +9999,10 @@ def deliver_secrets(
     # The sentinel LAST, and only once every value landed. The container is blocked on
     # it, so writing it early would release the wait onto a partial set — which from
     # inside looks exactly like a completed delivery.
-    r = subprocess.run([*argv, RECEIVE_SECRET_BIN, "sentinel"], capture_output=True)
+    r = subprocess.run(
+        [*argv, RECEIVE_SECRET_BIN, "sentinel"], input=(delivery_id or "-").encode(),
+        capture_output=True,
+    )  # fmt: skip
     if r.returncode != 0:
         die(f"delivered {len(secrets)} credential(s) to '{name}' but could not release its wait")
     log(f"delivered {len(secrets)} credential(s) into '{name}' over SSH")
@@ -10444,10 +10473,15 @@ def compose_up_exec(
             f"longer declared may still be present"
         )
     env_settings = dict(spec.compose_environment(name))
+    _delivery_id = ""
     if secrets_to_deliver:
-        # Only when there IS something to wait for: absent variable means no wait,
-        # so a deployment declaring no secrets is unaffected to the second.
-        env_settings["AGENT_CONTAINER_AWAIT_DELIVERY"] = "1"
+        # A per-deploy ID, not a bare flag. "Already present" cannot distinguish a
+        # RESTART (nothing is coming, do not wait) from a ROTATION (a new value IS
+        # coming, and reading the old one first means the rotation silently does not
+        # take effect for that boot). The container waits until the sentinel carries
+        # THIS id, so a restart proceeds at once and a rotation blocks for its value.
+        _delivery_id = f"{utc_now()}-{secrets.token_hex(4)}"
+        env_settings["AGENT_CONTAINER_AWAIT_DELIVERY"] = _delivery_id
     # Feature 004: resolve the workspace mount (persistent volume / local bind /
     # none→container layer) + whether to declare the named workspace volume. bind on
     # a non-local host is refused here, before any runtime call (FR-011).
@@ -10621,7 +10655,9 @@ def compose_up_exec(
         threading.Thread(
             target=lambda: (
                 claim_cred_mounts(host_rec, name, _cred_refs),
-                deliver_secrets(host_name, host_rec, name, secrets_to_deliver),
+                deliver_secrets(
+                    host_name, host_rec, name, secrets_to_deliver, delivery_id=_delivery_id
+                ),
             ),
             daemon=True,
         ).start()
@@ -10637,7 +10673,7 @@ def compose_up_exec(
     # container that is already running and waiting for them.
     if secrets_to_deliver:
         claim_cred_mounts(host_rec, name, _cred_refs)
-        deliver_secrets(host_name, host_rec, name, secrets_to_deliver)
+        deliver_secrets(host_name, host_rec, name, secrets_to_deliver, delivery_id=_delivery_id)
     write_state(host_name, name, port)
     addr = driver_reachable_address(host_rec)
     # Feature 018: capture and pin, HERE — the one choke point every deploy path

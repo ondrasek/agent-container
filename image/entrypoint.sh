@@ -1113,20 +1113,25 @@ DELIVERY_SENTINEL="${DELIVER_DIR}/sentinel/value"
 # them already mounted — and with no CLI present to deliver anything. Waiting then
 # would burn the timeout and come up broken, which is the failure that made ephemeral
 # credentials untenable in the first place.
-_have_creds=0
-for _d in "${DELIVER_DIR}"/*/*; do
-    [[ -f "${_d}/value" ]] && { _have_creds=1; break; }
-done
-if [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]] && ((_have_creds)); then
-    log "credentials already present on their volumes; not waiting for delivery"
-elif [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]]; then
+# The variable carries the DEPLOY's delivery id. The sentinel carries the id of the
+# delivery that last completed. Equal means this deploy's values are already here (a
+# restart) — proceed. Different means a delivery is still coming (a fresh deploy, or a
+# ROTATION where the old value is sitting right there) — wait for it, or the rotation
+# would silently not take effect for this boot.
+_want_id="${AGENT_CONTAINER_AWAIT_DELIVERY:-}"
+_have_id=""
+[[ -f "${DELIVERY_SENTINEL}" ]] && _have_id="$(cat "${DELIVERY_SENTINEL}" 2>/dev/null || true)"
+if [[ -n "${_want_id}" && "${_want_id}" == "${_have_id}" ]]; then
+    log "credentials for this deployment are already present; not waiting"
+elif [[ -n "${_want_id}" ]]; then
     _dw=0
     _dw_max="${AGENT_CONTAINER_DELIVERY_TIMEOUT:-90}"
-    while [[ ! -f "${DELIVERY_SENTINEL}" ]] && ((_dw < _dw_max)); do
+    while [[ "$(cat "${DELIVERY_SENTINEL}" 2>/dev/null || true)" != "${_want_id}" ]] \
+        && ((_dw < _dw_max)); do
         sleep 1
         _dw=$((_dw + 1))
     done
-    if [[ -f "${DELIVERY_SENTINEL}" ]]; then
+    if [[ "$(cat "${DELIVERY_SENTINEL}" 2>/dev/null || true)" == "${_want_id}" ]]; then
         log "credential delivery complete after ${_dw}s"
     else
         # Continue rather than die. The env/.env channels may still supply what is
@@ -1180,7 +1185,13 @@ if [[ -d "${CONFIG_INJECT_DIR}" ]]; then
     # canonical files. Plain -R (NOT -a/-p) so the unprivileged dev user never
     # fails trying to preserve the /run source ownership; the staged files are
     # 0644 (readable).
-    if cp -RL "${CONFIG_INJECT_DIR}/." "${AGENT_CONTAINER_HOME}/" 2>/dev/null; then
+    # `--remove-destination`, and it is load-bearing. Compose materialises INLINE
+    # config content READ-ONLY (0444), and `cp` without -p gives a new destination the
+    # source's mode — so the first boot wrote a 0444 file into the agent home, and
+    # every later overlay hit EACCES trying to overwrite it. The failure was invisible
+    # (stderr discarded) and the symptom was canonical config silently never
+    # refreshing. Unlinking first sidesteps the destination's mode entirely.
+    if cp -RL --remove-destination "${CONFIG_INJECT_DIR}/." "${AGENT_CONTAINER_HOME}/" 2>/dev/null; then
         log "Delivered operator-canonical agent config fresh (runtime state under the home preserved)"
     else
         log "NOTE: failed to overlay canonical agent config from ${CONFIG_INJECT_DIR}"

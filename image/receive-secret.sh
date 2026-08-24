@@ -53,9 +53,19 @@ mkdir -p "$(dirname "${target}")"
 [[ -L "${target}" ]] && die "refusing: ${target} is a symlink"
 
 if [[ "${ref}" == sentinel* ]]; then
+    # The sentinel carries the DELIVERY ID, not just existence: the container must be
+    # able to tell "a delivery already happened" (restart — proceed) from "a NEW
+    # delivery is coming" (rotation — wait, or the old value is read first and the
+    # rotation silently does not take effect).
     mkdir -p "$(dirname "${target}")"
-    : > "${target}"
-else
     cat > "${target}"
-    chmod 0400 "${target}"
+else
+    # REPLACE, never append or open-for-write: the previous value is stored 0400, so
+    # `cat >` onto it fails with EACCES even for its owner — which broke ROTATION,
+    # since re-delivering a changed key is exactly an overwrite. Written to a temp and
+    # moved so a reader never sees a half-written credential.
+    rm -f "${target}.new"
+    cat > "${target}.new"
+    chmod 0400 "${target}.new"
+    mv -f "${target}.new" "${target}"
 fi
