@@ -26,9 +26,9 @@ re-summarise them here.
   a bind and fails over a remote context (measured); only `{content:}` is API-delivered — the 001/003
   lesson.
 - **Secrets go to the CONTAINER, never through its DESCRIPTION** (Constitution IX). Push over its own
-  SSH channel; a description is a PLAN that outlives the need, so nothing secret may be inlined in it
-  or staged for it to reference. `configs: {file:}` is a daemon-side bind, **measured** not to cross;
-  `{content:}` crosses but is for PUBLIC data only.
+  SSH channel; a description is a PLAN outliving the need, so nothing secret may be inlined in it nor
+  staged for it. `configs: {file:}` is a daemon-side bind, **measured** not to cross; `{content:}`
+  crosses but is PUBLIC-only.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv, or
   printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume. On-volume
   `auth.json` is **operator-login only**; a `--task` is **not** a credential channel. **No private SSH
