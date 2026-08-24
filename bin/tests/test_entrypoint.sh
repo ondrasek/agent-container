@@ -454,7 +454,7 @@ run_entrypoint __unset__
 if git_has 'core.sshCommand'; then bad "push: no key -> core.sshCommand must NOT be set"; else ok; fi
 
 # --- 9. Model/API credentials (Feature 003 US2) ------------------------------
-# Provider keys are DELIVERED as files under ${DELIVER_DIR}/apikeys/<provider>,
+# Provider keys are DELIVERED as files under ${DELIVER_DIR}/apikey/<provider>,
 # delivered EPHEMERALLY (H1/FR-012): Claude gets an apiKeyHelper that CATS the
 # injected key (the key value never lands on the ~/.claude volume); Codex/pi get
 # their homes REDIRECTED to an ephemeral dir so nothing they write hits the
@@ -465,15 +465,15 @@ CLAUDE_HELPER="${HOMEDIR}/.claude/apikey-helper.sh"
 reset_session; reset_ssh
 APIRT="${SB}/apirt"; rm -rf "${APIRT}"; TEST_APIKEY_RUNTIME="${APIRT}"
 rm -rf "${HOMEDIR}/.claude" "${HOMEDIR}/.codex" "${HOMEDIR}/.pi"
-mkdir -p "${DELIVERDIR}/apikeys"
-printf 'sk-ant-SECRETVALUE\n' > "${DELIVERDIR}/apikeys/anthropic"
-printf 'sk-oai-SECRETVALUE\n'  > "${DELIVERDIR}/apikeys/openai"
+mkdir -p "${DELIVERDIR}/apikey"
+printf 'sk-ant-SECRETVALUE\n' > "${DELIVERDIR}/apikey/anthropic"
+printf 'sk-oai-SECRETVALUE\n'  > "${DELIVERDIR}/apikey/openai"
 run_entrypoint __unset__
 
 # Claude: settings.json carries an apiKeyHelper pointing at a helper script that
 # cats the EPHEMERAL injected key — never the key value itself.
 if [[ -f "${CLAUDE_SETTINGS}" ]] && grep -qF 'apiKeyHelper' "${CLAUDE_SETTINGS}"; then ok; else bad "apikey: Claude settings.json gets apiKeyHelper"; fi
-if [[ -x "${CLAUDE_HELPER}" ]] && grep -qF "${DELIVERDIR}/apikeys/anthropic" "${CLAUDE_HELPER}"; then ok; else bad "apikey: helper cats the injected anthropic path"; fi
+if [[ -x "${CLAUDE_HELPER}" ]] && grep -qF "${DELIVERDIR}/apikey/anthropic" "${CLAUDE_HELPER}"; then ok; else bad "apikey: helper cats the injected anthropic path"; fi
 # H1/FR-012: the anthropic key VALUE must not be written onto the ~/.claude volume.
 if grep -rqF 'sk-ant-SECRETVALUE' "${HOMEDIR}/.claude" 2>/dev/null; then bad "apikey: anthropic key value must NOT land on the ~/.claude volume"; else ok; fi
 

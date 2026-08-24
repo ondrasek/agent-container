@@ -650,13 +650,14 @@ EXIT_CODES = (
 # reading it must not start a container.
 IMAGE_VERSION_LABEL = "org.opencontainers.image.version"
 INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
-# DELIVERED, not described (Constitution IX), so this lives where the container's own
-# `dev` user can create it. /run/agent-container is the RUNTIME's mount point for
-# compose configs and is root-owned, and there is no sudo at runtime by design — so a
-# secret arriving over SSH as `dev` could not be written there at all. /dev/shm is
-# tmpfs: ephemeral like /run, never a volume, and writable by the user that receives
-# the delivery.
-INJECT_APIKEY_DIR = "/dev/shm/agent-container/apikeys"  # nosec B108 — see above; created 0700 and symlink-checked at delivery
+# DELIVERED, not described (Constitution IX). The container OWNS this layout: the tool
+# hands a logical ref to `agent-container-receive-secret` and the script decides where
+# it lands. Under /run so it dies with the container and is never a volume (FR-012),
+# dev-owned 0700 from the image — private, unlike the shared world-writable /dev/shm
+# an earlier version used.
+SECRETS_DIR = "/run/agent-container-secrets"
+INJECT_APIKEY_DIR = f"{SECRETS_DIR}/apikey"
+RECEIVE_SECRET_BIN = "agent-container-receive-secret"
 INJECT_CONFIG_DIR = "/run/agent-container/config"
 # Feature 017 FR-004/R4: the host registry SNAPSHOT a control plane reads on
 # arrival. Under /run because that is where injected material goes and NEVER on a
@@ -9651,7 +9652,7 @@ def stage_ssh_injection(host: str, name: str, admit_lines: list[str]) -> Path | 
     return ak_file
 
 
-INJECT_DELIVERED_SENTINEL = "/dev/shm/agent-container/.delivered"  # nosec B108 — as INJECT_APIKEY_DIR
+INJECT_DELIVERED_SENTINEL = f"{SECRETS_DIR}/sentinel"
 # SECRET targets are identified by WHERE THE MATERIAL LANDS, not by the config name.
 # The target is the same string the entrypoint reads, so a new producer writing into
 # the api-key directory is classified correctly without having to remember to name
@@ -9778,31 +9779,21 @@ def deliver_secrets(
             )
         time.sleep(1)
     for target, value in secrets:
-        q = shlex.quote(target)
+        # A logical REF, not a path: the container decides where it belongs. The value
+        # is on stdin, never argv, which is world-readable through the process table.
+        ref = target[len(SECRETS_DIR) + 1 :] if target.startswith(SECRETS_DIR + "/") else target
         r = subprocess.run(
-            [
-                *argv,
-                # /dev/shm is world-writable (1777), so the classic risk is a
-                # pre-created symlink at our path redirecting the write. Refuse
-                # instead of following it, and own the directory at 0700.
-                f'd="$(dirname {q})"; umask 077; mkdir -p "$d" && chmod 0700 "$d" '
-                f'&& if [ -L {q} ]; then echo "refusing: {target} is a symlink" >&2; exit 9; fi '
-                f"&& cat > {q} && chmod 0400 {q}",
-            ],
-            input=value.encode(),
-            capture_output=True,
+            [*argv, RECEIVE_SECRET_BIN, ref], input=value.encode(), capture_output=True
         )
         if r.returncode != 0:
             die(
-                f"failed to deliver a credential to {target} in '{name}': "
+                f"failed to deliver '{ref}' to '{name}': "
                 f"{r.stderr.decode(errors='replace').strip()[:200]}"
             )
-    # The sentinel LAST, and only once every value landed. The container is blocked
-    # on it, so writing it early would release the wait onto a partial set — which
-    # from inside looks exactly like a completed delivery.
-    r = subprocess.run(
-        [*argv, f"umask 077; : > {shlex.quote(INJECT_DELIVERED_SENTINEL)}"], capture_output=True
-    )
+    # The sentinel LAST, and only once every value landed. The container is blocked on
+    # it, so writing it early would release the wait onto a partial set — which from
+    # inside looks exactly like a completed delivery.
+    r = subprocess.run([*argv, RECEIVE_SECRET_BIN, "sentinel"], capture_output=True)
     if r.returncode != 0:
         die(f"delivered {len(secrets)} credential(s) to '{name}' but could not release its wait")
     log(f"delivered {len(secrets)} credential(s) into '{name}' over SSH")
@@ -11308,6 +11299,13 @@ def do_start(name: str, host: str | None = None) -> None:
             remedy=f"agent-container up {name}",
         )
     warn_on_collection_drift(host_name, name)  # FR-013: report drift, never re-apply
+    # A resume re-runs the entrypoint, so a container that was told to expect a
+    # delivery will WAIT for one again — and `start` is the only caller that could
+    # send it. Without this the wait times out and the environment comes up without
+    # its credentials, which is the ephemerality tax paid as a silent failure.
+    # Re-resolved rather than remembered: the values are not stored anywhere (that is
+    # the point), so they are discovered again exactly as `up` discovers them.
+    _resume_secrets = split_injected(stage_apikey_injection(host_name, name))[1]
     override = resolve_sidecar_override(name)  # act on the agent + helpers as one unit (US4)
     with deployment_lock(host_name, name):
         ensure_tunnel(host_rec)
@@ -11316,6 +11314,8 @@ def do_start(name: str, host: str | None = None) -> None:
             die(
                 f"compose start failed — if the deployment was disposed, run: agent-container up {name}"
             )
+    if _resume_secrets:
+        deliver_secrets(host_name, host_rec, name, _resume_secrets)
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     log(
         f"started {container_name(name)} on {host_name}; attach with: agent-container attach {name}{hflag}"

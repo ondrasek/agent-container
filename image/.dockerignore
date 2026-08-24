@@ -18,7 +18,8 @@
 # The image needs exactly two paths from the context:
 #   Dockerfile      — the build recipe (compose sets `context` only, so the
 #                     daemon resolves <context>/Dockerfile)
-#   entrypoint.sh   — the sole COPY source in the Dockerfile
+#   entrypoint.sh          — container PID 1
+#   receive-secret.sh      — the in-container secret receiver (Constitution IX)
 #
 # If you add a COPY/ADD instruction, allow-list its source below. The packaging
 # test `test_dockerignore_allowlists_every_dockerfile_copy_source` fails until
@@ -28,3 +29,4 @@
 
 !Dockerfile
 !entrypoint.sh
+!receive-secret.sh

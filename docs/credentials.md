@@ -210,9 +210,26 @@ silently satisfy the authentication instead.
 **With secrets declared and no identity, the deploy refuses** — it does not fall back
 to a weaker channel.
 
-Delivered values land on `/dev/shm` (tmpfs — ephemeral, never a volume) at mode 0400
-owned by `dev`. `/run/agent-container` could not be used: it is the runtime's own
-root-owned mount point, and delivery arrives as `dev` with no sudo.
+**The container decides where credentials belong, not the CLI.** Delivery invokes
+`agent-container-receive-secret <kind>/<name>` over SSH with the value on stdin; that
+script — root-owned 0755, so the agent cannot rewrite it — validates the ref and
+stores the value. Without that seam the CLI would have to know in-container paths, and
+every change to them would be a change to the deployment side too.
+
+Values land in `/run/agent-container-secrets`, created **dev-owned 0700 in the image**,
+at mode 0400. Two paths were rejected: `/run/agent-container` is the runtime's own
+root-owned mount point for compose configs and delivery arrives as `dev` with no sudo;
+and `/dev/shm`, used by an earlier version, is shared and world-writable, so a 0700
+subdir there still sits in a namespace every other process in the container uses.
+
+**Why not a persistent volume?** Because a volume outlives the container, so a
+credential delivered once would still be there after you stopped declaring it —
+exactly the class of bug Feature 020 removed from `authorized_keys`. Removal would
+become `--purge`, which destroys the environment's own SSH identity, so revoking a key
+would cost you the container's identity. And a compromised agent's window would extend
+past the container's life. The cost of that choice is that a **resume must re-deliver**
+— `start` does, re-resolving the values rather than remembering them, since not storing
+them is the point (FR-012).
 
 The container waits for delivery before consuming credentials, but **only when the
 tool says to expect it**, so a deployment declaring no secrets is unaffected. The

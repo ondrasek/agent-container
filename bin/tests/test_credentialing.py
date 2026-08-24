@@ -11,6 +11,7 @@ container push behavior is the acceptance tier.
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 from pathlib import Path
 
@@ -216,11 +217,10 @@ def test_stage_apikey_injection_ephemeral_target(wiz, tmp_path):
     by_name = {e[0]: e for e in entries}
     name, staged, target = by_name["apikey_anthropic"]
     assert target == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
-    # EPHEMERAL is the property that matters, not the literal /run prefix. Delivered
-    # secrets moved to /dev/shm because /run/agent-container is the runtime's
-    # root-owned mount point and delivery arrives as `dev` over SSH with no sudo.
-    # Both are tmpfs and die with the container; neither is a volume.
-    assert target.startswith("/dev/shm/") or target.startswith("/run/")
+    # Delivered secrets live in a dev-owned 0700 dir created in the IMAGE, beside the
+    # runtime's own root-owned config mount point rather than inside it. Still under
+    # /run, so it dies with the container and is never a volume (FR-012).
+    assert target.startswith("/run/")  # dies with the container, never a volume
     assert "/home/dev/" not in target  # never a per-agent volume path
     assert staged == src.read_text()  # carried as a value, not a staged path
     # THE load-bearing half: no plaintext copy is left on disk anywhere.
@@ -1011,7 +1011,7 @@ def test_the_sentinel_is_written_last_over_ssh(wiz, monkeypatch, tmp_path):
     monkeypatch.setattr(
         wiz.subprocess, "run",
         lambda argv, **kw: (
-            order.append("sentinel" if ".delivered" in " ".join(argv) else "value"),
+            order.append("sentinel" if argv[-1] == "sentinel" else "value"),
             subprocess.CompletedProcess(argv, 0, b"", b""),
         )[1],
     )  # fmt: skip
@@ -1026,3 +1026,43 @@ def test_delivery_identity_is_read_from_settings_and_absence_is_reported(wiz, tm
     (wiz.CONFIG_DIR / "settings.yaml").write_text("delivery_identity: ~/.ssh/id_automation\n")
     got = wiz.delivery_identity(tmp_path / "nowhere")
     assert got is not None and got.name == "id_automation" and "~" not in str(got)
+
+
+def test_delivery_calls_the_in_container_receiver_with_a_logical_ref(wiz, monkeypatch, tmp_path):
+    """The CONTAINER owns the layout; the CLI hands over a ref and a value.
+
+    Without this seam the CLI would have to know in-container paths, and every change
+    to them would be a change to the deployment side too. The value stays on stdin.
+    """
+    ident = tmp_path / "id"
+    ident.write_text("K")
+    monkeypatch.setattr(wiz, "delivery_identity", lambda cwd=None: ident)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda h: "localhost")
+    monkeypatch.setattr(wiz, "port_for_name", lambda n: 2222)
+    monkeypatch.setattr(wiz, "query", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    seen: list = []
+    monkeypatch.setattr(
+        wiz.subprocess, "run",
+        lambda argv, **kw: (seen.append((argv, kw.get("input"))),
+                            subprocess.CompletedProcess(argv, 0, b"", b""))[1],
+    )  # fmt: skip
+    wiz.deliver_secrets("local", {}, "acme", [(f"{wiz.INJECT_APIKEY_DIR}/anthropic", "sk-SECRET")])
+    argv, stdin = seen[0]
+    assert argv[-2:] == [wiz.RECEIVE_SECRET_BIN, "apikey/anthropic"]  # a REF, not a path
+    assert stdin == b"sk-SECRET"
+    assert "sk-SECRET" not in " ".join(argv)
+    assert seen[-1][0][-1] == "sentinel"  # released last
+
+
+def test_the_receiver_refuses_a_traversing_ref():
+    """The script's charset bars '.' entirely, so '..' cannot appear."""
+    import re
+
+    body = pathlib.Path("image/receive-secret.sh").read_text()
+    m = re.search(r"\[\[ \"\$\{ref\}\" =~ (\^\S+\$) \]\]", body)
+    assert m, "the ref guard is gone"
+    pat = re.compile(m.group(1))
+    for bad in ("../etc/passwd", "apikey/../../x", "a/./b", "/abs", "APIKEY/x", "a/b/c"):
+        assert not pat.fullmatch(bad), f"guard accepted {bad!r}"
+    for good in ("apikey/anthropic", "sentinel", "apikey/open-ai_2"):
+        assert pat.fullmatch(good), f"guard rejected {good!r}"

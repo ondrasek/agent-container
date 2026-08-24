@@ -227,6 +227,17 @@ RUN set -eux; \
 # --- Layer 6: entrypoint (most-frequently-changed; STUB until item C) -------
 # Two-step COPY+chmod instead of `COPY --chmod=` so the file builds under both
 # the legacy builder and BuildKit; --chmod requires BuildKit specifically.
+# Constitution IX: secrets are DELIVERED to the running container, and the container
+# decides where they land. Root-owned 0755 so the agent (dev) cannot rewrite the
+# receiver, and a dev-owned 0700 directory for it to write into — under /run, so it
+# dies with the container and is never a volume (FR-012), and PRIVATE rather than the
+# shared world-writable /dev/shm.
+COPY receive-secret.sh /usr/local/bin/agent-container-receive-secret
+RUN chmod 0755 /usr/local/bin/agent-container-receive-secret; \
+    mkdir -p /run/agent-container-secrets; \
+    chown dev:dev /run/agent-container-secrets; \
+    chmod 0700 /run/agent-container-secrets
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 

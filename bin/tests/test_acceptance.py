@@ -6487,11 +6487,14 @@ def test_an_api_key_reaches_the_container_over_ssh_not_through_its_description(a
     ]
     assert leaked == [], f"plaintext staged on disk: {leaked}"
 
-    got = _ssh(port, priv, "cat /dev/shm/agent-container/apikeys/anthropic")
+    got = _ssh(port, priv, "cat /run/agent-container-secrets/apikey/anthropic")
     assert got.returncode == 0, got.stderr
     assert got.stdout.strip() == secret
-    mode = _ssh(port, priv, "stat -c %a /dev/shm/agent-container/apikeys/anthropic")
-    assert mode.stdout.strip() == "400", f"delivered at mode {mode.stdout.strip()!r}"
+    mode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container-secrets/apikey/anthropic")
+    assert mode.stdout.strip() == "400 dev", f"delivered as {mode.stdout.strip()!r}"
+    # And the directory is PRIVATE — not a shared world-writable space.
+    dmode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container-secrets")
+    assert dmode.stdout.strip() == "700 dev", f"secrets dir is {dmode.stdout.strip()!r}"
 
 
 def test_delivery_refuses_when_no_identity_is_declared(acc):
