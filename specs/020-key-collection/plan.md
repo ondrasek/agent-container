@@ -192,3 +192,36 @@ phase — Foundational — because they must land together). If the two ever dis
   and validates via `ssh-keygen -l`, which handles options — but no contract pins
   it. If an operator uses `from=`, nothing should break; that it *doesn't* is
   currently an assumption, not a tested one.
+
+
+---
+
+## Superseded by later work (2026-08-24)
+
+This plan describes the feature as designed, and three things changed after it shipped.
+Recorded here because the plan is what a reader opens first, and a plan that quietly
+disagrees with the code is worse than no plan.
+
+**Credential delivery moved out of the deployment description entirely.** The plan's
+`content:` decision still holds for PUBLIC material (authorised keys, known_hosts,
+canonical config, the task). Secrets no longer appear in the compose model in any form:
+they are pushed over SSH into the running container by `deliver_secrets`, per
+Constitution IX, which was ratified from a near-miss during this work. See
+`research.md` R7.
+
+**Credentials PERSIST, one volume each.** The first implementation made them ephemeral,
+which cannot survive a reboot or a daemon restart — nothing is present to re-deliver.
+FR-012 is superseded by FR-012a. Persistence is paired with reconciliation: every
+deploy removes the volume of a credential it no longer declares, or the declaration
+stops being the authority. See `research.md` R8.
+
+**sshd runs in every mode**, headless included, and starts before the credential
+stages. It is the primary interaction surface, and it is also the delivery channel, so
+it has to be listening before anything waits on a delivery.
+
+**Revocation is a CLI operation**: `creds ls` / `creds rm`. `docker volume rm` works —
+the naming is deliberate — but it cannot take effect while the container holds the
+volume, so it cannot serve the case an operator actually means by "revoke".
+
+The task list in `tasks.md` reflects the feature as planned and completed (55/55); it
+does NOT cover the four changes above, which arrived as separate work after it closed.

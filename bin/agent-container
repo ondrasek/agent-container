@@ -4855,6 +4855,8 @@ def cli_host_add(
     err = probe_host_runtime(record)
     if err is not None:
         warn(f"host '{name}' registered but its runtime is not usable yet: {err}")
+    # Said once, HERE, where the operator chose the endpoint — not on every deploy.
+    warn_if_cleartext_endpoint(str(record["driver"]), str(record["context"] or ""))
 
 
 def do_host_ls(as_json: bool) -> None:
@@ -13256,6 +13258,38 @@ def ssh_config_stanza(name: str, user: str, host: str, port: str) -> str:
         f"    RequestTTY yes\n"
         f"    RemoteCommand tmux attach -t main\n"
     )
+
+
+def warn_if_cleartext_endpoint(driver: str, ctx: str) -> None:
+    """Say so, at REGISTRATION, when a host's runtime endpoint is not encrypted.
+
+    Secrets no longer use this channel at all (Constitution IX — they go over SSH to
+    the container), so this is not a credential leak. But every OTHER API call still
+    rides it: container names, env-var NAMES, exec argv, image builds. A `tcp://`
+    endpoint carries all of that in the clear, and nothing previously said so.
+
+    A warning rather than a refusal: an operator may deliberately run an unencrypted
+    daemon on a trusted link, and refusing would break a working setup over a judgement
+    that is theirs. Said ONCE, where the decision is made, instead of on every deploy.
+    """
+    if not ctx:
+        return
+    base = ["docker"] if driver == "docker" else ["podman"]
+    try:
+        if driver == "docker":
+            r = query(base + ["context", "inspect", ctx, "--format", "{{.Endpoints.docker.Host}}"])
+        else:
+            r = query(base + ["system", "connection", "list", "--format", "{{.URI}}"])
+    except Fatal, OSError, subprocess.SubprocessError:
+        return
+    uri = ((r.stdout or "").strip().splitlines() or [""])[0].strip()
+    if uri and not uri.startswith(("unix://", "ssh://")):
+        warn(
+            f"the runtime endpoint for this host is {_sanitize_ssh_uri(uri)}, which is not "
+            f"encrypted. Credentials do not travel this way (they go over SSH to the "
+            f"container), but every other API call does — exec argv, names, builds. "
+            f"Prefer an ssh:// context."
+        )
 
 
 def _sanitize_ssh_uri(uri: str) -> str:

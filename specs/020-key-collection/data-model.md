@@ -136,3 +136,30 @@ itself** — the same defect SC-006 was rewritten to avoid.
 
 Three reads, three distinct absence answers. Collapsing any pair of them is what
 Constitution VIII forbids.
+
+
+---
+
+## 6. Superseded: where credentials live (2026-08-24)
+
+§3's admit set and §4's managed region are unchanged. What changed is material this
+document never covered, and the omission would now read as a claim:
+
+**Credentials are not part of the compose model.** They are pushed into the running
+container over SSH (Constitution IX) and stored on **one volume per credential**,
+`agent-container-<name>-cred-<kind>-<slug>`, mounted at
+`/run/agent-container-secrets/<kind>/<name>` with the value in `value` at 0400,
+owned by `dev`.
+
+| State | Meaning |
+|---|---|
+| declared + held | normal |
+| held, not declared | removed on the next deploy (reconciliation) |
+| declared, not held | not yet delivered |
+
+The volume name is the lifecycle handle. `creds rm` deletes the value inside the
+running container AND drops the volume; the first is what `docker volume rm` cannot do
+while the volume is in use.
+
+These volumes are deliberately **not** in `per_container_volumes` — that list is the
+fixed identity contract and these are dynamic, so they are addressed by prefix.

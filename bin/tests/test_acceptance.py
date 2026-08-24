@@ -6693,3 +6693,33 @@ def test_creds_ls_shows_a_credential_that_is_held_but_no_longer_declared(acc):
     listed = acc.cli(["creds", "ls", "accdrift2"])
     combined = listed.stdout + listed.stderr
     assert "NO LONGER DECLARED" in combined, combined
+
+
+def test_an_unknown_provider_gets_its_own_volume_and_arrives(acc):
+    """A provider nobody pre-declared must work — the set is a GLOB, not a list.
+
+    This is why the mount points cannot be pre-created dev-owned in the image, and
+    therefore why `claim_cred_mounts` exists: a new named volume mounts root-owned, and
+    the path contains a provider name discovered at deploy time. Pre-creating a fixed
+    list would leave exactly this case mounting root-owned and failing at delivery — a
+    rarely-taken path that breaks on the unfamiliar input, which is worse than a chown
+    that always runs.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    secret = "sk-novel-PROVIDER"
+    (cfg / "accnov.mistral.key").write_text(secret)  # not anthropic, not openai
+    priv, pub = _devkey(acc.work, "delivery")
+    (cfg / "authorized_keys").write_text(pub.read_text())
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {priv}\n")
+
+    port = acc.up("accnov")
+    got = _ssh(port, priv, "cat /run/agent-container-secrets/apikey/mistral/value")
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == secret
+    mode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container-secrets/apikey/mistral/value")
+    assert mode.stdout.strip() == "400 dev", f"delivered as {mode.stdout.strip()!r}"
+    vols = subprocess.run(
+        [RUNTIME, "volume", "ls", "--format", "{{.Name}}"], capture_output=True, text=True
+    ).stdout.splitlines()
+    assert "agent-container-accnov-cred-apikey-mistral" in vols

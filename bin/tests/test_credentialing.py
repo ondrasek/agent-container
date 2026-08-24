@@ -1213,3 +1213,38 @@ def test_revoke_says_so_when_it_cannot_delete_inside_a_running_container(wiz, mo
     deleted, _ = wiz.revoke_cred("local", {"driver": "docker", "context": ""}, "acme", "apikey/x")
     assert deleted is False
     assert any("still live" in w for w in warned)
+
+
+def test_a_cleartext_runtime_endpoint_is_flagged_at_registration(wiz, monkeypatch):
+    """Not a credential leak — but every OTHER API call rides that channel.
+
+    Secrets go over SSH to the container (Constitution IX), so a `tcp://` endpoint no
+    longer exposes them. It still carries exec argv, container names and builds in the
+    clear, and nothing said so. A warning rather than a refusal: running an
+    unencrypted daemon on a trusted link is the operator's judgement to make.
+    """
+    monkeypatch.setattr(
+        wiz, "query",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, "tcp://10.0.0.5:2375\\n", ""),
+    )  # fmt: skip
+    warned: list = []
+    monkeypatch.setattr(wiz, "warn", lambda m: warned.append(m))
+    wiz.warn_if_cleartext_endpoint("docker", "insecure")
+    assert any("not encrypted" in w for w in warned)
+    assert any("ssh://" in w for w in warned)  # names the remedy
+
+
+def test_ssh_and_unix_endpoints_are_not_flagged(wiz, monkeypatch):
+    """The two the tool actually uses must stay quiet, or the warning becomes noise."""
+    warned: list = []
+    monkeypatch.setattr(wiz, "warn", lambda m: warned.append(m))
+    for uri in ("ssh://root@1.2.3.4", "unix:///var/run/docker.sock"):
+        monkeypatch.setattr(
+            wiz, "query",
+            lambda argv, u=uri, **k: subprocess.CompletedProcess(argv, 0, u, ""),
+        )  # fmt: skip
+        wiz.warn_if_cleartext_endpoint("docker", "ctx")
+    assert warned == []
+    # A local host (no context) is a socket by definition — nothing to ask.
+    wiz.warn_if_cleartext_endpoint("docker", "")
+    assert warned == []
