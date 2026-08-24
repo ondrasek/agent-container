@@ -1099,7 +1099,13 @@ log "sshd listening"
 # Gated on the CLI SAYING to expect delivery. Absent variable means no wait at
 # all, so every deployment that declares no secrets is byte-for-byte unaffected —
 # this must not add a second to the common path.
-DELIVERY_SENTINEL="${INJECT_DIR}/.delivered"
+# Delivered material lands where `dev` can write it: /run/agent-container is the
+# runtime's root-owned mount point for compose configs, and delivery arrives as
+# dev over SSH with no sudo. /dev/shm is tmpfs — ephemeral, never a volume.
+# AGENT_CONTAINER_DELIVER_DIR lets the off-container harness redirect this, the
+# same hook AGENT_CONTAINER_INJECT_DIR provides for the compose-config dir.
+DELIVER_DIR="${AGENT_CONTAINER_DELIVER_DIR:-/dev/shm/agent-container}"
+DELIVERY_SENTINEL="${DELIVER_DIR}/.delivered"
 if [[ -n "${AGENT_CONTAINER_AWAIT_DELIVERY:-}" ]]; then
     _dw=0
     _dw_max="${AGENT_CONTAINER_DELIVERY_TIMEOUT:-90}"
@@ -1248,7 +1254,7 @@ chmod 0600 "${SSH_CONFIG}"
 # ephemeral home dirs; production leaves it unset so the default is a container-
 # private /tmp path (vanishes with the container, never a named volume). Exports
 # here reach the tmux server this entrypoint launches below — where the agents run.
-APIKEY_INJECT_DIR="${INJECT_DIR}/apikeys"
+APIKEY_INJECT_DIR="${DELIVER_DIR:-/dev/shm/agent-container}/apikeys"
 APIKEY_RUNTIME="${AGENT_CONTAINER_APIKEY_RUNTIME:-/tmp/agent-container-apikeys.$(id -u)}"
 _anthropic_key="${APIKEY_INJECT_DIR}/anthropic"
 _openai_key="${APIKEY_INJECT_DIR}/openai"

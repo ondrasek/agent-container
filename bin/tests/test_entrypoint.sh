@@ -86,6 +86,9 @@ STATE="${SB}/stubstate"; mkdir -p "${STATE}"
 HOMEDIR="${SB}/home"; mkdir -p "${HOMEDIR}"
 WORK="${SB}/work"; mkdir -p "${WORK}"
 INJECTDIR="${SB}/inject"; mkdir -p "${INJECTDIR}"
+# Where DELIVERED secrets land (Constitution IX) — /dev/shm in a real
+# container, redirected here so this harness can seed and inspect them.
+DELIVERDIR="${SB}/deliver"; mkdir -p "${DELIVERDIR}"
 
 # The rootless entrypoint uses NO sudo. sshd is invoked via the absolute path
 # /usr/sbin/sshd, so we substitute it through the AGENT_CONTAINER_SSHD hook with
@@ -135,7 +138,7 @@ reset_session() { rm -f "${STATE}/exists"; }
 # reset_ssh: clean SSH state so a run starts from "no persisted key, no
 # injection". SSH-specific tests call this, then set the TEST_ENV_* globals
 # and/or drop files in INJECTDIR before run_entrypoint.
-reset_ssh() { rm -rf "${HOMEDIR}/.ssh"; rm -rf "${INJECTDIR:?}"/*; TEST_ENV_AUTHKEYS=""; TEST_ENV_HKB64=""; TEST_PUSH_RUNTIME=""; TEST_APIKEY_RUNTIME=""; }
+reset_ssh() { rm -rf "${HOMEDIR}/.ssh"; rm -rf "${INJECTDIR:?}"/* "${DELIVERDIR:?}"/*; TEST_ENV_AUTHKEYS=""; TEST_ENV_HKB64=""; TEST_PUSH_RUNTIME=""; TEST_APIKEY_RUNTIME=""; }
 TEST_ENV_AUTHKEYS=""
 TEST_ENV_HKB64=""
 TEST_PUSH_RUNTIME=""
@@ -149,6 +152,11 @@ _export_env() {
     export AGENT_CONTAINER_GIT_CAPTURE="${GITCAP}" AGENT_CONTAINER_SSHD_CAPTURE="${SSHDCAP}"
     # rootless testability hooks: substitute sshd, redirect the bind-mount dir.
     export AGENT_CONTAINER_SSHD="${STUB}/sshd" AGENT_CONTAINER_INJECT_DIR="${INJECTDIR}"
+    # Feature 020 / Constitution IX: secrets are DELIVERED into the running
+    # container rather than described, and land on a dev-writable tmpfs
+    # (/dev/shm) because /run/agent-container is the runtime's root-owned mount
+    # point. Redirected here so this off-container harness can seed them.
+    export AGENT_CONTAINER_DELIVER_DIR="${DELIVERDIR}"
     # Feature 016: the run-record dir, redirected out of /var/lib. This suite
     # stays on the bare-shell path (no agent) and so writes no record today — the
     # hook is here so that stops being an assumption the moment one is added.
@@ -446,7 +454,7 @@ run_entrypoint __unset__
 if git_has 'core.sshCommand'; then bad "push: no key -> core.sshCommand must NOT be set"; else ok; fi
 
 # --- 9. Model/API credentials (Feature 003 US2) ------------------------------
-# Provider keys are injected as FILES under ${INJECT_DIR}/apikeys/<provider>,
+# Provider keys are DELIVERED as files under ${DELIVER_DIR}/apikeys/<provider>,
 # delivered EPHEMERALLY (H1/FR-012): Claude gets an apiKeyHelper that CATS the
 # injected key (the key value never lands on the ~/.claude volume); Codex/pi get
 # their homes REDIRECTED to an ephemeral dir so nothing they write hits the
@@ -457,15 +465,15 @@ CLAUDE_HELPER="${HOMEDIR}/.claude/apikey-helper.sh"
 reset_session; reset_ssh
 APIRT="${SB}/apirt"; rm -rf "${APIRT}"; TEST_APIKEY_RUNTIME="${APIRT}"
 rm -rf "${HOMEDIR}/.claude" "${HOMEDIR}/.codex" "${HOMEDIR}/.pi"
-mkdir -p "${INJECTDIR}/apikeys"
-printf 'sk-ant-SECRETVALUE\n' > "${INJECTDIR}/apikeys/anthropic"
-printf 'sk-oai-SECRETVALUE\n'  > "${INJECTDIR}/apikeys/openai"
+mkdir -p "${DELIVERDIR}/apikeys"
+printf 'sk-ant-SECRETVALUE\n' > "${DELIVERDIR}/apikeys/anthropic"
+printf 'sk-oai-SECRETVALUE\n'  > "${DELIVERDIR}/apikeys/openai"
 run_entrypoint __unset__
 
 # Claude: settings.json carries an apiKeyHelper pointing at a helper script that
 # cats the EPHEMERAL injected key — never the key value itself.
 if [[ -f "${CLAUDE_SETTINGS}" ]] && grep -qF 'apiKeyHelper' "${CLAUDE_SETTINGS}"; then ok; else bad "apikey: Claude settings.json gets apiKeyHelper"; fi
-if [[ -x "${CLAUDE_HELPER}" ]] && grep -qF "${INJECTDIR}/apikeys/anthropic" "${CLAUDE_HELPER}"; then ok; else bad "apikey: helper cats the injected anthropic path"; fi
+if [[ -x "${CLAUDE_HELPER}" ]] && grep -qF "${DELIVERDIR}/apikeys/anthropic" "${CLAUDE_HELPER}"; then ok; else bad "apikey: helper cats the injected anthropic path"; fi
 # H1/FR-012: the anthropic key VALUE must not be written onto the ~/.claude volume.
 if grep -rqF 'sk-ant-SECRETVALUE' "${HOMEDIR}/.claude" 2>/dev/null; then bad "apikey: anthropic key value must NOT land on the ~/.claude volume"; else ok; fi
 

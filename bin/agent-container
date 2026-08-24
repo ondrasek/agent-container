@@ -650,7 +650,13 @@ EXIT_CODES = (
 # reading it must not start a container.
 IMAGE_VERSION_LABEL = "org.opencontainers.image.version"
 INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
-INJECT_APIKEY_DIR = "/run/agent-container/apikeys"
+# DELIVERED, not described (Constitution IX), so this lives where the container's own
+# `dev` user can create it. /run/agent-container is the RUNTIME's mount point for
+# compose configs and is root-owned, and there is no sudo at runtime by design — so a
+# secret arriving over SSH as `dev` could not be written there at all. /dev/shm is
+# tmpfs: ephemeral like /run, never a volume, and writable by the user that receives
+# the delivery.
+INJECT_APIKEY_DIR = "/dev/shm/agent-container/apikeys"  # nosec B108 — see above; created 0700 and symlink-checked at delivery
 INJECT_CONFIG_DIR = "/run/agent-container/config"
 # Feature 017 FR-004/R4: the host registry SNAPSHOT a control plane reads on
 # arrival. Under /run because that is where injected material goes and NEVER on a
@@ -9645,7 +9651,7 @@ def stage_ssh_injection(host: str, name: str, admit_lines: list[str]) -> Path | 
     return ak_file
 
 
-INJECT_DELIVERED_SENTINEL = "/run/agent-container/.delivered"
+INJECT_DELIVERED_SENTINEL = "/dev/shm/agent-container/.delivered"  # nosec B108 — as INJECT_APIKEY_DIR
 # SECRET targets are identified by WHERE THE MATERIAL LANDS, not by the config name.
 # The target is the same string the entrypoint reads, so a new producer writing into
 # the api-key directory is classified correctly without having to remember to name
@@ -9687,76 +9693,119 @@ def inject_text(src: Path, what: str) -> str:
         die(f"{what} ({src}) is not valid UTF-8, so it cannot be injected as text.")
 
 
-def deliver_secrets(host: str, host_rec: dict, name: str, secrets: list[tuple[str, str]]) -> None:
-    """Push secrets INTO the running container, then release its wait.
+DELIVERY_IDENTITY_SETTING = "delivery_identity"
+
+
+def delivery_identity(cwd: Path | None = None) -> Path | None:
+    """The operator's SSH private key used to deliver secrets, or None if undeclared.
+
+    DECLARED BY THE OPERATOR, never minted by the tool. The tool generating a private
+    key would put a standing credential on the operator's disk that authorises entry
+    to every environment it deploys — replacing a delivery problem with a worse
+    exposure. The operator already keeps a dedicated automation key for exactly this;
+    the tool is told which one, and uses it the way an unattended path must:
+    `-i` with `IdentitiesOnly=yes` and `IdentityAgent=none`, so an approval-gated
+    agent key is never involved and cannot silently satisfy the auth instead.
+
+    A reader reports ABSENCE (Constitution VIII); the caller decides what that means.
+    """
+    declared = resolve_settings_key(DELIVERY_IDENTITY_SETTING, cwd)
+    return Path(str(declared)).expanduser() if declared else None
+
+
+def deliver_secrets(
+    host: str, host_rec: dict, name: str, secrets: list[tuple[str, str]], port: int | None = None
+) -> None:
+    """Push secrets INTO the running container over SSH — to the container itself.
 
     Constitution IX: a deployment description is a PLAN — written before anything
     exists, kept as the record, read by whatever wants to know what was deployed.
     Nothing with that lifetime may hold a secret. So secrets never enter the compose
-    model and are never staged in a file for it to reference; they are handed to a
-    container that is already running.
+    model and are never staged in a file for it to reference.
 
-    THE CHANNEL IS THE RUNTIME'S, AND ITS SECURITY IS THE CONTEXT'S. For a remote
-    host the docker context is `ssh://user@host` (podman: an ssh:// system
-    connection), so this call is carried inside that SSH transport — authenticated
-    and encrypted without the tool holding any key of its own. Locally it is a unix
-    socket, authenticated by filesystem permission.
+    THE CHANNEL IS THE CONTAINER'S OWN sshd, NOT the runtime's exec API, and the
+    difference is the whole point. Delivering through the daemon would inherit
+    whatever transport the operator's context happens to use — `unix://` and `ssh://`
+    are fine, `tcp://` is cleartext — so the tool could only CHECK that channel, not
+    provide it. An earlier version of this function did exactly that and had to
+    refuse insecure contexts, which is a workaround for using the wrong channel.
+    Over the container's sshd the transport is SSH by construction, whatever the
+    context is, and the daemon never sees the plaintext at all.
 
-    NO PRIVATE KEY IS GENERATED FOR THIS, and that is the point. The container's key
-    pair is created inside the container and only its PUBLIC half is ever captured
-    (018/019); the tool uses that half to VERIFY which container answered, which is
-    the opposite direction from authenticating itself to one. Minting a local key so
-    the tool could log in would put a standing credential on the operator's disk
-    that authorises entry to every environment — replacing a delivery problem with a
-    worse exposure than the one being fixed.
+    Both directions are established without the tool holding anything it minted:
+    the container is VERIFIED by the host key it generated itself and the tool
+    captured and pinned (018), and the tool is AUTHENTICATED by an operator-declared
+    identity that the collection authorises (020).
 
-    Values travel on STDIN, never argv: argv is world-readable through the process
-    table. `umask 077` sets the mode before the bytes land rather than after.
+    Values travel on STDIN, never argv — argv is world-readable through the process
+    table. `umask 077` sets the mode before the bytes land.
     """
     if not secrets:
         return
-    # `-u root` INSIDE the container, because /run/agent-container is the runtime's
-    # own mount point and is root-owned — `dev` cannot create a directory under it.
-    # This grants the AGENT nothing: it is the operator's existing daemon access
-    # acting from outside, and under rootless podman the container's root is the
-    # operator's own uid. Each file is handed to `dev` at 0400 immediately, so what
-    # the agent can reach is read-only and no more than before.
-    base = driver_runtime_argv(host_rec) + ["exec", "-i", "-u", "root", container_name(name)]
+    identity = delivery_identity()
+    if identity is None or not identity.is_file():
+        die(
+            f"cannot deliver {len(secrets)} credential(s) to '{name}': no delivery identity. "
+            f"Declare `{DELIVERY_IDENTITY_SETTING}: <path to an SSH private key>` in "
+            f"settings.yaml, and put its PUBLIC half in your key collection so the "
+            f"environment admits it. The tool will not generate a key for this — that "
+            f"would be a standing credential granting entry to every environment."
+            + (f" Declared but missing: {identity}" if identity else "")
+        )
+    address = driver_reachable_address(host_rec)
+    ssh_port = port if port is not None else port_for_name(name)
+    argv = [
+        shutil.which("ssh") or "ssh",
+        "-i", str(identity),
+        "-o", "IdentitiesOnly=yes",
+        "-o", "IdentityAgent=none",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={known_hosts_path(host)}",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-p", str(ssh_port),
+        f"{DEFAULT_SSH_USER}@{address}",
+    ]  # fmt: skip
+    deadline = time.monotonic() + 90
+    while True:  # sshd starts early now, but "early" is not "already listening"
+        probe = query([*argv, "true"], timeout=20)
+        if probe.returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            die(
+                f"cannot reach '{name}' over SSH at {address}:{ssh_port} to deliver "
+                f"{len(secrets)} credential(s): {probe.stderr.strip()[:200]}"
+            )
+        time.sleep(1)
     for target, value in secrets:
         q = shlex.quote(target)
         r = subprocess.run(
             [
-                *base,
-                "sh",
-                "-c",
-                f'd="$(dirname {q})"; umask 077; mkdir -p "$d" && cat > {q} '
-                f'&& chown -R {DEFAULT_SSH_USER}:{DEFAULT_SSH_USER} "$d" '
-                f'&& chmod 0700 "$d" && chmod 0400 {q}',
-            ],  # fmt: skip
+                *argv,
+                # /dev/shm is world-writable (1777), so the classic risk is a
+                # pre-created symlink at our path redirecting the write. Refuse
+                # instead of following it, and own the directory at 0700.
+                f'd="$(dirname {q})"; umask 077; mkdir -p "$d" && chmod 0700 "$d" '
+                f'&& if [ -L {q} ]; then echo "refusing: {target} is a symlink" >&2; exit 9; fi '
+                f"&& cat > {q} && chmod 0400 {q}",
+            ],
             input=value.encode(),
             capture_output=True,
         )
         if r.returncode != 0:
             die(
-                f"failed to deliver a credential to {target} in {container_name(name)}: "
+                f"failed to deliver a credential to {target} in '{name}': "
                 f"{r.stderr.decode(errors='replace').strip()[:200]}"
             )
     # The sentinel LAST, and only once every value landed. The container is blocked
     # on it, so writing it early would release the wait onto a partial set — which
     # from inside looks exactly like a completed delivery.
-    s = shlex.quote(INJECT_DELIVERED_SENTINEL)
     r = subprocess.run(
-        [
-            *base,
-            "sh",
-            "-c",
-            f"umask 077; : > {s} && chown {DEFAULT_SSH_USER}:{DEFAULT_SSH_USER} {s}",
-        ],  # fmt: skip
-        capture_output=True,
+        [*argv, f"umask 077; : > {shlex.quote(INJECT_DELIVERED_SENTINEL)}"], capture_output=True
     )
     if r.returncode != 0:
-        die(f"delivered {len(secrets)} credential(s) to {name} but could not release its wait")
-    log(f"delivered {len(secrets)} credential(s) into {name} via the runtime channel")
+        die(f"delivered {len(secrets)} credential(s) to '{name}' but could not release its wait")
+    log(f"delivered {len(secrets)} credential(s) into '{name}' over SSH")
 
 
 def stage_push_injection(

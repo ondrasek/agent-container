@@ -1,6 +1,22 @@
 <!--
 SYNC IMPACT REPORT
 ==================
+Version change: 2.4.0 → 2.4.1   (PATCH)
+
+- **Principle IX's MECHANISM corrected.** Its substance is unchanged; the channel it
+  named was wrong in a way that mattered. It said "over an authenticated, encrypted
+  channel to that container" and the first implementation read that as the container
+  RUNTIME's channel — which is SSH only when the operator's context happens to be
+  `ssh://`. A `tcp://` context would carry credential plaintext in the clear, and the
+  tool can only CHECK that channel, never provide it. The tell was having to add a
+  refusal for insecure endpoints: a guard against your own transport is a sign you
+  picked the wrong one.
+- Now: over the CONTAINER'S OWN sshd, which is why sshd runs in every mode. The
+  daemon never sees the value. Authentication is an operator-DECLARED identity
+  (`delivery_identity`) that the key collection authorises; the tool MUST NOT mint a
+  private key, since that is a standing credential granting entry to every
+  environment it deploys. Undeclared ⇒ refuse, never a weaker fallback.
+
 Version change: 2.3.0 → 2.4.0   (MINOR)
 
 - **Added Principle IX — Secrets Travel to the Container, Not Through Its
@@ -309,9 +325,22 @@ makes them reviewable: what an operator can find, they can question.
 
 A container's deployment description — the compose model, its generated file, and
 anything else the tool writes to plan a deployment — MUST NOT carry secret material.
-Secrets are DELIVERED to a container that is already running, over an authenticated,
-encrypted channel to that container: the SSH service it exposes, using the key pair
-it generated for itself. Public material (authorised keys, host fingerprints,
+Secrets are DELIVERED to a container that is already running, over SSH TO THAT
+CONTAINER — its own sshd, which therefore runs in every mode. **Not over the
+container runtime's channel**, even when that channel happens to be SSH: the
+runtime's transport is whatever the operator configured their context to be, so the
+tool could only CHECK it, never provide it. A `tcp://` context would carry the
+plaintext in the clear. Over the container's own sshd the transport is SSH by
+construction and the daemon never sees the value at all.
+
+Both directions are established WITHOUT the tool holding anything it minted. The
+container is verified by the host key it generated itself, whose public half the tool
+captured and pinned. The tool is authenticated by an operator-DECLARED identity that
+the environment's key collection authorises — the tool MUST NOT generate a private
+key for this, because a tool-minted key is a standing credential granting entry to
+every environment it deploys, which is a worse exposure than the delivery gap it
+would close. An undeclared identity is a refusal, never a fallback to a weaker
+channel. Public material (authorised keys, host fingerprints,
 non-secret configuration) MAY ride the deployment description, because it is public.
 
 Concretely, a secret MUST NOT be: inlined into the deployment description; written to
@@ -391,4 +420,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.4.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-24
+**Version**: 2.4.1 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-24

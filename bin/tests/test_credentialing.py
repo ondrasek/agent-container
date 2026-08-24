@@ -216,7 +216,11 @@ def test_stage_apikey_injection_ephemeral_target(wiz, tmp_path):
     by_name = {e[0]: e for e in entries}
     name, staged, target = by_name["apikey_anthropic"]
     assert target == f"{wiz.INJECT_APIKEY_DIR}/anthropic"
-    assert target.startswith("/run/")  # ephemeral, not a volume mount
+    # EPHEMERAL is the property that matters, not the literal /run prefix. Delivered
+    # secrets moved to /dev/shm because /run/agent-container is the runtime's
+    # root-owned mount point and delivery arrives as `dev` over SSH with no sudo.
+    # Both are tmpfs and die with the container; neither is a volume.
+    assert target.startswith("/dev/shm/") or target.startswith("/run/")
     assert "/home/dev/" not in target  # never a per-agent volume path
     assert staged == src.read_text()  # carried as a value, not a staged path
     # THE load-bearing half: no plaintext copy is left on disk anywhere.
@@ -903,42 +907,6 @@ def test_split_routes_by_target_not_by_config_name(wiz):
     assert [n for n, _c, _t in public] == ["apikey_looking_name"]
 
 
-def test_delivery_streams_values_on_stdin_never_argv(wiz, monkeypatch):
-    """A value on argv is world-readable through the process table."""
-    calls: list = []
-
-    def _fake_run(argv, **kw):
-        calls.append((argv, kw.get("input")))
-        return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-    monkeypatch.setattr(wiz.subprocess, "run", _fake_run)
-    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda h: ["docker"])
-    wiz.deliver_secrets("local", {}, "acme", [("/run/agent-container/apikeys/x", "sk-SECRET")])
-    assert calls, "nothing was delivered"
-    for argv, _stdin in calls:
-        assert "sk-SECRET" not in " ".join(argv), "secret appeared on argv"
-    assert any(stdin == b"sk-SECRET" for _a, stdin in calls), "value never reached stdin"
-
-
-def test_the_sentinel_is_written_last(wiz, monkeypatch):
-    """The container is BLOCKED on the sentinel, so writing it early would release
-    the wait onto a partial set — which from inside is indistinguishable from a
-    completed delivery."""
-    order: list = []
-
-    def _fake_run(argv, **kw):
-        order.append("sentinel" if ".delivered" in " ".join(argv) else "value")
-        return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-    monkeypatch.setattr(wiz.subprocess, "run", _fake_run)
-    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda h: ["docker"])
-    wiz.deliver_secrets(
-        "local", {}, "acme",
-        [("/run/agent-container/apikeys/a", "1"), ("/run/agent-container/apikeys/b", "2")],
-    )  # fmt: skip
-    assert order == ["value", "value", "sentinel"]
-
-
 def test_a_failed_value_never_releases_the_wait(wiz, monkeypatch):
     """If a value fails to land, the container must NOT be told delivery finished."""
     seen: list = []
@@ -982,3 +950,79 @@ def test_the_container_only_waits_when_there_is_something_to_wait_for(wiz, monke
     wiz.compose_up_exec("local", {"driver": "docker", "context": ""}, "acme",
                         tmp_path / "acme.env", [], None, [])  # fmt: skip
     assert "AGENT_CONTAINER_AWAIT_DELIVERY" not in (captured["env"] or {})
+
+
+def test_delivery_refuses_without_an_operator_declared_identity(wiz, monkeypatch):
+    """The tool must NOT mint a key to solve its own auth problem.
+
+    A tool-generated private key would be a standing credential on the operator's
+    disk granting entry to every environment it deploys — a worse exposure than the
+    delivery gap it would close. So an undeclared identity is a refusal with
+    instructions, not a silent fallback to a channel we cannot secure.
+    """
+    monkeypatch.setattr(wiz, "delivery_identity", lambda cwd=None: None)
+    ran: list = []
+    monkeypatch.setattr(wiz.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.deliver_secrets("local", {}, "acme", [("/run/x", "sk-SECRET")])
+    msg = str(e.value)
+    assert "delivery_identity" in msg and "will not generate a key" in msg
+    assert not ran, "attempted delivery with no identity"
+
+
+def test_delivery_uses_ssh_with_the_agent_disabled(wiz, monkeypatch, tmp_path):
+    """`-i` with IdentitiesOnly and IdentityAgent=none, and the TOOL-OWNED known_hosts.
+
+    An approval-gated agent key must never be able to satisfy this auth instead, and
+    the operator's own known_hosts is never touched (018).
+    """
+    ident = tmp_path / "id_delivery"
+    ident.write_text("KEY")
+    monkeypatch.setattr(wiz, "delivery_identity", lambda cwd=None: ident)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda h: "localhost")
+    monkeypatch.setattr(wiz, "port_for_name", lambda n: 2222)
+    monkeypatch.setattr(wiz, "query", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    seen: list = []
+
+    def _run(argv, **kw):
+        seen.append((argv, kw.get("input")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(wiz.subprocess, "run", _run)
+    wiz.deliver_secrets("local", {}, "acme", [("/run/agent-container/apikeys/a", "sk-SECRET")])
+    argv, stdin = seen[0]
+    assert argv[0].endswith("ssh")
+    assert "-i" in argv and str(ident) in argv
+    assert "IdentitiesOnly=yes" in argv and "IdentityAgent=none" in argv
+    assert f"UserKnownHostsFile={wiz.known_hosts_path('local')}" in argv
+    assert stdin == b"sk-SECRET"
+    assert "sk-SECRET" not in " ".join(argv)  # never on argv
+
+
+def test_the_sentinel_is_written_last_over_ssh(wiz, monkeypatch, tmp_path):
+    """Releasing the wait early would hand the container a partial set."""
+    ident = tmp_path / "id"
+    ident.write_text("K")
+    monkeypatch.setattr(wiz, "delivery_identity", lambda cwd=None: ident)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda h: "localhost")
+    monkeypatch.setattr(wiz, "port_for_name", lambda n: 2222)
+    monkeypatch.setattr(wiz, "query", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    order: list = []
+    monkeypatch.setattr(
+        wiz.subprocess, "run",
+        lambda argv, **kw: (
+            order.append("sentinel" if ".delivered" in " ".join(argv) else "value"),
+            subprocess.CompletedProcess(argv, 0, b"", b""),
+        )[1],
+    )  # fmt: skip
+    wiz.deliver_secrets("local", {}, "acme", [("/run/a", "1"), ("/run/b", "2")])
+    assert order == ["value", "value", "sentinel"]
+
+
+def test_delivery_identity_is_read_from_settings_and_absence_is_reported(wiz, tmp_path):
+    """A reader reports absence; the caller decides what it means (Principle VIII)."""
+    assert wiz.delivery_identity(tmp_path / "nowhere") is None
+    wiz.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (wiz.CONFIG_DIR / "settings.yaml").write_text("delivery_identity: ~/.ssh/id_automation\n")
+    got = wiz.delivery_identity(tmp_path / "nowhere")
+    assert got is not None and got.name == "id_automation" and "~" not in str(got)

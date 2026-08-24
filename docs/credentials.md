@@ -173,6 +173,53 @@ Nothing SSH-related is baked into the image. Three injection channels feed the
 
 Every channel above carries **public** keys only.
 
+### Secrets are delivered to the container, not described (Constitution IX)
+
+A provider API key never appears in the compose file that describes a deployment, and
+is never staged in a file for that description to reference. It is pushed **into the
+already-running container over SSH — the container's own sshd**, which is why sshd
+now runs in every mode including headless.
+
+**Not over the container runtime's channel**, even though that is often SSH too. The
+runtime's transport is whatever your context happens to be: `unix://` and `ssh://`
+are fine, `tcp://` is cleartext. The tool can only *check* that channel; it cannot
+provide it. Over the container's own sshd the transport is SSH by construction, and
+the daemon never sees the value.
+
+Both directions are established without the tool holding anything it minted:
+
+| Direction | How | From |
+|---|---|---|
+| Is this the right container? | its host key, generated inside it, public half captured and pinned | 018 |
+| May the tool log in? | an **operator-declared** identity the key collection authorises | 020 |
+
+**You must declare the identity** — the tool will not generate one, because a
+tool-minted private key is a standing credential granting entry to every environment
+it deploys:
+
+```yaml
+# ~/.config/agent-container/settings.yaml
+delivery_identity: ~/.ssh/id_automation
+```
+
+Put its **public** half in your key collection so environments admit it. Use a
+dedicated file-based key, not an approval-gated agent key: delivery runs unattended
+with `IdentitiesOnly=yes` and `IdentityAgent=none` precisely so an agent key can never
+silently satisfy the authentication instead.
+
+**With secrets declared and no identity, the deploy refuses** — it does not fall back
+to a weaker channel.
+
+Delivered values land on `/dev/shm` (tmpfs — ephemeral, never a volume) at mode 0400
+owned by `dev`. `/run/agent-container` could not be used: it is the runtime's own
+root-owned mount point, and delivery arrives as `dev` with no sudo.
+
+The container waits for delivery before consuming credentials, but **only when the
+tool says to expect it**, so a deployment declaring no secrets is unaffected. The
+completion sentinel is written last, after every value lands — releasing the wait
+early would hand the container a partial set that looks, from inside, exactly like a
+completed delivery.
+
 ### The key collection — declare devices once (Feature 020)
 
 An `authorized_keys` file at either config level is auto-injected into every

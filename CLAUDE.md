@@ -25,14 +25,14 @@ re-summarise them here.
 - **Run mechanism is compose** (v2), generated and run **on the target host**. `configs: {file:}` **is**
   a bind and fails over a remote context (measured); only `{content:}` is API-delivered — the 001/003
   lesson.
-- **Secrets go to the CONTAINER, never through its DESCRIPTION** (Constitution IX). Push over its own
-  SSH channel; a description is a PLAN outliving the need, so nothing secret may be inlined in it nor
-  staged for it. `configs: {file:}` is a daemon-side bind, **measured** not to cross; `{content:}`
-  crosses but is PUBLIC-only.
-- **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv, or
-  printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume. On-volume
-  `auth.json` is **operator-login only**; a `--task` is **not** a credential channel. **No private SSH
-  key is injected at all.**
+- **Secrets go to the CONTAINER over ITS OWN sshd** (Constitution IX) — not the runtime channel, whose
+  security is the operator's context, not ours. A description is a PLAN outliving the need: nothing
+  secret inlined in it nor staged for it. Auth is an operator-**declared** identity (`delivery_identity`);
+  the tool **never mints a key**. Undeclared ⇒ refuse. `configs: {file:}` is a daemon-side bind,
+  **measured** not to cross; `{content:}` crosses but is PUBLIC-only. sshd runs in **every** mode.
+- **Credentials are least-exposure (Constitution III).** Never baked, on argv, or printed; **never** on
+  a volume. On-volume `auth.json` is **operator-login only**; a `--task` is **not** a credential
+  channel. **No private SSH key is injected at all.**
 - **The supported-agent list is single-sourced** (`AGENTS`); tests pin completions + every Dockerfile.
   **Mirror any CLI surface change in both completions** — tests catch parity, not staleness.
 - **Defaults belong at the SURFACE** (Constitution VIII) — each **named**. A reader reports
@@ -52,12 +52,10 @@ re-summarise them here.
 - **The admit set is DECLARED; the region is REWRITTEN (020).** `authorized_keys` both levels, project
   **replaces** user; resolve+validate at the SURFACE. The container replaces a sentinel region each boot,
   preserving all outside it — a union can't revoke. Same idiom as `~/.ssh/config`, **opposite** rule;
-  markers matched by **prefix**. The tool creates no access it cannot withdraw. **Projected AND
-  observed**; stopped ⇒ `undetermined`, never empty.
-- **The inventory remembers what we CREATED; `panic` acts on it.** Durable, **flat**, capped by count
-  **not age**. `panic` enumerates from it, stops by **compose project label** (so does `stop` with no
-  local compose file), verifies by **observation**. **Unreachable ⇒ `undetermined`, never `stopped`**
-  and fails the run; an **unverified destroy writes no outcome**.
+  markers by **prefix**. No access the tool can't withdraw. **Projected AND observed**; stopped ⇒
+  `undetermined`.
+- **The inventory remembers what we CREATED; `panic` acts on it.** Verifies by **observation**;
+  **unreachable ⇒ `undetermined`, never `stopped`**; an **unverified destroy writes no outcome**.
 - **Observability is TWO LEGS, ONE PAYLOAD** (017). Local trail unconditional; export is `curl`,
   **write-time**, **fail-open**, **zero** deps — protocol only, **never** a backend package.
   `accepted` = *this endpoint accepted this record*, nothing more; **2xx is not acceptance**;
@@ -87,8 +85,8 @@ Never bake host-specific orchestration into the image.
 
 ## Conventions for future work
 
-- **Rootless by decision**: no `sudo`/root at runtime, sshd as `dev` on 2222. **Bake every system dep
-  at build — an agent never `apt install`s.**
+- **Rootless by decision**: no `sudo`/root at runtime, sshd as `dev` on 2222. **Bake every system dep at
+  build.**
 
 - **Commit-and-push** is a property of the agent config, not git hooks (bypassable).
 

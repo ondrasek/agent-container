@@ -6455,25 +6455,29 @@ def test_a_file_config_does_not_cross_to_a_daemon_that_cannot_see_it(acc):
 # --- Constitution IX: secrets delivered, not described -----------------------
 
 
-def test_an_api_key_reaches_the_container_without_entering_its_description(acc):
-    """The 003 `file:` defect, fixed — end to end, against the real runtime.
+def test_an_api_key_reaches_the_container_over_ssh_not_through_its_description(acc):
+    """The 003 `file:` defect, fixed — end to end, over the container's own sshd.
 
-    A discovered provider key must (a) NOT appear anywhere in the compose file that
-    describes the deployment, and (b) still arrive inside the container. Before this,
-    (b) was achieved by a `configs: {file:}` bind — which fails outright against a
-    daemon that cannot see the operator's filesystem — and it put the plaintext in a
-    0644 staged file that nothing ever deleted.
+    Three properties at once. The secret is ABSENT from the compose file that
+    describes the deployment and from every other file on the host side. It ARRIVES
+    inside the container. And it gets there over SSH to the container itself, so the
+    transport is encrypted by construction rather than inheriting whatever the
+    operator's docker context happens to be — a `tcp://` context would otherwise put
+    credential plaintext on the wire, and the tool can only check that channel, not
+    provide it.
     """
     cfg = _config_dir_of(acc.state_dir)
     cfg.mkdir(parents=True, exist_ok=True)
     secret = "sk-ant-ACCEPTANCE-SECRET"
     (cfg / "accix.anthropic.key").write_text(secret)
-    _, pub = _devkey(acc.work, "laptop")
+    # The delivery identity is the OPERATOR's, never minted by the tool; its public
+    # half goes in the collection so the environment admits it.
+    priv, pub = _devkey(acc.work, "delivery")
     (cfg / "authorized_keys").write_text(pub.read_text())
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {priv}\n")
 
     port = acc.up("accix")
 
-    # (a) absent from the description, and from every other file on the host side.
     compose = acc.state_dir / "agent-container" / "local" / "accix.compose.yaml"
     assert secret not in compose.read_text(), "the secret is in the deployment description"
     leaked = [
@@ -6483,13 +6487,27 @@ def test_an_api_key_reaches_the_container_without_entering_its_description(acc):
     ]
     assert leaked == [], f"plaintext staged on disk: {leaked}"
 
-    # (b) but it DID arrive, at the ephemeral target, readable only by dev.
-    priv = acc.work / "id_laptop"
-    got = _ssh(port, priv, "cat /run/agent-container/apikeys/anthropic")
+    got = _ssh(port, priv, "cat /dev/shm/agent-container/apikeys/anthropic")
     assert got.returncode == 0, got.stderr
     assert got.stdout.strip() == secret
-    mode = _ssh(port, priv, "stat -c '%a %U' /run/agent-container/apikeys/anthropic")
-    assert mode.stdout.strip() == "400 dev", f"delivered as {mode.stdout.strip()!r}"
+    mode = _ssh(port, priv, "stat -c %a /dev/shm/agent-container/apikeys/anthropic")
+    assert mode.stdout.strip() == "400", f"delivered at mode {mode.stdout.strip()!r}"
+
+
+def test_delivery_refuses_when_no_identity_is_declared(acc):
+    """No identity means REFUSE — never a silent fallback to a weaker channel.
+
+    The tool will not mint a key to solve its own authentication problem, so the
+    absence has to be surfaced as an error the operator can act on.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "accni.anthropic.key").write_text("sk-ant-NEEDS-IDENTITY")
+    r = acc.up("accni", wait=False)
+    assert r.returncode != 0
+    combined = r.stdout + r.stderr
+    assert "delivery_identity" in combined
+    assert "will not generate a key" in combined
 
 
 def test_sshd_is_available_in_headless_mode(acc):
