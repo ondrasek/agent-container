@@ -238,14 +238,29 @@ create a directory beneath it. This grants the AGENT nothing — it is the opera
 existing daemon access acting from outside, and under rootless podman the
 container's root is the operator's own uid.
 
-**Verified on both runtimes**: the delivery test passes under docker AND under the
+**Verified on BOTH runtimes, for the SSH channel**: the delivery test and the
+no-identity refusal both pass under docker and under the podman `lima` connection,
+asserting that the key is absent from the compose file and from every file under the
+state dir, and present inside the container at 0400 owned by `dev`.
+
+The first podman attempt failed on an unrelated image-build step (a nodesource apt
+fetch) and was reported as unverified rather than assumed fine; a retry passed. Worth
+noting only because "it failed once" and "it does not work" are different claims, and
+the commit that shipped this said the weaker one until the retry settled it.
+
+**Superseded note**: the delivery test passes under docker AND under the
 podman `lima` connection, asserting that the key is absent from the compose file and
 from every file under the state dir, and present inside the container at 0400 owned
 by `dev`.
 
-**Open, and recorded rather than smoothed over**: under the rootless-podman-over-Lima
-acceptance harness, `agent-container logs` returns rc=0 with **no output at all**, so
-a container's own log lines cannot be observed there. The headless-sshd assertion is
-therefore measured on docker and skipped — with that reason named — under podman. It
-is a harness observability gap, not evidence that sshd fails to start; worth closing
-because several other assertions could silently become unobservable the same way.
+**Still open, and recorded rather than smoothed over**: under the
+rootless-podman-over-Lima acceptance harness, `agent-container logs` returns rc=0 with
+**no output at all**, so a container's own log lines cannot be observed there. The
+headless-sshd assertion is therefore measured on docker and skipped — with that reason
+named — under podman. It is a harness observability gap, not evidence that sshd fails
+to start; worth closing because other assertions could silently become unobservable
+the same way.
+
+**Also open**: nothing constrains the scheme of a registered runtime context. That no
+longer affects secrets (they no longer use that channel at all), but a `tcp://`
+context would still carry every other API call in the clear.
