@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.38.0 (2026-08-24)
+
+### Documentation
+
+- Bring CLAUDE.md back under 2000 tokens
+  ([`33af795`](https://github.com/ondrasek/agent-container/commit/33af795ff0d4e0043613ffa6f7e81c4faf674baf))
+
+
 ## v0.37.0 (2026-08-23)
 
 ### Bug Fixes
