@@ -64,7 +64,7 @@ carry SSH, HTTPS, or both.
 The authorization an agent needs to reach its backend. Delivered file-by-default
 (`class=secret`, ephemeral), consumed per agent:
 
-| Agent | Tool-injected default (**always ephemeral**, FR-012) | Operator stored-auth (volume, **interactive only**) |
+| Agent | Tool-injected default (**own per-credential volume**, FR-012a — never a per-AGENT volume) | Operator stored-auth (agent volume, **interactive only**) |
 |-------|-------------------------------------------------------|------------------------------------------------------|
 | Claude Code | `apiKeyHelper` (in the fresh canonical `settings.json`) → `cat` the injected key at `INJECT_APIKEY_DIR`; the `~/.claude` volume never receives the key | interactive `/login` OAuth persists on `~/.claude` |
 | Codex | `CODEX_HOME` redirected to an **ephemeral** `/run` dir + `codex login --with-api-key` reading the injected file on **stdin** → `auth.json` in that ephemeral dir (or `OPENAI_API_KEY` in the in-container env if honored); the `-codex` volume is never written | interactive `codex login` persists on `~/.codex` |

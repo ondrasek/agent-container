@@ -389,13 +389,18 @@ favour of the source's mode. A 0600 staged key simply crash-looped the entrypoin
 ## Model/API credentials — file-first delivery (H1)
 
 An agent that cannot reach its model cannot work at all (US2). The tool delivers
-each agent's model/API credential **as a file by default** — and, crucially, the
-tool-injected credential is **ALWAYS ephemeral** (FR-006 / FR-012): it lands under
-`INJECT_APIKEY_DIR` = `/run/agent-container/apikeys/<provider>` and is **never**
-written onto a per-agent volume by the tool. This is the **H1 rule**: because
-some agents' native auth form is a file on their home volume, injecting a key by
-running a non-interactive `login` would persist it — so instead the entrypoint
-**redirects that agent's home** to an ephemeral `/run` dir for the injected mode.
+each agent's model/API credential **as a file**, on **its own volume**, one per
+credential (FR-012a): `/run/agent-container-secrets/apikey/<provider>/value`.
+
+It **persists**, deliberately — a container whose credentials died with it could not
+survive a reboot or a daemon restart, since nothing would be there to re-deliver them.
+Earlier versions of this document said the injected credential was "ALWAYS ephemeral"
+(FR-012); that was a misreading and is reversed. **What FR-012 was protecting still
+holds**: the credential is never written onto a per-**agent** volume (`-claude`,
+`-codex`, `-pi`). That is the **H1 rule** — some agents' native auth form is a file on
+their home volume, so a non-interactive `login` would persist it *there*, mixing
+tool-injected material with an operator's own stored authorization. The entrypoint
+**redirects that agent's home** instead.
 
 ### Convention-discovered key files (no flags)
 

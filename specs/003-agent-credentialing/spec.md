@@ -107,7 +107,7 @@ Because every secret is injected at runtime from the operator's machine and neve
 **Model/API credentials**
 
 - **FR-005**: The system MUST provision the **model/API credential** an agent needs to reach its backend, delivered as runtime-injected material, such that the agent can operate.
-- **FR-006**: Model/API credentials MUST be delivered **as files by default** and placed into the agent's environment **inside the container** only where an agent cannot consume a file; the credential MUST NOT be placed on any process command line nor written literally into the deployment description. **Tool-injected** delivery (file or in-container env) MUST be **ephemeral** — the injected credential is not written to a persistent per-agent volume by the tool (FR-012). Delivering it into an agent's own on-volume auth store on the tool's behalf (e.g. a non-interactive `login`) is therefore NOT a permitted default; that on-volume form is only the operator-initiated stored authorization below.
+- **FR-006**: Model/API credentials MUST be delivered **as files by default** and placed into the agent's environment **inside the container** only where an agent cannot consume a file; the credential MUST NOT be placed on any process command line nor written literally into the deployment description. **Tool-injected** delivery MUST NOT write the credential onto a per-**agent** volume (the `-claude`/`-codex`/`-pi` stores), which is what FR-012a preserves; it now persists on its **own** volume instead. Delivering it into an agent's own on-volume auth store on the tool's behalf (e.g. a non-interactive `login`) is therefore NOT a permitted default; that on-volume form is only the operator-initiated stored authorization below.
 
 **Configuration (non-secret)**
 
@@ -119,7 +119,29 @@ Because every secret is injected at runtime from the operator's machine and neve
 
 - **FR-010**: No secret MUST ever be **baked into an image layer**.
 - **FR-011**: No secret MUST ever appear on a **process command line**.
-- **FR-012**: No **tool-injected** secret MUST **rest in a host persistent volume**; injected secrets are delivered read-only and vanish with the container, leaving the operator's local copy as the sole durable copy. *Exception — operator-initiated stored authorization:* an operator may interactively authenticate an agent **inside** the container (e.g. its `login` flow), caching a session on the per-agent volume; this is the operator's own action on their own credential, not tool-injected material, and is explicitly outside this invariant (see the Model/API credential entity). The tool MUST NOT perform such persistence on the operator's behalf as a delivery default.
+- **FR-012a** *(supersedes FR-012, 2026-08-24)*: A tool-injected credential MUST **persist
+  on its own dedicated volume**, one per credential, named deterministically from the
+  environment and the credential ref. **Ephemerality was a misreading of FR-012's intent
+  and is reversed**: a container whose credentials died with it could not survive a
+  reboot, a daemon restart, or a `restart` policy, because nothing would be present to
+  re-deliver them — it would wait for a delivery nobody sends and come up unable to work.
+
+  What FR-012 was actually protecting is preserved and now stated separately. The
+  credential MUST NOT be written onto a per-**agent** volume (`-claude`, `-codex`, `-pi`),
+  because that conflates tool-injected material with an operator's own interactive
+  stored authorization, and an agent writing its home volume would capture it. A
+  dedicated per-credential volume keeps those distinct.
+
+  Persistence is conditional on RECONCILIATION, and the two MUST NOT be separated: every
+  deploy MUST remove the volume of a credential it no longer declares. Without that, the
+  declaration stops being the authority — the config would say a credential is gone while
+  the container still held it, which is the defect Feature 020 removed from
+  `authorized_keys`. The volume name is therefore the lifecycle handle, and the tool MUST
+  expose revocation itself (`creds rm`) rather than leaving `docker volume rm` as the
+  only route: the runtime cannot remove a volume that a running container holds, so
+  revoking through the runtime alone cannot take effect until a recreate.
+
+- **FR-012** *(SUPERSEDED 2026-08-24 — see FR-012a)*: No **tool-injected** secret MUST **rest in a host persistent volume**; injected secrets are delivered read-only and vanish with the container, leaving the operator's local copy as the sole durable copy. *Exception — operator-initiated stored authorization:* an operator may interactively authenticate an agent **inside** the container (e.g. its `login` flow), caching a session on the per-agent volume; this is the operator's own action on their own credential, not tool-injected material, and is explicitly outside this invariant (see the Model/API credential entity). The tool MUST NOT perform such persistence on the operator's behalf as a delivery default.
 - **FR-013**: Each secret MUST be delivered **only to the deployment that needs it** (no broader distribution).
 - **FR-014**: All injected material MUST be delivered to the target host **over the runtime context** so a remote deployment receives it (never a local-only reference that resolves empty remotely) — inherited from Feature 001.
 - **FR-015**: **Rotating** any secret MUST require only changing it on the operator's machine and redeploying; no baked or persisted copy may survive the rotation.

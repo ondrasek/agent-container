@@ -1,6 +1,24 @@
 <!--
 SYNC IMPACT REPORT
 ==================
+Version change: 2.4.1 → 2.5.0   (MINOR)
+
+- **Principle IX gained a PERSISTENCE clause.** Additive; the delivery rule is
+  unchanged. It previously forbade writing a secret "anywhere that outlives the
+  container's need for it", which read as a ban on persistence and was implemented that
+  way. The objection that settles it is operational: a container whose credentials died
+  with it cannot survive a reboot, a daemon restart, or a restart policy, because
+  nothing is present to re-deliver them — it waits for a delivery nobody sends and
+  comes up unable to work.
+- The clause pairs persistence with RECONCILIATION and forbids separating them: storage
+  that outlives the declaration lets the system hold a credential its configuration
+  says is gone, which is the `authorized_keys` union defect one layer down. Storage is
+  therefore per-secret and named, and the tool must expose withdrawal itself, because a
+  runtime cannot remove storage a running container holds.
+- Feature 003's FR-012 is superseded by FR-012a. What FR-012 actually protected — no
+  tool-injected secret on a per-AGENT volume, where it would mix with an operator's own
+  stored authorization — is preserved and now stated on its own.
+
 Version change: 2.4.0 → 2.4.1   (PATCH)
 
 - **Principle IX's MECHANISM corrected.** Its substance is unchanged; the channel it
@@ -344,9 +362,18 @@ channel. Public material (authorised keys, host fingerprints,
 non-secret configuration) MAY ride the deployment description, because it is public.
 
 Concretely, a secret MUST NOT be: inlined into the deployment description; written to
-a staging file that the description references; placed on argv; or written anywhere
-that outlives the container's need for it. It MUST be pushed to the running container
-and land only where that container reads it.
+a staging file that the description references; or placed on argv. It MUST be pushed to
+the running container and land only where that container reads it.
+
+Once delivered, a secret MAY and generally MUST **persist**, because a container that
+lost its credentials on restart could not survive a reboot, a daemon restart, or a
+restart policy — nothing would be present to re-deliver them. Persistence is
+conditional on RECONCILIATION and the two MUST NOT be separated: whatever holds a
+secret MUST be removed when the operator stops declaring it, or the declaration stops
+being the authority and the system can hold a credential its configuration says is
+gone. Storage MUST therefore be per-secret and named, so that one can be withdrawn
+without disturbing the others — and the tool MUST expose that withdrawal itself, since
+a runtime cannot remove storage a running container holds.
 
 **Rationale:** ratified after a wrong turn that this constitution had not ruled out.
 A compose `configs: {file:}` entry is materialised as a bind and resolved on the
@@ -420,4 +447,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.4.1 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-24
+**Version**: 2.5.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-24
