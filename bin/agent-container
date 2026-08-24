@@ -9800,6 +9800,80 @@ def delivery_identity(cwd: Path | None = None) -> Path | None:
     return Path(str(declared)).expanduser() if declared else None
 
 
+def _delivery_ssh_argv(host: str, identity: Path, address: str, port: int) -> list[str]:
+    """`ssh` argv for delivery and revocation — one definition, used by both.
+
+    Every option a literal argument: no `~/.ssh/config`, and the agent disabled, so an
+    approval-gated key can never silently satisfy this authentication instead. The
+    known_hosts is the TOOL's, never the operator's (018).
+
+    `accept-new` because the container has just generated its host key and the deploy
+    captures it, so there is nothing yet to compare against. A MISMATCH still refuses —
+    `accept-new` only ever adds a key that is absent.
+    """
+    return [
+        shutil.which("ssh") or "ssh",
+        "-i", str(identity),
+        "-o", "IdentitiesOnly=yes",
+        "-o", "IdentityAgent=none",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={known_hosts_path(host)}",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-p", str(port),
+        f"{DEFAULT_SSH_USER}@{address}",
+    ]  # fmt: skip
+
+
+def held_cred_refs(host_rec: dict, name: str) -> list[str]:
+    """The credential refs an environment currently HOLDS, from its volume names.
+
+    Derived from the volumes rather than from the config, because the two can differ
+    — which is the whole reason this is worth showing an operator.
+    """
+    pref = cred_volume_prefix(name)
+    out = []
+    for vol in existing_cred_volumes(host_rec, name):
+        slug = vol[len(pref) :]
+        kind, _, rest = slug.partition("-")
+        out.append(f"{kind}/{rest}" if rest else kind)
+    return out
+
+
+def revoke_cred(host: str, host_rec: dict, name: str, ref: str) -> tuple[bool, bool]:
+    """Revoke one credential: (deleted from the running container, volume removed).
+
+    Two acts, because either alone is incomplete. Deleting the VALUE takes effect on
+    a RUNNING container — which `docker volume rm` cannot do while the volume is in
+    use, and which is the case an operator actually cares about when revoking. And
+    removing the VOLUME stops it coming back on the next start.
+
+    Deletion goes through the in-container receiver, so the CLI names a credential and
+    never a path — the container keeps owning its own layout.
+    """
+    deleted = False
+    cname = container_name(name)
+    base = driver_runtime_argv(host_rec)
+    if runtime_container_exists(base, cname):
+        identity = delivery_identity()
+        if identity is not None and identity.is_file():
+            argv = _delivery_ssh_argv(
+                host, identity, driver_reachable_address(host_rec), port_for_name(name)
+            )
+            r = query([*argv, RECEIVE_SECRET_BIN, "-r", ref], timeout=30)
+            deleted = r.returncode == 0
+        if not deleted:
+            # Say it plainly: the value is STILL LIVE inside a running container, and
+            # the operator's next step differs depending on that.
+            warn(
+                f"could not delete '{ref}' inside the running {cname} — the value is "
+                f"still live there until the environment is recreated"
+            )
+    vol = cred_volume_name(name, ref)
+    r = query(base + ["volume", "rm", vol])
+    return deleted, r.returncode == 0
+
+
 def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
     """Hand the freshly-mounted credential volumes to `dev`.
 
@@ -9870,18 +9944,7 @@ def deliver_secrets(
         )
     address = driver_reachable_address(host_rec)
     ssh_port = port if port is not None else port_for_name(name)
-    argv = [
-        shutil.which("ssh") or "ssh",
-        "-i", str(identity),
-        "-o", "IdentitiesOnly=yes",
-        "-o", "IdentityAgent=none",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={known_hosts_path(host)}",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
-        "-p", str(ssh_port),
-        f"{DEFAULT_SSH_USER}@{address}",
-    ]  # fmt: skip
+    argv = _delivery_ssh_argv(host, identity, address, ssh_port)
     deadline = time.monotonic() + 90
     while True:  # sshd starts early now, but "early" is not "already listening"
         probe = query([*argv, "true"], timeout=20)
@@ -17215,6 +17278,102 @@ def up(
         role=spec.role,
         workspace=spec.workspace,
     )
+
+
+creds_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "The credentials an environment HOLDS — list them, revoke them. Injecting is "
+        "automatic (a `<name>.<provider>.key` file is discovered, no flag), so this "
+        "group exists for the other direction: revoking through the tool rather than "
+        "through `docker volume rm`, which works but leaks the abstraction."
+    ),
+)
+app.add_typer(creds_app, name="creds")
+
+
+@creds_app.command("ls")
+def creds_ls(
+    name: str = typer.Argument(..., help="Environment short name."),
+    host: str | None = typer.Option(None, "--host", help="Host the environment runs on."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """What credentials does this environment hold, and does that match the config?
+
+    Read from the VOLUMES, not from the config, because the two can differ — and that
+    difference is the thing worth showing. A credential still held but no longer
+    declared will be pruned on the next deploy; one declared but not yet held has not
+    been delivered.
+    """
+    set_json_mode(as_json)
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    held = held_cred_refs(host_rec, name)
+    declared = [f"apikey/{p}" for p in sorted(discover_apikey_files(name))]
+    if not held and not declared:
+        log(f"{name}: no credentials")
+        return
+    for ref in sorted(set(held) | set(declared)):
+        if ref in held and ref in declared:
+            state = "held, declared"
+        elif ref in held:
+            state = "held, NO LONGER DECLARED — removed on the next deploy"
+        else:
+            state = "declared, not yet delivered"
+        log(f"  {ref}  [{state}]")
+
+
+@creds_app.command("rm")
+def creds_rm(
+    name: str = typer.Argument(..., help="Environment short name."),
+    ref: str | None = typer.Argument(None, help="Credential ref, e.g. apikey/anthropic."),
+    all_creds: bool = typer.Option(False, "--all", help="Revoke every credential it holds."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation."),
+    host: str | None = typer.Option(None, "--host", help="Host the environment runs on."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Revoke a credential: delete it from the running environment AND drop its volume.
+
+    Both, because either alone is incomplete — deleting the value takes effect on a
+    RUNNING environment, and dropping the volume stops it coming back on restart.
+    """
+    set_json_mode(as_json)
+    validate_name(name)
+    if not ref and not all_creds:
+        die("creds rm: name a credential (e.g. apikey/anthropic) or pass --all")
+    host_name, host_rec = resolve_deploy_host(host)
+    held = held_cred_refs(host_rec, name)
+    # Narrowed, not cast: `ref` is optional on the command line and the guard above
+    # already rejected the both-absent case, but the type has to say so too.
+    targets: list[str] = held if all_creds else [ref] if ref else []
+    missing = [r for r in targets if r not in held]
+    if missing:
+        die(f"{name} does not hold: {', '.join(missing)} (see: agent-container creds ls {name})")
+    if not targets:
+        log(f"{name}: no credentials to revoke")
+        return
+    if not yes:
+        if not sys.stdin.isatty():
+            die("refusing to revoke without -y/--yes on a non-TTY")
+        if not questionary.confirm(
+            f"revoke {len(targets)} credential(s) from {name} ({', '.join(targets)})?",
+            default=False,
+        ).ask():
+            log("aborted")
+            return
+    still_declared = {f"apikey/{p}" for p in discover_apikey_files(name)}
+    for r in targets:
+        deleted, dropped = revoke_cred(host_name, host_rec, name, r)
+        log(f"revoked {r}: {'deleted in-container' if deleted else 'not deleted in-container'}, "
+            f"{'volume removed' if dropped else 'volume NOT removed'}")  # fmt: skip
+        if r in still_declared:
+            # Otherwise the next deploy silently puts it back and the revocation looks
+            # like it did not work.
+            warn(
+                f"{name} still DECLARES {r} — it returns on the next deploy. Remove the "
+                f"source file to make this permanent: {discover_apikey_files(name).get(r.split('/')[-1], '')}"
+            )
+    emit_action("creds-rm", name=name)
 
 
 keys_app = typer.Typer(

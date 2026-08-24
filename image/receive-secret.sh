@@ -16,7 +16,13 @@ SECRETS_DIR="${AGENT_CONTAINER_SECRETS_DIR:-/run/agent-container-secrets}"
 
 die() { printf 'receive-secret: %s\n' "$*" >&2; exit 1; }
 
-[[ $# -eq 1 ]] || die "usage: agent-container-receive-secret <kind>/<name>"
+# `-r` REMOVES instead of storing. Revocation goes through the same script as
+# delivery so the container keeps owning its layout: the CLI names a credential, it
+# does not name a path. Deleting the value takes effect on a RUNNING container, which
+# `docker volume rm` cannot do while the volume is in use.
+remove=0
+if [[ "${1:-}" == "-r" ]]; then remove=1; shift; fi
+[[ $# -eq 1 ]] || die "usage: agent-container-receive-secret [-r] <kind>/<name>"
 ref="$1"
 
 # A strict charset, anchored, with no '.' at all — so '..' cannot appear and the ref
@@ -34,6 +40,11 @@ esac
 # directory, so the value lives in a file inside it. That mount point is also the
 # lifecycle handle — `docker volume rm` on it revokes exactly this one credential.
 target="${SECRETS_DIR}/${ref}/value"
+
+if ((remove)); then
+    rm -f "${target}"
+    exit 0
+fi
 umask 077
 mkdir -p "$(dirname "${target}")"
 

@@ -230,10 +230,28 @@ would be present to re-deliver them. So each credential gets its own volume:
 agent-container-<name>-cred-apikey-anthropic   ->  …/apikey/anthropic/value
 ```
 
-The **name is the lifecycle handle**. `docker volume rm
-agent-container-acme-cred-apikey-anthropic` revokes exactly one credential and touches
-nothing else — not the `ssh` volume, not the other credentials. `--purge` and `wipe`
-find them by prefix, so teardown still removes everything.
+**Revoke through the CLI:**
+
+```sh
+agent-container creds ls acme                        # what it holds, and whether config agrees
+agent-container creds rm acme apikey/anthropic       # revoke one
+agent-container creds rm acme --all
+```
+
+`creds rm` does **both halves**: it deletes the value inside the **running**
+environment (so revocation takes effect now, without a recreate) and drops the volume
+(so it does not come back on restart). If the credential is still declared in your
+config it says so — otherwise the next deploy would silently put it back and the
+revocation would look like it had failed.
+
+`docker volume rm agent-container-acme-cred-apikey-anthropic` also works, and the
+naming is deliberate so it can. But it cannot take effect while the container is
+running, because the volume is in use. Prefer `creds rm`.
+
+`creds ls` reads the **volumes**, not the config, because the two can differ — a
+credential still held but no longer declared is exactly what you need to see.
+`--purge` and `wipe` find these volumes by prefix, so teardown still removes
+everything.
 
 **Persistence is only safe because every deploy reconciles.** A volume outlives the
 container, so without pruning, a credential you stopped declaring would still be

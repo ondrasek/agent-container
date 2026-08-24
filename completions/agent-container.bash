@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys down purge wipe list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys creds down purge wipe list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -203,6 +203,25 @@ _agent_container() {
             if [[ "${cur}" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--driver --docker-context --connection --address --default --json" -- "${cur}") )
             fi
+            ;;
+        creds)
+            # A GROUP (ls/rm), mirroring `keys` and `ssh-key`.
+            local csub="" c1
+            for (( c1 = i + 1; c1 < cword; c1++ )); do
+                case "${words[c1]}" in
+                    -*) ;;
+                    *) csub="${words[c1]}"; break ;;
+                esac
+            done
+            if [[ -z "${csub}" ]]; then
+                COMPREPLY=( $(compgen -W "ls rm" -- "${cur}") )
+                return 0
+            fi
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--host --json --all -y --yes" -- "${cur}") )
+                return 0
+            fi
+            __agent_container_add_names __agent_container_names_local
             ;;
         keys)
             # A GROUP since Feature 020 (add/show/ls), mirroring ssh-key. Completing a

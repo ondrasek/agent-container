@@ -118,6 +118,7 @@ _agent-container() {
         'stop:Stop a container, keeping it and its volumes'
         'start:Start a previously stopped container'
         'keys:The keys an environment admits — grant, show, list'
+        'creds:The credentials an environment holds — list, revoke'
         'down:Stop and remove a container'
         'purge:Stop, remove, and delete all per-container volumes'
         'wipe:Remove the container, its volumes, and the locally-built image'
@@ -188,6 +189,16 @@ _agent-container() {
                         '--address[Attach address override]:address:' \
                         '--default[Make this the default deploy target]' \
                         '--json[Emit machine-readable JSON]'
+                    ;;
+                creds)
+                    # A GROUP (ls/rm), mirroring `keys` and `ssh-key`.
+                    _arguments '1:command:(ls rm)' \
+                        '--host[Host the environment runs on]:host:' \
+                        '--all[Revoke every credential]' \
+                        '(-y --yes)'{-y,--yes}'[Skip the confirmation]' \
+                        '--json[Emit machine-readable JSON]' \
+                        '*:container:__agent_container_names_local'
+                    return 0
                     ;;
                 keys)
                     # A GROUP since Feature 020 (add/show/ls), mirroring ssh-key.

@@ -1153,3 +1153,63 @@ def test_reconcile_with_nothing_declared_removes_them_all(wiz, monkeypatch):
         lambda argv, **k: subprocess.CompletedProcess(argv, 0, vol if "ls" in argv else "", ""),
     )  # fmt: skip
     assert wiz.reconcile_cred_volumes({"driver": "docker", "context": ""}, "acme", []) == [vol]
+
+
+# --- `creds` — revoking through the tool, not through the runtime -------------
+
+
+def test_held_refs_come_from_the_volumes_not_the_config(wiz, monkeypatch):
+    """Read from the VOLUMES, because the two can differ — and that is the point.
+
+    A credential still held but no longer declared is exactly what an operator needs
+    to see; asking the config would only ever confirm the config.
+    """
+    vol = wiz.cred_volume_name("acme", "apikey/anthropic")
+    monkeypatch.setattr(
+        wiz, "query",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, vol if "ls" in argv else "", ""),
+    )  # fmt: skip
+    assert wiz.held_cred_refs({"driver": "docker", "context": ""}, "acme") == ["apikey/anthropic"]
+
+
+def test_revoke_deletes_in_the_running_container_and_drops_the_volume(wiz, monkeypatch, tmp_path):
+    """BOTH, because either alone is incomplete.
+
+    Deleting the value takes effect on a RUNNING environment — which `docker volume
+    rm` cannot do while the volume is in use, and which is the case an operator
+    actually cares about. Dropping the volume stops it coming back on restart.
+    """
+    ident = tmp_path / "id"
+    ident.write_text("K")
+    monkeypatch.setattr(wiz, "delivery_identity", lambda cwd=None: ident)
+    monkeypatch.setattr(wiz, "driver_reachable_address", lambda h: "localhost")
+    monkeypatch.setattr(wiz, "port_for_name", lambda n: 2222)
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *a, **k: True)
+    seen: list = []
+
+    def _q(argv, **k):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(wiz, "query", _q)
+    deleted, dropped = wiz.revoke_cred("local", {"driver": "docker", "context": ""},
+                                       "acme", "apikey/anthropic")  # fmt: skip
+    assert deleted and dropped
+    # Deletion goes through the in-container receiver: the CLI names a CREDENTIAL,
+    # never a path, so the container keeps owning its layout.
+    assert any(a[-3:] == [wiz.RECEIVE_SECRET_BIN, "-r", "apikey/anthropic"] for a in seen)
+    assert any(a[-2:] == ["volume", "rm"] or "rm" in a for a in seen)
+
+
+def test_revoke_says_so_when_it_cannot_delete_inside_a_running_container(wiz, monkeypatch):
+    """A value still live in a running container must not read as a clean revocation."""
+    monkeypatch.setattr(wiz, "delivery_identity", lambda cwd=None: None)
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda *a, **k: True)
+    monkeypatch.setattr(
+        wiz, "query", lambda argv, **k: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+    warned: list = []
+    monkeypatch.setattr(wiz, "warn", lambda m: warned.append(m))
+    deleted, _ = wiz.revoke_cred("local", {"driver": "docker", "context": ""}, "acme", "apikey/x")
+    assert deleted is False
+    assert any("still live" in w for w in warned)

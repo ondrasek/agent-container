@@ -6639,3 +6639,57 @@ def test_undeclaring_a_credential_removes_its_volume(acc):
     acc.down("accrev")
     acc.up("accrev", wait=False)
     assert vol not in _volumes(), "an undeclared credential kept its volume"
+
+
+def test_creds_ls_and_rm_revoke_a_live_credential_through_the_cli(acc):
+    """Revoking through the TOOL, not through `docker volume rm`.
+
+    `docker volume rm` works but leaks the abstraction — and it cannot take effect on
+    a running container, because the volume is in use. `creds rm` does both halves:
+    deletes the value inside the running environment (immediate) and drops the volume
+    (so it does not come back on restart).
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    secret = "sk-ant-REVOKE-ME"
+    keyfile = cfg / "accrm.anthropic.key"
+    keyfile.write_text(secret)
+    priv, pub = _devkey(acc.work, "delivery")
+    (cfg / "authorized_keys").write_text(pub.read_text())
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {priv}\n")
+
+    port = acc.up("accrm")
+    path = "/run/agent-container-secrets/apikey/anthropic/value"
+    assert _ssh(port, priv, f"cat {path}").stdout.strip() == secret
+
+    listed = acc.cli(["creds", "ls", "accrm"])
+    assert "apikey/anthropic" in listed.stdout + listed.stderr
+
+    out = acc.cli(["creds", "rm", "accrm", "apikey/anthropic", "-y"])
+    combined = out.stdout + out.stderr
+    assert out.returncode == 0, combined
+    assert "revoked apikey/anthropic" in combined
+    # Still declared in config, so the tool must SAY it will come back — otherwise the
+    # revocation looks permanent and the next deploy silently undoes it.
+    assert "still DECLARES" in combined
+
+    # Gone from the RUNNING container, without a recreate.
+    gone = _ssh(port, priv, f"cat {path}")
+    assert gone.returncode != 0, "the value is still readable after revocation"
+
+
+def test_creds_ls_shows_a_credential_that_is_held_but_no_longer_declared(acc):
+    """The drift an operator needs to see: held, but the config stopped naming it."""
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    keyfile = cfg / "accdrift2.anthropic.key"
+    keyfile.write_text("sk-ant-DRIFT")
+    priv, pub = _devkey(acc.work, "delivery")
+    (cfg / "authorized_keys").write_text(pub.read_text())
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {priv}\n")
+
+    acc.up("accdrift2")
+    keyfile.unlink()  # stop declaring it, but do NOT redeploy
+    listed = acc.cli(["creds", "ls", "accdrift2"])
+    combined = listed.stdout + listed.stderr
+    assert "NO LONGER DECLARED" in combined, combined
