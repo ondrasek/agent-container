@@ -2,6 +2,46 @@
 
 <!-- version list -->
 
+## v0.39.0 (2026-08-24)
+
+### Bug Fixes
+
+- **credentials**: Deliver secrets over the container's own sshd
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`04e2aae`](https://github.com/ondrasek/agent-container/commit/04e2aaed0e659c9a433d6ca4bcb6ef108a5b6744))
+
+- **credentials**: Rotation, config refresh, and compose interpolation
+  ([`93143b5`](https://github.com/ondrasek/agent-container/commit/93143b53379ab32b880374699d823ab6077f6b36))
+
+### Documentation
+
+- Credentials persist — restate FR-012, add Principle IX's persistence clause
+  ([`78de32a`](https://github.com/ondrasek/agent-container/commit/78de32ac2c36de5d9662f4e2e5488c2d3cefcfd2))
+
+- **creds**: Flag cleartext runtime endpoints, and refresh 020's stale artifacts
+  ([`31cab95`](https://github.com/ondrasek/agent-container/commit/31cab95b6f7e6034dff730a5b7aa5554eb93cd10))
+
+- **keys**: Record that credentials must PERSIST, reversing my ephemerality argument
+  ([`c7d264c`](https://github.com/ondrasek/agent-container/commit/c7d264ceccc22e5c42b86ec590e0c249bd585682))
+
+- **keys**: The SSH delivery path is verified on podman too
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`9d43fdd`](https://github.com/ondrasek/agent-container/commit/9d43fddd15b1f4d0a15e06ed8b8665e8a705ebc3))
+
+### Features
+
+- **credentials**: Persist each credential on its own volume
+  ([`75c302f`](https://github.com/ondrasek/agent-container/commit/75c302f22d79e40a957ad163e69d651eac7cc664))
+
+- **creds**: Revoke credentials through the CLI, not the runtime
+  ([`c0a9917`](https://github.com/ondrasek/agent-container/commit/c0a9917bbd77c82ba35ed56a4bb5cc58238001e5))
+
+### Refactoring
+
+- **credentials**: Let the container decide where secrets belong
+  ([`8fa954b`](https://github.com/ondrasek/agent-container/commit/8fa954be4a7c6a307359b9f0c39f8e549ca95955))
+
+
 ## v0.38.0 (2026-08-24)
 
 ### Documentation
