@@ -25,10 +25,14 @@ re-summarise them here.
 - **Run mechanism is compose** (v2), generated and run **on the target host**. `configs: {file:}` **is**
   a bind and fails over a remote context (measured); only `{content:}` is API-delivered — the 001/003
   lesson.
+- **Secrets go to the CONTAINER, never through its DESCRIPTION** (Constitution IX). Push over its own
+  SSH channel; a description is a PLAN that outlives the need, so nothing secret may be inlined in it
+  or staged for it to reference. `configs: {file:}` is a daemon-side bind, **measured** not to cross;
+  `{content:}` crosses but is for PUBLIC data only.
 - **Credentials are runtime-injected, least-exposure (Constitution III).** Never baked, on argv, or
-  printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume; a missing
-  referenced file must `die` **before** compose. On-volume `auth.json` is **operator-login only**; a
-  `--task` is **not** a credential channel. **No private SSH key is injected at all** (see below).
+  printed. Tool-injected secrets land under `/run/agent-container/…`, **never** on a volume. On-volume
+  `auth.json` is **operator-login only**; a `--task` is **not** a credential channel. **No private SSH
+  key is injected at all.**
 - **The supported-agent list is single-sourced** (`AGENTS`); tests pin completions + every Dockerfile.
   **Mirror any CLI surface change in both completions** — tests catch parity, not staleness.
 - **Defaults belong at the SURFACE** (Constitution VIII) — each **named**. A reader reports
@@ -63,8 +67,6 @@ re-summarise them here.
   agents** but it DOES need a runtime client. Passphrase in-container, printed **once**, **no
   recovery**; the authorised key **is** the boundary, `revoke` the only narrowing. `panic` from inside
   **excludes itself and says so**. Role **inheritable**, provenance **persisted**.
-- **`doctor` is read-only BY COMPOSITION** — never reaches a writer (a test walks the call graph);
-  `unknown` **never exits 1**; a credential is checked by DECLARATION, never resolved.
 - **Every substantive merge to `main` is a release.** python-semantic-release bumps from Conventional
   Commits (`feat`→minor, `fix`→patch, **breaking→minor pre-1.0**) — so a breaking change must SAY so in
   the body; the version won't.

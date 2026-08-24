@@ -1,6 +1,34 @@
 <!--
 SYNC IMPACT REPORT
 ==================
+Version change: 2.3.0 → 2.4.0   (MINOR)
+
+- **Added Principle IX — Secrets Travel to the Container, Not Through Its
+  Description.** MINOR: a new principle, additive; Principle III is unchanged and
+  now cross-references IX as its application to one recurring question.
+- Ratified after a wrong turn that came within one commit of shipping, and the
+  sequence matters more than the conclusion. Feature 020 MEASURED that a compose
+  `configs: {file:}` entry is a bind resolved DAEMON-side, so it cannot reach a
+  daemon that does not share the operator's filesystem. Correct finding. The repair
+  chosen was to inline the material instead — which fixed reachability by writing
+  every credential, API keys included, into the file that describes the deployment:
+  kept as its record, parsed by several code paths, read long after the credential
+  was needed.
+- Each step looked like an improvement on the last, and the change even TIGHTENED
+  the mode (0600, replacing per-credential 0644 staged copies), which made it read
+  as a security gain. It was a functional bug traded for a durable exposure.
+- The error was treating credential delivery as a property of the DESCRIPTION. A
+  deployment description is a plan: written before anything exists, kept afterwards,
+  and read by whatever wants to know what was deployed. The container is a running
+  peer with its own generated key pair and its own authenticated channel — which
+  needs no daemon-visible file, and so answers the very problem that started this.
+- Consequence: secrets are pushed to the running container over SSH. Public material
+  (authorised keys, host fingerprints, non-secret config) may still ride the
+  description, because it is public. The inlining change was REVERTED, not shipped;
+  the `file:` defect for 003's injected credentials therefore remains open and is
+  recorded in `specs/020-key-collection/research.md` and the threat model rather
+  than being closed the wrong way.
+
 Version change: 2.2.0 → 2.3.0   (MINOR)
 
 - **Added Principle VIII — Defaults Belong at the Surface.** MINOR: a new
@@ -193,6 +221,10 @@ scope and reach, even against convenience.
 narrow exposure shrinks both the blast radius of a leak and the number of places
 one can begin.
 
+Principle IX is this principle applied to one recurring question — *how* a secret
+reaches a container — because "no more widely than its use demands" was not specific
+enough to rule out a mechanism that looked like a narrowing and was not.
+
 ### IV. Deterministic Identity
 
 Many containers coexist on one host as independent, non-colliding instances.
@@ -273,6 +305,40 @@ would have read a complete-looking listing with a host silently missing. Nothing
 was broken except a policy nobody could see. Naming and surfacing defaults also
 makes them reviewable: what an operator can find, they can question.
 
+### IX. Secrets Travel to the Container, Not Through Its Description
+
+A container's deployment description — the compose model, its generated file, and
+anything else the tool writes to plan a deployment — MUST NOT carry secret material.
+Secrets are DELIVERED to a container that is already running, over an authenticated,
+encrypted channel to that container: the SSH service it exposes, using the key pair
+it generated for itself. Public material (authorised keys, host fingerprints,
+non-secret configuration) MAY ride the deployment description, because it is public.
+
+Concretely, a secret MUST NOT be: inlined into the deployment description; written to
+a staging file that the description references; placed on argv; or written anywhere
+that outlives the container's need for it. It MUST be pushed to the running container
+and land only where that container reads it.
+
+**Rationale:** ratified after a wrong turn that this constitution had not ruled out.
+A compose `configs: {file:}` entry is materialised as a bind and resolved on the
+DAEMON side, so it cannot reach a daemon that does not share the operator's
+filesystem — measured, not assumed. The obvious repair was to inline the material
+instead, which fixes reachability by writing every credential into a file that
+describes the deployment, persists as its record, is parsed by several code paths,
+and is read long after the credential was needed. It trades a functional bug for a
+durable exposure, and it was *nearly* shipped because each step looked like an
+improvement on the one before.
+
+The error was treating delivery as a property of the DESCRIPTION. A deployment
+description is a plan: it is written before anything exists, kept afterwards, and
+read by whatever wants to know what was deployed. Nothing with that lifetime should
+hold a secret. The container, by contrast, is a running peer with its own identity
+and its own authenticated channel — reachable without the daemon seeing any local
+file, which is what made the original mechanism fail. Delivering over that channel
+is both the more secure answer and the more portable one, and the two are not in
+tension here: the same property that keeps the secret out of the plan is what lets it
+reach a daemon that shares nothing.
+
 ## Platform & Interface Constraints
 
 - **Editor-agnostic, SSH + tmux only.** The canonical attach path is
@@ -325,4 +391,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.3.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-21
+**Version**: 2.4.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-24
