@@ -2,6 +2,67 @@
 
 <!-- version list -->
 
+## v0.37.0 (2026-08-23)
+
+### Bug Fixes
+
+- **compose**: Inline the admit set instead of referencing a staged path
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`67b67be`](https://github.com/ondrasek/agent-container/commit/67b67bef35988a38f705a905debb7c99a29de27d))
+
+### Code Style
+
+- **compose**: Let ruff collapse the inlined config dict
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`5132bbf`](https://github.com/ondrasek/agent-container/commit/5132bbf069bdfdc8d9edf4bc02a0b7fbc38c726c))
+
+### Documentation
+
+- **keys**: Close the remaining analyze findings for 020
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`7c20349`](https://github.com/ondrasek/agent-container/commit/7c203495fd82a83252fcff0571320f93712fe31b))
+
+- **keys**: Close the second analyze round for 020
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`6fc5418`](https://github.com/ondrasek/agent-container/commit/6fc5418d9ee933c5fb42cad3c36c7d2bbfdf2f69))
+
+- **keys**: Correct a task I marked done that was not
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`5a85651`](https://github.com/ondrasek/agent-container/commit/5a856516d53af1e6b2b18d89f1d61e02d6c9569e))
+
+- **keys**: Document the collection and reconcile the threat model
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`5780a8b`](https://github.com/ondrasek/agent-container/commit/5780a8bd3de37ddd81312a98f063b6baee57ab8a))
+
+- **keys**: Resolve the readability item by relocating mechanism
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`184a228`](https://github.com/ondrasek/agent-container/commit/184a22817b0a3cc7b1c2291140841b2303915984))
+
+### Features
+
+- **keys**: Keys becomes a group; grants are recreate-scoped
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`51a90f4`](https://github.com/ondrasek/agent-container/commit/51a90f43685fea6386a91d6dab211995da057e75))
+
+- **keys**: Replace the authorized_keys union with a managed region
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`c21ea83`](https://github.com/ondrasek/agent-container/commit/c21ea83c3165eb4bf12cdaad6d034e74ad093ba5))
+
+- **keys**: Resolve a public-key collection at the CLI surface
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`66da9ce`](https://github.com/ondrasek/agent-container/commit/66da9cead9339f45e942e44ad480133682b162c5))
+
+### Testing
+
+- **keys**: Invert the last union assertion, and pin C20
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`9feadc1`](https://github.com/ondrasek/agent-container/commit/9feadc15cd270f806191afe37dce913352dc46db))
+
+- **keys**: Prove the collection end to end, and fix a misplaced call
+  ([#020](https://github.com/ondrasek/agent-container/pull/20),
+  [`fc292d1`](https://github.com/ondrasek/agent-container/commit/fc292d13eb8faa63bf62fe0328af162ac8390f0d))
+
+
 ## v0.36.0 (2026-08-23)
 
 ### Documentation
