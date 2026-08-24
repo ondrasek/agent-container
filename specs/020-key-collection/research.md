@@ -264,3 +264,52 @@ the same way.
 **Also open**: nothing constrains the scheme of a registered runtime context. That no
 longer affects secrets (they no longer use that channel at all), but a `tcp://`
 context would still carry every other API call in the clear.
+
+
+---
+
+## R8 — Credentials PERSIST. FR-012's "always ephemeral" was a misreading
+
+**Decided by the operator, against what I argued.** I defended ephemerality by citing
+Feature 003's FR-012, and the objection that settles it is operational, not
+philosophical: **a container whose credentials die with it cannot survive a restart.**
+A host reboot, a daemon restart, or `restart: unless-stopped` brings the container back
+with no CLI present to re-deliver — so it would wait for a delivery nobody sends, time
+out, and come up broken. Re-delivering on `start` only helps when the CLI is the thing
+doing the restarting, which is the minority of restarts that matter.
+
+Two of my supporting arguments were also wrong, and are retracted here so they are not
+re-derived:
+
+1. *"Removal becomes `--purge`, which destroys the container's SSH identity."* False. A
+   credential on its own volume is removable with `docker volume rm` and never touches
+   the `ssh` volume.
+2. *"On `/run` the plaintext never reaches disk."* False, and measured false: `/run` is
+   not a tmpfs in this image, it is the container's overlay writable layer. The
+   property was lifetime, not medium, and I wrote it as though it were both.
+
+**The design, which follows from naming (Principle IV).** One volume per credential:
+`agent-container-<name>-cred-<kind>-<slug>`. That gives all three properties at once:
+
+- **Survives** restarts, reboots and daemon failures, because it is a volume.
+- **Independently revocable**: `docker volume rm agent-container-acme-cred-apikey-anthropic`
+  removes exactly one credential and nothing else.
+- **Enumerable by prefix**, which is what keeps the DECLARATION authoritative: on each
+  deploy the tool reconciles — a credential no longer declared has its volume removed.
+  Without that step persistence reintroduces the union bug this whole feature exists to
+  remove (config says gone, container still holds it), so **reconciliation is not
+  optional**; it is what makes persistence safe. Same lesson as the managed region:
+  replace the set, do not append to it.
+
+**Constitution IX is unaffected.** It governs how a secret TRAVELS — to the running
+container, never through its description — not how long it lives once delivered. The
+receiver script already owns the layout, so persisting to a volume is a change inside
+the receiver, not to the channel.
+
+**Not yet implemented.** What it touches: `per_container_volumes` (the fixed
+ten-volume identity contract — credential volumes are dynamic and belong beside it, not
+in it), `--purge` and `wipe` (must enumerate the `-cred-` prefix, which is exactly the
+"manage lifecycle by naming" the operator proposed), the compose model (declare and
+mount the volumes it delivers to), the receiver (write into the mounted volume), the
+entrypoint (read from there, and stop waiting for a delivery that already persisted),
+and FR-012 itself, which needs restating rather than silently contradicting.
