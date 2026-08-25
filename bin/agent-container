@@ -11358,7 +11358,16 @@ def do_stop(name: str, host: str | None = None) -> None:
 
 
 def created_with_admit_set(host: str, name: str) -> list[str] | None:
-    """The admit set the deployment was CREATED WITH, or None if unknowable.
+    """The admit set the deployment was CREATED WITH; None means NO SUCH DEPLOYMENT.
+
+    Three states, and the caller needs all three (Constitution VIII):
+      None       -> no deployment record on this host. Nothing was created.
+      []         -> created, admitting NOBODY. A record exists and names no keys.
+      [k, ...]   -> created with these.
+
+    None is reserved for the absent record. It is NOT "we could not tell" and NOT
+    "no keys" — the surface decides what each absence means, and it cannot if the
+    reader hands it one value for two facts.
 
     Read from the generated compose file, where Feature 020 inlines it as
     `configs.ssh_authorized_keys.content`. NO NEW STATE: that file is already the
@@ -11383,7 +11392,14 @@ def created_with_admit_set(host: str, name: str) -> list[str] | None:
         return None
     cfg = ((doc.get("configs") or {}).get("ssh_authorized_keys") or {}).get("content")
     if cfg is None:
-        return None
+        # DEPLOYED ADMITTING NOBODY, which is not the same fact as "no deployment"
+        # and must not return the same value. `build_compose_model` omits the config
+        # entirely when the admit set is empty, so this is the ordinary shape of an
+        # environment created with no collection and no `--authorized-key` — and
+        # answering None for it made `warn_on_collection_drift` silent for exactly
+        # the operator who declared a collection AFTER deploying, which is the case
+        # FR-013 most needs to catch.
+        return []
     return [ln for ln in cfg.splitlines() if ln.strip()]
 
 
@@ -11446,6 +11462,103 @@ def _fp_or_raw(line: str) -> str:
     return f"  {fp}  {parts[-1] if len(parts) > 2 else '(no comment)'}{suffix}"
 
 
+def admit_set_reading(host: str, host_rec: dict, name: str) -> dict:
+    """The three reads of data-model.md §5, as DATA rather than as printed lines.
+
+    Separated from the rendering so `--json` answers the same question the human
+    output answers, from the SAME reads. Before T057 both `keys show` and `keys ls`
+    accepted `--json`, set JSON mode, and then reported exclusively through `log()`
+    — which is stderr. Stdout stayed empty and the exit status stayed 0, so an agent
+    could not tell "this environment admits nobody" from "this command told me
+    nothing", which is the Constitution VIII collapse one layer out from the data.
+
+    Every absence is carried as its own value, never as an empty list standing in
+    for a missing answer. The renderers below decide what to SAY about each; that
+    decision belongs at the surface, not in here.
+    """
+    projected_error: str | None = None
+    try:
+        entries, coll, declared = resolved_admit_set([])
+        projected_lines: list[str] | None = [e.line for e in entries]
+    except Fatal as e:
+        entries, coll, declared = [], None, False
+        projected_lines, projected_error = None, str(e)
+    return {
+        "entries": entries,
+        "collection": coll,
+        "declared": declared,
+        "projected_lines": projected_lines,
+        "projected_error": projected_error,
+        # A compose file that is absent means NO SUCH DEPLOYMENT. Kept apart from
+        # `observed is None` below, which means the environment could not be reached
+        # — "there is nothing to look at" against "we did not look".
+        "deployed": compose_file_path(host, name).is_file(),
+        "observed": observed_admit_set(host_rec, name),
+        "created": created_with_admit_set(host, name),
+    }
+
+
+def _observed_entry(line: str) -> dict:
+    """One observed key as data: identity, label, and whether the tool owns it."""
+    raw = line.split("\t")[0]
+    parts = raw.split()
+    try:
+        fp: str | None = validate_public_key_line(raw, "<observed>", 0)
+    except Fatal:
+        fp = None  # unparseable HERE is not unparseable in the container: report it
+    return {
+        "fingerprint": fp,
+        "comment": (parts[-1] if len(parts) > 2 else None),
+        "managed": "\t" not in line,
+    }
+
+
+def admit_reading_payload(host: str, name: str, r: dict) -> dict:
+    """The reading as a `--json` payload (FR-007, Feature 009's envelope).
+
+    Public keys only, so nothing here is a secret (FR-010) — but blobs are still
+    left out: a fingerprint IDENTIFIES a device and a blob is noise, which is C10's
+    rule for the human statement and holds just as well for a machine one.
+
+    `projected`, `deployment` and `observed` each carry their own absence word. A
+    consumer that wants "does this environment admit what I declared" reads `agree`,
+    which is `null` when it was never established rather than `false` — refusing to
+    report a verdict it did not reach.
+    """
+    if r["projected_error"] is not None:
+        proj_state = "unreadable"
+    elif not r["declared"] and not r["entries"]:
+        proj_state = "undeclared"
+    elif not r["entries"]:
+        proj_state = "declared-empty"
+    else:
+        proj_state = "declared"
+    observed, created = r["observed"], r["created"]
+    agree: bool | None = None
+    if observed is not None and r["projected_lines"] is not None and r["deployed"]:
+        agree = {ln.split("\t")[0] for ln in observed} == set(r["projected_lines"])
+    return {
+        "environment": name,
+        "host": host,
+        "projected": {
+            "state": proj_state,
+            "source": str(r["collection"]) if r["collection"] else None,
+            "error": r["projected_error"],
+            "keys": [
+                {"fingerprint": e.fingerprint, "comment": e.comment or None, "source": e.source}
+                for e in r["entries"]
+            ],
+        },
+        "deployment": "recorded" if r["deployed"] else "absent",
+        "created_with": None if created is None else {"count": len(created)},
+        "observed": {
+            "state": UNDETERMINED if observed is None else "read",
+            "keys": None if observed is None else [_observed_entry(ln) for ln in observed],
+        },
+        "agree": agree,
+    }
+
+
 def report_projected_vs_observed(host: str, host_rec: dict, name: str) -> None:
     """Print BOTH readings and state disagreement (FR-014).
 
@@ -11456,23 +11569,43 @@ def report_projected_vs_observed(host: str, host_rec: dict, name: str) -> None:
     environment means `undetermined`. Collapsing any pair is the Constitution VIII
     failure this feature keeps running into.
     """
-    try:
-        entries, coll, declared = resolved_admit_set([])
-        projected: list[str] | None = [e.line for e in entries]
-    except Fatal as e:
-        warn(f"the key collection cannot be resolved: {e}")
-        projected, coll, declared = None, None, False
+    render_admit_reading(host, name, admit_set_reading(host, host_rec, name))
+
+
+def render_admit_reading(host: str, name: str, r: dict) -> None:
+    """Print one reading. Takes the reading it renders rather than taking it again:
+    `keys ls` needs the exit status to describe the rows it PRINTED, and a second
+    observation could answer differently from the one the operator just read."""
+    projected = r["projected_lines"]
+    if r["projected_error"] is not None:
+        warn(f"the key collection cannot be resolved: {r['projected_error']}")
     log(f"{name}:")
     if projected is None:
         log("  projected:  (collection unreadable)")
-    elif not declared and not projected:
+    elif not r["declared"] and not projected:
         log("  projected:  (no collection declared)")
     else:
-        src = f" [{coll}]" if coll else ""
+        src = f" [{r['collection']}]" if r["collection"] else ""
         log(f"  projected:  {len(projected)} key(s){src}")
         for ln in projected:
             log(_fp_or_raw(ln))
-    observed = observed_admit_set(host_rec, name)
+    observed = r["observed"]
+    # The SECOND of three reads (data-model.md §5). A compose file that is absent
+    # means there is NO SUCH DEPLOYMENT — a different fact from an environment that
+    # exists and could not be reached, which is what `undetermined` means below.
+    # Answering the first with the second tells an operator "we did not look" where
+    # the truth is "there is nothing to look at" (Constitution VIII, FR-014).
+    if not r["deployed"]:
+        log(f"  deployment: NONE recorded on {host} — nothing was created with this name")
+        if observed is None:
+            return  # nothing created and nothing running: both stated, neither inferred
+        # A container with no deployment record is surfaced rather than hidden behind
+        # the missing record: it admits keys this host cannot account for, and no
+        # `redeploy` of ours will withdraw them.
+        log(f"  observed:   {len(observed)} key(s) — a container this host has NO RECORD of")
+        for ln in observed:
+            log(_fp_or_raw(ln))
+        return
     if observed is None:
         log(f"  observed:   {UNDETERMINED} (not running, or unreachable)")
         return
@@ -11481,6 +11614,16 @@ def report_projected_vs_observed(host: str, host_rec: dict, name: str) -> None:
         log(_fp_or_raw(ln))
     if projected is None:
         return
+    # The THIRD read, reported only where it EXPLAINS a disagreement rather than
+    # padding the output: an admit set that differs from the collection is WHY the
+    # environment lags it, and naming it points at `redeploy` instead of leaving the
+    # operator to infer the cause from two numbers.
+    created = r["created"]
+    if created is not None and created != projected:
+        log(
+            f"  created-with: {len(created)} key(s) — this deployment predates the "
+            f"current collection; `agent-container redeploy {name}` applies it"
+        )
     obs_material = {ln.split("\t")[0] for ln in observed}
     proj_material = set(projected)
     if obs_material == proj_material:
@@ -17506,7 +17649,11 @@ def keys_show(
     set_json_mode(as_json)
     validate_name(name)
     host_name, host_rec = resolve_deploy_host(host)
-    report_projected_vs_observed(host_name, host_rec, name)
+    reading = admit_set_reading(host_name, host_rec, name)
+    if as_json:
+        emit_json(admit_reading_payload(host_name, name, reading))
+        return
+    render_admit_reading(host_name, name, reading)
 
 
 @keys_app.command("ls")
@@ -17526,20 +17673,42 @@ def keys_ls(
         f.name[: -len(".compose.yaml")] for f in host_state_dir(host_name).glob("*.compose.yaml")
     )
     if not names:
+        if as_json:
+            emit_json({"host": host_name, "environments": [], "undetermined": []})
+            return
         log(f"no deployments recorded on {host_name}")
         return
-    undetermined = 0
-    for n in names:
-        report_projected_vs_observed(host_name, host_rec, n)
-        if observed_admit_set(host_rec, n) is None:
-            undetermined += 1
+    # Read each environment ONCE, then report from that reading. The exit status
+    # must describe the rows the operator was shown; deriving it from a second,
+    # independent observation let a row printed with an admit set be counted
+    # `undetermined` (or the reverse) whenever the container's state moved between
+    # the two execs — a status describing a listing nobody saw.
+    readings = [(n, admit_set_reading(host_name, host_rec, n)) for n in names]
+    undetermined = [n for n, r in readings if r["observed"] is None]
+    if as_json:
+        emit_json(
+            {
+                "host": host_name,
+                # EVERY row, examined ones included: a consumer that cannot see
+                # which environments were read cannot tell "read and empty" from
+                # "never reached" (FR-020).
+                "environments": [admit_reading_payload(host_name, n, r) for n, r in readings],
+                "undetermined": undetermined,
+            }
+        )
+    else:
+        for n, r in readings:
+            render_admit_reading(host_name, n, r)
     if undetermined:
         # NOT a success. Exiting 0 here would report a complete answer for
-        # environments that were never examined.
-        warn(
-            f"{undetermined} of {len(names)} environment(s) could not be observed; "
-            f"their admit sets are {UNDETERMINED}."
-        )
+        # environments that were never examined. The payload above still carries
+        # every row — the status says the answer is incomplete, not that it is
+        # absent, which is the shape `doctor` already uses.
+        if not as_json:
+            warn(
+                f"{len(undetermined)} of {len(names)} environment(s) could not be "
+                f"observed; their admit sets are {UNDETERMINED}: {', '.join(undetermined)}"
+            )
         raise typer.Exit(1)
 
 
