@@ -999,10 +999,14 @@ fi
 chmod 0600 "${HOSTKEY}"
 chmod 0644 "${HOSTKEY}.pub"
 
-# --- 2b. authorized_keys: union of persisted + injected sources, deduped -----
-# Non-secret (public keys). Sources: the persisted file, a bind-mounted file
-# (`up --authorized-key`), and the SSH_AUTHORIZED_KEYS env var. Deduped so
-# repeated boots and overlapping sources don't accumulate duplicates.
+# --- 2b. authorized_keys: a tool-managed REGION, replaced every boot ---------
+# Non-secret (public keys). Sources: the compose config inlined at
+# ${INJECT_DIR}/authorized_keys (the resolved admit set — the operator's key
+# collection plus any `--authorized-key`) and the SSH_AUTHORIZED_KEYS env var.
+# NOT a union with what the volume already holds, which is what this used to be:
+# a union retains every key ever granted, so removing one from the source could
+# never withdraw access (Feature 020, FR-006). Nor a bind — the config crosses as
+# `content:`, measured (C20), because a `file:` config is resolved daemon-side.
 # SHARED-BLOCK BEGIN authorized_keys (drift-guarded; see test_pure_logic)
 AUTHKEYS="${SSH_DIR}/authorized_keys"
 # This region is REPLACED on every boot. `~/.ssh/config`'s identically-styled

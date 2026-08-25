@@ -355,7 +355,7 @@ feature will pass its own acceptance criteria while its hardest requirement is u
 **Purpose**: Gaps found by assessing the codebase against spec.md, plan.md and this
 file. Appended, never rewritten — Phases 1–7 stand as the record of what was built.
 
-- [ ] T056 **CRITICAL** Read the created-with set in `report_projected_vs_observed` in
+- [X] T056 **CRITICAL** Read the created-with set in `report_projected_vs_observed` in
   `bin/agent-container` and report a **missing compose file** as its own answer — "no such
   deployment" — rather than as `undetermined`, per Constitution VIII / FR-014 / data-model.md §5
   (partial). The function's own docstring promises "three reads, three distinct absence answers"
@@ -364,54 +364,63 @@ file. Appended, never rewritten — Phases 1–7 stand as the record of what was
   That is the exact collapse T041 named as *the* Constitution VIII failure — "we did not look"
   standing in for "there is nothing to look at". Share the read with `warn_on_collection_drift`
   rather than building it a third time.
-- [ ] T057 Emit a JSON envelope from `keys show` and `keys ls` in `bin/agent-container`, or remove
+- [X] T057 Emit a JSON envelope from `keys show` and `keys ls` in `bin/agent-container`, or remove
   their `--json` flag, per FR-007 / C28 and Feature 009's envelope contract (contradicts). Both
   commands accept `JSON_OPT` and call `set_json_mode`, then report exclusively through `log()`,
   which is stderr — so `keys show <name> --json` writes **nothing** to stdout and exits 0. An
   agent reading that stream gets silence indistinguishable from success. `keys add` routes
   through `emit_action` and is unaffected; the two query verbs 020 introduced are the gap.
-- [ ] T058 Add the C27 test — after `inject_keys`, the region markers still form **exactly one
+  **DONE.** The reads were split out of the rendering (`admit_set_reading` /
+  `render_admit_reading` / `admit_reading_payload`) so both surfaces answer from the SAME
+  three reads rather than from two implementations that can drift. Each absence keeps its
+  own word in the payload — `undeclared` / `declared-empty` / `absent` / `undetermined` —
+  and `agree` is `null`, never `false`, when no reading was obtained.
+- [X] T058 Add the C27 test — after `inject_keys`, the region markers still form **exactly one
   pair** — in `bin/tests/test_key_collection.py`, per C27 / T034 (missing). T034 was marked done,
   but the only test touching `inject_keys` (`test_command_construction.py:700`) asserts the
   stdin-not-argv discipline and nothing about the region. plan.md names this the likeliest place
   for the feature to go wrong precisely because the region has two writers; the acceptance test
   covers only the branch where a region already exists, leaving `append_sh`'s else-branch — which
   creates a region — unexercised.
-- [ ] T059 Add the C32 test — `keys ls` across several environments with one unreachable reports
+  **DONE, and the snippet is EXECUTED rather than matched as text**: the test rewrites the
+  container paths onto a tmp dir and runs the real script under `bash`, because a textual
+  assertion cannot fail when the shell is wrong. Both branches are correct as written — no
+  bug found, which is the outcome a guard is supposed to have on the day it is added.
+- [X] T059 Add the C32 test — `keys ls` across several environments with one unreachable reports
   **every** row, marks that row `undetermined`, and does not exit claiming success — in
   `bin/tests/test_key_collection.py`, per C32 / FR-020 / SC-014 / T044 (missing). No test in
   `bin/tests/` invokes `keys ls` at all, though `test_key_collection.py:216` heads its section
   "C23/C24/C31/C32". A section header is not a test.
-- [ ] T060 Add the C29 test using an environment literally named `show` in
+- [X] T060 Add the C29 test using an environment literally named `show` in
   `bin/tests/test_key_collection.py`, per C29 / SC-012 / T045 (missing). The behaviour is
   currently correct — verified by hand — which is exactly the state the spec refuses to accept:
   "the collision is the reason for the layout, so it is the case that must be tested rather than
   reasoned about". Nothing stops a future flattening of the group from silently taking it back.
-- [ ] T061 Add the C30 test — the old bare form `keys <name> --authorized-key` no longer grants —
+- [X] T061 Add the C30 test — the old bare form `keys <name> --authorized-key` no longer grants —
   in `bin/tests/test_key_collection.py`, per C30 / FR-018 / T040 (missing). T040 named this test
   in its own body and it was never written. A silently-still-working old form is how a breaking
   change goes unnoticed until someone depends on both spellings.
-- [ ] T062 Derive `keys ls`'s exit status from the reading it **printed** in `bin/agent-container`,
+- [X] T062 Derive `keys ls`'s exit status from the reading it **printed** in `bin/agent-container`,
   per FR-020 / C32 (partial). It currently calls `report_projected_vs_observed(...)` and then
   `observed_admit_set(...)` again per row — two independent execs against the same environment, so
   a row printed with an observed set can still be counted `undetermined` (or the reverse) when the
   container's state changes between them. The exit status must describe the answer that was given.
-- [ ] T063 Correct the stale section headers above the managed region in `image/entrypoint.sh`
+- [X] T063 Correct the stale section headers above the managed region in `image/entrypoint.sh`
   (L1002-1005) and `image-control-plane/entrypoint.sh` (L79), per C21 / C22 / FR-006 (contradicts).
   Both still announce "authorized_keys: **union** of persisted + injected sources, deduped", and
   the agent image adds "a **bind-mounted** file (`up --authorized-key`)" — the union was deleted by
   T005 and the bind by T009. Both false claims sit directly above the code that disproves them,
   which is the two-contradicting-docstrings shape C22 exists to forbid.
-- [ ] T064 Replace the union claim at `README.md:171` — "`authorized_keys` are a deduped union of
+- [X] T064 Replace the union claim at `README.md:171` — "`authorized_keys` are a deduped union of
   the persisted file plus every injected source" — with the managed-region rule, per FR-006 / T051
   (contradicts). The same file already states the region rule correctly at L885 and L916, so the
   README currently contradicts itself and the reader cannot tell which half is current.
-- [ ] T065 State the grant's lifetime in `README.md`'s `keys add` section (L158-166) and drop the
+- [X] T065 State the grant's lifetime in `README.md`'s `keys add` section (L158-166) and drop the
   "sshd is reloaded in place" claim, per FR-015 / T051 (contradicts). FR-015 requires the changed
   guarantee be said out loud wherever the grant is made; the README presents `keys add` as a
   durable path with no mention that the grant dies at the next recreate — and `inject_keys`
   performs no sshd reload (sshd re-reads `authorized_keys` per connection).
-- [ ] T066 Add a guard test that `ssh-key show` emits **no** admit-set output, per FR-018 / T042
+- [X] T066 Add a guard test that `ssh-key show` emits **no** admit-set output, per FR-018 / T042
   (missing). T042 is a do-not-do requirement, so the current implementation satisfies it by
   omission and nothing would notice the omission being undone. Inbound authorisation and the
   agent's outbound identity are opposite directions; merging them is the confusion the spec

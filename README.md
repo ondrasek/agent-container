@@ -155,21 +155,29 @@ agent-container up acme --authorized-key ~/.ssh/id_ed25519.pub
 The file is delivered read-only and installed onto the `~/.ssh` volume by the
 entrypoint before sshd starts.
 
-**Into an already-running container — `agent-container keys`:**
+**Into an already-running container — `agent-container keys add`:**
 
 ```bash
 agent-container keys add acme --authorized-key ~/.ssh/id_ed25519.pub
 ```
 
-No recreate: the key is streamed over stdin (never on argv), merged with dedup,
-and sshd is reloaded in place.
+No recreate: the key is streamed over stdin (never on argv) and merged with dedup
+into the tool-managed region. sshd needs no reload — it re-reads `authorized_keys`
+on every connection.
+
+**The grant lasts only until the next recreate.** The tool does not create access
+it cannot withdraw, so `down`/`up` removes it along with everything else the tool
+wrote. To make a key permanent, put it in the collection above.
 
 **Via the `.env` file:** set `SSH_AUTHORIZED_KEYS` (newline-separated public keys);
 the entrypoint installs them at boot. This is the natural fit for the Quadlet path,
 whose credentials already flow through the env-file.
 
-`authorized_keys` are a deduped union of the persisted file plus every injected
-source.
+`authorized_keys` holds a tool-managed region, **replaced on every boot** from the
+resolved admit set; anything outside that region is preserved byte-for-byte, so a
+key you add by hand from inside the container survives. It used to be a deduped
+union with the persisted file — which meant a key injected once could never be
+withdrawn, and is the defect Feature 020 exists to remove.
 
 **The host key is captured, never supplied.** The container generates its own
 ed25519 host key on the `-ssh` volume and it never leaves. Every deploy reads the

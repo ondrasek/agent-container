@@ -76,7 +76,9 @@ fi
 chmod 0600 "${HOSTKEY}"
 chmod 0644 "${HOSTKEY}.pub"
 
-# --- 2b. authorized_keys: union of persisted + injected sources, deduped -----
+# --- 2b. authorized_keys: a tool-managed REGION, replaced every boot ---------
+# NOT a union with the persisted file, which is what this used to be: a union
+# retains every key ever granted, so removal could never revoke (020, FR-006).
 # SHARED-BLOCK BEGIN authorized_keys (drift-guarded; see test_pure_logic)
 AUTHKEYS="${SSH_DIR}/authorized_keys"
 # This region is REPLACED on every boot. `~/.ssh/config`'s identically-styled
