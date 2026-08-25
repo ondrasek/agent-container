@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.39.1 (2026-08-25)
+
+### Bug Fixes
+
+- **keys**: Answer the third absence, and make --json answer at all
+  ([`a34d051`](https://github.com/ondrasek/agent-container/commit/a34d05104262b8e9be627f2576c213332cdb436b))
+
+### Chores
+
+- **deps**: Resync uv.lock onto 0.39.0
+  ([`ee9f854`](https://github.com/ondrasek/agent-container/commit/ee9f8545c0a9b42ea91a6db7d2f36d4536c2eb09))
+
+### Documentation
+
+- **keys**: Delete the union claim from the three places it survived
+  ([`b8a1388`](https://github.com/ondrasek/agent-container/commit/b8a1388a99e231bcbe1cefd0ae0bd7864689100d))
+
+
 ## v0.39.0 (2026-08-24)
 
 ### Bug Fixes
