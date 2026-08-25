@@ -18,6 +18,62 @@ name used two ways anywhere else in the docs, this file wins.
 
 "Project directory" is **not** used: it is ambiguous between the first two.
 
+### Relocating the config directory
+
+**`AGENT_CONTAINER_CONFIG_DIR`** points this tool's user configuration somewhere else:
+
+| Wins | Then | Then |
+|---|---|---|
+| `AGENT_CONTAINER_CONFIG_DIR` | `$XDG_CONFIG_HOME/agent-container` | `~/.config/agent-container` |
+
+It names **the directory itself** — no `agent-container` component is appended, because
+unlike `XDG_CONFIG_HOME` it is not a directory shared with other tools. An empty value
+falls through rather than resolving to the current directory.
+
+**Why it exists.** `XDG_CONFIG_HOME` is a shared namespace: relocating this tool through it
+relocates *every* XDG-honouring program in the process. That is not theoretical. The
+acceptance harness moved `XDG_CONFIG_HOME` to isolate `hosts.json`, and moved **podman's
+connection registry** with it — podman keeps connections under
+`$XDG_CONFIG_HOME/containers/`. Its connection list then read **empty** rather than
+missing, so `podman --connection <name>` — the argv this tool itself builds — resolved
+nothing, and the podman path could not be exercised at all. Podman is the **default**
+runtime ([ADR 0001](decisions/0001-runtime-and-base-image.md)), so the one runtime with no
+end-to-end coverage was the one we ship on. Docker concealed it, keeping contexts in
+`~/.docker` where XDG does not reach.
+
+The state and data directories keep answering to `$XDG_STATE_HOME` and `$XDG_DATA_HOME`
+alone: podman stores nothing under either, so neither collides, and the config directory is
+the whole fix.
+
+## Relocating the tool's own directories
+
+Each of the three user-level locations answers to **its own** variable first, then the
+XDG one, then the `$HOME` default:
+
+| Location | Ours (wins) | Then | Then |
+|---|---|---|---|
+| User configuration | `AGENT_CONTAINER_CONFIG_DIR` | `$XDG_CONFIG_HOME/agent-container` | `~/.config/agent-container` |
+| Derived host state | `AGENT_CONTAINER_STATE_DIR` | `$XDG_STATE_HOME/agent-container` | `~/.local/state/agent-container` |
+| Durable records | `AGENT_CONTAINER_DATA_DIR` | `$XDG_DATA_HOME/agent-container` | `~/.local/share/agent-container` |
+
+Ours names **the directory itself**; no `agent-container` component is appended. The XDG
+form names a directory shared with other tools, so ours is a subdirectory of it — that is
+the difference, and it is why the two cannot be spelled the same way.
+
+**Why these exist.** `XDG_CONFIG_HOME` is a shared namespace: relocating this tool through
+it relocates *every* XDG-honouring program in the process. That is not theoretical. The
+acceptance harness moved `XDG_CONFIG_HOME` to isolate `hosts.json`, and moved **podman's
+connection registry** with it — podman keeps connections under
+`$XDG_CONFIG_HOME/containers/`. Its connection list then read **empty** rather than
+missing, so `podman --connection <name>` — the argv this tool itself builds — resolved
+nothing, and the entire podman path could not be exercised. Podman is the **default**
+runtime ([ADR 0001](decisions/0001-runtime-and-base-image.md)), so the one runtime with no
+end-to-end coverage was the one we ship on. Docker concealed it for as long as it lasted,
+keeping contexts in `~/.docker` where XDG does not reach.
+
+"Relocate this tool" and "relocate everything" are different instructions, and a tool that
+can only be told the second one will eventually break something it never meant to touch.
+
 ## Your project
 
 ```text

@@ -105,10 +105,29 @@ CONTAINER_PREFIX = "agent-container-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
 
+
 STATE_DIR = (
     Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
 )
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
+# OUR variable first, then the XDG one, then the default — and it names THE
+# DIRECTORY ITSELF, with no `agent-container` component appended, because unlike
+# `XDG_CONFIG_HOME` it is not a directory shared with other tools.
+#
+# It exists because `XDG_CONFIG_HOME` is a SHARED namespace: relocating this tool
+# through it relocates every xdg-honouring program in the process. Not theoretical
+# — the acceptance harness moved it to isolate `hosts.json` and took PODMAN's
+# connection registry with it (podman keeps connections under
+# `$XDG_CONFIG_HOME/containers/`). The registry then read EMPTY rather than
+# missing, `podman --connection <name>` — the argv this tool itself builds —
+# resolved nothing, and the podman path could not be exercised at all. ADR 0001
+# makes podman the DEFAULT runtime, so the one runtime with no end-to-end coverage
+# was the one we ship on. Docker hid it, keeping contexts in `~/.docker`.
+#
+# An EMPTY value falls through rather than resolving to the process's cwd.
+CONFIG_DIR = Path(
+    os.environ.get("AGENT_CONTAINER_CONFIG_DIR")
+    or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
+)
 # Feature 016 R1: the SIXTH layout location, and it is DATA_HOME rather than a
 # corner of STATE_DIR because docs/layout.md documents the state dir as "computed;
 # safe to delete". A durable record kept somewhere safe to delete is a

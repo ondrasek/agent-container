@@ -1536,3 +1536,73 @@ def test_the_quadlet_unit_is_the_AGENT_path_and_says_so(wiz):
         "the quadlet unit does not say it is the agent path only, so a reader may "
         "assume it supervises a control plane too"
     )
+
+
+# --- AGENT_CONTAINER_CONFIG_DIR ----------------------------------------------
+# XDG_CONFIG_HOME is a SHARED namespace. Relocating this tool through it relocates
+# every xdg-honouring program in the process — which is not hypothetical: the
+# acceptance harness moved it to isolate hosts.json and took PODMAN's connection
+# registry with it, so `podman --connection <name>` stopped resolving and the
+# default runtime (ADR 0001) became untestable. This variable exists so "relocate
+# this tool" and "relocate everything" stay sayable apart.
+
+
+def test_our_config_dir_var_outranks_xdg(load_wiz, tmp_path):
+    """The whole point: ours wins, so XDG_CONFIG_HOME need not be touched at all."""
+    wiz = load_wiz(xdg_config=tmp_path / "xdg-config", own_config=tmp_path / "conf")
+    assert wiz.CONFIG_DIR == tmp_path / "conf"
+
+
+def test_the_override_is_the_dir_itself_not_a_parent(load_wiz, tmp_path):
+    """No `agent-container` component is appended — unlike the XDG form.
+
+    XDG_CONFIG_HOME names a directory holding MANY tools' config, so ours is a
+    subdirectory of it. Our variable names OUR directory, so appending again would
+    produce `.../conf/agent-container` and quietly ignore what the caller said.
+    """
+    wiz = load_wiz(xdg_config=tmp_path / "xdg-config", own_config=tmp_path / "conf")
+    assert wiz.CONFIG_DIR == tmp_path / "conf"
+    assert wiz.CONFIG_DIR.name != "agent-container"
+
+
+def test_it_moves_only_the_config_dir(load_wiz, tmp_path):
+    """STATE_DIR and DATA_DIR keep answering to XDG alone.
+
+    Deliberate: podman keeps nothing under XDG_STATE_HOME or XDG_DATA_HOME, so
+    neither collides, and one variable is the whole fix. Pinned so a later hand
+    cannot widen the surface without saying why.
+    """
+    wiz = load_wiz(
+        xdg_state=tmp_path / "xs",
+        xdg_config=tmp_path / "xc",
+        xdg_data=tmp_path / "xd",
+        own_config=tmp_path / "conf",
+    )
+    assert wiz.CONFIG_DIR == tmp_path / "conf"
+    assert wiz.STATE_DIR == tmp_path / "xs" / "agent-container"
+    assert wiz.DATA_DIR == tmp_path / "xd" / "agent-container"
+
+
+def test_absent_override_leaves_xdg_behaviour_exactly_as_it_was(load_wiz, tmp_path):
+    """Absent means absent — the reader falls through, it does not default.
+
+    Every existing deployment resolves through XDG, so the override must be
+    invisible when unset (Constitution VIII: absent, defaulted and declared are
+    three different facts).
+    """
+    wiz = load_wiz(xdg_config=tmp_path / "xc")
+    assert wiz.CONFIG_DIR == tmp_path / "xc" / "agent-container"
+
+
+def test_neither_set_falls_back_to_home(load_wiz, tmp_path):
+    """And the $HOME fallback still holds with both unset."""
+    home = tmp_path / "h"
+    wiz = load_wiz(home=home, xdg_state=None, xdg_config=None, xdg_data=None)
+    assert wiz.CONFIG_DIR == home / ".config" / "agent-container"
+
+
+def test_an_empty_override_is_not_a_relocation(load_wiz, tmp_path):
+    """`FOO=` is how a shell says "unset" in practice; treating it as a path would
+    resolve the config dir to the process's cwd."""
+    wiz = load_wiz(xdg_config=tmp_path / "xc", own_config="")
+    assert wiz.CONFIG_DIR == tmp_path / "xc" / "agent-container"

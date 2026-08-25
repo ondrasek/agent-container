@@ -65,10 +65,47 @@ def _detect_runtime() -> str | None:
 RUNTIME = _detect_runtime()
 _MISSING = [t for t in ("ssh", "ssh-keygen", "uv") if shutil.which(t) is None]
 
+
+def _runtime_unreachable() -> str | None:
+    """Why the runtime cannot be reached, or None if it can.
+
+    A runtime that is INSTALLED is not the same as one that is USABLE, and the
+    difference is infrastructure the test environment has to provide — exactly like
+    `ssh` and `uv` being on PATH. Podman on macOS needs a configured system
+    connection; docker needs a running daemon. Without this check a missing one
+    surfaces as ~170 identical fixture errors reading `build failed (exit 125)`,
+    which looks like a defect in the tool rather than a machine that was never set
+    up. Stated once, as a skip, so the prerequisite is visible instead of inferred.
+    """
+    if RUNTIME is None:
+        return None  # already covered by the guard below
+    try:
+        r = subprocess.run(
+            [RUNTIME, "info", "--format", "{{.Host.OS}}"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"{RUNTIME} is installed but unusable: {e}"
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout).strip().splitlines()
+        hint = (
+            " — configure one: `podman system connection add <name> <uri>`"
+            if RUNTIME == "podman"
+            else ""
+        )
+        return f"{RUNTIME} cannot reach a service{hint}: {detail[-1] if detail else '?'}"
+    return None
+
+
+_UNREACHABLE = _runtime_unreachable()
+
 pytestmark = [
     pytest.mark.acceptance,
     pytest.mark.skipif(RUNTIME is None, reason="no docker/podman runtime on PATH"),
     pytest.mark.skipif(bool(_MISSING), reason=f"missing tools: {_MISSING}"),
+    pytest.mark.skipif(bool(_UNREACHABLE), reason=str(_UNREACHABLE)),
 ]
 
 # Invoke the real CLI exactly as an operator would (single PEP 723 uv script).
@@ -82,10 +119,17 @@ def _cli_env(state_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
     env["AGENT_CONTAINER_RUNTIME"] = RUNTIME  # deterministic runtime in CI
     env["XDG_STATE_HOME"] = str(state_dir)  # isolate the .port state files
-    # Isolate CONFIG_DIR too so the suite never reads the developer's real
-    # ~/.config/agent-container (hosts.json) AND so a test can seed a
-    # convention-discovered canonical config under it (US3).
-    env["XDG_CONFIG_HOME"] = str(state_dir / "xdgconfig")
+    # Isolate CONFIG_DIR through OUR OWN variable, not `XDG_CONFIG_HOME`. Same
+    # isolation — never read the developer's real hosts.json, and let a test seed a
+    # convention-discovered canonical config (US3) — but scoped to this tool.
+    #
+    # Moving XDG_CONFIG_HOME (which is what this used to do) also moved PODMAN's
+    # connection registry, which lives under $XDG_CONFIG_HOME/containers/. Its
+    # connection list read EMPTY, `podman --connection <name>` resolved nothing, and
+    # every deploy died at connect time — making the DEFAULT runtime (ADR 0001) the
+    # one we could not test. XDG_STATE_HOME and XDG_DATA_HOME below are left as they
+    # were: podman keeps nothing under either, so neither collides.
+    env["AGENT_CONTAINER_CONFIG_DIR"] = str(state_dir / "xdgconfig" / "agent-container")
     # Feature 016: the run-record store is DATA, not state. Without this the suite
     # would write records into the developer's real ~/.local/share/agent-container
     # and — worse — read them back, so a `runs list` assertion could pass on a
@@ -95,7 +139,7 @@ def _cli_env(state_dir: Path) -> dict[str, str]:
 
 
 def _config_dir_of(state_dir: Path) -> Path:
-    """CONFIG_DIR the CLI resolves under the isolated XDG_CONFIG_HOME (see _cli_env)."""
+    """CONFIG_DIR the CLI resolves from AGENT_CONTAINER_CONFIG_DIR (see _cli_env)."""
     return state_dir / "xdgconfig" / "agent-container"
 
 
@@ -726,7 +770,7 @@ def test_list_reconcile_unreachable_host_renders_without_hanging(acc, tmp_path):
 
     def run_list(*extra):
         env = _cli_env(acc.tmp / "state")
-        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env["AGENT_CONTAINER_CONFIG_DIR"] = str(tmp_path / "config" / "agent-container")
         env.pop("HCLOUD_TOKEN", None)
         return subprocess.run(
             [*AGENT_CONTAINER, "list", "--json", *extra],
@@ -1411,7 +1455,7 @@ def test_host_rm_destroy_emptiness_guard_against_real_containers(acc, tmp_path):
 
     def host_rm_destroy():
         env = _cli_env(acc.tmp / "state")
-        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env["AGENT_CONTAINER_CONFIG_DIR"] = str(tmp_path / "config" / "agent-container")
         env.pop("HCLOUD_TOKEN", None)  # never make a real cloud call from this test
         return subprocess.run(
             [*AGENT_CONTAINER, "host", "rm", "acchz", "--destroy", "-y"],
@@ -1462,7 +1506,7 @@ def test_host_rm_destroy_fails_closed_when_daemon_unreachable(tmp_path):
     }
     (config / "hosts.json").write_text(json.dumps(reg))
     env = _cli_env(tmp_path / "state")
-    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["AGENT_CONTAINER_CONFIG_DIR"] = str(tmp_path / "config" / "agent-container")
     env.pop("HCLOUD_TOKEN", None)
     r = subprocess.run(
         [*AGENT_CONTAINER, "host", "rm", "deadhz", "--destroy", "-y"],
@@ -1519,7 +1563,7 @@ def test_hetzner_provision_deploy_destroy(tmp_path, monkeypatch):
     # Point THIS process's cli at the same XDG dirs as the host-add subprocess, so
     # the in-process tunnel re-check below finds the automation key host-add wrote.
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.setenv("AGENT_CONTAINER_CONFIG_DIR", str(config / "agent-container"))
     cli = _load_cli()
     env = dict(os.environ)
 
