@@ -80,8 +80,17 @@ def _runtime_unreachable() -> str | None:
     if RUNTIME is None:
         return None  # already covered by the guard below
     try:
+        # `version --format {{.Server.Version}}`, which BOTH runtimes answer and
+        # which cannot be answered without contacting the server. `info
+        # --format {{.Host.OS}}` was podman-only: docker has no `.Host` field, so
+        # the probe failed, this guard reported docker unreachable, and the WHOLE
+        # acceptance tier skipped in 0.28s while exiting 0. A guard that turns a
+        # green run into a silent no-run is worse than the confusing errors it was
+        # added to replace — the same shape as the podman connection registry
+        # reading EMPTY rather than missing. Caught by running the tier under
+        # docker rather than by reading this back.
         r = subprocess.run(
-            [RUNTIME, "info", "--format", "{{.Host.OS}}"],
+            [RUNTIME, "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
             timeout=120,

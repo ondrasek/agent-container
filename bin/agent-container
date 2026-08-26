@@ -7673,6 +7673,16 @@ def build_compose_model(
             # THE ONLY PRIVILEGE IN THE DEPLOYMENT, and it is not on the agent.
             # Constitution II is per-container: this one runs no untrusted code.
             "cap_add": ["NET_ADMIN"],
+            # DNAT-TO-LOOPBACK NEEDS THIS, and it cannot be set from inside: the
+            # sidecar's /proc/sys is read-only under rootless podman, so `sysctl -w`
+            # in the entrypoint fails. The runtime must set it at creation.
+            #
+            # Without it the DNS redirect below is installed, MATCHES (counters
+            # climb), and the packet still never arrives: rewriting the destination
+            # to 127.0.0.1 without rerouting to loopback makes it a martian, and the
+            # send fails EPERM. Measured — the rule fired 19 times while every
+            # lookup failed, which reads exactly like a rule that is not matching.
+            "sysctls": {"net.ipv4.conf.all.route_localnet": "1"},
             # THE PUBLISHED PORT LIVES HERE NOW. A shared network namespace has
             # exactly one port owner, and it is the container that owns the
             # namespace. The port NUMBER is unchanged, so `port_for_name` and every
