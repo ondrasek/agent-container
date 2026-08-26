@@ -7317,6 +7317,38 @@ def driver_redeploy_argv(
     )
 
 
+def driver_compose_rm_argv(
+    host: dict,
+    project: str,
+    file: Path,
+    override: Path | None = None,
+    boundary: Path | None = None,
+) -> list[str]:
+    """Stop and remove the project's CONTAINERS before a redeploy recreates them.
+
+    Containers ONLY: named volumes are external-by-name (FR-008) and networks are
+    untouched by `rm`, so this removes exactly what `--force-recreate` was going to
+    destroy anyway — just in an order every runtime accepts.
+
+    WHY IT IS NEEDED. With an egress boundary the agent joins the sidecar's network
+    namespace (`network_mode: service:egress`). Podman treats that as a hard
+    dependency and refuses to remove the sidecar while the agent exists, so
+    `up --force-recreate` — which recreates the sidecar first — dies with
+    "has dependent containers which must be removed before it". Reproduced on a
+    bare `up` then `redeploy`, with no other containers involved: EVERY
+    egress-enabled environment was un-redeployable under podman. Docker's compose
+    removes dependents itself and never surfaced it.
+
+    Runtime-NEUTRAL on purpose. Branching on the runtime here is what produced the
+    hard-coded `127.0.0.11` in the egress sidecar and a `{{.Host.OS}}` probe that
+    skipped the whole docker tier; a third instance is not wanted. Removing first
+    is correct everywhere and costs docker nothing it was not already doing.
+    """
+    return driver_compose_argv(
+        host, project, file, "rm", "--stop", "--force", override=override, boundary=boundary
+    )
+
+
 def driver_stop_argv(
     host: dict, project: str, file: Path, override: Path | None = None
 ) -> list[str]:
@@ -10693,6 +10725,12 @@ def compose_up_exec(
     # exit code (FR-002/SC-004); everything else brings the deployment up detached.
     foreground = spec.foreground and spec.mode == "headless" and not redeploy
     if redeploy:
+        # Remove the containers BEFORE recreating them: an egress sidecar cannot be
+        # recreated while the agent sharing its netns still exists (see
+        # `driver_compose_rm_argv`). Failure is not fatal — a project with nothing
+        # to remove is the ordinary first-redeploy case, and `up` below reports any
+        # real problem with a better message than `rm` would.
+        run_child(driver_compose_rm_argv(host_rec, project, compose_file, override, boundary_file))
         argv = driver_redeploy_argv(host_rec, project, compose_file, override, boundary_file)
     else:
         argv = driver_up_argv(
