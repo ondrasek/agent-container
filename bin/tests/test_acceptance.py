@@ -2142,6 +2142,17 @@ def test_build_context_contains_only_the_image_sources(acc):
         assert leaked not in out, f"{leaked} appeared in the build context transfer"
 
 
+@pytest.mark.skipif(
+    RUNTIME != "docker",
+    reason=(
+        "builds a docker CONTEXT and a driver:docker host record, so it cannot run "
+        "under podman as written. NAMING WHAT THIS LEAVES UNCOVERED: the claim under "
+        "test — that compose reads `-e` env files CLIENT-side, so a path existing only "
+        "on the operator's machine reaches a remote daemon — is runtime-NEUTRAL and "
+        "matters just as much for a podman `--connection`. A podman twin belongs here "
+        "and does not exist yet; skipping silently would let that read as covered."
+    ),
+)
 def test_explicit_env_file_works_against_a_non_default_context(acc):
     """T016a / FR-001e (analysis C2). Remote parity for `-e`.
 
@@ -6571,9 +6582,18 @@ def test_a_file_config_does_not_cross_to_a_daemon_that_cannot_see_it(acc):
                 timeout=180,
             )
 
+    # THE CONTRACT IS THAT THE MARKER DOES NOT ARRIVE, not that a particular
+    # daemon phrases the refusal a particular way. This asserted `"bind" in
+    # <stderr>`, which is DOCKER's wording for refusing the mount outright.
+    # Podman does not refuse: it starts the container, the config is not there,
+    # and `cat` exits 1 — a different route to the same verdict, and the earlier
+    # assertion called that a failure. Matching on the daemon's prose made a
+    # runtime-neutral claim runtime-specific.
     by_path = _compose({"file": str(marker)})
     assert by_path.returncode != 0, "a file: config reached a daemon that cannot see the path"
-    assert "bind" in (by_path.stdout + by_path.stderr).lower()
+    assert "AAAAPROBE" not in by_path.stdout + by_path.stderr, (
+        "the marker CROSSED via file: to a daemon that cannot see the path"
+    )
 
     inline = _compose({"content": marker.read_text()})
     assert inline.returncode == 0, f"a content: config failed to arrive:\n{inline.stderr}"
