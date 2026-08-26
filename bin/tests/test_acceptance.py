@@ -115,6 +115,28 @@ AGENT_CONTAINER = ["uv", "run", "--no-project", "--script", str(SCRIPT_PATH)]
 # --- low-level helpers -------------------------------------------------------
 
 
+_SCRATCH_NET = "agent-container-acctest-scratch"
+
+
+def _scratch_network() -> str:
+    """A named bridge for throwaway helper containers. Idempotent.
+
+    ROOTLESS PODMAN gives a container `slirp4netns` when no network is named, and
+    `podman network connect` then refuses it outright — `"slirp4netns" is not
+    supported: invalid network mode` — so a container started bare can NEVER join
+    the compose network afterwards, and the helpers below read an empty address.
+    Docker's default `bridge` happens to permit the later connect, which is the
+    only reason this went unseen: "start it, attach it later" is a docker-ism that
+    reads as runtime-neutral.
+
+    Naming a bridge at run time works on both runtimes, and leaves the ordering
+    these helpers depend on intact — the servers must exist BEFORE the deploy that
+    creates the compose network, because the declaration names their addresses.
+    """
+    subprocess.run([RUNTIME, "network", "create", _SCRATCH_NET], capture_output=True)
+    return _SCRATCH_NET
+
+
 def _cli_env(state_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
     env["AGENT_CONTAINER_RUNTIME"] = RUNTIME  # deterministic runtime in CI
@@ -2811,7 +2833,17 @@ def test_git_push_over_a_declared_ssh_endpoint_actually_pushes(acc):
         for n in names:
             assert (
                 subprocess.run(
-                    [RUNTIME, "run", "-d", "--name", n, "acc-gitsrv:test"], capture_output=True
+                    [
+                        RUNTIME,
+                        "run",
+                        "-d",
+                        "--network",
+                        _scratch_network(),
+                        "--name",
+                        n,
+                        "acc-gitsrv:test",
+                    ],
+                    capture_output=True,
                 ).returncode
                 == 0
             )
@@ -4721,7 +4753,11 @@ def _bare_git_servers(acc, env: str, names: tuple[str, ...]) -> dict[str, str]:
     assert net, f"no network for agent-container-{env}"
     ips = {}
     for n in names:
-        subprocess.run([RUNTIME, "run", "-d", "--name", n, "acc-baregit:test"], capture_output=True)
+        subprocess.run(
+            [RUNTIME, "run", "-d", "--network", _scratch_network(),
+             "--name", n, "acc-baregit:test"],
+            capture_output=True,
+        )  # fmt: skip
         subprocess.run([RUNTIME, "network", "connect", net, n], capture_output=True)
         ips[n] = subprocess.run(
             [RUNTIME, "inspect", n, "--format",
