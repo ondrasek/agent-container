@@ -227,13 +227,23 @@ def test_mode_and_workspace_are_independent(wiz):
             svc = m["services"]["agent"]
             # The mode axis drives restart, untouched by the workspace axis.
             assert svc["restart"] == ("on-failure" if mode == "headless" else "unless-stopped")
+
             # The workspace axis drives the mount, untouched by the mode axis.
+            # Matched on the mount TARGET rather than on the whole string: a bind
+            # carries `:ro` (the container does not write to the operator's home),
+            # so an `endswith(":/workspace")` check silently stopped seeing it —
+            # and the ephemeral arm's negative form would have kept passing while
+            # having stopped looking, which is the worse half of that failure.
+            def _at_workspace(v: str) -> bool:
+                parts = v.split(":")
+                return len(parts) > 1 and parts[1] == "/workspace"
+
             if ws == "ephemeral":
-                assert not any(v.endswith(":/workspace") for v in svc["volumes"])
+                assert not any(_at_workspace(v) for v in svc["volumes"])
             elif ws == "persistent":
                 assert f"{wiz.volume_name('acme')}:/workspace" in svc["volumes"]
             else:  # bind
-                assert any(v.endswith(":/workspace") for v in svc["volumes"])
+                assert any(_at_workspace(v) for v in svc["volumes"])
             assert svc["environment"]["AGENT_CONTAINER_MODE"] == mode
 
 
@@ -257,7 +267,10 @@ def test_resolve_workspace_bind_local(wiz, tmp_path):
     d.mkdir()
     spec = wiz.ExecSpec(workspace="bind", workspace_dir=str(d))
     mount, declare = wiz.resolve_workspace(spec, "acme", LOCAL_HOST)
-    assert mount == f"{d.resolve()}:/workspace"
+    # READ-ONLY: a bind workspace is the operator's own directory shown to the
+    # agent, and the container does not write to the operator's home. Writable
+    # state is what the `persistent` mode's VOLUME is for.
+    assert mount == f"{d.resolve()}:/workspace:ro"
     assert declare is False
 
 

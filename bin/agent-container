@@ -670,15 +670,24 @@ def other_volume_mounts(name: str) -> list[str]:
 
 def resolve_bind_mount(spec: str) -> str:
     """Resolve a '--mount HOSTDIR[:CONTAINERPATH]' spec into an absolute,
-    read-write '-v' value.
+    READ-ONLY '-v' value.
 
     HOSTDIR is resolved to an absolute real path (Path.resolve()) and must be
     an existing directory. CONTAINERPATH defaults to /workspace/<basename>; if
     given explicitly it must be absolute. No secret/env value ever reaches argv.
 
-    Lima prerequisite: the host dir must sit under a path the Lima VM exposes
-    WRITABLE (set `writable: true` on the relevant mount and restart Lima),
-    otherwise the bind is read-only inside the VM.
+    `:ro` BY DESIGN, and it is the design rather than a workaround: the container
+    does not write to the operator's home. Everything it writes goes to a VOLUME —
+    the workspace volume, the agent-login volumes, the credential volumes — which
+    is what makes those writes survive a recreate and be revocable by name. A host
+    bind is an INPUT.
+
+    This used to request read-write, and the request could not be honoured on the
+    common macOS setup where Lima exposes `~` read-only. The two runtimes disagreed
+    only about WHEN they said so: docker mounted it and failed at the first write
+    (`Read-only file system`), podman refused at container create. Measured both.
+    So `rw` never bought a capability here; it bought a deferred error under one
+    runtime and a dead deploy under the other.
     """
     host, sep, container = spec.partition(":")
     if not host:
@@ -694,7 +703,7 @@ def resolve_bind_mount(spec: str) -> str:
             die(f"--mount: container path '{container}' must be absolute")
     else:
         container = f"/workspace/{Path(abs_host).name}"
-    return f"{abs_host}:{container}"
+    return f"{abs_host}:{container}:ro"
 
 
 # Container-side paths the entrypoint reads injected SSH material from (bind
@@ -10313,7 +10322,11 @@ def resolve_workspace(spec: ExecSpec, name: str, host_rec: dict) -> tuple[str | 
     p = Path(spec.workspace_dir).expanduser()
     if not p.is_dir():
         die(f"--workspace-dir {spec.workspace_dir} does not exist or is not a directory")
-    return f"{p.resolve()}:/workspace", False
+    # READ-ONLY, same rule as `--mount`: the container does not write to the
+    # operator's home, and a bind workspace is the operator's own directory shown
+    # to the agent. Writable state belongs on the workspace VOLUME (`persistent`),
+    # which is the mode to choose when the agent must produce something.
+    return f"{p.resolve()}:/workspace:ro", False
 
 
 def is_ssh_git_url(url: str) -> bool:

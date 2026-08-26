@@ -189,13 +189,29 @@ def test_compose_up_exec_threads_binds_into_volumes(wiz, capture_compose, monkey
 def test_resolve_bind_mount_default_container_path(wiz, tmp_path):
     d = tmp_path / "proj"
     d.mkdir()
-    assert wiz.resolve_bind_mount(str(d)) == f"{d.resolve()}:/workspace/proj"
+    assert wiz.resolve_bind_mount(str(d)) == f"{d.resolve()}:/workspace/proj:ro"
 
 
 def test_resolve_bind_mount_explicit_container_path(wiz, tmp_path):
     d = tmp_path / "proj"
     d.mkdir()
-    assert wiz.resolve_bind_mount(f"{d}:/opt/data") == f"{d.resolve()}:/opt/data"
+    assert wiz.resolve_bind_mount(f"{d}:/opt/data") == f"{d.resolve()}:/opt/data:ro"
+
+
+def test_a_host_bind_is_read_only(wiz, tmp_path):
+    """The container does not write to the operator's home — writes go to VOLUMES.
+
+    Pinned as its own test rather than left implicit in the two above, because the
+    `:ro` is the CONTRACT and their subject is path resolution. Requesting `rw`
+    never bought a capability: on the common macOS setup where Lima exposes `~`
+    read-only, docker mounted it and failed at the first write while podman refused
+    at container create — measured both. It bought a deferred error under one
+    runtime and a dead deploy under the other.
+    """
+    d = tmp_path / "proj"
+    d.mkdir()
+    for spec in (str(d), f"{d}:/opt/data"):
+        assert wiz.resolve_bind_mount(spec).endswith(":ro"), spec
 
 
 def test_resolve_bind_mount_rejects_missing_dir(wiz, tmp_path):
@@ -220,7 +236,7 @@ def test_resolve_bind_mount_rejects_file(wiz, tmp_path):
 def test_resolve_bind_mount_makes_relative_host_absolute(wiz, tmp_path, monkeypatch):
     (tmp_path / "proj").mkdir()
     monkeypatch.chdir(tmp_path)
-    assert wiz.resolve_bind_mount("proj") == f"{(tmp_path / 'proj').resolve()}:/workspace/proj"
+    assert wiz.resolve_bind_mount("proj") == f"{(tmp_path / 'proj').resolve()}:/workspace/proj:ro"
 
 
 def test_resolve_bind_mount_dereferences_symlinked_host(wiz, tmp_path):
@@ -228,7 +244,7 @@ def test_resolve_bind_mount_dereferences_symlinked_host(wiz, tmp_path):
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real)
-    assert wiz.resolve_bind_mount(str(link)) == f"{real.resolve()}:/workspace/real"
+    assert wiz.resolve_bind_mount(str(link)) == f"{real.resolve()}:/workspace/real:ro"
 
 
 # --- do_up orchestration (compose path) --------------------------------------
@@ -272,7 +288,7 @@ def test_do_up_threads_mounts_through(up_env, capture_compose, monkeypatch, tmp_
     vols = json.loads(wiz.compose_file_path("local", "acme").read_text())["services"]["agent"][
         "volumes"
     ]
-    assert f"{proj.resolve()}:/workspace/proj" in vols
+    assert f"{proj.resolve()}:/workspace/proj:ro" in vols
 
 
 def test_do_up_rejects_bad_mount_before_any_runtime_call(
