@@ -7317,6 +7317,47 @@ def driver_redeploy_argv(
     )
 
 
+def agent_exit_code(host_rec: dict, name: str, fallback: int) -> int:
+    """The agent container's OWN recorded exit code, or `fallback` if unreadable.
+
+    A headless `--foreground` run propagates the agent's exit code (FR-002/SC-004),
+    and compose was trusted to carry it out through `--exit-code-from agent`. That
+    requires compose to still be following the container's log stream when the
+    workload exits. Under podman a fast-exiting agent WINS that race: the follow
+    request is cancelled ("context canceled" on `/containers/<id>/logs?follow=1`)
+    and compose reports exit status 1 for a run that exited 0.
+
+    Measured, not inferred: 5 failures in 6 consecutive isolated runs of the
+    concurrent-records acceptance test, whose fake agent is `exit 0` and therefore
+    exits almost immediately. It looked like load-dependent flakiness in the full
+    tier and is nothing of the sort.
+
+    So ask the CONTAINER, which recorded the truth either way. `.State.ExitCode`
+    is answered identically by both runtimes (verified: both report 7 for a
+    container that exited 7) — checked rather than assumed, because a
+    podman-only template is exactly how a probe once skipped the entire docker
+    acceptance tier.
+
+    Falls back rather than dying: an unreadable container must not turn a finished
+    run into a tool error, and compose's own status is still the best guess left.
+    """
+    try:
+        r = query(
+            driver_runtime_argv(host_rec)
+            + ["inspect", container_name(name), "--format", "{{.State.ExitCode}}"],
+            timeout=RUNS_PROBE_TIMEOUT,
+        )
+    except OSError, subprocess.SubprocessError:
+        return fallback
+    # `or ""`: a caller (and a test double) may hand back a CompletedProcess with
+    # no captured stdout at all, and an unreadable answer is the fallback case, not
+    # an AttributeError thrown from inside a finished run.
+    text = (r.stdout or "").strip()
+    if r.returncode != 0 or not text.lstrip("-").isdigit():
+        return fallback
+    return int(text)
+
+
 def driver_compose_rm_argv(
     host: dict,
     project: str,
@@ -10757,7 +10798,10 @@ def compose_up_exec(
         ).start()
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
-        # The container's exit code IS the agent result — surface it as our own.
+        # The container's exit code IS the agent result — surface it as our own,
+        # read FROM THE CONTAINER rather than from compose's propagation of it
+        # (see `agent_exit_code`).
+        rc = agent_exit_code(host_rec, name, fallback=rc)
         write_state(host_name, name, port)
         log(f"headless run finished (exit {rc}); logs: agent-container logs {name}")
         raise typer.Exit(rc)

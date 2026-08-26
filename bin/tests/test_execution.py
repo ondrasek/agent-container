@@ -491,8 +491,43 @@ def test_up_headless_foreground_builds_attached_argv_and_exits_with_code(
     with pytest.raises(wiz.typer.Exit) as ei:
         wiz.do_up("acme", spec=wiz.ExecSpec(mode="headless", task="t", foreground=True))
     assert ei.value.exit_code == 3  # the agent's exit code is our exit code (SC-004)
-    (argv,) = calls
-    assert "--abort-on-container-exit" in argv and "-d" not in argv
+    compose_argv = next(a for a in calls if "--abort-on-container-exit" in a)
+    assert "-d" not in compose_argv
+    # The exit code is now read FROM THE CONTAINER, so the container is asked. This
+    # stub returns no stdout, which exercises the FALLBACK arm — compose's own
+    # status, i.e. exactly the behaviour this test pinned before.
+    assert any("inspect" in a for a in calls), "the container was never asked"
+
+
+def test_the_agent_exit_code_comes_from_the_container_not_from_compose(wiz, monkeypatch):
+    """SC-004 must survive compose failing to propagate it.
+
+    `--exit-code-from` requires compose to still be following the log stream when
+    the workload exits. Under podman a fast-exiting agent wins that race: the
+    follow request is cancelled and compose reports 1 for a run that exited 0.
+    Measured at 5 failures in 6 consecutive isolated runs of the concurrent-records
+    acceptance test before this changed. The container recorded the truth, so the
+    container is what we ask.
+    """
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda _h: ["docker"])
+    monkeypatch.setattr(
+        wiz, "query", lambda *_a, **_k: subprocess.CompletedProcess([], 0, "0\n", "")
+    )
+    # compose said 1; the container says 0. The container wins.
+    assert wiz.agent_exit_code({}, "acme", fallback=1) == 0
+
+
+def test_an_unreadable_container_falls_back_to_composes_status(wiz, monkeypatch):
+    """A finished run must not become a tool error because the container vanished."""
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda _h: ["docker"])
+    monkeypatch.setattr(
+        wiz, "query", lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "no such object")
+    )
+    assert wiz.agent_exit_code({}, "acme", fallback=3) == 3
+    monkeypatch.setattr(
+        wiz, "query", lambda *_a, **_k: subprocess.CompletedProcess([], 0, "not-a-number", "")
+    )
+    assert wiz.agent_exit_code({}, "acme", fallback=3) == 3
 
 
 # --- US4: ephemeral durability warning (T021) --------------------------------
