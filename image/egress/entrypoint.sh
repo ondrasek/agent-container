@@ -93,8 +93,36 @@ install_rules() {
     # names resolve. The tell is the rcode: unbound REFUSES, the daemon's
     # resolver returns NXDOMAIN, so an NXDOMAIN for an undeclared name means
     # these rules are in the wrong position rather than that the policy is off.
-    iptables -t nat -I OUTPUT 1 -d 127.0.0.11 -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:53
-    iptables -t nat -I OUTPUT 2 -d 127.0.0.11 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1:53
+    #
+    # BY PORT, NOT BY DESTINATION ADDRESS. This matched `-d 127.0.0.11` — DOCKER's
+    # embedded resolver and nothing else's. Podman puts aardvark-dns on the network
+    # GATEWAY, so under podman the rule never matched, every lookup fell through to
+    # the default-deny policy below, and NOTHING resolved, declared or not. It
+    # failed CLOSED, so it was never a hole; it made egress-enabled environments
+    # unusable on the runtime ADR 0001 makes the default.
+    #
+    # REDIRECT, not DNAT: REDIRECT reroutes to loopback, which is what makes the
+    # rewritten packet deliverable. Paired with route_localnet=1, set by the
+    # runtime at creation because /proc/sys is read-only here under rootless podman.
+    #
+    # `! --uid-owner "$UNBOUND_UID"` is load-bearing, not tidiness: unbound forwards
+    # DECLARED names upstream over port 53 itself, so without the exemption its own
+    # queries would be rewritten back to it and loop. Same idiom as the squid
+    # redirects above, for the same reason.
+    iptables -t nat -I OUTPUT 1 -p udp --dport 53 \
+        -m owner ! --uid-owner "$UNBOUND_UID" -j REDIRECT --to-port 53
+    iptables -t nat -I OUTPUT 2 -p tcp --dport 53 \
+        -m owner ! --uid-owner "$UNBOUND_UID" -j REDIRECT --to-port 53
+
+    # AND THE QUERY MUST ARRIVE LOOKING LOCAL. REDIRECT rewrites the DESTINATION
+    # and leaves the source alone, so a query from the agent reaches unbound with
+    # the namespace's bridge address as its source — and unbound is
+    # `interface: 127.0.0.1` with `access-control: 127.0.0.0/8 allow`, so it
+    # REFUSES it. Measured: rcode 5 for a DECLARED name, which reads exactly like
+    # a policy refusal and is not one. Without this SNAT the allowlist appears to
+    # deny everything, and the tell is that it denies declared names too.
+    iptables -t nat -A POSTROUTING -d 127.0.0.1 -p udp --dport 53 -j SNAT --to-source 127.0.0.1
+    iptables -t nat -A POSTROUTING -d 127.0.0.1 -p tcp --dport 53 -j SNAT --to-source 127.0.0.1
 
     # AND THE EPHEMERAL PORT BEHIND IT. The DNAT above matches dport 53 only,
     # while the daemon's resolver also listens on a high port that its own rule
@@ -107,6 +135,13 @@ install_rules() {
     # rather than on loopback — there the default-deny policy already covers it.
     iptables -A OUTPUT -d 127.0.0.11 -j DROP
     iptables -A OUTPUT -o lo -j ACCEPT
+    # BY DESTINATION AS WELL AS BY INTERFACE. A REDIRECTed packet does not match
+    # `-o lo` here — measured: the policy DROP counter climbed while the `-o lo`
+    # rule stayed put, so the rewritten query died one hop short of the resolver
+    # that would have answered it. Not a widening: `-o lo` already permits exactly
+    # this traffic, and the only things on 127.0.0.1 are unbound and squid, which
+    # ARE the boundary.
+    iptables -A OUTPUT -d 127.0.0.1 -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     iptables -A OUTPUT -m owner --uid-owner "$SQUID_UID" -j ACCEPT
     iptables -A OUTPUT -m owner --uid-owner "$UNBOUND_UID" -j ACCEPT
