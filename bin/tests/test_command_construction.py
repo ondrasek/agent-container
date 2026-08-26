@@ -198,6 +198,33 @@ def test_resolve_bind_mount_explicit_container_path(wiz, tmp_path):
     assert wiz.resolve_bind_mount(f"{d}:/opt/data") == f"{d.resolve()}:/opt/data:ro"
 
 
+def test_a_caller_supplied_ro_is_not_doubled(wiz, tmp_path):
+    """`host:container:ro` must not become `…:ro:ro`.
+
+    This function OWNS the mode field. Splitting on the first colon only left a
+    caller's `:ro` inside the container path, and appending ours produced "too
+    many colons" — a deploy killed by a string the tool built itself. The control
+    plane mounts the CLI exactly this way, so it was the whole control-plane
+    surface that went down, not an edge case.
+    """
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert wiz.resolve_bind_mount(f"{d}:/opt/data:ro") == f"{d.resolve()}:/opt/data:ro"
+
+
+def test_a_writable_mount_is_refused_not_downgraded(wiz, tmp_path):
+    """An operator asking for `rw` expects write-back and must be told, not humoured.
+
+    Silently mounting read-only would hand them exactly the deferred-failure
+    behaviour this change removes: the deploy succeeds and the first write fails,
+    somewhere far from the flag that caused it.
+    """
+    d = tmp_path / "proj"
+    d.mkdir()
+    with pytest.raises(wiz.Fatal, match="read-only"):
+        wiz.resolve_bind_mount(f"{d}:/opt/data:rw")
+
+
 def test_a_host_bind_is_read_only(wiz, tmp_path):
     """The container does not write to the operator's home — writes go to VOLUMES.
 

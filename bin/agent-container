@@ -689,7 +689,12 @@ def resolve_bind_mount(spec: str) -> str:
     So `rw` never bought a capability here; it bought a deferred error under one
     runtime and a dead deploy under the other.
     """
-    host, sep, container = spec.partition(":")
+    # THREE fields, not two: a caller may already spell the mode, and this function
+    # OWNS it. Splitting on the first colon only left any `:ro` the caller wrote
+    # inside `container`, so appending ours produced `…:ro:ro` — "too many colons",
+    # and a deploy that died on a string the tool built itself.
+    host, sep, rest = spec.partition(":")
+    container, _, mode = rest.partition(":")
     if not host:
         die(f"--mount: empty host directory in '{spec}'")
     p = Path(host)
@@ -703,6 +708,15 @@ def resolve_bind_mount(spec: str) -> str:
             die(f"--mount: container path '{container}' must be absolute")
     else:
         container = f"/workspace/{Path(abs_host).name}"
+    if mode and mode != "ro":
+        # `rw` is REFUSED rather than quietly downgraded: an operator who asked for
+        # it is expecting write-back, and silently mounting read-only would hand
+        # them the deferred-failure behaviour this change exists to remove.
+        die(
+            f"--mount: mode '{mode}' in '{spec}' is not available — a host bind is "
+            f"read-only (the container does not write to your home). For a writable "
+            f"workspace use `--workspace persistent`, whose volume survives recreation."
+        )
     return f"{abs_host}:{container}:ro"
 
 
