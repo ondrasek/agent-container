@@ -32,6 +32,7 @@ import tempfile
 import textwrap
 import time
 import types
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -207,10 +208,23 @@ def _run_cli(
     env = _cli_env(state_dir)
     if extra_env:
         env.update(extra_env)
+    # NEVER the developer's checkout. Without a cwd, `subprocess.run` inherits
+    # pytest's — the repository this suite lives in — and the CLI resolves a
+    # PROJECT from it: `project_config_dir` walks up from cwd, and the pre-011
+    # guard refuses outright when it finds a bare `.env` there. So the entire tier
+    # started failing the moment a `.env` existed at the repo root, for reasons
+    # belonging to no test in it. A test that reads the tree it happens to be run
+    # from is not isolated, and the conftest already guards XDG this way.
+    #
+    # Tests that MEAN to exercise project-level resolution pass `cwd` explicitly
+    # and are unaffected; this only fixes the default.
+    if cwd is None:
+        cwd = state_dir.parent / "neutral-cwd"
+        cwd.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
         argv,
         env=env,
-        cwd=str(cwd) if cwd else None,
+        cwd=str(cwd),
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
@@ -6871,3 +6885,167 @@ def test_an_unknown_provider_gets_its_own_volume_and_arrives(acc):
         [RUNTIME, "volume", "ls", "--format", "{{.Name}}"], capture_output=True, text=True
     ).stdout.splitlines()
     assert "agent-container-accnov-cred-apikey-mistral" in vols
+
+
+# --- A REAL agent, a REAL model, the whole stack ------------------------------
+# Every other agent test in this file stubs `claude` with a shell script (see
+# `_fake_agent`), and the comment above it claims the stub "completes the record
+# exactly as it does for a real agent". That was an assumption: no test had ever
+# executed an agent binary. These do, against Ollama Cloud, and they exercise the
+# pieces together rather than one at a time — credential on its own volume,
+# canonical config by convention, workspace volume, rootless, run record.
+#
+# Four agent-container defects were found by writing them, every one silent:
+# canonical config could not reach pi at all (wrong dir AND wrong filenames), only
+# anthropic/openai keys were ever exported, foreground credential delivery raced
+# container creation, and pi's ephemeral-home redirect seeded one level too high.
+
+_OLLAMA_MODEL_ID = "gpt-oss:20b"
+_OLLAMA_PROVIDER = "ollama"
+
+
+def _pi_ollama_project(acc, name: str):
+    """A project wired for pi -> Ollama Cloud through the SUPPORTED channels.
+
+    Nothing here reaches past a documented surface: the key rides the
+    `<name>.<provider>.key` convention onto its own volume, and the config rides
+    the `<name>.config/<agent>/…` canonical-config convention. If either stops
+    working this fixture breaks, which is the point.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+
+    # 1. CREDENTIAL -> its own volume. Never in the env file, never on argv.
+    (cfg / f"{name}.{_OLLAMA_PROVIDER}.key").write_text(os.environ["OLLAMA_API_KEY"].strip() + "\n")
+    (cfg / f"{name}.{_OLLAMA_PROVIDER}.key").chmod(0o600)
+
+    # 2. DELIVERY IDENTITY. Constitution IX: secrets go to the container over its
+    #    own sshd, under an operator-DECLARED identity — the tool refuses to mint
+    #    one. Its public half goes in the key collection so the container admits it.
+    ident = cfg / "delivery_key"
+    if not ident.exists():
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "acc-delivery", "-f", str(ident)],
+            check=True,
+        )
+    (cfg / "settings.yaml").write_text(f"delivery_identity: {ident}\n")
+    (cfg / "authorized_keys").write_text(ident.with_suffix(".pub").read_text())
+
+    # 3. CANONICAL CONFIG -> ~/.pi/agent/{models.json,settings.json} by convention.
+    #    `$OLLAMA_API_KEY` is pi's documented interpolation, so the key stays in the
+    #    delivered-credential path and never lands in a config file.
+    #
+    #    `cost` carries all four fields because pi SCHEMA-VALIDATES it and drops the
+    #    whole provider when one is missing — silently, so the model name then
+    #    matches a built-in provider instead and the failure reads as "no API key".
+    #
+    #    `defaultProvider` AND `defaultModel`: headless runs `pi -p <task>` with no
+    #    --model, and the id alone is ambiguous (a built-in provider ships the same
+    #    one). defaultModel takes the ID; --model matches on `name`.
+    # USER level (`CONFIG_DIR/<name>.config/pi/…`), the second half of the
+    # two-level chain `canonical_config_dir` resolves. The project level would work
+    # identically but only for a deploy run from inside that project, and `acc.up`
+    # takes no cwd — so the level that does not depend on where the CLI was invoked
+    # is the honest one to pin here.
+    pid = cfg / f"{name}.config" / "pi"
+    pid.mkdir(parents=True, exist_ok=True)
+    (pid / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    _OLLAMA_PROVIDER: {
+                        "api": "openai-completions",
+                        "apiKey": "$OLLAMA_API_KEY",
+                        "baseUrl": "https://ollama.com/v1",
+                        "models": [
+                            {
+                                "id": _OLLAMA_MODEL_ID,
+                                "name": "ollama-cloud-oss20b",
+                                "reasoning": True,
+                                "input": ["text"],
+                                "contextWindow": 131072,
+                                "maxTokens": 8192,
+                                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                            }
+                        ],
+                    }
+                }
+            },
+            indent=2,
+        )
+    )
+    (pid / "settings.json").write_text(
+        json.dumps({"defaultProvider": _OLLAMA_PROVIDER, "defaultModel": _OLLAMA_MODEL_ID})
+    )
+    return pid
+
+
+def _workspace_contains(name: str, token: str) -> bool:
+    """Search the workspace VOLUME for `token`, from a throwaway container.
+
+    Read off the volume rather than through the environment: a headless container
+    has exited by the time the assertion runs, and starting it again would re-run
+    the agent. Content, not path — pi resolves an absolute target against its own
+    project root, so the file may land a directory deeper than the task named.
+    That is pi's behaviour and not this tool's to assert.
+    """
+    r = subprocess.run(
+        [RUNTIME, "run", "--rm", "-v", f"agent-container-{name}-workspace:/w:ro",
+         "alpine:3", "sh", "-c", f"grep -rl '{token}' /w 2>/dev/null | head -1"],
+        capture_output=True, text=True, timeout=180,
+    )  # fmt: skip
+    return bool(r.stdout.strip())
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OLLAMA_API_KEY"),
+    reason=(
+        "billable real-agent call — opt in with OLLAMA_API_KEY. NOT COVERED without "
+        "it: that a real agent binary runs, resolves a delivered credential, reads "
+        "canonical config, uses its tools and completes a run record. Every other "
+        "agent test here stubs the binary with a shell script."
+    ),
+)
+def test_a_REAL_pi_agent_runs_against_ollama_and_writes_to_the_workspace(acc):
+    """The whole stack at once, with a real model doing real work.
+
+    Asserts a SIDE EFFECT, never the model's prose: an LLM's wording is not
+    deterministic, a file it was asked to write is. The token is random per run so
+    the test cannot pass on a file left behind by an earlier one — the workspace
+    volume persists, which is exactly how that would happen.
+    """
+    name = "accpi"
+    _pi_ollama_project(acc, name)
+    token = f"ACC-{uuid.uuid4().hex[:12]}"
+    acc.register(name)
+
+    r = acc.up(
+        name,
+        mode="headless",
+        agent="pi",
+        workspace="persistent",
+        task=f"Create a file at /workspace/proof.txt whose contents are exactly: {token}",
+        foreground=True,
+        wait=False,
+    )
+    combined = r.stdout + r.stderr
+    assert r.returncode == 0, f"the real agent run failed:\n{combined[-3000:]}"
+
+    # The credential travelled the delivery path, not the environment.
+    assert "delivered 1 credential" in combined, combined[-1500:]
+    # ...and reached the agent as an env var, which is the half that was missing:
+    # only anthropic/openai were ever exported before.
+    assert "exported OLLAMA_API_KEY" in combined, combined[-1500:]
+    # ...and the canonical config reached the agent home.
+    assert "Delivered operator-canonical agent config" in combined, combined[-1500:]
+
+    assert _workspace_contains(name, token), (
+        "the agent reported success but nothing on the workspace volume contains "
+        f"{token} — a real tool-use failure, not a wording difference"
+    )
+
+    runs = _runs(acc, name)
+    assert len(runs) == 1, f"expected exactly one record, got {len(runs)}"
+    assert runs[0]["ended_at"], "the record was never completed for a REAL agent"
+    assert runs[0]["exit_code"] == 0, runs[0]
+    assert token in (runs[0].get("task") or ""), "the task did not reach the record verbatim"
