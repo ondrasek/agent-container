@@ -7135,3 +7135,74 @@ def test_a_REAL_pi_agent_reaches_its_api_THROUGH_the_egress_boundary(acc):
         "the agent ran behind the boundary but produced nothing — a declared API "
         "that does not actually resolve or connect looks exactly like this"
     )
+
+
+_TEST_REPO = "https://github.com/ondrasek/agent-container-test-repository"
+
+
+@pytest.mark.skipif(
+    not (
+        os.environ.get("OLLAMA_API_KEY") and os.environ.get("AGENT_CONTAINER_TEST_REPOSITORY_PAT")
+    ),
+    reason=(
+        "billable real-agent call against a real PRIVATE repository — opt in with "
+        "OLLAMA_API_KEY and AGENT_CONTAINER_TEST_REPOSITORY_PAT. NOT COVERED without "
+        "them: clone-on-start with a credential that is actually required, and a run "
+        "record whose repository effect was produced by an agent rather than by a "
+        "shell stub committing on its behalf."
+    ),
+)
+def test_a_REAL_pi_agent_commits_in_a_repository_cloned_on_start(acc):
+    """US4 end to end: clone on start, let a real agent work, record what it did.
+
+    The repository is PRIVATE on purpose. Every other test in this tier passes
+    `GH_TOKEN=x` — a dummy that satisfies `require_env` and authenticates nothing —
+    so the github.com HTTPS credential path has never actually been exercised. A
+    private clone fails outright without a real token, which makes this the first
+    test that can tell a working credential helper from an unused one.
+
+    DELIBERATELY DOES NOT PUSH. The commit stays inside the container, which is
+    ephemeral; pushing would write to someone's real repository as a side effect of
+    running the suite. That also exercises the more interesting record state:
+    `unpushed` is the alarm Feature 016 exists to raise, and it is only reachable
+    when a run commits without pushing.
+    """
+    name = "accpirepo"
+    _pi_ollama_project(acc, name)
+    token = f"ACC-{uuid.uuid4().hex[:12]}"
+    acc.register(name)
+
+    r = acc.up(
+        name,
+        mode="headless",
+        agent="pi",
+        workspace="persistent",
+        repo=_TEST_REPO,
+        env_extra=[f"GH_TOKEN={os.environ['AGENT_CONTAINER_TEST_REPOSITORY_PAT'].strip()}"],
+        task=(
+            f"In the git repository at /workspace, create a file named proof.txt "
+            f"whose contents are exactly: {token}. Then stage it and make a git "
+            f"commit with the message 'acceptance {token}'. Do not push."
+        ),
+        foreground=True,
+        wait=False,
+    )
+    combined = r.stdout + r.stderr
+    assert r.returncode == 0, f"the agent run failed:\n{combined[-3000:]}"
+
+    # The clone happened AND needed the token: a private repo cannot be cloned
+    # without one, so reaching a baseline at all is the credential path working.
+    assert "no-repository" not in combined, (
+        "the workspace held no repository — clone-on-start did not happen, so "
+        f"nothing here says anything about repository effect:\n{combined[-2000:]}"
+    )
+    assert _workspace_contains(name, token), "the agent's file never reached the workspace"
+
+    rec = _runs(acc, name)[0]
+    assert rec["ended_at"] and rec["exit_code"] == 0, rec
+    repo = rec.get("repository") or {}
+    assert repo, f"the record carries no repository effect at all: {rec}"
+    # The agent's own commit, observed by the tool rather than reported by the agent.
+    assert repo.get("commits"), f"no commit was recorded for a run that made one: {repo}"
+    # Committed and NOT pushed — the state the alarm exists for.
+    assert repo.get("pushed") is not True, f"the run pushed to a real repository: {repo}"
