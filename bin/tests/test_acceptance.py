@@ -7066,3 +7066,72 @@ def test_a_REAL_pi_agent_runs_against_ollama_and_writes_to_the_workspace(acc):
     assert runs[0]["ended_at"], "the record was never completed for a REAL agent"
     assert runs[0]["exit_code"] == 0, runs[0]
     assert token in (runs[0].get("task") or ""), "the task did not reach the record verbatim"
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OLLAMA_API_KEY"),
+    reason=(
+        "billable real-agent call — opt in with OLLAMA_API_KEY. NOT COVERED without "
+        "it: that a real agent reaches its API THROUGH the egress boundary. The other "
+        "egress tests prove `curl` and `ssh-keyscan` cross it, which exercise squid's "
+        "REDIRECT and the netfilter port rule respectively — not an agent's own HTTPS."
+    ),
+)
+def test_a_REAL_pi_agent_reaches_its_api_THROUGH_the_egress_boundary(acc):
+    """US5 with a real workload: the boundary must permit the declared API, and the
+    agent must actually get through it.
+
+    A DIFFERENT PATH from every other egress test here. `{host: ollama.com}` is
+    declared WITHOUT a port, so `build_squid_acl` puts it in the proxy allowlist
+    rather than `build_netfilter_rules` — the agent's TLS is redirected to squid,
+    which splices it. `test_a_declared_port_opens_that_host_and_that_port_only`
+    covers the netfilter side with ssh-keyscan; nothing covered the proxy side with
+    a real agent, and the DNS the agent depends on is the path that was broken
+    under podman until this week.
+
+    It also puts credential delivery under a boundary, which moves the published
+    port to the sidecar — the agent container has none of its own. Delivery
+    connects to that port, so this is the first test where those two features have
+    to agree.
+    """
+    name = "accpiegr"
+    _pi_ollama_project(acc, name)
+    proj = acc.tmp / f"proj{name}"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / f"{name}.env").write_text(
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+    )
+    # No PORT on the destination — that is what routes it to squid instead of to a
+    # netfilter ACCEPT, and it is the whole point of this test.
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        f"environments:\n  - name: {name}\n    host: local\n"
+        f"    container:\n      agent: pi\n"
+        f"    egress:\n      allow:\n        - host: ollama.com\n"
+    )
+    token = f"ACC-{uuid.uuid4().hex[:12]}"
+    acc.register(name)
+
+    r = acc.cli(
+        ["up", name, "--mode", "headless", "--agent", "pi", "--workspace", "persistent",
+         "--foreground", "--task",
+         f"Create a file at /workspace/proof.txt whose contents are exactly: {token}"],
+        cwd=proj,
+    )  # fmt: skip
+    combined = r.stdout + r.stderr
+    assert r.returncode == 0, f"the agent could not work behind the boundary:\n{combined[-3000:]}"
+
+    # The boundary really was in place — otherwise this proves nothing about egress.
+    sidecar = subprocess.run(
+        [RUNTIME, "ps", "-a", "--filter", f"name=agent-egress-{name}", "--format", "{{.Names}}"],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    assert f"agent-egress-{name}" in sidecar.stdout, (
+        "no egress sidecar: the run passed WITHOUT a boundary, so it says nothing "
+        f"about reaching an API through one.\n{sidecar.stdout}"
+    )
+    # Credential delivery had to work with the published port on the SIDECAR.
+    assert "delivered 1 credential" in combined, combined[-1500:]
+    assert _workspace_contains(name, token), (
+        "the agent ran behind the boundary but produced nothing — a declared API "
+        "that does not actually resolve or connect looks exactly like this"
+    )
