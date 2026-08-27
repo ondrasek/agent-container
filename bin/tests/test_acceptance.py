@@ -198,6 +198,24 @@ def _exec(name: str, argv: list[str]) -> subprocess.CompletedProcess:
     )
 
 
+# Created ONCE per session, under the system temp rather than the acceptance base:
+# the base holds per-test tmpdirs that are torn down, and a cwd pointing into one
+# of those became a FileNotFoundError for every later test in the run. Under
+# /tmp (or /var/folders) the walk up from it also reaches no `.agent-container`,
+# which is the whole point — the CLI must find no project here.
+_NEUTRAL_CWD = Path(tempfile.mkdtemp(prefix="agent-container-neutral-"))
+
+
+def _neutral_cwd() -> Path:
+    """A directory the CLI can be run from that belongs to no project.
+
+    Recreated if something removed it: this is shared by every test in the run, so
+    one stale reference would take the rest of the tier with it.
+    """
+    _NEUTRAL_CWD.mkdir(parents=True, exist_ok=True)
+    return _NEUTRAL_CWD
+
+
 def _run_cli(
     argv: list[str],
     state_dir: Path,
@@ -219,8 +237,7 @@ def _run_cli(
     # Tests that MEAN to exercise project-level resolution pass `cwd` explicitly
     # and are unaffected; this only fixes the default.
     if cwd is None:
-        cwd = state_dir.parent / "neutral-cwd"
-        cwd.mkdir(parents=True, exist_ok=True)
+        cwd = _neutral_cwd()
     return subprocess.run(
         argv,
         env=env,
