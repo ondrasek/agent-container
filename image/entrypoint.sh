@@ -1373,10 +1373,23 @@ if [[ "${_any_apikey}" -eq 1 ]]; then
     export PI_CODING_AGENT_DIR="${APIKEY_RUNTIME}/pi-home"
     mkdir -p "${PI_CODING_AGENT_DIR}"
     chmod 0700 "${PI_CODING_AGENT_DIR}"
-    # Seed from the on-volume ~/.pi so the redirect keeps the operator's canonical
-    # config visible (FR-007/SC-005); anything pi writes here stays ephemeral (FR-012).
-    if [[ -d "${AGENT_CONTAINER_HOME}/.pi" ]]; then
-        cp -RL "${AGENT_CONTAINER_HOME}/.pi/." "${PI_CODING_AGENT_DIR}/" 2>/dev/null || true
+    # Seed from the on-volume ~/.pi/agent so the redirect keeps the operator's
+    # canonical config visible (FR-007/SC-005); anything pi writes here stays
+    # ephemeral (FR-012).
+    #
+    # `.pi/agent`, NOT `.pi`. PI_CODING_AGENT_DIR *is* pi's agent dir — the thing
+    # that is otherwise `~/.pi/agent` — so seeding it with the contents of `~/.pi`
+    # produced `<redirect>/agent/models.json` while pi looked for
+    # `<redirect>/models.json`. The operator's canonical config was therefore
+    # invisible WHENEVER A CREDENTIAL WAS INJECTED, which is precisely when an
+    # agent needs both. Measured: with the redirect as it was, pi registered no
+    # custom provider and reported "No API key found for the selected model"; with
+    # PI_CODING_AGENT_DIR pointed one level down at the same tree, the same run
+    # answered. FR-007/SC-005 claimed this redirect preserved that config; it did
+    # not, and nothing tested it because the only pi config the manifest could
+    # deliver went to a path pi never reads either.
+    if [[ -d "${AGENT_CONTAINER_HOME}/.pi/agent" ]]; then
+        cp -RL "${AGENT_CONTAINER_HOME}/.pi/agent/." "${PI_CODING_AGENT_DIR}/" 2>/dev/null || true
     fi
     log "pi: PI_CODING_AGENT_DIR redirected to an ephemeral dir (the -pi volume is never written)"
 fi
@@ -1394,14 +1407,34 @@ fi
 # exposure here, not more. Do not add a redirect for symmetry. The on-volume
 # auth.json stays operator-interactive-login only, as for the other three.
 # Do NOT clobber a value the operator already set via .env (that layer wins).
-if [[ -f "${_anthropic_key}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    ANTHROPIC_API_KEY="$(cat "${_anthropic_key}")"
-    export ANTHROPIC_API_KEY
-fi
-if [[ -f "${_openai_key}" && -z "${OPENAI_API_KEY:-}" ]]; then
-    OPENAI_API_KEY="$(cat "${_openai_key}")"
-    export OPENAI_API_KEY
-fi
+# EVERY DELIVERED PROVIDER, not a hard-coded pair. `<name>.<provider>.key`
+# accepts any provider, each arrives on its OWN volume, and `creds ls`/`creds rm`
+# already name them generically — but this step used to export ANTHROPIC_API_KEY
+# and OPENAI_API_KEY and nothing else. So a key for any other provider was
+# discovered, staged, pushed over SSH and mounted at 0400 — and then invisible to
+# the agent that needed it. Measured with an `ollama` key: delivered to
+# /run/agent-container-secrets/apikey/ollama/value, and pi reported "no API key".
+# Silent, because every layer up to the last one had done its job.
+#
+# The rule is mechanical: <PROVIDER> upper-cased, hyphens to underscores, plus
+# _API_KEY. It SUBSUMES the two former special cases rather than sitting beside
+# them (anthropic -> ANTHROPIC_API_KEY, openai -> OPENAI_API_KEY), so there is one
+# rule to know and no list to keep in step with the CLI's.
+for _kv in "${APIKEY_INJECT_DIR}"/*/value; do
+    [[ -f "${_kv}" ]] || continue
+    _prov="$(basename "$(dirname "${_kv}")")"
+    # Uppercase and normalise; skip anything that could not be a shell identifier
+    # rather than attempting an export that would fail the whole boot.
+    _var="$(printf '%s' "${_prov}" | tr '[:lower:]-' '[:upper:]_')_API_KEY"
+    [[ "${_var}" =~ ^[A-Z_][A-Z0-9_]*$ ]] || { log "NOTE: provider '${_prov}' has no usable env var name; skipped"; continue; }
+    # Do NOT clobber a value the operator already set via .env — that layer wins,
+    # which is the same precedence the two hard-coded blocks had.
+    [[ -n "${!_var:-}" ]] && continue
+    printf -v "${_var}" '%s' "$(cat "${_kv}")"
+    export "${_var?}"
+    log "exported ${_var} from the delivered '${_prov}' credential (volume never read by the agent's own config)"
+done
+unset _kv _prov _var
 
 # --- 3d. Clone-on-start (Feature 004, US4) ----------------------------------
 # Populate /workspace from a source repo on first start (persistent/ephemeral).

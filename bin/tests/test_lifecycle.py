@@ -339,7 +339,13 @@ def test_host_ps_rows_fail_closed_on_nonzero_and_parses_on_zero(wiz, monkeypatch
     ]
 
 
-def test_do_redeploy_warns_when_container_absent(wiz, monkeypatch):
+def test_do_redeploy_warns_when_container_absent(wiz, monkeypatch, tmp_path):
+    # ISOLATE THE CWD: `do_redeploy` resolves the project from it, so without this
+    # the test reads the DEVELOPER'S checkout and a `.env` sitting in the repo root
+    # makes it refuse the pre-011 layout — failing for a reason unrelated to the
+    # warning it exists to pin. Hermetic tests must not depend on the tree they are
+    # run from; the conftest already guards XDG this way, and cwd was the gap.
+    monkeypatch.chdir(tmp_path)
     _fix_host(wiz, monkeypatch)
     monkeypatch.setattr(wiz, "host_container_names", lambda *a, **k: set())
     monkeypatch.setattr(wiz, "resolve_env_file", lambda n: Path("/tmp/x.env"))

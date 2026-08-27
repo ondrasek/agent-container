@@ -139,6 +139,13 @@ def test_secrets_never_reach_the_compose_model_at_all(wiz, tmp_path):
 
 
 def test_do_up_threads_known_hosts_material(wiz, monkeypatch, tmp_path):
+    # ISOLATE THE CWD, like every other test in this file. Without it `do_up`
+    # resolves the project from the DEVELOPER'S checkout, so the moment a `.env`
+    # exists in the repo root the tool refuses the pre-011 layout and this test
+    # fails for a reason that has nothing to do with known_hosts. A hermetic test
+    # that reads the working tree it happens to be run from is not hermetic — the
+    # same class of leak the conftest already guards for XDG dirs.
+    monkeypatch.chdir(tmp_path)
     seen: dict = {}
 
     def _fake_exec(*a, **k):

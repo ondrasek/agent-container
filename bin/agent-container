@@ -1168,7 +1168,22 @@ def discover_apikey_files(name: str, cwd: Path | None = None) -> dict[str, Path]
 CANONICAL_MANIFEST: dict[str, tuple[str, tuple[str, ...]]] = {
     "claude": (".claude", ("settings.json", "CLAUDE.md", "*.mcp.json", "mcp.json")),
     "codex": (".codex", ("config.toml", "AGENTS.md")),
-    "pi": (".pi", ("config.json", "config.toml", "config.yaml", "config.yml")),
+    # `.pi/agent`, not `.pi`, and these two filenames and no others. pi keeps its
+    # config in getAgentDir() — `~/.pi/agent` — which this image's own Dockerfile
+    # comment already recorded ("getAgentDir() -> ~/.pi/agent, auth.json at
+    # ~/.pi/agent/auth.json") while this manifest pointed one level up at names pi
+    # does not read. `config.json`/`config.toml`/`config.yaml`/`config.yml` were
+    # invented: nothing in pi looks for any of them, so canonical config delivery
+    # could never work for pi at all — a file placed by the convention landed at
+    # `~/.pi/<name>` and was ignored.
+    #
+    # `models.json` declares custom providers; `settings.json` holds the settings,
+    # including the model default that a headless `pi -p` depends on (it takes no
+    # --model). `auth.json` and `trust.json` live in the same directory and are
+    # deliberately ABSENT here: the first is a credential store and canonical
+    # config is non-secret by definition (FR-007), the second is runtime state
+    # (FR-008).
+    "pi": (".pi/agent", ("models.json", "settings.json")),
 }
 
 
@@ -4518,6 +4533,20 @@ def query(argv: list[str], timeout: float | None = None) -> subprocess.Completed
 def container_running(rt: str, cname: str) -> bool:
     r = query([rt, "ps", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
     return cname in r.stdout.splitlines()  # exact match, mirrors grep -qx
+
+
+def runtime_container_running(base_argv: list[str], cname: str) -> bool:
+    """Whether `cname` is RUNNING, for a driver-qualified base argv.
+
+    `container_running` takes a single runtime binary; this takes the same
+    `driver_runtime_argv` list every remote-capable caller already builds, so a
+    podman `--connection` or docker `--context` is not silently dropped.
+    """
+    try:
+        r = query(base_argv + ["ps", "--filter", f"name=^{cname}$", "--format", "{{.Names}}"])
+    except OSError, subprocess.SubprocessError:
+        return False
+    return cname in r.stdout.splitlines()
 
 
 def container_exists(rt: str, cname: str) -> bool:
@@ -10787,15 +10816,45 @@ def compose_up_exec(
         # already exited, so delivering afterwards would arrive for a container that
         # is gone. Deliver from a thread: the container is blocked on the sentinel,
         # so it makes progress the moment this lands.
-        threading.Thread(
-            target=lambda: (
-                claim_cred_mounts(host_rec, name, _cred_refs),
+        def _deliver_when_up() -> None:
+            # WAIT FOR THE CONTAINER FIRST. This thread starts BEFORE run_child —
+            # i.e. before compose has created anything — so claiming the mounts
+            # immediately raced container creation and lost: "no container with name
+            # or ID ... found". The credentials then never arrived, the container sat
+            # on the sentinel for its full timeout, and the run continued WITHOUT the
+            # secrets it was waiting for. Measured with an `ollama` key on a headless
+            # --foreground run; invisible on the detached path, where compose has
+            # already returned by the time delivery starts.
+            #
+            # Bounded BELOW the container's own wait (default 90s, and read from the
+            # same setting so the two cannot drift): giving up after it would race the
+            # container's fallback and deliver into a run that had stopped waiting.
+            budget = int(os.environ.get("AGENT_CONTAINER_DELIVERY_TIMEOUT", "90"))
+            deadline = time.monotonic() + max(5, budget - 15)
+            base = driver_runtime_argv(host_rec)
+            cname = container_name(name)
+            # RUNNING, not merely created. Delivery execs into the container, and
+            # a container in `created` state accepts no exec session — "can only
+            # create exec sessions on running containers: container state improper".
+            # Waiting only for existence traded one race for a narrower one.
+            while time.monotonic() < deadline:
+                if runtime_container_running(base, cname):
+                    break
+                time.sleep(0.5)
+            else:
+                warn(f"credential delivery gave up waiting for {cname} to start")
+                return
+            try:
+                claim_cred_mounts(host_rec, name, _cred_refs)
                 deliver_secrets(
                     host_name, host_rec, name, secrets_to_deliver, delivery_id=_delivery_id
-                ),
-            ),
-            daemon=True,
-        ).start()
+                )
+            except Fatal as e:
+                # A thread that dies takes its traceback nowhere useful, and the
+                # container's own timeout would report only that nothing arrived.
+                warn(f"credential delivery failed: {e}")
+
+        threading.Thread(target=_deliver_when_up, daemon=True).start()
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
         # The container's exit code IS the agent result — surface it as our own,
