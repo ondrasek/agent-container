@@ -342,7 +342,12 @@ printf '7\n' > "${STATE}/agentrc"   # agent (task) fails with code 7
 run_entry AGENT_CONTAINER_MODE=headless AGENT_CONTAINER_AGENT=claude
 rc=$?
 check_eq "US3: container exits with the agent's exit code (FR-002/SC-004)" "7" "${rc}"
-if agent_has 'claude -p run the tests'; then ok; else bad "US3: headless claude invoked with -p <task>"; fi
+# The permission mode is part of the invocation, not decoration: headless has no
+# tty and nobody to approve a tool call, so without it Claude Code asks for
+# permission it can never receive, does nothing, and exits 0 — a SUCCESSFUL record
+# for an agent that did no work. Asserted here, in the harness that EXECUTES the
+# entrypoint, so it cannot regress into a passing run that produces nothing.
+if agent_has 'claude --permission-mode bypassPermissions -p run the tests'; then ok; else bad "US3: headless claude invoked with a permission mode and -p <task>"; fi
 # INVERTED, deliberately. sshd is the primary interaction surface with the agent, so
 # it now runs in EVERY mode — a headless run is exactly when an operator needs to look
 # inside a container they cannot attach to. It also has to be listening before the

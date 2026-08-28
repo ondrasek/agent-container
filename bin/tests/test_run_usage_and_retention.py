@@ -165,7 +165,14 @@ def test_the_container_writes_the_unreported_shape_and_never_a_figure(wiz):
 @pytest.mark.parametrize(
     "invocation",
     [
-        'cmd=(claude -p "${t}")',
+        # `--permission-mode bypassPermissions` was added because headless has no
+        # tty and nobody to approve a tool call, so the default asked for
+        # permission it could never receive and the agent silently did nothing.
+        # It changes WHAT THE AGENT MAY DO, not what it REPORTS: `-p` still emits
+        # prose, nothing here requests a machine-readable usage summary, and the
+        # record still honestly says unknown. That is the question this test makes
+        # someone answer when an invocation changes, and this is the answer.
+        'cmd=(claude --permission-mode bypassPermissions -p "${t}")',
         'cmd=(codex exec "${t}")',
         'cmd=(pi -p "${t}")',
         'cmd=(opencode run "${t}")',
