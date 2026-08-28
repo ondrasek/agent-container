@@ -6905,39 +6905,92 @@ def test_an_unknown_provider_gets_its_own_volume_and_arrives(acc):
 
 
 # --- A REAL agent, a REAL model, the whole stack ------------------------------
-# Every other agent test in this file stubs `claude` with a shell script (see
+# Every other agent test in this file stubs the binary with a shell script (see
 # `_fake_agent`), and the comment above it claims the stub "completes the record
 # exactly as it does for a real agent". That was an assumption: no test had ever
-# executed an agent binary. These do, against Ollama Cloud, and they exercise the
-# pieces together rather than one at a time — credential on its own volume,
-# canonical config by convention, workspace volume, rootless, run record.
+# executed an agent binary. These do, and they exercise the pieces TOGETHER —
+# credential on its own volume, canonical config by convention, workspace volume,
+# rootless, egress boundary, clone-on-start, run record.
 #
-# Four agent-container defects were found by writing them, every one silent:
-# canonical config could not reach pi at all (wrong dir AND wrong filenames), only
-# anthropic/openai keys were ever exported, foreground credential delivery raced
-# container creation, and pi's ephemeral-home redirect seeded one level too high.
+# Six agent-container defects were found by writing them, every one silent.
+#
+# PARAMETRISED OVER TWO AGENTS, and that is the point of the shape: pi and Claude
+# Code reach their providers by DIFFERENT mechanisms — pi through a custom
+# provider in models.json that interpolates an env var, Claude through the
+# apiKeyHelper the entrypoint patches into its settings. Running one proves
+# nothing about the other, and the generic provider-key export exists precisely
+# because the second was the only kind that ever worked.
 
-_OLLAMA_MODEL_ID = "gpt-oss:20b"
-_OLLAMA_PROVIDER = "ollama"
+_TEST_REPO = "https://github.com/ondrasek/agent-container-test-repository"
+
+_AGENT_PROFILES = [
+    pytest.param(
+        {
+            "agent": "pi",
+            "provider": "ollama",
+            "key_env": "OLLAMA_API_KEY",
+            # pi has no built-in Ollama provider: it is declared in models.json,
+            # which the canonical-config convention delivers.
+            "custom_provider": True,
+            # Unported, so `build_squid_acl` takes it and the agent's TLS rides the
+            # PROXY rather than a netfilter ACCEPT.
+            "egress_allow": "        - host: ollama.com\n        - host: github.com\n",
+        },
+        id="pi-ollama",
+    ),
+    pytest.param(
+        {
+            "agent": "claude",
+            "provider": "anthropic",
+            "key_env": "ANTHROPIC_API_KEY",
+            # Claude Code needs NO delivered config: the entrypoint patches an
+            # apiKeyHelper into ~/.claude/settings.json that cats the injected key
+            # at request time, so the key never touches the -claude volume.
+            "custom_provider": False,
+            "egress_allow": "        - provider: anthropic\n        - host: github.com\n",
+        },
+        id="claude-anthropic",
+    ),
+]
 
 
-def _pi_ollama_project(acc, name: str):
-    """A project wired for pi -> Ollama Cloud through the SUPPORTED channels.
+def _require_key(profile: dict) -> str:
+    """The provider key, or skip NAMING WHAT GOES UNCOVERED without it.
+
+    A bare "no key" skip would let an unrun test read as a covered one, which is
+    the reporting failure this repo refuses everywhere else.
+    """
+    key = os.environ.get(profile["key_env"])
+    if not key:
+        pytest.skip(
+            f"billable real-agent call — opt in with {profile['key_env']}. NOT COVERED "
+            f"without it: that the real `{profile['agent']}` binary runs, resolves a "
+            f"credential delivered to its own volume, uses its tools and completes a "
+            f"run record. Every other agent test here stubs the binary with a shell "
+            f"script."
+        )
+    return key.strip()
+
+
+def _agent_project(acc, name: str, profile: dict) -> None:
+    """Wire an environment for `profile`'s agent through the SUPPORTED channels.
 
     Nothing here reaches past a documented surface: the key rides the
-    `<name>.<provider>.key` convention onto its own volume, and the config rides
+    `<name>.<provider>.key` convention onto its own volume, and any config rides
     the `<name>.config/<agent>/…` canonical-config convention. If either stops
-    working this fixture breaks, which is the point.
+    working these tests break, which is the point of using them rather than
+    writing files into the container by hand.
     """
     cfg = _config_dir_of(acc.state_dir)
     cfg.mkdir(parents=True, exist_ok=True)
 
     # 1. CREDENTIAL -> its own volume. Never in the env file, never on argv.
-    (cfg / f"{name}.{_OLLAMA_PROVIDER}.key").write_text(os.environ["OLLAMA_API_KEY"].strip() + "\n")
-    (cfg / f"{name}.{_OLLAMA_PROVIDER}.key").chmod(0o600)
+    keyfile = cfg / f"{name}.{profile['provider']}.key"
+    keyfile.write_text(_require_key(profile) + "\n")
+    keyfile.chmod(0o600)
 
     # 2. DELIVERY IDENTITY. Constitution IX: secrets go to the container over its
-    #    own sshd, under an operator-DECLARED identity — the tool refuses to mint
+    #    own sshd under an operator-DECLARED identity — the tool refuses to mint
     #    one. Its public half goes in the key collection so the container admits it.
     ident = cfg / "delivery_key"
     if not ident.exists():
@@ -6948,6 +7001,9 @@ def _pi_ollama_project(acc, name: str):
     (cfg / "settings.yaml").write_text(f"delivery_identity: {ident}\n")
     (cfg / "authorized_keys").write_text(ident.with_suffix(".pub").read_text())
 
+    if not profile["custom_provider"]:
+        return  # Claude Code is wired by the entrypoint's apiKeyHelper; nothing to deliver.
+
     # 3. CANONICAL CONFIG -> ~/.pi/agent/{models.json,settings.json} by convention.
     #    `$OLLAMA_API_KEY` is pi's documented interpolation, so the key stays in the
     #    delivered-credential path and never lands in a config file.
@@ -6956,27 +7012,22 @@ def _pi_ollama_project(acc, name: str):
     #    whole provider when one is missing — silently, so the model name then
     #    matches a built-in provider instead and the failure reads as "no API key".
     #
-    #    `defaultProvider` AND `defaultModel`: headless runs `pi -p <task>` with no
-    #    --model, and the id alone is ambiguous (a built-in provider ships the same
-    #    one). defaultModel takes the ID; --model matches on `name`.
-    # USER level (`CONFIG_DIR/<name>.config/pi/…`), the second half of the
-    # two-level chain `canonical_config_dir` resolves. The project level would work
-    # identically but only for a deploy run from inside that project, and `acc.up`
-    # takes no cwd — so the level that does not depend on where the CLI was invoked
-    # is the honest one to pin here.
+    #    `defaultProvider` AND `defaultModel`: headless runs `<agent> -p <task>` with
+    #    no --model, and the id alone is ambiguous (a built-in provider ships the
+    #    same one). defaultModel takes the ID; --model matches on `name`.
     pid = cfg / f"{name}.config" / "pi"
     pid.mkdir(parents=True, exist_ok=True)
     (pid / "models.json").write_text(
         json.dumps(
             {
                 "providers": {
-                    _OLLAMA_PROVIDER: {
+                    "ollama": {
                         "api": "openai-completions",
                         "apiKey": "$OLLAMA_API_KEY",
                         "baseUrl": "https://ollama.com/v1",
                         "models": [
                             {
-                                "id": _OLLAMA_MODEL_ID,
+                                "id": "gpt-oss:20b",
                                 "name": "ollama-cloud-oss20b",
                                 "reasoning": True,
                                 "input": ["text"],
@@ -6992,9 +7043,8 @@ def _pi_ollama_project(acc, name: str):
         )
     )
     (pid / "settings.json").write_text(
-        json.dumps({"defaultProvider": _OLLAMA_PROVIDER, "defaultModel": _OLLAMA_MODEL_ID})
+        json.dumps({"defaultProvider": "ollama", "defaultModel": "gpt-oss:20b"})
     )
-    return pid
 
 
 def _workspace_contains(name: str, token: str) -> bool:
@@ -7002,9 +7052,9 @@ def _workspace_contains(name: str, token: str) -> bool:
 
     Read off the volume rather than through the environment: a headless container
     has exited by the time the assertion runs, and starting it again would re-run
-    the agent. Content, not path — pi resolves an absolute target against its own
-    project root, so the file may land a directory deeper than the task named.
-    That is pi's behaviour and not this tool's to assert.
+    the agent. Content, not path — an agent may resolve an absolute target against
+    its own project root, so the file can land a directory deeper than the task
+    named. That is the agent's behaviour and not this tool's to assert.
     """
     r = subprocess.run(
         [RUNTIME, "run", "--rm", "-v", f"agent-container-{name}-workspace:/w:ro",
@@ -7014,16 +7064,8 @@ def _workspace_contains(name: str, token: str) -> bool:
     return bool(r.stdout.strip())
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OLLAMA_API_KEY"),
-    reason=(
-        "billable real-agent call — opt in with OLLAMA_API_KEY. NOT COVERED without "
-        "it: that a real agent binary runs, resolves a delivered credential, reads "
-        "canonical config, uses its tools and completes a run record. Every other "
-        "agent test here stubs the binary with a shell script."
-    ),
-)
-def test_a_REAL_pi_agent_runs_against_ollama_and_writes_to_the_workspace(acc):
+@pytest.mark.parametrize("profile", _AGENT_PROFILES)
+def test_a_REAL_agent_runs_and_writes_to_the_workspace(acc, profile):
     """The whole stack at once, with a real model doing real work.
 
     Asserts a SIDE EFFECT, never the model's prose: an LLM's wording is not
@@ -7031,15 +7073,15 @@ def test_a_REAL_pi_agent_runs_against_ollama_and_writes_to_the_workspace(acc):
     the test cannot pass on a file left behind by an earlier one — the workspace
     volume persists, which is exactly how that would happen.
     """
-    name = "accpi"
-    _pi_ollama_project(acc, name)
+    name = f"accr{profile['agent']}"
+    _agent_project(acc, name, profile)
     token = f"ACC-{uuid.uuid4().hex[:12]}"
     acc.register(name)
 
     r = acc.up(
         name,
         mode="headless",
-        agent="pi",
+        agent=profile["agent"],
         workspace="persistent",
         task=f"Create a file at /workspace/proof.txt whose contents are exactly: {token}",
         foreground=True,
@@ -7050,11 +7092,9 @@ def test_a_REAL_pi_agent_runs_against_ollama_and_writes_to_the_workspace(acc):
 
     # The credential travelled the delivery path, not the environment.
     assert "delivered 1 credential" in combined, combined[-1500:]
-    # ...and reached the agent as an env var, which is the half that was missing:
-    # only anthropic/openai were ever exported before.
-    assert "exported OLLAMA_API_KEY" in combined, combined[-1500:]
-    # ...and the canonical config reached the agent home.
-    assert "Delivered operator-canonical agent config" in combined, combined[-1500:]
+    # ...and the canonical config reached the agent home, where one was delivered.
+    if profile["custom_provider"]:
+        assert "Delivered operator-canonical agent config" in combined, combined[-1500:]
 
     assert _workspace_contains(name, token), (
         "the agent reported success but nothing on the workspace volume contains "
@@ -7068,53 +7108,61 @@ def test_a_REAL_pi_agent_runs_against_ollama_and_writes_to_the_workspace(acc):
     assert token in (runs[0].get("task") or ""), "the task did not reach the record verbatim"
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OLLAMA_API_KEY"),
-    reason=(
-        "billable real-agent call — opt in with OLLAMA_API_KEY. NOT COVERED without "
-        "it: that a real agent reaches its API THROUGH the egress boundary. The other "
-        "egress tests prove `curl` and `ssh-keyscan` cross it, which exercise squid's "
-        "REDIRECT and the netfilter port rule respectively — not an agent's own HTTPS."
-    ),
-)
-def test_a_REAL_pi_agent_reaches_its_api_THROUGH_the_egress_boundary(acc):
+@pytest.mark.parametrize("profile", _AGENT_PROFILES)
+def test_a_REAL_agent_reaches_its_api_THROUGH_the_egress_boundary(acc, profile):
     """US5 with a real workload: the boundary must permit the declared API, and the
     agent must actually get through it.
 
-    A DIFFERENT PATH from every other egress test here. `{host: ollama.com}` is
-    declared WITHOUT a port, so `build_squid_acl` puts it in the proxy allowlist
-    rather than `build_netfilter_rules` — the agent's TLS is redirected to squid,
-    which splices it. `test_a_declared_port_opens_that_host_and_that_port_only`
-    covers the netfilter side with ssh-keyscan; nothing covered the proxy side with
-    a real agent, and the DNS the agent depends on is the path that was broken
-    under podman until this week.
+    A DIFFERENT PATH from every other egress test here. The destination is declared
+    WITHOUT a port, so `build_squid_acl` puts it in the proxy allowlist rather than
+    `build_netfilter_rules` — the agent's TLS is redirected to squid, which splices
+    it. `test_a_declared_port_opens_that_host_and_that_port_only` covers the
+    netfilter side with ssh-keyscan; nothing covered the proxy side with a real
+    agent, and the DNS the agent depends on is the path that was broken under
+    podman until this week.
 
     It also puts credential delivery under a boundary, which moves the published
     port to the sidecar — the agent container has none of its own. Delivery
     connects to that port, so this is the first test where those two features have
     to agree.
     """
-    name = "accpiegr"
-    _pi_ollama_project(acc, name)
+    name = f"acce{profile['agent']}"
+    _agent_project(acc, name, profile)
     proj = acc.tmp / f"proj{name}"
     (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
     (proj / ".agent-container" / f"{name}.env").write_text(
-        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@e.com\n"
+        "GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n"
     )
-    # No PORT on the destination — that is what routes it to squid instead of to a
-    # netfilter ACCEPT, and it is the whole point of this test.
     (proj / ".agent-container" / "environments.yaml").write_text(
         f"environments:\n  - name: {name}\n    host: local\n"
-        f"    container:\n      agent: pi\n"
-        f"    egress:\n      allow:\n        - host: ollama.com\n"
+        f"    container:\n      agent: {profile['agent']}\n"
+        f"    egress:\n      allow:\n{profile['egress_allow']}"
+    )
+    pat = (os.environ.get("AGENT_CONTAINER_TEST_REPOSITORY_PAT") or "").strip()
+    if not pat:
+        pytest.skip("needs AGENT_CONTAINER_TEST_REPOSITORY_PAT to push its evidence")
+    (proj / ".agent-container" / f"{name}.env").write_text(
+        f"GH_TOKEN={pat}\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n"
     )
     token = f"ACC-{uuid.uuid4().hex[:12]}"
+    branch = f"e2e/egress-{profile['agent']}-{token}"
     acc.register(name)
 
+    # CLONES AND PUSHES THROUGH THE BOUNDARY, which is why `github.com` is declared
+    # alongside the API. A run that only talked to its model would leave nothing
+    # behind and would exercise one destination; this one has to reach two, and the
+    # push is durable evidence that the boundary permitted real work rather than
+    # just a chat completion.
     r = acc.cli(
-        ["up", name, "--mode", "headless", "--agent", "pi", "--workspace", "persistent",
-         "--foreground", "--task",
-         f"Create a file at /workspace/proof.txt whose contents are exactly: {token}"],
+        ["up", name, "--mode", "headless", "--agent", profile["agent"],
+         "--workspace", "persistent", "--foreground", "--repo", _TEST_REPO,
+         "--task",
+         f"In the git repository at /workspace: create a file named "
+         f"runs/egress-{profile['agent']}-{token}.md containing a short markdown "
+         f"note that includes the exact string {token} on its own line and one "
+         f"sentence saying you reached your model API through an egress boundary. "
+         f"Then stage it, commit with message 'e2e egress {profile['agent']} "
+         f"{token}', create branch {branch}, and push that branch to origin."],
         cwd=proj,
     )  # fmt: skip
     combined = r.stdout + r.stderr
@@ -7135,54 +7183,82 @@ def test_a_REAL_pi_agent_reaches_its_api_THROUGH_the_egress_boundary(acc):
         "the agent ran behind the boundary but produced nothing — a declared API "
         "that does not actually resolve or connect looks exactly like this"
     )
+    # DURABLE EVIDENCE, and proof the push itself crossed the boundary.
+    got = _github_branch(branch, pat)
+    assert got is not None, (
+        f"branch {branch} is not on GitHub — the agent worked behind the boundary "
+        f"but could not push through it:\n{combined[-2000:]}"
+    )
+    assert token in got["commit"]["commit"]["message"]
 
 
-_TEST_REPO = "https://github.com/ondrasek/agent-container-test-repository"
+def _github_branch(branch: str, pat: str) -> dict | None:
+    """The pushed branch as GitHub sees it, or None. The DURABLE evidence.
+
+    Asserted against the forge rather than against the container: a commit that
+    only ever existed in an ephemeral container is not evidence that the agent did
+    anything, because nothing outlives the run to look at. An earlier version of
+    this test deliberately did not push, and the consequence was a test suite that
+    "proved" repository work while the repository stayed empty.
+    """
+    r = subprocess.run(
+        ["curl", "-s", "-o", "/dev/stdout", "-w", "\n%{http_code}",
+         "-H", f"Authorization: Bearer {pat}", "-H", "Accept: application/vnd.github+json",
+         f"https://api.github.com/repos/ondrasek/agent-container-test-repository/branches/{branch}"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    body, _, code = r.stdout.rpartition("\n")
+    if code.strip() != "200":
+        return None
+    return json.loads(body)
 
 
-@pytest.mark.skipif(
-    not (
-        os.environ.get("OLLAMA_API_KEY") and os.environ.get("AGENT_CONTAINER_TEST_REPOSITORY_PAT")
-    ),
-    reason=(
-        "billable real-agent call against a real PRIVATE repository — opt in with "
-        "OLLAMA_API_KEY and AGENT_CONTAINER_TEST_REPOSITORY_PAT. NOT COVERED without "
-        "them: clone-on-start with a credential that is actually required, and a run "
-        "record whose repository effect was produced by an agent rather than by a "
-        "shell stub committing on its behalf."
-    ),
-)
-def test_a_REAL_pi_agent_commits_in_a_repository_cloned_on_start(acc):
-    """US4 end to end: clone on start, let a real agent work, record what it did.
+@pytest.mark.parametrize("profile", _AGENT_PROFILES)
+def test_a_REAL_agent_commits_and_PUSHES_to_the_cloned_repository(acc, profile):
+    """US4 end to end, with evidence that outlives the container.
+
+    Clone on start, a real agent generates a file, commits it, and PUSHES — and the
+    branch is then read back from GitHub. The push is the point: a commit made
+    inside a container that is torn down seconds later proves nothing to anyone
+    looking at the repository afterwards.
 
     The repository is PRIVATE on purpose. Every other test in this tier passes
     `GH_TOKEN=x` — a dummy that satisfies `require_env` and authenticates nothing —
-    so the github.com HTTPS credential path has never actually been exercised. A
-    private clone fails outright without a real token, which makes this the first
-    test that can tell a working credential helper from an unused one.
+    so the github.com HTTPS credential path had never actually been exercised.
+    A private clone AND a push both fail outright without a real token.
 
-    DELIBERATELY DOES NOT PUSH. The commit stays inside the container, which is
-    ephemeral; pushing would write to someone's real repository as a side effect of
-    running the suite. That also exercises the more interesting record state:
-    `unpushed` is the alarm Feature 016 exists to raise, and it is only reachable
-    when a run commits without pushing.
+    Each run pushes its OWN branch. Pushing a shared branch would make two agents
+    racing the same remote a source of flakiness that says nothing about either.
     """
-    name = "accpirepo"
-    _pi_ollama_project(acc, name)
+    pat = os.environ.get("AGENT_CONTAINER_TEST_REPOSITORY_PAT")
+    if not pat:
+        pytest.skip(
+            "NOT COVERED without AGENT_CONTAINER_TEST_REPOSITORY_PAT: clone-on-start "
+            "and push with a credential that is actually required. A public clone "
+            "would pass with the `GH_TOKEN=x` dummy every other test uses."
+        )
+    pat = pat.strip()
+    name = f"accg{profile['agent']}"
+    _agent_project(acc, name, profile)
     token = f"ACC-{uuid.uuid4().hex[:12]}"
+    branch = f"e2e/{profile['agent']}-{token}"
     acc.register(name)
 
     r = acc.up(
         name,
         mode="headless",
-        agent="pi",
+        agent=profile["agent"],
         workspace="persistent",
         repo=_TEST_REPO,
-        env_extra=[f"GH_TOKEN={os.environ['AGENT_CONTAINER_TEST_REPOSITORY_PAT'].strip()}"],
+        env_extra=[f"GH_TOKEN={pat}"],
         task=(
-            f"In the git repository at /workspace, create a file named proof.txt "
-            f"whose contents are exactly: {token}. Then stage it and make a git "
-            f"commit with the message 'acceptance {token}'. Do not push."
+            f"In the git repository at /workspace: create a file named "
+            f"runs/{profile['agent']}-{token}.md containing a short markdown note. "
+            f"The note must include the exact string {token} on its own line, and "
+            f"one sentence describing that you are the {profile['agent']} agent "
+            f"running headless inside an agent-container. Then stage the file, "
+            f"commit it with the message 'e2e {profile['agent']} {token}', create a "
+            f"branch named {branch}, and push that branch to origin."
         ),
         foreground=True,
         wait=False,
@@ -7196,13 +7272,17 @@ def test_a_REAL_pi_agent_commits_in_a_repository_cloned_on_start(acc):
         "the workspace held no repository — clone-on-start did not happen, so "
         f"nothing here says anything about repository effect:\n{combined[-2000:]}"
     )
-    assert _workspace_contains(name, token), "the agent's file never reached the workspace"
 
     rec = _runs(acc, name)[0]
     assert rec["ended_at"] and rec["exit_code"] == 0, rec
     repo = rec.get("repository") or {}
-    assert repo, f"the record carries no repository effect at all: {rec}"
-    # The agent's own commit, observed by the tool rather than reported by the agent.
     assert repo.get("commits"), f"no commit was recorded for a run that made one: {repo}"
-    # Committed and NOT pushed — the state the alarm exists for.
-    assert repo.get("pushed") is not True, f"the run pushed to a real repository: {repo}"
+
+    # THE DURABLE EVIDENCE: the branch exists on GitHub, with the agent's commit.
+    got = _github_branch(branch, pat)
+    assert got is not None, (
+        f"branch {branch} is not on GitHub — the agent committed but the push never "
+        f"landed, so nothing survives this container:\n{combined[-2000:]}"
+    )
+    msg = got["commit"]["commit"]["message"]
+    assert token in msg, f"the pushed commit is not this run's: {msg!r}"

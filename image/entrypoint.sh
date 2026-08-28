@@ -1593,7 +1593,22 @@ run_headless_agent() {
     require_agent_binary "${a}"
     local -a cmd
     case "${a}" in
-        claude) cmd=(claude -p "${t}") ;;
+        # `--permission-mode bypassPermissions` is REQUIRED here, not a
+        # convenience. Headless has no tty and nobody to approve anything, so
+        # Claude Code's default asks for permission it can never receive: it
+        # answers "The write needs your approval — permission to create
+        # /workspace/proof.txt wasn't granted", does nothing, AND EXITS 0. The run
+        # record then reports success for an agent that performed no work, which is
+        # the worst available outcome. Measured with a real key before this line
+        # existed; claude is also the DEFAULT agent, so headless mode was broken in
+        # its default configuration.
+        #
+        # The container IS the boundary — that is the whole premise of this tool.
+        # It is rootless, its egress is whatever was declared, its workspace is its
+        # own volume and its home is disposable. Asking a coding agent to confirm a
+        # file write inside that, while it already has a shell, is not a security
+        # control; it is a prompt with no audience.
+        claude) cmd=(claude --permission-mode bypassPermissions -p "${t}") ;;
         codex)  cmd=(codex exec "${t}") ;;
         pi)     cmd=(pi -p "${t}") ;;
         # `opencode run` is the documented non-interactive form. VERIFIED to
