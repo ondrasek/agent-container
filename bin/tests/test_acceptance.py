@@ -3491,7 +3491,19 @@ def test_records_are_ingested_over_a_non_default_context(acc):
 # The stand-in agent lives on that volume too and runs the task as a shell script
 # (`claude -p "<task>"` → `$2`). The task is the only per-run channel a headless
 # run has, and these runs must each change something DIFFERENT.
-_TASK_RUNNER = '#!/bin/sh\n# acceptance stand-in: the task text IS the script\nexec sh -c "$2"\n'
+# THE LAST ARGUMENT, not `$2`. Every agent this tool invokes takes the task as the
+# final argument — `claude … -p <task>`, `codex exec <task>`, `pi -p <task>`,
+# `opencode run <task>` — but the number of flags BEFORE it is not fixed. Reading
+# `$2` encoded one agent's exact flag count, so adding `--permission-mode` to the
+# claude invocation made this stub run `sh -c bypassPermissions` and every test
+# using it died with 127. A stand-in that only works for one spelling of one
+# agent's command line is a stand-in that will break again.
+_TASK_RUNNER = (
+    "#!/bin/sh\n"
+    "# acceptance stand-in: the task text IS the script, and it is the LAST argument\n"
+    'for a in "$@"; do t="$a"; done\n'
+    'exec sh -c "$t"\n'
+)
 _GIT_ID = "git -c user.name=Test -c user.email=t@example.com"
 
 
