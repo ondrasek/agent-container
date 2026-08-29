@@ -7039,8 +7039,19 @@ def _agent_project(acc, name: str, profile: dict) -> None:
                         "baseUrl": "https://ollama.com/v1",
                         "models": [
                             {
-                                "id": "gpt-oss:20b",
-                                "name": "ollama-cloud-oss20b",
+                                # A CODE model, and the reason is measured rather
+                                # than aesthetic: `gpt-oss:20b` reliably did the
+                                # first half of the repository task — created the
+                                # file, staged it, committed — and dropped the
+                                # branch-and-push half, so the run exited 0 with a
+                                # commit in the record and nothing on GitHub. The
+                                # test caught exactly what it was written to catch.
+                                # That is model capability on a five-step task, not
+                                # an agent-container defect, and the honest fix is a
+                                # model that can do the task rather than a task
+                                # trimmed until the model can.
+                                "id": "kimi-k2.7-code",
+                                "name": "ollama-cloud-k2-code",
                                 "reasoning": True,
                                 "input": ["text"],
                                 "contextWindow": 131072,
@@ -7055,7 +7066,7 @@ def _agent_project(acc, name: str, profile: dict) -> None:
         )
     )
     (pid / "settings.json").write_text(
-        json.dumps({"defaultProvider": "ollama", "defaultModel": "gpt-oss:20b"})
+        json.dumps({"defaultProvider": "ollama", "defaultModel": "kimi-k2.7-code"})
     )
 
 
