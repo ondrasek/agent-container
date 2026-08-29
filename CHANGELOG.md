@@ -2,6 +2,60 @@
 
 <!-- version list -->
 
+## v0.41.0 (2026-08-29)
+
+### Bug Fixes
+
+- **egress**: Resolve DNS under podman, where three faults hid behind one symptom
+  ([`a03116e`](https://github.com/ondrasek/agent-container/commit/a03116e810b5ec1baafa56280b1669bdcb795c3e))
+
+- **headless**: Read the agent's exit code from the container, not from compose
+  ([`4cb9726`](https://github.com/ondrasek/agent-container/commit/4cb9726d4ed746566041e6209a5771f09c861703))
+
+- **mount**: Own the mode field, so a caller's :ro is not doubled
+  ([`35e6434`](https://github.com/ondrasek/agent-container/commit/35e643469af15f3b23d1a2960edaa35d6ad8f63f))
+
+- **pi**: Make pi usable at all — four defects found by running it end to end
+  ([`a5d0581`](https://github.com/ondrasek/agent-container/commit/a5d05814568b0edf49a1a2152d55030268a3cd6f))
+
+- **redeploy**: Remove containers before recreating them
+  ([`ae4954c`](https://github.com/ondrasek/agent-container/commit/ae4954c1bfdf080faadad55762486bc182f6cf8c))
+
+- **tests**: Make the neutral cwd outlive the test that first needed it
+  ([`c09ac75`](https://github.com/ondrasek/agent-container/commit/c09ac753ab507c2f2b218bb56ec57c56335395c1))
+
+- **tests**: Probe the runtime with a template BOTH runtimes answer
+  ([`8c95b3d`](https://github.com/ondrasek/agent-container/commit/8c95b3dfbd7c7d777b25712f5aaaf398031f5381))
+
+- **tests**: Read the task from the LAST argument, not from $2
+  ([`37f190a`](https://github.com/ondrasek/agent-container/commit/37f190a58dd62b7b33938a1ce46bb27c13d982d7))
+
+- **workspace**: Mount host binds read-only, which is what they always were
+  ([`f6f64e3`](https://github.com/ondrasek/agent-container/commit/f6f64e38f4752ba1a13cd3177723bccbe9de45ac))
+
+### Features
+
+- **headless**: Give Claude Code a permission mode, and push the evidence
+  ([`657e11d`](https://github.com/ondrasek/agent-container/commit/657e11db8c2763a8a9eae1d787cf4eb012cad431))
+
+### Testing
+
+- **acceptance**: A REAL agent committing in a repository cloned on start
+  ([`4a5dc7a`](https://github.com/ondrasek/agent-container/commit/4a5dc7afff12265103fd537456d0f50fd08bb899))
+
+- **acceptance**: A REAL agent reaching its API through the egress boundary
+  ([`08a65d8`](https://github.com/ondrasek/agent-container/commit/08a65d8301f11136a962dc798eabd990914825ff))
+
+- **acceptance**: Assert contracts, not a daemon's prose
+  ([`c231efa`](https://github.com/ondrasek/agent-container/commit/c231efa307744ed590a691cb44096adfed0eabf7))
+
+- **acceptance**: Run a REAL agent against a REAL model, and stop reading the repo
+  ([`eb37f69`](https://github.com/ondrasek/agent-container/commit/eb37f69ad028430207f5794eba2065b71306ff6f))
+
+- **headless**: Repin claude's invocation, and answer the question it asks
+  ([`6eb7ff8`](https://github.com/ondrasek/agent-container/commit/6eb7ff8800bc805f061c301e03ca2601173d6aea))
+
+
 ## v0.40.0 (2026-08-25)
 
 
