@@ -1320,6 +1320,48 @@ if [[ -f "${_anthropic_key}" ]]; then
         chmod 0600 "${_settings}"
         log "Claude apiKeyHelper wired to the ephemeral injected Anthropic key (never written to the ~/.claude volume)"
     fi
+
+    # AN INJECTED AGENT MUST NOT OPEN ON A WIZARD. Credentials are delivered and
+    # config is injected precisely so the operator attaches to a working agent; a
+    # first-run flow that asks them to pick a theme and confirm a key they did not
+    # type is the injection not having landed, from where they are sitting.
+    #
+    # Claude Code gates two separate things in ~/.claude.json, and BOTH have to be
+    # pre-answered or an attach lands on a dialog:
+    #   hasCompletedOnboarding / hasTrustDialogAccepted — the first-run flow
+    #   customApiKeyResponses.approved — "Detected a custom API key in your
+    #     environment ... Do you want to use this API key?", whose entries are the
+    #     key's LAST 20 CHARACTERS (verified against the running binary: the
+    #     prompt renders that same suffix, and the approved list is tested with it)
+    #
+    # MERGED, never overwritten: this file is the operator's, and it also carries
+    # per-project history. Absent keys are added, existing values are left alone.
+    _cjson="${AGENT_CONTAINER_HOME}/.claude.json"
+    if command -v python3 >/dev/null 2>&1; then
+        AC_KEYFILE="${_anthropic_key}" AC_CJSON="${_cjson}" python3 - <<'PYSEED' || log "NOTE: could not seed ~/.claude.json; Claude may show its first-run prompts"
+import json, os, pathlib
+p = pathlib.Path(os.environ["AC_CJSON"])
+try:
+    d = json.loads(p.read_text()) if p.exists() else {}
+except ValueError:
+    raise SystemExit(0)          # operator's file, unreadable: leave it alone
+d.setdefault("hasCompletedOnboarding", True)
+d.setdefault("hasTrustDialogAccepted", True)
+proj = d.setdefault("projects", {}).setdefault("/workspace", {})
+proj.setdefault("hasTrustDialogAccepted", True)
+r = d.setdefault("customApiKeyResponses", {})
+approved = r.setdefault("approved", [])
+r.setdefault("rejected", [])
+try:
+    suffix = pathlib.Path(os.environ["AC_KEYFILE"]).read_text().strip()[-20:]
+except OSError:
+    suffix = ""
+if suffix and suffix not in approved:
+    approved.append(suffix)
+p.write_text(json.dumps(d, indent=2))
+PYSEED
+        chmod 0600 "${_cjson}" 2>/dev/null || true
+    fi
 fi
 
 # Codex — redirect CODEX_HOME to an EPHEMERAL dir so an api-key login writes
@@ -1430,6 +1472,22 @@ for _kv in "${APIKEY_INJECT_DIR}"/*/value; do
     # Do NOT clobber a value the operator already set via .env — that layer wins,
     # which is the same precedence the two hard-coded blocks had.
     [[ -n "${!_var:-}" ]] && continue
+    # ONE CHANNEL PER AGENT, not two. Claude Code reads the key through the
+    # apiKeyHelper wired above — file-first, so the bytes never reach the volume —
+    # and exporting it into the environment as well makes Claude itself warn
+    # "Both apiKeyHelper and ANTHROPIC_API_KEY set - auth may not work as
+    # expected", on top of prompting for approval of a key the operator never
+    # typed. Measured: with the variable unset and the helper alone, the same
+    # launch is clean.
+    #
+    # Scoped to the SELECTED agent, because the env var is the only channel the
+    # others have: opencode reads ANTHROPIC_API_KEY straight from the environment,
+    # so an opencode (or codex, or pi) deployment still gets it.
+    if [[ "${_prov}" == "anthropic" && "${AGENT_CONTAINER_AGENT:-}" == "claude" \
+          && -f "${AGENT_CONTAINER_HOME}/.claude/apikey-helper.sh" ]]; then
+        log "not exporting ANTHROPIC_API_KEY: claude reads it through its apiKeyHelper (one channel, no approval prompt)"
+        continue
+    fi
     printf -v "${_var}" '%s' "$(cat "${_kv}")"
     export "${_var?}"
     log "exported ${_var} from the delivered '${_prov}' credential (volume never read by the agent's own config)"
