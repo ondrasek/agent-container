@@ -10607,6 +10607,22 @@ def record_never_started(host_name: str, name: str, spec: ExecSpec, reason: str)
     return record["run_id"]
 
 
+# Constitution VIII: this default is NAMED because it is a policy — "how long may a
+# deploy wait for a container that might be building its image first". It was an
+# inline `"1800"` at the one decision site below, which is how a policy ends up with
+# no owner: greppable only by its value, changeable only by someone who already knows
+# where to look. Overridable per-run with AGENT_CONTAINER_BUILD_TIMEOUT.
+#
+# 30 minutes, and the unit matters: this is NOT the credential-delivery budget. The
+# container's own sentinel wait is 90s and starts when the entrypoint reaches it —
+# i.e. after the container is running. This one covers everything BEFORE that, image
+# build included. Collapsing the two is the bug it was introduced to fix: a rebuild
+# exhausted the wait before the container existed, so the deploy continued WITHOUT
+# the pushed secrets and the agent reported "no API key" for a credential that had
+# been discovered, staged, and never sent.
+BUILD_WAIT_TIMEOUT = 1800  # seconds; env: AGENT_CONTAINER_BUILD_TIMEOUT
+
+
 def compose_up_exec(
     host_name: str,
     host_rec: dict,
@@ -10901,7 +10917,9 @@ def compose_up_exec(
             # only THEN start racing the sentinel. The container's own 90s begins
             # when its entrypoint reaches that point, which is after it is running —
             # so the two clocks start together rather than one inside the other.
-            build_budget = int(os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", "1800"))
+            build_budget = int(
+                os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", str(BUILD_WAIT_TIMEOUT))
+            )
             deadline = time.monotonic() + build_budget
             base = driver_runtime_argv(host_rec)
             cname = container_name(name)
@@ -14054,8 +14072,12 @@ def wiz_up(rt: str) -> None:
     # Optional single host-dir bind (empty = none). Resolved now so a bad path
     # surfaces before the confirmation card; Fatal returns to the menu.
     mounts: list[str] = []
+    # "read-only", not "read-write": resolve_bind_mount() emits `:ro` and owns that
+    # decision. The prompt said read-write long after the mount stopped being it,
+    # which is a promise the tool cannot keep made at the moment the operator
+    # decides — the worst place to be wrong.
     mount_dir = questionary.text(
-        "host directory to mount read-write (empty = none)", default=""
+        "host directory to mount read-only (empty = none)", default=""
     ).ask()
     if mount_dir:
         mounts = [resolve_bind_mount(mount_dir)]

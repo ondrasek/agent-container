@@ -317,7 +317,8 @@ agent-container logs job               # retrieve the output afterward
   the entrypoint reads that file and passes it to the agent in-container.
 - **`--workspace persistent|bind|ephemeral`** (default `persistent`) — what mounts
   at `/workspace`: a named volume that survives recreation; a local directory
-  (**`--workspace-dir`**, local hosts only — a remote host refuses it); or nothing
+  (**`--workspace-dir`**, local hosts only — a remote host refuses it, and it is
+  mounted **read-only**, so it is an input rather than a place to work); or nothing
   (the container layer, **gone on teardown** — commit-and-push or lose it).
 - **`--repo <url>`** — clone-on-start for a persistent/ephemeral workspace, credential
   by URL scheme: `git@…`/`ssh://…` uses the container's **own** SSH key (**a first
@@ -806,17 +807,26 @@ To give a container read/write access to a directory on your machine, pass
 
 ```bash
 agent-container up acme --mount ~/code/myproject
-#   -> appears inside the container at /workspace/myproject (read/write)
+#   -> appears inside the container at /workspace/myproject (READ-ONLY)
 
 # explicit target, and more than one:
 agent-container up acme --mount ~/code/myproject:/workspace/proj --mount ~/data
 ```
 
-> **macOS / Lima prerequisite:** the host directory must sit inside a **writable**
-> Lima mount, or the container sees it read-only / not at all. If R/W fails, add
-> the path to your Lima VM's config under `mounts:` with `writable: true` and
-> restart the VM (`limactl edit <vm>` then `limactl restart <vm>`). The commit-
-> and-push discipline still applies to any git repo you mount this way.
+> **Mounts are read-only.** A `--mount` directory is an INPUT: the container reads
+> it and writes nothing back. Everything the container writes goes to a volume,
+> which is what makes those writes survive a recreate and be revocable by name.
+>
+> This removes the old macOS / Lima prerequisite entirely — you no longer need a
+> `writable: true` Lima mount for `--mount` to work, and there is no read-write
+> mode to fall back to. Read-write was requested until it was measured: on the
+> common Lima setup where `~` is exposed read-only, docker mounted the directory
+> and failed at the *first write*, while podman refused at *container create*. The
+> capability was never actually there under either runtime.
+>
+> To have an agent work on a repository and push it, clone it into the workspace
+> (`--repo`) rather than mounting it — that is the commit-and-push path the whole
+> project is built around.
 
 ### Update the image
 

@@ -164,11 +164,32 @@ Two details that are load-bearing rather than incidental:
   host", or an operator debugs their network instead of their declaration. `NXDOMAIN` is also a
   cacheable negative answer, so a client that caches it keeps failing after the declaration is
   fixed — a policy error presenting as a DNS bug and outliving its cause.
-- **The agent cannot pick another resolver.** There is no DNS redirect rule, and that is the design
-  rather than an omission: default-deny already makes every resolver but this one *unreachable*, so
-  there is nothing to redirect. Docker's embedded resolver at `127.0.0.11` is the one exception —
-  it is reached over loopback and forwards outside the namespace — so its traffic is rewritten to
-  the sidecar resolver and the port behind it is dropped.
+- **The agent cannot pick another resolver, and this is now enforced by a rule.** **All** port-53
+  traffic, UDP and TCP, is REDIRECTed to the sidecar resolver — exactly as 443 and 80 are
+  REDIRECTed to squid, and for the same reason (FR-020a). The daemons are exempted **by UID**
+  (`! --uid-owner`), never by destination: unbound forwards declared names upstream over port 53
+  itself, so without the exemption its own queries would be rewritten back into it and loop. An
+  allowlist written twice, in two syntaxes, can drift; a UID cannot, because it does not encode
+  the allowlist at all.
+
+  > **This paragraph used to say the opposite** — that no DNS rule was needed because default-deny
+  > already made every other resolver unreachable, with Docker's embedded `127.0.0.11` as the lone
+  > rewritten exception. That reasoning was runtime-specific and it was wrong as a general claim:
+  > it held only where the runtime's resolver sat at a known loopback address, and **under rootless
+  > podman it did not hold at all**. The spec never accepted it — FR-020a always required *all*
+  > port-53 traffic to be forced to the resolver — so what changed is that the implementation came
+  > into compliance with the requirement, not that the requirement moved. Recorded rather than
+  > quietly rewritten, because "no rule is needed here" is precisely the shape of a control that
+  > looks deliberate while enforcing nothing.
+
+- **Two rules that look like plumbing and are not.** A REDIRECT rewrites the *destination* and
+  leaves the source alone, so a redirected query arrives at unbound carrying the namespace's
+  bridge address — and unbound answers `127.0.0.0/8` only, so it **REFUSES** it. That refusal is
+  `rcode 5`, which reads exactly like a policy denial and is not one; the tell is that declared
+  names are denied too. A POSTROUTING SNAT to `127.0.0.1` is what makes the query arrive looking
+  local. Separately, the resolver's **ephemeral high port** is dropped, because the redirect
+  matches port 53 only and asking that port directly walks straight past the rewrite — measured,
+  and it answered.
 
 The upstream for declared names is chosen by the tool, not inherited from the host: the host's
 resolver would otherwise learn the environment's entire declared destination set.

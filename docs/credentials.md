@@ -270,6 +270,26 @@ completion sentinel is written last, after every value lands — releasing the w
 early would hand the container a partial set that looks, from inside, exactly like a
 completed delivery.
 
+**Two clocks, and they must not be collapsed into one.** The container's sentinel
+wait is **90 s**, and it starts when the entrypoint reaches that point — that is,
+*after* the container is running. The tool's own wait covers everything **before**
+that, and a deploy may include an **image build**: minutes, not seconds. It is
+therefore a separate, longer budget, named `BUILD_WAIT_TIMEOUT` (30 minutes) and
+overridable per run:
+
+```bash
+AGENT_CONTAINER_BUILD_TIMEOUT=3600 agent-container up acme
+```
+
+Bounding the whole wait by the container's 90 s was a real defect, and its failure
+mode is the one worth remembering: a deploy that rebuilt the image exhausted the
+wait *before the container existed*, the delivery thread gave up, the container
+waited its own 90 s and continued **without the pushed secrets** — and the agent
+then reported "no API key" for a credential that had been discovered, staged, and
+never sent. Measured; a rebuild alone was enough, so a **first** deploy with
+credentials was the likeliest case to hit it. The two clocks now start together
+rather than one inside the other.
+
 ### Claude Code: API key or OAuth token (`claude_auth`)
 
 Claude Code accepts two credentials and they are **not** interchangeable:
@@ -436,6 +456,20 @@ discover and stage it automatically — one file per provider:
 #   <provider> ∈ anthropic | openai | …   (lower-case)
 ```
 
+**The provider name IS the environment variable**, derived rather than enumerated:
+`<provider>` is upper-cased, `-` becomes `_`, and `_API_KEY` is appended — so
+`acme.anthropic.key` exports `ANTHROPIC_API_KEY`, and `acme.google.key` exports
+`GOOGLE_API_KEY` with nothing to add anywhere. This replaced a hardcoded pair
+(anthropic, openai): every other provider's key was delivered to its volume and
+then silently never exported, which for a multi-provider agent like `pi` or
+`opencode` meant a credential the operator could see on disk and the agent could
+not see at all.
+
+**One provider is mapped explicitly, and deliberately:** `claude-oauth` exports
+`CLAUDE_CODE_OAUTH_TOKEN`, not `CLAUDE_OAUTH_API_KEY`. A subscription token is not
+an API key, and bending it into the naming rule would produce a variable Claude
+Code does not read — the kind of nearly-true thing that costs an afternoon.
+
 **User level only** (Feature 011, FR-001f). There is deliberately no project-local
 equivalent: `.agent-container/` travels with the repository, and the repo holds a
 **locator, never a value** — so a key placed there would be staged by `git add`.
@@ -464,10 +498,33 @@ An agent's home mixes two kinds of data, split at **file granularity** by a
 per-agent **canonical manifest** (US3):
 
 - **Canonical config** — operator-owned, non-secret settings, project guidance,
-  and tool/MCP definitions (e.g. `~/.claude/settings.json` + `CLAUDE.md`;
-  `~/.codex/config.toml` + `AGENTS.md`; pi config). Delivered **fresh on each
-  deploy** to `INJECT_CONFIG_DIR` and copied onto the volume every boot, so a
-  local edit propagates on the next `up`/`redeploy` (FR-007).
+  and tool/MCP definitions. Delivered **fresh on each deploy** to
+  `INJECT_CONFIG_DIR` and copied onto the volume every boot, so a local edit
+  propagates on the next `up`/`redeploy` (FR-007).
+
+  **The manifest is exact, per agent — these directories and these filenames and
+  no others:**
+
+  | Agent | Home dir | Canonical filenames |
+  |---|---|---|
+  | `claude` | `~/.claude` | `settings.json`, `CLAUDE.md`, `mcp.json`, `*.mcp.json` |
+  | `codex` | `~/.codex` | `config.toml`, `AGENTS.md` |
+  | `pi` | `~/.pi/agent` | `models.json`, `settings.json` |
+
+  **`~/.pi/agent`, not `~/.pi`** — pi keeps its configuration in `getAgentDir()`,
+  one level below its home volume. The manifest previously pointed at `~/.pi` and
+  named `config.json` / `config.toml` / `config.yaml` / `config.yml`, none of which
+  pi reads: a file placed by the convention landed at `~/.pi/<name>` and was
+  ignored, so canonical config delivery **could never work for pi at all**. It
+  failed silently, because delivering a file nobody reads looks exactly like
+  delivering a file.
+
+  `models.json` declares custom providers; `settings.json` holds the settings,
+  including the model default that a headless `pi -p` depends on (it takes no
+  `--model`). `auth.json` and `trust.json` sit in the same directory and are
+  deliberately **absent** from the manifest: the first is a credential store and
+  canonical config is non-secret by definition (FR-007), the second is runtime
+  state (FR-008).
 - **Runtime state** — history, caches, learned state, and interactive OAuth
   credentials. **Persists** on the per-agent volume across recreation; the fresh
   canonical copy overwrites only the manifest's files and leaves everything else
@@ -478,6 +535,34 @@ Discovery mirrors the `.env`/sidecar convention (project-local first):
 ```
 .agent-container/<name>.config/…   →  ~/.config/agent-container/<name>.config/…
 ```
+
+### First-run state is SEEDED in-container, not delivered (Feature 003 boundary)
+
+An agent that has never run shows its onboarding flow, and a credentialed agent
+showing a setup wizard is indistinguishable — to the operator attaching — from an
+agent that received no credential at all. So the entrypoint seeds the minimum
+first-run state at boot: for Claude Code, `hasCompletedOnboarding`,
+`hasTrustDialogAccepted`, and the `customApiKeyResponses.approved` entry for the
+key actually injected.
+
+**Why this does not contradict FR-008.** That requirement governs what the tool
+*delivers from the host* — runtime state is never shipped onto a volume, and it
+still isn't. This is different in kind: the state is **synthesised inside the
+container at boot**, from a decision the operator already made by supplying the
+credential. Nothing is read from the host, nothing new crosses the boundary, and
+the file stays the agent's own.
+
+Two properties keep it honest:
+
+- **Merged, never overwritten.** An existing `~/.claude.json` keeps every key it
+  has; only absent keys are filled in. An operator's interactive login, MCP
+  approvals, and history survive a redeploy.
+- **It approves exactly the key that was injected**, identified by that key's own
+  trailing characters. It cannot pre-approve a credential the container was not
+  given, so it grants no access the deployment did not already carry.
+
+If seeding fails the entrypoint says so and continues — the agent then shows its
+first-run prompts, which is the pre-existing behaviour and not a broken container.
 
 **Secret-bearing config (FR-009):** a config file that *carries* a secret (e.g. an
 MCP definition embedding a token) is classified and delivered **as a secret**

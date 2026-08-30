@@ -81,10 +81,29 @@ fails if any of them disagree.
 
 | Agent | Headless form | Persistent state |
 |---|---|---|
-| `claude` | `claude -p "<task>"` | `~/.claude` |
+| `claude` | `claude --permission-mode bypassPermissions -p "<task>"` | `~/.claude` |
 | `codex` | `codex exec "<task>"` | `~/.codex` |
 | `pi` | `pi -p "<task>"` | `~/.pi` |
 | `opencode` | `opencode run "<task>"` | `~/.config/opencode` **and** `~/.local/share/opencode` |
+
+**Claude Code runs headless with `--permission-mode bypassPermissions`, and that
+is required rather than convenient.** Headless has no tty and nobody to approve
+anything, so Claude's default asks for a permission it can never receive: it
+answers *"the write needs your approval"*, does nothing, **and exits 0**. The run
+record then reports success for an agent that performed no work — the worst
+available outcome, because it is indistinguishable from a task that genuinely had
+nothing to do. Measured with a real key; since `claude` is also the *default*
+agent, headless mode was broken in its default configuration.
+
+**What this does and does not widen.** It removes an in-container prompt, not a
+boundary. The container **is** the boundary — rootless, egress limited to what was
+declared (Feature 012), workspace on its own volume, home disposable. An agent
+that can already open a shell gains nothing from being asked to confirm a file
+write; the prompt has no audience. What it does mean is plain: **a headless task
+runs with the agent's tools unrestricted inside that container**, so the boundary
+doing the work is the container and the egress declaration, never the agent's own
+consent dialog. Scope a task accordingly, and declare egress if the container
+should not reach the whole internet.
 
 **opencode is the one agent with two volumes.** It follows XDG and splits
 configuration (`~/.config/opencode`) from credentials and session history
@@ -119,13 +138,25 @@ Selects what is mounted at `/workspace`:
 | Mode | `/workspace` is | Durability | Host |
 |------|-----------------|------------|------|
 | **persistent** | the named `agent-container-<name>-workspace` volume | survives recreation | any |
-| **bind** | a local directory (`--workspace-dir`) | edits the operator's own filesystem | **local hosts only** (a remote host refuses it) |
+| **bind** | a local directory (`--workspace-dir`), mounted **read-only** | an INPUT — the container cannot write it | **local hosts only** (a remote host refuses it) |
 | **ephemeral** | nothing (the container's writable layer) | **gone on teardown** | any |
 
 The workspace named volume exists **only** in persistent mode; the other eight
 per-container volumes and the name/port identity are unchanged, and pre-004 /
 default deployments are persistent — so no existing deployment's identity changes.
 `--purge`/`wipe` tolerate the workspace volume's absence.
+
+> **A host bind is read-only, and that is the design rather than a limitation.**
+> Everything the container writes goes to a **volume** — the workspace volume, the
+> agent-login volumes, the credential volumes — which is what makes those writes
+> survive a recreate and be revocable by name. A host directory is an input.
+>
+> This used to request read-write, and the request could not be honoured on the
+> common macOS + Lima setup where `~` is exposed read-only. The two runtimes
+> disagreed only about *when* they said so: docker mounted it and failed at the
+> first write (`Read-only file system`), podman refused at container create. Both
+> measured. So `rw` never bought a capability here — it bought a deferred error
+> under one runtime and a dead deploy under the other.
 
 > **Ephemeral is not durable.** An ephemeral workspace loses anything not
 > committed-and-pushed when the container is torn down. `up` prints a NOTE to that

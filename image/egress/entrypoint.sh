@@ -62,16 +62,28 @@ install_rules() {
     iptables -t nat -A OUTPUT -p tcp --dport 80 \
         -m owner ! --uid-owner "$SQUID_UID" -j REDIRECT --to-port "$SQUID_HTTP_PORT"
 
-    # FR-020a needs NO DNS RULE AT ALL, and that is the finding rather than an
-    # omission (research R18, measured). The default-deny policy below already
-    # makes every resolver except ours UNREACHABLE — an agent querying 8.8.8.8
-    # cannot open the connection, so there is nothing to redirect. A REDIRECT
-    # would merely *answer* such an agent; the DROP means it cannot ask.
+    # FR-020a REQUIRES A DNS RULE, and the rules below are it. This comment used
+    # to say the exact opposite — that no rule was needed, that its absence was
+    # "the finding rather than an omission" (research R18), and that a future
+    # reader should "not re-add one". That was wrong, and it is left on the record
+    # rather than deleted because of HOW it was wrong.
     #
-    # Four NAT approaches were tried and all failed here (REDIRECT needs
-    # route_localnet with /proc/sys read-only; DNAT gets no reply and breaks
-    # direct queries). Do not re-add one: it would be a moving part that buys
-    # nothing, and its absence is deliberate.
+    # The claim was that default-deny already makes every other resolver
+    # UNREACHABLE, so there is nothing to redirect: an agent querying 8.8.8.8
+    # cannot open the connection, and a DROP means it cannot even ask. That
+    # reasoning is sound only for resolvers reached THROUGH the filter table. It
+    # silently excluded the one resolver that is not — the runtime's own, reached
+    # over loopback, which forwards the query outside this namespace where none of
+    # these rules apply. The comment then acknowledged that hole in its very next
+    # paragraph and closed it with a rule, while still asserting no rule was
+    # needed. Both halves shipped, and the contradiction survived review.
+    #
+    # So the guarantee was never "no rule needed"; it was "one narrow rule, for
+    # one runtime". FR-020a says ALL port-53 traffic, and it always did. The rules
+    # below now do that, by port and not by destination address, for any runtime.
+    # Do not restore the narrow form: it failed closed under podman (see below),
+    # which made it look harmless, and a control that enforces nothing while
+    # reading as deliberate is the most expensive kind of comment to leave behind.
 
     # DOCKER'S EMBEDDED RESOLVER IS A HOLE IN THE LOOPBACK ACCEPT (research R19).
     # On every user-defined network — which is what compose creates — the daemon
