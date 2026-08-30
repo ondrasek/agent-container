@@ -18,7 +18,49 @@ name used two ways anywhere else in the docs, this file wins.
 
 "Project directory" is **not** used: it is ambiguous between the first two.
 
-### Relocating the config directory
+### Relocating this tool's own directories
+
+Each of the three answers to its own variable, then to a single **root**, then to
+XDG, then to `$HOME`:
+
+| Location | Ours (wins) | Then `AGENT_CONTAINER_ROOT` | Then XDG | Then |
+|---|---|---|---|---|
+| User configuration | `AGENT_CONTAINER_CONFIG_DIR` | `<root>/config` | `$XDG_CONFIG_HOME/agent-container` | `~/.config/agent-container` |
+| Derived host state | `AGENT_CONTAINER_STATE_DIR` | `<root>/state` | `$XDG_STATE_HOME/agent-container` | `~/.local/state/agent-container` |
+| Durable records | `AGENT_CONTAINER_DATA_DIR` | `<root>/data` | `$XDG_DATA_HOME/agent-container` | `~/.local/share/agent-container` |
+
+The specific variables name **the directory itself** — no `agent-container`
+component is appended, because unlike the XDG variables they are not directories
+shared with other tools. Under the root the components are `config`, `state` and
+`data`, so the tree is self-describing. An empty value falls through rather than
+resolving to the current directory.
+
+**Why ours exist.** The XDG variables are a shared namespace: relocating this tool
+through them relocates *every* XDG-honouring program in the process. That is not
+theoretical. The acceptance harness moved `XDG_CONFIG_HOME` to isolate
+`hosts.json` and moved **podman's connection registry** with it — podman keeps
+connections under `$XDG_CONFIG_HOME/containers/`. Its registry then read **empty**
+rather than missing, so `podman --connection <name>` — the argv this tool itself
+builds — resolved nothing, and the podman path could not be exercised at all.
+Podman is the **default** runtime ([ADR 0001](decisions/0001-runtime-and-base-image.md)),
+so the one runtime with no end-to-end coverage was the one we ship on. Docker
+concealed it, keeping contexts in `~/.docker` where XDG does not reach.
+
+**Why the root exists too.** The config override alone fixed that collision but not
+*isolation*: `attach` reads the compose file and `.port` from the **state** dir, so
+standing up a deployment that touches none of the operator's own files still meant
+moving two shared XDG namespaces — the very thing the config override existed to
+stop doing. One root relocates all three together:
+
+```sh
+AGENT_CONTAINER_ROOT=~/scratch/demo agent-container up demo
+AGENT_CONTAINER_ROOT=~/scratch/demo agent-container attach demo
+```
+
+That is what an isolated deployment, a test harness, or a second parallel setup
+actually wants: one variable, one tree, nobody else's namespace touched.
+
+## Relocating the config directory
 
 **`AGENT_CONTAINER_CONFIG_DIR`** points this tool's user configuration somewhere else:
 

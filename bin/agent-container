@@ -106,33 +106,56 @@ PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
 
 
-STATE_DIR = (
-    Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-container"
-)
-# OUR variable first, then the XDG one, then the default — and it names THE
-# DIRECTORY ITSELF, with no `agent-container` component appended, because unlike
-# `XDG_CONFIG_HOME` it is not a directory shared with other tools.
+# THE TOOL'S OWN THREE DIRECTORIES, resolved by one rule each.
 #
-# It exists because `XDG_CONFIG_HOME` is a SHARED namespace: relocating this tool
-# through it relocates every xdg-honouring program in the process. Not theoretical
-# — the acceptance harness moved it to isolate `hosts.json` and took PODMAN's
-# connection registry with it (podman keeps connections under
-# `$XDG_CONFIG_HOME/containers/`). The registry then read EMPTY rather than
-# missing, `podman --connection <name>` — the argv this tool itself builds —
-# resolved nothing, and the podman path could not be exercised at all. ADR 0001
-# makes podman the DEFAULT runtime, so the one runtime with no end-to-end coverage
-# was the one we ship on. Docker hid it, keeping contexts in `~/.docker`.
+#   1. its OWN variable            AGENT_CONTAINER_{CONFIG,STATE,DATA}_DIR
+#   2. the single ROOT override    AGENT_CONTAINER_ROOT/{config,state,data}
+#   3. the XDG variable            $XDG_*_HOME/agent-container
+#   4. the $HOME default           ~/.config, ~/.local/state, ~/.local/share
 #
-# An EMPTY value falls through rather than resolving to the process's cwd.
-CONFIG_DIR = Path(
-    os.environ.get("AGENT_CONTAINER_CONFIG_DIR")
-    or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "agent-container"
-)
+# WHY OURS EXIST AT ALL. The XDG variables are a SHARED namespace: relocating this
+# tool through them relocates every xdg-honouring program in the process. Not
+# theoretical — the acceptance harness moved `XDG_CONFIG_HOME` to isolate
+# `hosts.json` and took PODMAN's connection registry with it (podman keeps
+# connections under `$XDG_CONFIG_HOME/containers/`). The registry then read EMPTY
+# rather than missing, `podman --connection <name>` — the argv this tool itself
+# builds — resolved nothing, and the podman path could not be exercised at all.
+# ADR 0001 makes podman the DEFAULT runtime, so the one runtime with no end-to-end
+# coverage was the one we ship on. Docker hid it, keeping contexts in `~/.docker`.
+#
+# WHY THE ROOT EXISTS TOO. The config override alone fixed that collision but not
+# ISOLATION: `attach` reads the compose file and `.port` from the state dir, so
+# standing up a deployment that does not touch the operator's own files still
+# meant moving two shared XDG namespaces. `AGENT_CONTAINER_ROOT=<dir>` relocates
+# all three together, which is the thing an isolated deployment, a test harness or
+# a second parallel setup actually wants. One variable, one tree, nobody else's
+# namespace touched.
+#
+# Ours name THE DIRECTORY ITSELF — no `agent-container` component is appended —
+# because unlike the XDG variables they are not directories shared with other
+# tools. Under the ROOT the components are `config`, `state` and `data`, so the
+# tree is self-describing.
+#
+# An EMPTY value falls through rather than resolving to the process's cwd: `FOO=`
+# is how a shell says "unset" in practice.
+def _own_dir(own: str, under_root: str, xdg: str, home_default: str) -> Path:
+    """This tool's own directory, by the precedence documented above."""
+    mine = os.environ.get(own)
+    if mine:
+        return Path(mine)
+    root = os.environ.get("AGENT_CONTAINER_ROOT")
+    if root:
+        return Path(root) / under_root
+    return Path(os.environ.get(xdg) or Path.home() / home_default) / "agent-container"
+
+
+STATE_DIR = _own_dir("AGENT_CONTAINER_STATE_DIR", "state", "XDG_STATE_HOME", ".local/state")
+CONFIG_DIR = _own_dir("AGENT_CONTAINER_CONFIG_DIR", "config", "XDG_CONFIG_HOME", ".config")
 # Feature 016 R1: the SIXTH layout location, and it is DATA_HOME rather than a
 # corner of STATE_DIR because docs/layout.md documents the state dir as "computed;
 # safe to delete". A durable record kept somewhere safe to delete is a
 # contradiction, and it would quietly make Feature 011's own map false.
-DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "agent-container"
+DATA_DIR = _own_dir("AGENT_CONTAINER_DATA_DIR", "data", "XDG_DATA_HOME", ".local/share")
 HOSTS_CONF = CONFIG_DIR / "hosts.conf"
 # Feature 001: the host registry (hosts.json) supersedes the flat hosts.conf
 # address book. DEFAULT_HOST is the implicit local host name; per-host runtime

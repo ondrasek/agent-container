@@ -63,6 +63,9 @@ def load_wiz(monkeypatch, tmp_path):
         xdg_config: Path | None = None,
         xdg_data: Path | None = None,
         own_config: Path | str | None = None,
+        own_state: Path | str | None = None,
+        own_data: Path | str | None = None,
+        own_root: Path | str | None = None,
     ):
         if home is None:
             home = tmp_path / "home"
@@ -88,19 +91,29 @@ def load_wiz(monkeypatch, tmp_path):
             "HCLOUD_TOKEN",
             "AGENT_CONTAINER_HOST",
             "AGENT_CONTAINER_USER",
-            # OUTRANKS the XDG vars set above, so a leaked one would point a test
-            # at the operator's real config and silently void this fixture's whole
-            # isolation promise — the failure mode the XDG_DATA_HOME comment
-            # describes, one variable further along.
+            # These OUTRANK the XDG vars set above, so a leaked one would point a
+            # test at the operator's real files and silently void this fixture's
+            # whole isolation promise — the failure mode the XDG_DATA_HOME comment
+            # describes, one variable further along. AGENT_CONTAINER_ROOT is the
+            # worst of them: it moves all three at once.
             "AGENT_CONTAINER_CONFIG_DIR",
+            "AGENT_CONTAINER_STATE_DIR",
+            "AGENT_CONTAINER_DATA_DIR",
+            "AGENT_CONTAINER_ROOT",
             "TMUX",
         ):
             monkeypatch.delenv(var, raising=False)
         # ...and only THEN what a test asks for deliberately. Scrub first, set
         # second: reversing it would have the leak-guard eat the test's own intent,
         # which is a fixture that silently ignores its arguments.
-        if own_config is not None:
-            monkeypatch.setenv("AGENT_CONTAINER_CONFIG_DIR", str(own_config))
+        for var, val in (
+            ("AGENT_CONTAINER_ROOT", own_root),
+            ("AGENT_CONTAINER_CONFIG_DIR", own_config),
+            ("AGENT_CONTAINER_STATE_DIR", own_state),
+            ("AGENT_CONTAINER_DATA_DIR", own_data),
+        ):
+            if val is not None:
+                monkeypatch.setenv(var, str(val))
 
         mod_name = f"_agent_container_under_test_{next(_counter)}"
         loader = SourceFileLoader(mod_name, str(SCRIPT_PATH))

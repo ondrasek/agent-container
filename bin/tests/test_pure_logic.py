@@ -1565,12 +1565,74 @@ def test_the_override_is_the_dir_itself_not_a_parent(load_wiz, tmp_path):
     assert wiz.CONFIG_DIR.name != "agent-container"
 
 
-def test_it_moves_only_the_config_dir(load_wiz, tmp_path):
-    """STATE_DIR and DATA_DIR keep answering to XDG alone.
+def test_the_root_moves_all_three_together(load_wiz, tmp_path):
+    """One variable for the case that actually recurs: isolate this tool entirely.
 
-    Deliberate: podman keeps nothing under XDG_STATE_HOME or XDG_DATA_HOME, so
-    neither collides, and one variable is the whole fix. Pinned so a later hand
-    cannot widen the surface without saying why.
+    The config override alone fixed podman's collision but not ISOLATION — `attach`
+    reads the compose file and `.port` from the STATE dir, so standing up a
+    deployment that touches none of the operator's files still meant moving two
+    shared XDG namespaces, which is the problem the config override existed to
+    stop doing.
+    """
+    root = tmp_path / "root"
+    wiz = load_wiz(
+        xdg_state=tmp_path / "xs",
+        xdg_config=tmp_path / "xc",
+        xdg_data=tmp_path / "xd",
+        own_root=root,
+    )
+    assert wiz.CONFIG_DIR == root / "config"
+    assert wiz.STATE_DIR == root / "state"
+    assert wiz.DATA_DIR == root / "data"
+
+
+def test_a_specific_override_beats_the_root(load_wiz, tmp_path):
+    """Precedence, stated as a test rather than left to be inferred: the narrower
+    instruction wins. An operator who moved everything and then moved one thing
+    back meant the second edit."""
+    root = tmp_path / "root"
+    wiz = load_wiz(own_root=root, own_state=tmp_path / "elsewhere")
+    assert wiz.STATE_DIR == tmp_path / "elsewhere"
+    assert wiz.CONFIG_DIR == root / "config"  # untouched by the narrower override
+    assert wiz.DATA_DIR == root / "data"
+
+
+def test_the_root_is_ignored_when_unset(load_wiz, tmp_path):
+    """Absent means absent: with no root and no specific override, XDG still wins
+    and every existing deployment resolves exactly where it did before."""
+    wiz = load_wiz(xdg_state=tmp_path / "xs", xdg_config=tmp_path / "xc", xdg_data=tmp_path / "xd")
+    assert wiz.CONFIG_DIR == tmp_path / "xc" / "agent-container"
+    assert wiz.STATE_DIR == tmp_path / "xs" / "agent-container"
+    assert wiz.DATA_DIR == tmp_path / "xd" / "agent-container"
+
+
+def test_an_empty_root_is_not_a_relocation(load_wiz, tmp_path):
+    """`AGENT_CONTAINER_ROOT=` would otherwise put every directory under cwd."""
+    wiz = load_wiz(xdg_config=tmp_path / "xc", own_root="")
+    assert wiz.CONFIG_DIR == tmp_path / "xc" / "agent-container"
+
+
+def test_state_and_data_have_their_own_overrides(load_wiz, tmp_path):
+    """The pair added alongside the root, so one directory can be moved alone."""
+    wiz = load_wiz(
+        xdg_state=tmp_path / "xs",
+        xdg_data=tmp_path / "xd",
+        own_state=tmp_path / "s",
+        own_data=tmp_path / "d",
+    )
+    assert wiz.STATE_DIR == tmp_path / "s"
+    assert wiz.DATA_DIR == tmp_path / "d"
+
+
+def test_the_config_override_moves_only_the_config_dir(load_wiz, tmp_path):
+    """Each specific override moves ONE directory and leaves the others alone.
+
+    Superseding an earlier version of this test, which pinned that state and data
+    had no override at all. That was true and deliberate at the time — podman keeps
+    nothing under XDG_STATE_HOME or XDG_DATA_HOME, so the config variable fixed the
+    collision by itself. It did not fix ISOLATION, which is what
+    AGENT_CONTAINER_ROOT is for; the narrowness pinned here is now about scope, not
+    about the others being absent.
     """
     wiz = load_wiz(
         xdg_state=tmp_path / "xs",
