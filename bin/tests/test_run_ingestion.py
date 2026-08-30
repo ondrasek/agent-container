@@ -867,7 +867,12 @@ def test_both_runs_commands_take_json(wiz):
     for cmd in group.typer_instance.registered_commands:
         names.add(cmd.name)
         assert "as_json" in inspect.signature(cmd.callback).parameters, cmd.name
-    assert names == {"list", "show"}
+    # `ls` is the canonical listing verb; `list` remains as a HIDDEN alias so
+    # existing scripts keep working. Both are registered, so both appear here —
+    # and both must carry --json, which is the property this test exists for. An
+    # alias that quietly dropped the machine-readable surface would be worse than
+    # no alias, because callers would have no reason to suspect it.
+    assert names == {"ls", "list", "show"}
 
 
 # --- adversarial review: the alarm must not go quiet on an UNKNOWN commit list

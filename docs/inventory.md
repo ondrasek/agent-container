@@ -15,9 +15,9 @@ for the same reason `unknown` is unstorable: recording a removal that may not ha
 in the one store a later audit reads.
 
 ```bash
-agent-container inventory list           # everything ever created, newest first
+agent-container inventory ls           # everything ever created, newest first
 agent-container inventory reconcile      # record vs. reality
-agent-container inventory list --json    # for an agent
+agent-container inventory ls --json    # for an agent
 ```
 
 ## It begins at install, and is not backfilled

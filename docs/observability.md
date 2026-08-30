@@ -10,10 +10,10 @@ Every run — headless or interactive — now leaves one small JSON **record** t
 container.
 
 ```bash
-agent-container runs list                      # every environment on the default host
-agent-container runs list demo --json
+agent-container runs ls                      # every environment on the default host
+agent-container runs ls demo --json
 agent-container runs show 20260809T101010Z-ab12
-agent-container runs list demo --changed src/auth/session.py
+agent-container runs ls demo --changed src/auth/session.py
 ```
 
 ## What a record is
@@ -110,7 +110,7 @@ interval leaves no record, and no ordering fixes that — there is no run yet to
 after their agent has started are the ones this guarantees.
 
 **Draining happens on contact, not on a schedule.** `up`, `redeploy`, `down`, `wipe`,
-`runs list` and `runs show` each drain that host first, so listing a detached run that finished
+`runs ls` and `runs show` each drain that host first, so listing a detached run that finished
 thirty seconds ago finds it rather than answering "no runs".
 
 **Teardown drains BEFORE it removes.** Ordering is the property, not an optimisation: a drain
@@ -173,14 +173,14 @@ Constitution I exists to prevent:
 "committed and did not push"; conflating it with "could not tell" would make the loudest signal in
 the feature unreliable.
 
-In `runs list --json` the alarm is the `unpushed` key — a list of run ids beside `runs`, derived
+In `runs ls --json` the alarm is the `unpushed` key — a list of run ids beside `runs`, derived
 once by the tool so a consumer cannot forget to re-derive it. It is **always present, even empty**,
 as is `usage`; a key that appeared only when it had something to say would make "nothing to report"
 and "this build does not report it" indistinguishable. `uncertain` appears with `--changed`, the
 only mode in which the concept exists. `runs show --json` adds nothing: it is the record verbatim.
 
 **`paths` is captured when the run ends, not resolved from the SHAs later.** That is what lets
-`runs list --changed <path>` answer months afterwards, on a machine that never had the clone, and
+`runs ls --changed <path>` answer months afterwards, on a machine that never had the clone, and
 against history someone has since rebased. Both the path list and the commit list are capped at
 200 entries — a run touching ten thousand files would otherwise write a record larger than
 everything else combined — and the cap is **never silent**: `paths_truncated` travels with the
@@ -253,7 +253,7 @@ Round-robin is a **priority, not a third bound**. Every day empties before the c
 run from a store holding 251 records would be losing data for no space.
 
 The cost, stated rather than left to be discovered: while a day holds more records than its round,
-the survivors are no longer a contiguous "everything since *date*" window, so `runs list --changed`
+the survivors are no longer a contiguous "everything since *date*" window, so `runs ls --changed`
 is thinner across that day than it would have been. That is the incompleteness any prune creates,
 placed on the day that produced thousands of identical records instead of on the days that produced
 distinct ones.
@@ -364,7 +364,7 @@ record saying so on every `list` would bury the ones that matter.
 | Action | Lands on |
 |---|---|
 | `up`, `stop`, `start` | the **target environment's** runs volume, on its host |
-| `list`, `inventory list`, `runs list` | the **control plane's own** runs volume |
+| `list`, `inventory ls`, `runs ls` | the **control plane's own** runs volume |
 
 **Reads are attributed too.** A read is how an attacker finds what to act on, so a trail recording
 only writes answers *"what was changed"* and not *"what was looked at"* — and an investigation starts

@@ -122,7 +122,8 @@ _agent-container() {
         'down:Stop and remove a container'
         'purge:Stop, remove, and delete all per-container volumes'
         'wipe:Remove the container, its volumes, and the locally-built image'
-        'list:List containers (plus stale state files)'
+        'ls:List containers (plus stale state files)'
+        'list:List containers (hidden alias for ls, kept so scripts keep working)'
         'attach:Attach via ssh + tmux (local state or hosts.conf)'
         'logs:Tail container logs'
         'runs:Durable run records (list, show) — survives teardown'
@@ -197,7 +198,7 @@ _agent-container() {
                 creds)
                     # A GROUP (ls/rm), mirroring `keys` and `ssh-key`.
                     _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
-                        '1:command:(ls rm)' \
+                        '1:command:(ls remove rm)' \
                         '--host[Host the environment runs on]:host:' \
                         '--all[Revoke every credential]' \
                         '(-y --yes)'{-y,--yes}'[Skip the confirmation]' \
@@ -208,7 +209,7 @@ _agent-container() {
                 keys)
                     # A GROUP since Feature 020 (add/show/ls), mirroring ssh-key.
                     _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
-                        '1:command:(add show ls)' \
+                        '1:command:(add show ls remove rm)' \
                         '*--authorized-key[Grant a public key, until the next recreate]:file:_files' \
                         '--host[Host the environment runs on]:host:' \
                         '--json[Emit machine-readable JSON]' \
@@ -293,13 +294,13 @@ _agent-container() {
                     ;;
                 inventory)
                     _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
-                        '1:command:(list)' '--json[Emit machine-readable JSON]'
+                        '1:command:(ls list)' '--json[Emit machine-readable JSON]'
                     return 0
                     ;;
                 runs)
                     _arguments \
                         '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
-                        '1:subcommand:(list show)' \
+                        '1:subcommand:(ls show list)' \
                         '--host[Host whose records to read]:host:' \
                         '--changed[Only runs whose recorded paths cover PATH (list)]:path:' \
                         '--json[Emit machine-readable JSON]' \

@@ -221,12 +221,15 @@ def _all_click_commands(wiz):
     """Every command in the built click tree, groups included, by dotted path."""
     root = wiz.typer.main.get_command(wiz.app)
     wiz.attach_verbose_option(root)
-    out, stack = {}, [("", root)]
+    # The ROOT contributes no path segment: a command is `host remove`, not
+    # `<root> host remove`. Keyed the way an operator types it, so a failure
+    # message is a command line they can paste.
+    out, stack = {"<root>": root}, [("", root)]
     while stack:
         prefix, cmd = stack.pop()
-        name = f"{prefix} {cmd.name}".strip() if prefix else (cmd.name or "<root>")
-        out[name] = cmd
         for sub in getattr(cmd, "commands", {}).values():
+            name = f"{prefix} {sub.name}".strip()
+            out[name] = sub
             stack.append((name, sub))
     return out
 
@@ -272,6 +275,61 @@ def test_verbose_is_not_swallowed_into_a_command_signature(wiz):
                 assert prm.expose_value is False, (
                     f"{name}: --verbose would be passed to the callback"
                 )
+
+
+# The group-verb convention, settled after `inventory list` and `host ls` turned
+# out to be a 3/3 coin flip rather than a rule. Canonical name -> the older
+# spelling that must keep working.
+_VERB_CONVENTION = {
+    "ls": "list",  # root: environments
+    "runs ls": "runs list",
+    "inventory ls": "inventory list",
+    "creds remove": "creds rm",
+    "host remove": "host rm",
+}
+
+
+def test_group_verbs_follow_the_naming_convention(wiz):
+    """READ verbs are short (`ls`); DESTRUCTIVE verbs are spelled out (`remove`).
+
+    Short for the read because it is typed constantly and every operator knows it
+    from the shell; spelled out for the destructive one because an abbreviation
+    makes a dangerous command easier to type by accident, and it matches the
+    root's own `down`/`destroy`/`purge`/`wipe`.
+
+    Pinned because the previous state was not a convention at all — three groups
+    said `ls`, three said `list`, and nothing chose between them.
+    """
+    tree = _all_click_commands(wiz)
+    wrong = [c for c in _VERB_CONVENTION if c not in tree]
+    assert not wrong, f"canonical names missing: {wrong}"
+    assert "creds rm" not in {k for k, v in tree.items() if not getattr(v, "hidden", False)}
+
+
+def test_the_old_spellings_still_work_as_hidden_aliases(wiz):
+    """Renaming a published command breaks scripts, so nothing was renamed away.
+
+    Every previous spelling stays registered and keeps running the same function;
+    it is simply hidden, so `--help` teaches one name instead of two. A test
+    rather than a promise, because the aliases are exactly the thing nobody would
+    notice losing until someone's automation broke.
+    """
+    tree = _all_click_commands(wiz)
+    for canonical, old in _VERB_CONVENTION.items():
+        assert old in tree, f"alias {old!r} was dropped — that breaks existing scripts"
+        assert getattr(tree[old], "hidden", False), f"{old!r} should be hidden, not advertised"
+
+        # Compare the WRAPPED original, not the callback: typer generates a
+        # distinct wrapper per registration, so identity fails on the wrappers
+        # while both still call one function. Asserting the shared original is
+        # what actually rules out a copy-pasted second implementation drifting.
+        def origin(c):
+            cb = c.callback
+            return getattr(cb, "__wrapped__", cb)
+
+        assert origin(tree[old]) is origin(tree[canonical]), (
+            f"{old!r} and {canonical!r} must run the SAME function, not two copies"
+        )
 
 
 def _short_flag_offenders(wiz) -> list[str]:

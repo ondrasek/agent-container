@@ -17882,7 +17882,8 @@ def creds_ls(
         log(f"  {ref}  [{state}]")
 
 
-@creds_app.command("rm")
+@creds_app.command("remove")
+@creds_app.command("rm", hidden=True)
 def creds_rm(
     name: str = typer.Argument(..., help="Environment short name."),
     ref: str | None = typer.Argument(None, help="Credential ref, e.g. apikey/anthropic."),
@@ -18236,7 +18237,20 @@ def purge(
     emit_action("purge", name=name)
 
 
-@app.command(name="list")
+# NAMING CONVENTION for group verbs, settled after `inventory list` and `host ls`
+# were found to be a coin flip rather than a rule:
+#
+#   READ verbs are SHORT   — `ls`, because it is typed constantly and every
+#                            operator already knows it from the shell.
+#   DESTRUCTIVE verbs are SPELLED OUT — `remove`, matching the root's `down`,
+#                            `destroy`, `purge`, `wipe`. An abbreviation makes a
+#                            dangerous command easier to type by accident, and
+#                            these are the commands where a typo costs something.
+#
+# The previous spellings stay registered as HIDDEN aliases, so no script and no
+# muscle memory breaks; they are simply not what --help teaches.
+@app.command(name="ls")
+@app.command(name="list", hidden=True)
 def list_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
     local_only: bool = typer.Option(
@@ -18388,7 +18402,8 @@ def telemetry_retry(
     do_telemetry_retry(host, name, as_json)
 
 
-@runs_app.command("list")
+@runs_app.command("ls")
+@runs_app.command("list", hidden=True)
 def runs_list(
     environment: str | None = typer.Argument(
         None, help="Environment to list (default: every environment recorded on the host)."
@@ -18563,7 +18578,8 @@ def inventory_reconcile(
     do_inventory_reconcile(as_json)
 
 
-@inventory_app.command("list")
+@inventory_app.command("ls")
+@inventory_app.command("list", hidden=True)
 def inventory_list(
     as_json: bool = JSON_OPT,
 ) -> None:
@@ -18663,7 +18679,8 @@ def host_show(
     do_host_show(name, as_json)
 
 
-@host_app.command("rm")
+@host_app.command("remove")
+@host_app.command("rm", hidden=True)
 def host_rm(
     name: str = typer.Argument(..., help="Host short name to remove."),
     destroy: bool = typer.Option(

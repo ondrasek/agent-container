@@ -96,10 +96,11 @@ Never bake host-specific orchestration into the image.
   while that tier runs** — it re-reads the CLI per invocation.
 - **Run the full suite, not only your new tests** — a changed contract is exactly when a pre-existing
   test still pins the old shape.
-- **Conventional Commits are mandatory** — the CD pipeline reads them. Enforced by the local
-  `commit-msg` hook (once per clone), the `commits` CI job, and a ruleset on `main`; `--no-verify`
-  bypasses only the first.
-- **Every short flag needs a long one** (`-y`/`--yes`); a test enforces it, and one proves it can fail.
+- **Conventional Commits are mandatory** — the CD pipeline reads them; a local `commit-msg` hook,
+  a CI job and a `main` ruleset enforce it (`--no-verify` bypasses only the hook).
+- **CLI surface, test-enforced.** Short flags need a long form (`-y`/`--yes`). `-v`/`--verbose` works
+  on **every** command — injected, not declared per command. Group verbs: **`ls` reads, spelled-out
+  destructive**; a rename keeps the old name as a hidden alias.
 - **Keep this file under 2000 tokens** — `chars/4` UNDERSTATES by ~7%; measure with a tokenizer. New
   detail goes to `docs/`; **prune before adding**.
 

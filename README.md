@@ -276,8 +276,8 @@ agent-container skill install  # teach your agent (claude|codex|opencode|pi) to 
 agent-container host add local --docker-context lima-docker --default  # register a host
 agent-container host ls        # list registered hosts (where containers run)
 agent-container host show hz1 --json   # one host's full record (driver/context/provisioning)
-agent-container host rm hz1            # remove the registration only (server left untouched)
-agent-container host rm hz1 --destroy  # also deprovision — refused if it still hosts containers
+agent-container host remove hz1            # remove the registration only (server left untouched)
+agent-container host remove hz1 --destroy  # also deprovision — refused if it still hosts containers
 agent-container up acme        # deploy to the default host; --host NAME picks another
 agent-container list           # live state: queries each host's daemon + reconciles state files
 agent-container list --local --json  # fast local-only view (skips remote round-trips), machine-readable
@@ -409,7 +409,7 @@ building the image **on the host** — so a **Compose v2**-capable runtime is re
 (`docker compose` / `podman compose`). Injected SSH identity travels as compose
 configs (so it works over a remote context, not just locally). **Server and
 container lifecycles are separate:** `down` never touches the server; removing a
-tool-provisioned server is the explicit `host rm --destroy`, which is refused while
+tool-provisioned server is the explicit `host remove --destroy`, which is refused while
 the server still hosts any container and for hosts the tool did not create.
 
 It keeps all state on disk, namespaced per host (container names, the port hash,

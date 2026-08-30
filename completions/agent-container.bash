@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys creds down purge wipe list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help -v --verbose"
+    local subcommands="build host up redeploy stop start keys creds down purge wipe ls list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help -v --verbose"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -214,7 +214,7 @@ _agent_container() {
                 esac
             done
             if [[ -z "${csub}" ]]; then
-                COMPREPLY=( $(compgen -W "ls rm" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "ls remove rm" -- "${cur}") )
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
@@ -346,7 +346,7 @@ _agent_container() {
         inventory)
             # Feature 014: no per-entry targets to offer — the store is flat and keyed
             # by a generated entry id, which nobody types.
-            COMPREPLY=( $(compgen -W "list --json" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "ls list --json" -- "${cur}") )
             return 0
             ;;
         runs)
@@ -361,7 +361,7 @@ _agent_container() {
                 esac
             done
             if [[ -z "${rsub}" ]]; then
-                COMPREPLY=( $(compgen -W "list show" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "ls show list" -- "${cur}") )
                 return 0
             fi
             if [[ "${prev}" == "--host" || "${prev}" == "--changed" ]]; then
