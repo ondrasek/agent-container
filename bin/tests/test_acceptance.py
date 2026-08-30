@@ -7375,3 +7375,171 @@ def test_a_REAL_agent_commits_and_PUSHES_to_the_cloned_repository(acc, profile):
     # THE DURABLE EVIDENCE: three commits on GitHub, and the transform RECOMPUTED
     # from the data the agent itself pushed.
     _assert_pipeline_on_github(profile["agent"], token, branch, pat, combined)
+
+
+# --- A REAL agent writing REAL software: an AVL tree, a TUI, and tests --------
+# The pipeline tests prove an agent can generate and transform data. This proves
+# it can write a non-trivial ALGORITHM correctly — self-balancing insert and
+# delete are exactly the kind of code that looks right and is not.
+#
+# The API is dictated by the task, not discovered afterwards, so verification can
+# be deterministic. The task IS the specification.
+
+_AVL_API = (
+    "class AVLTree with methods: insert(value: int) -> None, "
+    "delete(value: int) -> None, contains(value: int) -> bool, "
+    "in_order() -> list[int] returning every value in ascending order, and "
+    "height() -> int returning the height of the tree (an empty tree has height 0)"
+)
+
+# OUR OWN correctness check, run against THEIR module. Inserts are SORTED on
+# purpose: an unbalanced binary search tree degenerates into a linked list of
+# height 300, while a correct AVL stays under ~12. A plain BST passes a sortedness
+# check and fails this one, which is the whole point of asserting the height bound
+# rather than just the traversal.
+_AVL_VERIFY = r"""
+import math
+from avl import AVLTree
+
+N = 300
+t = AVLTree()
+for v in range(1, N + 1):          # SORTED: the degenerate case for a plain BST
+    t.insert(v)
+assert t.in_order() == list(range(1, N + 1)), "in_order() is not sorted after inserts"
+assert all(t.contains(v) for v in range(1, N + 1)), "contains() missed an inserted value"
+bound = 1.44 * math.log2(N + 2)
+assert t.height() <= bound, f"height {t.height()} exceeds the AVL bound {bound:.1f} — not balanced"
+
+for v in range(1, N // 2 + 1):
+    t.delete(v)
+left = list(range(N // 2 + 1, N + 1))
+assert t.in_order() == left, "in_order() wrong after deletes"
+assert not any(t.contains(v) for v in range(1, N // 2 + 1)), "a deleted value is still present"
+bound = 1.44 * math.log2(len(left) + 2)
+assert t.height() <= bound, f"height {t.height()} exceeds the AVL bound after deletes"
+print("VERIFY-OK")
+"""
+
+
+def _avl_task(agent: str, token: str, branch: str) -> str:
+    d = f"avl/{agent}-{token}"
+    return (
+        f"In the git repository at /workspace, write a small Python project in the "
+        f"directory {d}. Use ONLY the Python standard library — do NOT install or "
+        f"import any third-party package, and do NOT use an existing tree "
+        f"implementation; write the AVL tree yourself.\n"
+        f"1. {d}/avl.py — a self-balancing AVL tree. It must define {_AVL_API}. "
+        f"Rebalance with rotations on both insert and delete so the tree stays "
+        f"balanced. Commit with the message 'avl implement {token}'.\n"
+        f"2. {d}/test_avl.py — unit tests using the standard library `unittest` "
+        f"module (NOT pytest). Cover insert, delete, contains, in-order order, and "
+        f"that the tree stays balanced when values are inserted in ascending order. "
+        f"Run them with `python -m unittest` and make sure they PASS before you "
+        f"commit. Commit with the message 'avl tests {token}'.\n"
+        f"3. {d}/tui.py — a text UI. It must read commands from standard input, one "
+        f"per line: `i <number>` inserts, `d <number>` deletes, `p` prints the tree, "
+        f"and `q` quits. After each insert or delete it must print the tree's "
+        f"current contents in ascending order on one line. It must exit cleanly on "
+        f"`q` or end of input. Commit with the message 'avl tui {token}'.\n"
+        f"Finally create a branch named {branch} and push it to origin."
+    )
+
+
+def _run_in_throwaway(files: dict[str, str], script: str) -> subprocess.CompletedProcess:
+    """Run `script` against `files` in a disposable container, no network.
+
+    The agent's code is executed to check it WORKS — and executing code an LLM
+    wrote is exactly the thing not to do on the host. It runs in a throwaway
+    container with `--network none`, which is the same reasoning this whole tool
+    is built on: the container is the blast radius.
+    """
+    setup = "mkdir -p /w && cd /w\n"
+    for name, text in files.items():
+        b64 = base64.b64encode(text.encode()).decode()
+        setup += f"printf %s '{b64}' | base64 -d > {name}\n"
+    return subprocess.run(
+        [RUNTIME, "run", "--rm", "--network", "none", "python:3.13-slim",
+         "sh", "-c", setup + script],
+        capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+
+
+def _assert_avl_on_github(agent: str, token: str, branch: str, pat: str, ctx: str) -> None:
+    d = f"avl/{agent}-{token}"
+    msgs = _github_commits(branch, pat)
+    assert msgs, f"branch {branch} is not on GitHub — nothing was pushed:\n{ctx[-1500:]}"
+    mine = [m for m in msgs if token in m]
+    assert len(mine) >= 3, f"expected three commits on {branch}, found {len(mine)}: {mine}"
+
+    files = {}
+    for name in ("avl.py", "test_avl.py", "tui.py"):
+        got = _github_file(f"{d}/{name}", branch, pat)
+        assert got, f"{d}/{name} is not on the branch"
+        files[name] = got
+
+    # WROTE IT THEMSELVES: no third-party tree, as the task required.
+    #
+    # Matched on IMPORT STATEMENTS, not substrings. The first version lowercased
+    # the source and searched for "avltree", which matches the agents' own class
+    # `AVLTree` — so it failed both agents for writing exactly what was asked. A
+    # check that cannot distinguish "imports a tree library" from "defines a tree
+    # class" tests nothing except its author's care.
+    banned = ("sortedcontainers", "bintrees", "pyavl", "blist", "avltree", "bisect")
+    for mod in banned:
+        bad = re.search(rf"^\s*(?:import|from)\s+{mod}\b", files["avl.py"], re.M)
+        assert not bad, f"avl.py imports {mod} instead of implementing its own tree"
+
+    # 1. THEIR tests must actually pass.
+    r = _run_in_throwaway(files, "cd /w && python -m unittest test_avl -v 2>&1 | tail -25")
+    assert r.returncode == 0, f"the agent's OWN unit tests fail:\n{r.stdout}\n{r.stderr}"
+    assert "OK" in r.stdout, f"unittest did not report OK:\n{r.stdout}"
+
+    # 2. OUR correctness check, including the height bound a plain BST cannot meet.
+    r = _run_in_throwaway({**files, "verify.py": _AVL_VERIFY}, "cd /w && python verify.py")
+    assert "VERIFY-OK" in r.stdout, (
+        f"the tree is not a working AVL:\n{r.stdout}\n{r.stderr[-1200:]}"
+    )
+
+    # 3. The TUI runs and responds to input.
+    r = _run_in_throwaway(
+        files, "cd /w && printf 'i 5\\ni 3\\ni 8\\nd 3\\np\\nq\\n' | python tui.py"
+    )
+    assert r.returncode == 0, f"tui.py exited {r.returncode}:\n{r.stdout}\n{r.stderr[-800:]}"
+    assert "5" in r.stdout and "8" in r.stdout, f"the TUI printed no tree contents:\n{r.stdout}"
+
+
+@pytest.mark.parametrize("profile", _AGENT_PROFILES)
+def test_a_REAL_agent_writes_a_working_AVL_tree_with_tests(acc, profile):
+    """The agent writes real software: an AVL tree, unit tests, and a TUI.
+
+    Verified by RUNNING it, not by reading it. Their own `unittest` suite must
+    pass, our property check must pass — including a height bound that a plain
+    unbalanced BST cannot meet, because the inserts are ascending — and the TUI
+    must respond to piped input. All of it executed in a throwaway container with
+    no network, because running LLM-written code on the host is precisely the thing
+    this tool exists to avoid.
+    """
+    pat = os.environ.get("AGENT_CONTAINER_TEST_REPOSITORY_PAT")
+    if not pat:
+        pytest.skip("NOT COVERED without AGENT_CONTAINER_TEST_REPOSITORY_PAT")
+    pat = pat.strip()
+    name = f"acca{profile['agent']}"
+    _agent_project(acc, name, profile)
+    token = f"AVL-{uuid.uuid4().hex[:10]}"
+    branch = f"e2e/avl-{profile['agent']}-{token}"
+    acc.register(name)
+
+    r = acc.up(
+        name,
+        mode="headless",
+        agent=profile["agent"],
+        workspace="persistent",
+        repo=_TEST_REPO,
+        env_extra=[f"GH_TOKEN={pat}"],
+        task=_avl_task(profile["agent"], token, branch),
+        foreground=True,
+        wait=False,
+    )
+    combined = r.stdout + r.stderr
+    assert r.returncode == 0, f"the agent run failed:\n{combined[-3000:]}"
+    _assert_avl_on_github(profile["agent"], token, branch, pat, combined)
