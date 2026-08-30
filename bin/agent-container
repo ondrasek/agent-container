@@ -9980,6 +9980,36 @@ def inject_text(src: Path, what: str) -> str:
         die(f"{what} ({src}) is not valid UTF-8, so it cannot be injected as text.")
 
 
+CLAUDE_AUTH_SETTING = "claude_auth"
+CLAUDE_AUTH_MODES = ("api-key", "oauth")
+
+
+def resolve_claude_auth(cwd: Path | None = None) -> str | None:
+    """Which credential Claude Code should authenticate with, or None if undeclared.
+
+    Two credentials can both be present — an Anthropic API key and a Claude Code
+    OAuth token (the one tied to a subscription) — and they authenticate
+    DIFFERENTLY: the key rides the apiKeyHelper, the token rides
+    CLAUDE_CODE_OAUTH_TOKEN. Wiring both is what made Claude warn "Both
+    apiKeyHelper and ANTHROPIC_API_KEY set", so the operator declares which one
+    they mean rather than the tool guessing from whichever file it noticed first.
+
+    Undeclared is a THIRD state, not a default: with only one credential present
+    the container uses it, and the setting exists for the case where both are.
+    """
+    declared = resolve_settings_key(CLAUDE_AUTH_SETTING, cwd)
+    if declared is None:
+        return None
+    v = str(declared).strip().lower()
+    if v not in CLAUDE_AUTH_MODES:
+        die(
+            f"{CLAUDE_AUTH_SETTING}: {declared!r} is not one of {', '.join(CLAUDE_AUTH_MODES)}. "
+            f"`api-key` uses the anthropic credential through Claude's apiKeyHelper; "
+            f"`oauth` uses the claude-oauth credential as CLAUDE_CODE_OAUTH_TOKEN."
+        )
+    return v
+
+
 DELIVERY_IDENTITY_SETTING = "delivery_identity"
 
 
@@ -10360,6 +10390,13 @@ class ExecSpec:
         CLI's host-side build-context override)."""
         env = {"AGENT_CONTAINER_MODE": self.mode, "AGENT_CONTAINER_AGENT": self.agent}
         env["AGENT_CONTAINER_ROLE"] = self.role
+        # Resolved on the OPERATOR's side for the same reason the OTLP endpoint is:
+        # the container holds no `.agent-container/` and no user config, so it has
+        # nothing to resolve a setting FROM. Delivered only when declared, so an
+        # absent setting stays absent in the container and the entrypoint can tell
+        # "declared api-key" from "not declared" (Constitution VIII).
+        if (claude_auth := resolve_claude_auth()) is not None:
+            env["AGENT_CONTAINER_CLAUDE_AUTH"] = claude_auth
         # Feature 017 FR-009d/FR-009f. Non-secret: an endpoint URL is a
         # destination, not a credential, so it rides the same channel `mode` and
         # `agent` do rather than the injected-secret path.

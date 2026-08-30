@@ -1292,7 +1292,34 @@ _openai_key="${APIKEY_INJECT_DIR}/openai/value"
 # time; the key bytes themselves NEVER touch the ~/.claude volume (H1). Self-healing:
 # if the key is absent on a later boot the helper emits nothing and Claude falls back
 # to ANTHROPIC_API_KEY / interactive login.
-if [[ -f "${_anthropic_key}" ]]; then
+# WHICH CREDENTIAL CLAUDE AUTHENTICATES WITH. Two are possible and they are not
+# interchangeable: an Anthropic API key rides the apiKeyHelper (file-first, never
+# on the volume), while a Claude Code OAuth token — the one tied to a subscription
+# — rides CLAUDE_CODE_OAUTH_TOKEN in the environment. Wiring both is what makes
+# Claude warn "Both apiKeyHelper and ANTHROPIC_API_KEY set - auth may not work as
+# expected", so exactly one is wired.
+#
+# The operator DECLARES it (`claude_auth: api-key|oauth` in settings.yaml,
+# delivered as AGENT_CONTAINER_CLAUDE_AUTH). Undeclared is a third state, not a
+# default: with only one credential present that one is used, and the declaration
+# exists for when both are — where guessing would silently pick one and the
+# operator would debug the wrong half.
+_oauth_key="${APIKEY_INJECT_DIR}/claude-oauth/value"
+_claude_auth="${AGENT_CONTAINER_CLAUDE_AUTH:-}"
+if [[ -z "${_claude_auth}" ]]; then
+    if [[ -f "${_oauth_key}" && ! -f "${_anthropic_key}" ]]; then
+        _claude_auth="oauth"
+    elif [[ -f "${_anthropic_key}" ]]; then
+        _claude_auth="api-key"
+    fi
+fi
+if [[ "${_claude_auth}" == "oauth" && ! -f "${_oauth_key}" ]]; then
+    log "NOTE: claude_auth is 'oauth' but no claude-oauth credential was delivered; Claude will fall back to interactive login"
+elif [[ "${_claude_auth}" == "api-key" && ! -f "${_anthropic_key}" ]]; then
+    log "NOTE: claude_auth is 'api-key' but no anthropic credential was delivered; Claude will fall back to interactive login"
+fi
+
+if [[ -f "${_anthropic_key}" && "${_claude_auth}" == "api-key" ]]; then
     CLAUDE_DIR="${AGENT_CONTAINER_HOME}/.claude"
     mkdir -p "${CLAUDE_DIR}"
     _helper="${CLAUDE_DIR}/apikey-helper.sh"
@@ -1467,7 +1494,15 @@ for _kv in "${APIKEY_INJECT_DIR}"/*/value; do
     _prov="$(basename "$(dirname "${_kv}")")"
     # Uppercase and normalise; skip anything that could not be a shell identifier
     # rather than attempting an export that would fail the whole boot.
-    _var="$(printf '%s' "${_prov}" | tr '[:lower:]-' '[:upper:]_')_API_KEY"
+    # <PROVIDER>_API_KEY is the rule; `claude-oauth` is the one credential whose
+    # consumer names its variable differently, and Claude Code reads exactly
+    # CLAUDE_CODE_OAUTH_TOKEN. Mapped explicitly rather than bent into the pattern:
+    # a token is not an api key, and calling it one would be the kind of nearly-true
+    # naming that costs somebody an afternoon.
+    case "${_prov}" in
+        claude-oauth) _var="CLAUDE_CODE_OAUTH_TOKEN" ;;
+        *) _var="$(printf '%s' "${_prov}" | tr '[:lower:]-' '[:upper:]_')_API_KEY" ;;
+    esac
     [[ "${_var}" =~ ^[A-Z_][A-Z0-9_]*$ ]] || { log "NOTE: provider '${_prov}' has no usable env var name; skipped"; continue; }
     # Do NOT clobber a value the operator already set via .env — that layer wins,
     # which is the same precedence the two hard-coded blocks had.
@@ -1483,6 +1518,16 @@ for _kv in "${APIKEY_INJECT_DIR}"/*/value; do
     # Scoped to the SELECTED agent, because the env var is the only channel the
     # others have: opencode reads ANTHROPIC_API_KEY straight from the environment,
     # so an opencode (or codex, or pi) deployment still gets it.
+    # The unchosen credential is not exported at all. Both present and both wired
+    # is the state Claude itself calls out as broken.
+    if [[ "${_prov}" == "claude-oauth" && "${_claude_auth:-}" == "api-key" ]]; then
+        log "not exporting CLAUDE_CODE_OAUTH_TOKEN: claude_auth is 'api-key'"
+        continue
+    fi
+    if [[ "${_prov}" == "anthropic" && "${_claude_auth:-}" == "oauth" ]]; then
+        log "not exporting ANTHROPIC_API_KEY: claude_auth is 'oauth'"
+        continue
+    fi
     if [[ "${_prov}" == "anthropic" && "${AGENT_CONTAINER_AGENT:-}" == "claude" \
           && -f "${AGENT_CONTAINER_HOME}/.claude/apikey-helper.sh" ]]; then
         log "not exporting ANTHROPIC_API_KEY: claude reads it through its apiKeyHelper (one channel, no approval prompt)"

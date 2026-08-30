@@ -270,6 +270,30 @@ completion sentinel is written last, after every value lands — releasing the w
 early would hand the container a partial set that looks, from inside, exactly like a
 completed delivery.
 
+### Claude Code: API key or OAuth token (`claude_auth`)
+
+Claude Code accepts two credentials and they are **not** interchangeable:
+
+| credential file | how it reaches Claude | what it is |
+|---|---|---|
+| `<name>.anthropic.key` | `apiKeyHelper` — file-first, bytes never touch the `-claude` volume | an Anthropic API key |
+| `<name>.claude-oauth.key` | `CLAUDE_CODE_OAUTH_TOKEN` in the environment | a Claude Code OAuth token, tied to a subscription |
+
+Declare which one in `settings.yaml`:
+
+```yaml
+claude_auth: oauth      # or: api-key
+```
+
+**Exactly one is wired.** Claude itself refuses to be told twice —
+*"Both apiKeyHelper and ANTHROPIC_API_KEY set · auth may not work as expected"* —
+so the unchosen credential is delivered to its volume but never exported, and the
+entrypoint says which it skipped and why.
+
+**Undeclared is a third state, not a default.** With only one credential present
+that one is used; the setting exists for when both are, where guessing would pick
+one silently and leave the operator debugging the wrong half.
+
 ### The key collection — declare devices once (Feature 020)
 
 An `authorized_keys` file at either config level is auto-injected into every

@@ -49,10 +49,21 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
+        fd-find \
+        ripgrep \
     && sed -i 's/^# *\(C.UTF-8\)/\1/' /etc/locale.gen || true \
     && locale-gen C.UTF-8 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# `fd` is the name every agent looks for; Debian ships the binary as `fdfind`
+# because of a name clash with an unrelated package. Without this link
+# pi-coding-agent decides `fd` is missing and DOWNLOADS its own copy at runtime,
+# into an ephemeral dir, on every boot — which contradicts "bake every system dep
+# at build" (CLAUDE.md) and, behind an egress boundary, simply fails: the download
+# is not a declared destination, so the agent runs degraded and says so only in
+# its startup chatter. Observed in a real interactive session.
+RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # --- Layer 2: Node 22 LTS via NodeSource ------------------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
