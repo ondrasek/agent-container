@@ -7179,13 +7179,7 @@ def test_a_REAL_agent_reaches_its_api_THROUGH_the_egress_boundary(acc, profile):
     r = acc.cli(
         ["up", name, "--mode", "headless", "--agent", profile["agent"],
          "--workspace", "persistent", "--foreground", "--repo", _TEST_REPO,
-         "--task",
-         f"In the git repository at /workspace: create a file named "
-         f"runs/egress-{profile['agent']}-{token}.md containing a short markdown "
-         f"note that includes the exact string {token} on its own line and one "
-         f"sentence saying you reached your model API through an egress boundary. "
-         f"Then stage it, commit with message 'e2e egress {profile['agent']} "
-         f"{token}', create branch {branch}, and push that branch to origin."],
+         "--task", _pipeline_task(f"egress-{profile['agent']}", token, branch)],
         cwd=proj,
     )  # fmt: skip
     combined = r.stdout + r.stderr
@@ -7202,17 +7196,102 @@ def test_a_REAL_agent_reaches_its_api_THROUGH_the_egress_boundary(acc, profile):
     )
     # Credential delivery had to work with the published port on the SIDECAR.
     assert "delivered 1 credential" in combined, combined[-1500:]
-    assert _workspace_contains(name, token), (
-        "the agent ran behind the boundary but produced nothing — a declared API "
-        "that does not actually resolve or connect looks exactly like this"
+    # DURABLE EVIDENCE, and proof the push itself crossed the boundary: the whole
+    # generate/transform/report pipeline had to complete THROUGH the boundary.
+    _assert_pipeline_on_github(f"egress-{profile['agent']}", token, branch, pat, combined)
+
+
+def _github_file(path: str, ref: str, pat: str) -> str | None:
+    """A file's CONTENT from GitHub, or None. Read from the forge, not the container."""
+    r = subprocess.run(
+        ["curl", "-s", "-H", f"Authorization: Bearer {pat}",
+         "-H", "Accept: application/vnd.github+json",
+         f"https://api.github.com/repos/ondrasek/agent-container-test-repository/"
+         f"contents/{path}?ref={ref}"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    try:
+        d = json.loads(r.stdout)
+        return base64.b64decode(d["content"]).decode()
+    except Exception:
+        return None
+
+
+def _github_commits(branch: str, pat: str) -> list[str]:
+    """Commit messages on `branch`, newest first."""
+    r = subprocess.run(
+        ["curl", "-s", "-H", f"Authorization: Bearer {pat}",
+         f"https://api.github.com/repos/ondrasek/agent-container-test-repository/"
+         f"commits?sha={branch}&per_page=20"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    try:
+        return [c["commit"]["message"] for c in json.loads(r.stdout)]
+    except Exception:
+        return []
+
+
+def _pipeline_task(agent: str, token: str, branch: str) -> str:
+    """A task with REAL work in it: generate data, process it, report on it.
+
+    Three commits, not one. A single "write this string to a file" commit proves
+    the plumbing and nothing about the agent — it cannot distinguish an agent that
+    worked from one that echoed its instructions. Here step 2 must READ what step 1
+    produced and compute over it, so the assertions can recompute the same numbers
+    from the pushed data and catch a fabricated answer.
+    """
+    d = f"data/{agent}-{token}"
+    return (
+        f"In the git repository at /workspace, do the following as THREE SEPARATE "
+        f"git commits, then push. Work only inside the directory {d}.\n"
+        f"1. Create {d}/input.csv with the header line `id,item,amount` followed by "
+        f"exactly 8 data rows. Use ids 1 to 8, any item names you like without "
+        f"commas, and integer amounts between 10 and 99. Stage it and commit with "
+        f"the message 'step1 generate {token}'.\n"
+        f"2. READ {d}/input.csv and compute the number of data rows and the sum of "
+        f"the amount column. Create {d}/summary.md containing exactly two lines:\n"
+        f"ROWS=<the number of data rows>\n"
+        f"TOTAL=<the sum of the amount column>\n"
+        f"Stage it and commit with the message 'step2 transform {token}'.\n"
+        f"3. Create {d}/report.md containing the line {token} and one sentence "
+        f"describing what you computed. Stage it and commit with the message "
+        f"'step3 report {token}'.\n"
+        f"Finally create a branch named {branch} and push it to origin."
     )
-    # DURABLE EVIDENCE, and proof the push itself crossed the boundary.
-    got = _github_branch(branch, pat)
-    assert got is not None, (
-        f"branch {branch} is not on GitHub — the agent worked behind the boundary "
-        f"but could not push through it:\n{combined[-2000:]}"
+
+
+def _assert_pipeline_on_github(agent: str, token: str, branch: str, pat: str, ctx: str) -> None:
+    """The evidence, verified by RECOMPUTING the agent's answer from its own data.
+
+    Checking that `summary.md` merely exists would accept any number in it. Fetching
+    `input.csv`, summing it here, and comparing is what separates an agent that
+    processed the data from one that wrote a plausible-looking file.
+    """
+    d = f"data/{agent}-{token}"
+    msgs = _github_commits(branch, pat)
+    assert msgs, f"branch {branch} is not on GitHub — nothing was pushed:\n{ctx[-1500:]}"
+    mine = [m for m in msgs if token in m]
+    assert len(mine) >= 3, (
+        f"expected three commits for this run on {branch}, found {len(mine)}: {mine}"
     )
-    assert token in got["commit"]["commit"]["message"]
+
+    csv_text = _github_file(f"{d}/input.csv", branch, pat)
+    assert csv_text, f"{d}/input.csv is not on the branch"
+    rows = [r for r in csv_text.strip().splitlines()[1:] if r.strip()]
+    assert len(rows) == 8, f"expected 8 generated rows, got {len(rows)}:\n{csv_text}"
+    total = sum(int(r.split(",")[2].strip()) for r in rows)
+
+    summary = _github_file(f"{d}/summary.md", branch, pat)
+    assert summary, f"{d}/summary.md is not on the branch — nothing transformed the data"
+    got_rows = re.search(r"ROWS=(\d+)", summary)
+    got_total = re.search(r"TOTAL=(\d+)", summary)
+    assert got_rows and got_total, f"summary.md has no ROWS=/TOTAL= lines:\n{summary}"
+    # RECOMPUTED from the pushed csv: a wrong sum means the agent did not read it.
+    assert int(got_rows.group(1)) == len(rows), f"ROWS wrong: {summary} vs {len(rows)} rows"
+    assert int(got_total.group(1)) == total, f"TOTAL wrong: {summary} vs computed {total}"
+
+    report = _github_file(f"{d}/report.md", branch, pat)
+    assert report and token in report, f"{d}/report.md missing or not this run's:\n{report}"
 
 
 def _github_branch(branch: str, pat: str) -> dict | None:
@@ -7274,15 +7353,7 @@ def test_a_REAL_agent_commits_and_PUSHES_to_the_cloned_repository(acc, profile):
         workspace="persistent",
         repo=_TEST_REPO,
         env_extra=[f"GH_TOKEN={pat}"],
-        task=(
-            f"In the git repository at /workspace: create a file named "
-            f"runs/{profile['agent']}-{token}.md containing a short markdown note. "
-            f"The note must include the exact string {token} on its own line, and "
-            f"one sentence describing that you are the {profile['agent']} agent "
-            f"running headless inside an agent-container. Then stage the file, "
-            f"commit it with the message 'e2e {profile['agent']} {token}', create a "
-            f"branch named {branch}, and push that branch to origin."
-        ),
+        task=_pipeline_task(profile["agent"], token, branch),
         foreground=True,
         wait=False,
     )
@@ -7301,11 +7372,6 @@ def test_a_REAL_agent_commits_and_PUSHES_to_the_cloned_repository(acc, profile):
     repo = rec.get("repository") or {}
     assert repo.get("commits"), f"no commit was recorded for a run that made one: {repo}"
 
-    # THE DURABLE EVIDENCE: the branch exists on GitHub, with the agent's commit.
-    got = _github_branch(branch, pat)
-    assert got is not None, (
-        f"branch {branch} is not on GitHub — the agent committed but the push never "
-        f"landed, so nothing survives this container:\n{combined[-2000:]}"
-    )
-    msg = got["commit"]["commit"]["message"]
-    assert token in msg, f"the pushed commit is not this run's: {msg!r}"
+    # THE DURABLE EVIDENCE: three commits on GitHub, and the transform RECOMPUTED
+    # from the data the agent itself pushed.
+    _assert_pipeline_on_github(profile["agent"], token, branch, pat, combined)
