@@ -1,0 +1,8 @@
+In the git repository at /workspace, do the following as THREE SEPARATE git commits, then push. Work only inside the directory @DIR@.
+1. Create @DIR@/input.csv with the header line `id,item,amount` followed by exactly 8 data rows. Use ids 1 to 8, any item names you like without commas, and integer amounts between 10 and 99. Stage it and commit with the message 'step1 generate @TOKEN@'.
+2. READ @DIR@/input.csv and compute the number of data rows and the sum of the amount column. Create @DIR@/summary.md containing exactly two lines:
+ROWS=<the number of data rows>
+TOTAL=<the sum of the amount column>
+Stage it and commit with the message 'step2 transform @TOKEN@'.
+3. Create @DIR@/report.md containing the line @TOKEN@ and one sentence describing what you computed. Stage it and commit with the message 'step3 report @TOKEN@'.
+Finally create a branch named @BRANCH@ and push it to origin.

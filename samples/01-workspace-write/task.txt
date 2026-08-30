@@ -1,0 +1,1 @@
+Create a file at /workspace/proof.txt whose contents are exactly: @TOKEN@

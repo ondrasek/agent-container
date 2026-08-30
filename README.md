@@ -28,6 +28,29 @@ detach (Ctrl-B d)
 
 Key property: **detach is non-destructive at every layer.** Closing the SSH connection leaves tmux running. tmux retains every pane's state. The container stays up because it was launched detached and is either supervised by user systemd (Quadlet) or kept alive by Docker's restart policy. Lingering keeps your user-level systemd alive across SSH logouts. The only way work is lost is if you (or an agent) fail to `git push` — which is why the design contract forbids that.
 
+## See it actually work — [`samples/`](samples/)
+
+Four runnable scenarios, each a directory holding the configuration files and a
+`run.sh`. They use a **real agent against a real model**, so they cost money and
+are not deterministic — which is exactly what makes them worth having, since
+every other test in this repository stubs the agent binary with a shell script.
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...        # or CLAUDE_CODE_OAUTH_TOKEN, or OLLAMA_API_KEY for pi
+cd samples/01-workspace-write && ./run.sh claude
+```
+
+| | |
+|---|---|
+| [`01-workspace-write`](samples/01-workspace-write/) | credential delivery, canonical config, real tool use, a run record |
+| [`02-egress-boundary`](samples/02-egress-boundary/) | the same work from behind a declared boundary — and proof the boundary was there |
+| [`03-clone-commit-push`](samples/03-clone-commit-push/) | clone → generate → transform → report → **push**, verified on the forge |
+| [`04-avl-tree`](samples/04-avl-tree/) | the agent writes working software, checked by **running** it |
+
+Each stages its setup into a disposable `AGENT_CONTAINER_ROOT` under `~/.cache`,
+so nothing touches your real configuration and no credential is ever written into
+this repository.
+
 ## Deploy to a Hetzner VPS
 
 This section walks through standing up a fresh always-on environment on a Hetzner Cloud server. Any Debian 12 / Ubuntu 24.04 host works the same way; nothing here is Hetzner-specific beyond Step 1.
