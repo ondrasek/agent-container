@@ -145,6 +145,7 @@ _agent-container() {
     )
 
     _arguments -C \
+        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
         '(- *)--self-test[Run doctests + interop corpus checks]' \
         '(- *)--help[Show help]' \
         '1:command:->command' \
@@ -158,6 +159,7 @@ _agent-container() {
             case $line[1] in
                 build)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--context[Docker build context (repo checkout)]:directory:_files -/' \
                         '1:tag:'
                     ;;
@@ -170,6 +172,7 @@ _agent-container() {
                         '--no-repo[Drop the inherited clone-on-start URL]'
                     )
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         "--agent[Primary agent to run]:agent:(${_agent_container_agents})" \
                         '--mode[Execution mode]:mode:(interactive headless)' \
                         '--workspace[Workspace backing]:workspace:(persistent bind ephemeral)' \
@@ -182,6 +185,7 @@ _agent-container() {
                     ;;
                 host)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '1:subcommand:(add ls)' \
                         '--driver[Runtime driver: docker or podman]:driver:(docker podman)' \
                         '--docker-context[Existing docker context]:context:' \
@@ -192,7 +196,8 @@ _agent-container() {
                     ;;
                 creds)
                     # A GROUP (ls/rm), mirroring `keys` and `ssh-key`.
-                    _arguments '1:command:(ls rm)' \
+                    _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '1:command:(ls rm)' \
                         '--host[Host the environment runs on]:host:' \
                         '--all[Revoke every credential]' \
                         '(-y --yes)'{-y,--yes}'[Skip the confirmation]' \
@@ -202,7 +207,8 @@ _agent-container() {
                     ;;
                 keys)
                     # A GROUP since Feature 020 (add/show/ls), mirroring ssh-key.
-                    _arguments '1:command:(add show ls)' \
+                    _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '1:command:(add show ls)' \
                         '*--authorized-key[Grant a public key, until the next recreate]:file:_files' \
                         '--host[Host the environment runs on]:host:' \
                         '--json[Emit machine-readable JSON]' \
@@ -211,6 +217,7 @@ _agent-container() {
                     ;;
                 down)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--host[Host the container runs on]:host:' \
                         '--purge[Also delete all per-container volumes]' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
@@ -218,6 +225,7 @@ _agent-container() {
                     ;;
                 purge)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
                         '*:container:__agent_container_names_local'
                     ;;
@@ -226,6 +234,7 @@ _agent-container() {
                     ;;
                 attach)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--local[Force local target (state file)]' \
                         '--remote[Force remote target (hosts.conf)]' \
                         '--user[SSH user (default: AGENT_CONTAINER_USER or dev)]:user:' \
@@ -235,6 +244,7 @@ _agent-container() {
                     ;;
                 logs)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--no-follow[Print logs without following]' \
                         '--egress[Read the egress boundary log, where refusals are recorded]' \
                         '--json[Machine-readable envelope]' \
@@ -242,6 +252,7 @@ _agent-container() {
                     ;;
                 doctor)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--host[Override the host to check]:host:' \
                         '--json[Machine-readable report]' \
                         '*:container:__agent_container_names'
@@ -252,7 +263,8 @@ _agent-container() {
                         '*:container:__agent_container_names'
                     ;;
                 telemetry)
-                    _arguments '1:command:(collect retry reconcile)' \
+                    _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '1:command:(collect retry reconcile)' \
                         '*--host[Host to act on]:host:' \
                         '*--name[Environment to act on]:container:__agent_container_names' \
                         '--since[Window lower bound]:since:' \
@@ -261,13 +273,15 @@ _agent-container() {
                         '--json[Machine-readable envelope]'
                     ;;
                 ssh-key)
-                    _arguments '1:command:(show rotate)' \
+                    _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '1:command:(show rotate)' \
                         '--json[Emit machine-readable JSON]' \
                         '(-y --yes)'{-y,--yes}'[Skip the rotate confirmation]'
                     return 0
                     ;;
                 panic)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '*--host[Limit to these hosts]:host:' \
                         '*--name[Limit to these environments]:name:' \
                         '--destroy[Remove containers AND volumes]' \
@@ -278,11 +292,13 @@ _agent-container() {
                     return 0
                     ;;
                 inventory)
-                    _arguments '1:command:(list)' '--json[Emit machine-readable JSON]'
+                    _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '1:command:(list)' '--json[Emit machine-readable JSON]'
                     return 0
                     ;;
                 runs)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '1:subcommand:(list show)' \
                         '--host[Host whose records to read]:host:' \
                         '--changed[Only runs whose recorded paths cover PATH (list)]:path:' \
@@ -291,6 +307,7 @@ _agent-container() {
                     ;;
                 egress)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--host[Host whose records to read]:host:' \
                         '--json[Emit machine-readable JSON]' \
                         '*:environment:__agent_container_egress_targets'

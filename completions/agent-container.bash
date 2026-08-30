@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys creds down purge wipe list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help"
+    local subcommands="build host up redeploy stop start keys creds down purge wipe list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help -v --verbose"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i
@@ -201,7 +201,7 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--driver --docker-context --connection --address --default --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--driver --docker-context --connection --address --default --json -v --verbose" -- "${cur}") )
             fi
             ;;
         creds)
@@ -218,7 +218,7 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --json --all -y --yes" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --json --all -y --yes -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local
@@ -244,8 +244,8 @@ _agent_container() {
             fi
             if [[ "${cur}" == -* ]]; then
                 case "${ksub2}" in
-                    add) COMPREPLY=( $(compgen -W "--authorized-key --json" -- "${cur}") ) ;;
-                    *)   COMPREPLY=( $(compgen -W "--host --json" -- "${cur}") ) ;;
+                    add) COMPREPLY=( $(compgen -W "--authorized-key --json -v --verbose" -- "${cur}") ) ;;
+                    *)   COMPREPLY=( $(compgen -W "--host --json -v --verbose" -- "${cur}") ) ;;
                 esac
                 return 0
             fi
@@ -254,21 +254,21 @@ _agent_container() {
             ;;
         down)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --purge -y --yes" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --purge -y --yes -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
             ;;
         purge)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "-y --yes" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "-y --yes -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
             ;;
         list)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--json -v --verbose" -- "${cur}") )
             fi
             ;;
         attach)
@@ -277,28 +277,28 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--local --remote --user --host --window -w" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--local --remote --user --host --window -w -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names       # local + remote hosts.conf
             ;;
         logs)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-follow --egress --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--no-follow --egress --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
             ;;
         doctor)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names
             ;;
         revoke)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "-y --yes --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "-y --yes --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names
@@ -313,7 +313,7 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --name --since --until --collector-ids --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --name --since --until --collector-ids --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             return 0
@@ -331,7 +331,7 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--json -y --yes" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--json -y --yes -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local
@@ -339,7 +339,7 @@ _agent_container() {
             ;;
         panic)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --name --destroy --preview --host-timeout -y --yes --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --name --destroy --preview --host-timeout -y --yes --json -v --verbose" -- "${cur}") )
             fi
             return 0
             ;;
@@ -393,7 +393,7 @@ _agent_container() {
                 return 0  # a host name we do not complete
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--host --json" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             # From the EGRESS store, and from state as well: an environment whose
@@ -413,7 +413,7 @@ _agent_container() {
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--context" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--context -v --verbose" -- "${cur}") )
                 return 0
             fi
             : # free-form tag otherwise

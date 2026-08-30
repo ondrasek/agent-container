@@ -62,6 +62,8 @@ from typing import NamedTuple, NoReturn
 
 import questionary
 import typer
+import typer.core
+import typer.main
 from rich.console import Console
 from rich.table import Table
 
@@ -316,6 +318,7 @@ def run_child(argv: list[str]) -> subprocess.CompletedProcess:
     BuildKit log printed there makes the payload unparseable. Progress is
     diagnostic output, and diagnostics go to stderr by contract.
     """
+    vlog_argv(argv, "run")
     if json_mode():
         return subprocess.run(argv, stdout=sys.stderr)
     return subprocess.run(argv)
@@ -337,6 +340,49 @@ def set_json_mode(on: bool) -> None:
 
 def json_mode() -> bool:
     return _JSON_MODE
+
+
+# --- verbose (-v/--verbose), on EVERY command --------------------------------
+#
+# Not a per-command option declared forty times: `attach -v` failing while
+# `up -v` worked would be exactly the inconsistency this exists to remove, and a
+# flag whose support depends on which subcommand you typed is worse than no flag.
+# It is injected into every command in the tree by attach_verbose_option(), so a
+# command added tomorrow gets it without anyone remembering to.
+_VERBOSE = False
+
+
+def set_verbose(on: bool) -> None:
+    global _VERBOSE
+    _VERBOSE = on
+
+
+def verbose_mode() -> bool:
+    return _VERBOSE
+
+
+def vlog(msg: str) -> None:
+    """Diagnostic detail, printed only under -v, and ALWAYS to stderr.
+
+    stderr because verbose output is diagnostics: a `--json` payload on stdout
+    must stay parseable, and `... | jq` must not break because someone added -v.
+    That makes the two flags composable rather than mutually exclusive.
+    """
+    if _VERBOSE:
+        eprint(f"[agent-container] + {msg}")
+
+
+def vlog_argv(argv: list[str], what: str = "exec") -> None:
+    """Log a child process's argv under -v.
+
+    Printing argv is safe BY CONSTRUCTION, not by redaction: this tool never puts
+    a secret on a command line (Constitution III — credentials are delivered over
+    the container's own sshd and read from files), and that property is asserted
+    by tests rather than assumed here. So -v printing argv is not a leak; it is a
+    way to SEE that invariant holding.
+    """
+    if _VERBOSE:
+        eprint(f"[agent-container] + {what}: {shlex.join(argv)}")
 
 
 def emit_json(data: object = None, error: dict | None = None) -> None:
@@ -4550,6 +4596,7 @@ def detect_runtime() -> str:
 
 
 def query(argv: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+    vlog_argv(argv, "query")
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
@@ -13930,7 +13977,12 @@ def cli_attach(
     # honest claim available — and it is the action most worth having, because
     # attaching is how an operator (or whoever holds the key) gets a shell.
     record_fleet_attribution("attach", [name])
-    os.execvp("ssh", attach_shell_action(user, host, port, window).commands[0])
+    _argv = attach_shell_action(user, host, port, window).commands[0]
+    # LAST chance to print anything: execvp replaces this process, so a -v line
+    # after it would never run. This is also the line an operator most wants when
+    # an attach misbehaves — the exact ssh invocation, reproducible by hand.
+    vlog_argv(_argv, "exec")
+    os.execvp("ssh", _argv)
 
 
 def _child_default_sigint() -> None:
@@ -19259,15 +19311,70 @@ def main(
         raise typer.Exit(wizard_loop())
 
 
+def _verbose_param_callback(_ctx: object, _param: object, value: object) -> object:
+    # click calls this positionally with (ctx, param, value); the first two are
+    # part of the contract and unused here, hence the underscores.
+    """Eager, so -v takes effect BEFORE the command body runs and its diagnostics
+    are not lost. `expose_value=False` keeps it out of every command's signature,
+    which is what lets one declaration serve all of them."""
+    if value:
+        set_verbose(True)
+    return value
+
+
+def attach_verbose_option(command: object) -> None:
+    """Give EVERY command -v/--verbose, including groups and nested subcommands.
+
+    Declared once and injected, rather than added to forty signatures: a flag that
+    works on `up` but not on `attach` is the inconsistency this removes, and the
+    forty-signature version reintroduces it the moment someone adds a command and
+    forgets. Injection means a command added tomorrow has it already.
+
+    It is accepted in EVERY position — `agent-container -v attach acme`,
+    `agent-container attach -v acme`, `agent-container attach acme -v` — because a
+    flag an operator has to place correctly is one they will place wrongly, and
+    click's own error for that ("no such option") reads like the flag is missing.
+
+    `typer.core.TyperOption` is typer's PUBLIC option class. Deliberately not
+    `click.Option`: typer 0.26 vendors click as the private `typer._click`, so an
+    `import click` resolves to whatever else is installed, or to nothing — while
+    the dependency pin (`typer>=0.12,<1`) spans both the vendored and unvendored
+    eras. Building the option from typer's own class is correct across the range.
+    """
+    params = getattr(command, "params", [])
+    if not any("--verbose" in (getattr(p, "opts", None) or []) for p in params):
+        params.append(
+            typer.core.TyperOption(
+                param_decls=["--verbose", "-v"],
+                is_flag=True,
+                expose_value=False,
+                is_eager=True,
+                callback=_verbose_param_callback,
+                help="Verbose diagnostics on stderr (every command accepts this).",
+            )
+        )
+    for sub in getattr(command, "commands", {}).values():
+        attach_verbose_option(sub)
+
+
 def cli() -> None:
     """Console-script entry point for `uv tool install` (see pyproject.toml).
 
     uv's generated launcher does `from agent_container import cli; sys.exit(cli())`,
     so the Fatal -> exit-1 handling that used to live only in the __main__ guard
     is hoisted here. NOT named `main` — that is already the Typer @app.callback.
+
+    This builds the click command itself rather than calling `app()`, because the
+    verbose option has to be injected into the tree BEFORE it is invoked and
+    `app()` builds a fresh tree internally. `Typer.__call__`'s one other effect —
+    installing typer's pretty-traceback hook — is reproduced explicitly, so an
+    unexpected exception still renders the way it always did.
     """
     try:
-        app()
+        sys.excepthook = typer.main.except_hook
+        command = typer.main.get_command(app)
+        attach_verbose_option(command)
+        command()
     except Fatal as e:
         # THE chokepoint: every failure in the tool arrives here, so the structured
         # rendering is a single site rather than ~100 call sites (research R4).

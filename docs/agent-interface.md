@@ -35,6 +35,50 @@ Every command accepts `--json` and then emits **one** JSON object on **stdout**:
 or consumed as a stream**, so wrapping it would break `eval $(…)`; `menu` is the interactive
 wizard. This set is asserted by the test suite, so a new command cannot silently opt out.
 
+## `-v` / `--verbose`: on every command, in every position
+
+Unlike `--json`, verbose has **no exceptions** — every command takes it, groups
+included, and it is accepted before or after the subcommand:
+
+```bash
+agent-container -v attach acme
+agent-container attach -v acme
+agent-container attach acme --verbose
+```
+
+All three are equivalent. A flag an operator has to *place* correctly is one they
+will place wrongly, and the error for that ("no such option") reads as though the
+flag does not exist.
+
+**It always writes to stderr**, never stdout, so it composes with `--json`:
+
+```bash
+agent-container list -v --json | jq .   # still parses; diagnostics went to stderr
+```
+
+**What it prints** is every child process the tool executes, with its argv:
+
+```
+[agent-container] + query: podman ps -a --format '{{.Names}}\t{{.Status}}'
+[agent-container] + exec: ssh -p 2206 -o StrictHostKeyChecking=yes dev@localhost -t tmux attach -t main
+```
+
+That second line is the one worth knowing about: it is printed immediately before
+`attach` hands the process over to `ssh`, which is the **last** moment anything
+can be printed at all — `execvp` replaces the process, so nothing after it runs.
+When an attach misbehaves, that line is the exact invocation, reproducible by
+hand.
+
+**Printing argv is safe by construction, not by redaction.** This tool never puts
+a secret on a command line — credentials are delivered over the container's own
+sshd and read from files (Constitution III/IX) — and that property is asserted by
+tests. So `-v` is not a leak; it is a way to watch the invariant hold.
+
+**The flag is injected, not declared per command.** One declaration is added to
+every command in the tree at startup, so a command added tomorrow has it without
+anyone remembering. A test walks the built tree and fails if any command lacks
+it — which is how `attach -v` came to be missing in the first place.
+
 ## `list --json`: both public keys travel with the row
 
 Each container row carries two captured **public** keys, or **`null`** when nothing

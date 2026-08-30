@@ -217,6 +217,63 @@ def test_script_fatal_exits_one_via_uv(tmp_path):
     assert "Traceback" not in proc.stderr
 
 
+def _all_click_commands(wiz):
+    """Every command in the built click tree, groups included, by dotted path."""
+    root = wiz.typer.main.get_command(wiz.app)
+    wiz.attach_verbose_option(root)
+    out, stack = {}, [("", root)]
+    while stack:
+        prefix, cmd = stack.pop()
+        name = f"{prefix} {cmd.name}".strip() if prefix else (cmd.name or "<root>")
+        out[name] = cmd
+        for sub in getattr(cmd, "commands", {}).values():
+            stack.append((name, sub))
+    return out
+
+
+def test_every_command_accepts_dash_v_and_verbose(wiz):
+    """`-v`/`--verbose` MUST work on every command, including nested subcommands.
+
+    This is a UNIVERSAL flag, and universal is the whole property: a flag that
+    works on `up` but not on `attach` is worse than no flag, because the operator
+    learns it exists and then hits "no such option" on the one command they were
+    debugging. Reported from exactly that: `attach -v` was rejected.
+
+    Asserted over the BUILT command tree rather than the source, so a command
+    added tomorrow is covered without anyone remembering to add it here — which is
+    the same reason the option is injected rather than declared forty times.
+    """
+    tree = _all_click_commands(wiz)
+    # Not a vacuous pass: an empty or tiny tree would satisfy the loop below while
+    # proving nothing. The floor is deliberately well under the real count.
+    assert len(tree) > 30, f"only {len(tree)} commands discovered — the walk is broken"
+
+    missing = []
+    for name, cmd in tree.items():
+        decls = {d for p in cmd.params for d in (getattr(p, "opts", None) or [])}
+        if not {"-v", "--verbose"} <= decls:
+            missing.append(f"{name} (has: {sorted(d for d in decls if d.startswith('-'))})")
+    assert not missing, "commands missing -v/--verbose:\n  " + "\n  ".join(sorted(missing))
+
+
+def test_verbose_is_not_swallowed_into_a_command_signature(wiz):
+    """The injected option must NOT be passed to the command function.
+
+    `expose_value=False` is what lets one declaration serve every command. Without
+    it each callback would need a `verbose` parameter, and any command missing one
+    would fail at call time with an unexpected-keyword TypeError — at RUN time,
+    for the operator, not here.
+    """
+    root = wiz.typer.main.get_command(wiz.app)
+    wiz.attach_verbose_option(root)
+    for name, cmd in _all_click_commands(wiz).items():
+        for prm in cmd.params:
+            if "--verbose" in (getattr(prm, "opts", None) or []):
+                assert prm.expose_value is False, (
+                    f"{name}: --verbose would be passed to the callback"
+                )
+
+
 def _short_flag_offenders(wiz) -> list[str]:
     """Every (command, param) whose option declares a short flag but no long one."""
     import inspect
