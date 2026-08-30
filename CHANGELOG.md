@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.44.0 (2026-08-30)
+
+### Documentation
+
+- **samples**: Runnable real-agent scenarios, one per directory
+  ([`325bf24`](https://github.com/ondrasek/agent-container/commit/325bf24618c3800130e40f0206abd15e559ceee4))
+
+### Features
+
+- **cli**: -v/--verbose on every command, in every position
+  ([`90c33cf`](https://github.com/ondrasek/agent-container/commit/90c33cfdc3ebb07a2f3816a9925176b4e230ad9d))
+
+
 ## v0.43.0 (2026-08-30)
 
 ### Documentation
