@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.43.0 (2026-08-30)
+
+### Documentation
+
+- **spec**: Specify agent configuration templates (021)
+  ([`2213a40`](https://github.com/ondrasek/agent-container/commit/2213a4002928e03d4c326ca528e67804d73bb2b0))
+
+### Features
+
+- **claude**: Support CLAUDE_CODE_OAUTH_TOKEN, chosen by settings.yaml
+  ([`3d70b82`](https://github.com/ondrasek/agent-container/commit/3d70b82f5f9638bc127d88cffe7022dee22dbd67))
+
+
 ## v0.42.0 (2026-08-30)
 
 ### Chores
