@@ -10826,11 +10826,23 @@ def compose_up_exec(
             # --foreground run; invisible on the detached path, where compose has
             # already returned by the time delivery starts.
             #
-            # Bounded BELOW the container's own wait (default 90s, and read from the
-            # same setting so the two cannot drift): giving up after it would race the
-            # container's fallback and deliver into a run that had stopped waiting.
-            budget = int(os.environ.get("AGENT_CONTAINER_DELIVERY_TIMEOUT", "90"))
-            deadline = time.monotonic() + max(5, budget - 15)
+            # TWO CLOCKS, because they measure different things. This thread starts
+            # BEFORE `compose up --build`, so everything up to the container
+            # existing may include an IMAGE BUILD — minutes, not seconds. Bounding
+            # the whole wait by the container's 90s sentinel meant a deploy that
+            # rebuilt the image exhausted the wait before the container even
+            # started: the thread gave up, the container waited its 90s and
+            # continued WITHOUT the pushed secrets, and the agent then reported "no
+            # API key" for a credential that had been discovered, staged and never
+            # sent. Measured — a rebuild is enough to trigger it, so a FIRST deploy
+            # with credentials was the most likely case to hit it.
+            #
+            # So: wait for the container as long as a build plausibly takes, and
+            # only THEN start racing the sentinel. The container's own 90s begins
+            # when its entrypoint reaches that point, which is after it is running —
+            # so the two clocks start together rather than one inside the other.
+            build_budget = int(os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", "1800"))
+            deadline = time.monotonic() + build_budget
             base = driver_runtime_argv(host_rec)
             cname = container_name(name)
             # RUNNING, not merely created. Delivery execs into the container, and
@@ -10842,7 +10854,10 @@ def compose_up_exec(
                     break
                 time.sleep(0.5)
             else:
-                warn(f"credential delivery gave up waiting for {cname} to start")
+                warn(
+                    f"credential delivery gave up waiting for {cname} to start after "
+                    f"{build_budget}s; the container will continue without its secrets"
+                )
                 return
             try:
                 claim_cred_mounts(host_rec, name, _cred_refs)
