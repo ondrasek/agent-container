@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.42.0 (2026-08-30)
+
+### Chores
+
+- **deps**: Resync uv.lock onto 0.41.1
+  ([`dd6991b`](https://github.com/ondrasek/agent-container/commit/dd6991bb2159e5606ee10214e0877ade57ef73ef))
+
+### Features
+
+- **layout**: Own overrides for state and data, and one ROOT for all three
+  ([`4e3ad69`](https://github.com/ondrasek/agent-container/commit/4e3ad691af3fae12be2effd4fd4a76a642b4ad18))
+
+### Testing
+
+- **acceptance**: Have the agents write a working AVL tree, tests and a TUI
+  ([`b95d744`](https://github.com/ondrasek/agent-container/commit/b95d744c13eca8f841855f567d55f60ba74c442c))
+
+
 ## v0.41.1 (2026-08-30)
 
 ### Bug Fixes
