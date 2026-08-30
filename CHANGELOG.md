@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.41.1 (2026-08-30)
+
+### Bug Fixes
+
+- **credentials**: Stop counting image build time against the delivery deadline
+  ([`a1f1815`](https://github.com/ondrasek/agent-container/commit/a1f1815f88ac5f293980369dbdca56b35406e2da))
+
+### Chores
+
+- **deps**: Resync uv.lock onto 0.41.0
+  ([`03fba02`](https://github.com/ondrasek/agent-container/commit/03fba022ea09c3796080d509e54da867ec8d52cd))
+
+
 ## v0.41.0 (2026-08-29)
 
 ### Bug Fixes
