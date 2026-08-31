@@ -95,12 +95,12 @@ DOCS = [
     (
         "agent-as-code.md",
         "Agent as code",
-        "The `.agent-container/` spec: plan, apply, destroy, and the deterministic identity that defines ownership.",
+        "The .agent-container/ spec: plan, apply, destroy, and the deterministic identity that defines ownership.",
     ),
     (
         "agent-interface.md",
         "Agent interface",
-        "The machine-readable surface an AI agent drives: `context`, `commands`, and the installable skill.",
+        "The machine-readable surface an AI agent drives: context, commands, and the installable skill.",
     ),
     (
         "credentials.md",
