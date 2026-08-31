@@ -10,11 +10,46 @@ runtime dependency.
 | Mode | What runs | `restart:` | Result |
 |------|-----------|-----------|--------|
 | **interactive** | sshd + tmux `main`; the chosen agent is launched in a dedicated window (optionally seeded with a task); PID 1 stays alive | `unless-stopped` (kept alive / restarted across crashes) | a persistent attachable session |
-| **headless** | the agent runs its non-interactive form as PID 1's workload; the container **exits with the agent's exit code** | `on-failure` (a success exits and is **not** resurrected; a failure follows the restart policy) | the container exit code + `logs` |
+| **headless** | the agent runs its non-interactive form as PID 1's workload; the container **exits with the agent's exit code** | **`no`** by default — a one-shot job, so a failure stays failed (`headless_restart:` to change it) | the container exit code + `logs` |
 
 The two modes and the workspace mode are **independently selectable** — every
 combination is permitted (guidance only notes the natural pairings: interactive ↔
 persistent, headless ↔ ephemeral).
+
+### A failed headless run does NOT retry by default
+
+```yaml
+# ~/.config/agent-container/settings.yaml
+headless_restart: on-failure:3      # default: no
+```
+
+The default is **`no`**, and the reason is worth stating: retrying an agent is not
+*resuming* work, it is **starting over**. Nothing about an agent run is
+idempotent — a task that commits and pushes pushes again on every attempt, which
+is repetition rather than resilience. And every attempt is a fresh model call.
+
+This used to be unbounded `on-failure`. The loop it created was already known and
+measured here — run-record retention buckets by UTC day to survive it, and the
+record-clearing argv budget is sized for it, both citing *"~9 records in ~40s"*.
+Those absorb **record volume**. What was never costed is **money**: one transient
+API error was measured turning into **13 billable model calls in 4 minutes**.
+
+Accepted values are `no` and `on-failure[:N]`. **`always` and `unless-stopped`
+are refused**, because both resurrect a container that exited 0 and FR-005
+requires a headless *success* to terminate and stay terminated — a settings file
+should be corrected by the execution model, not quietly contradict it.
+
+`on-failure:N` is honoured by **both** runtimes (measured: `RestartCount` stops at
+exactly N on docker and podman). Interactive sessions are unaffected — they stay
+`unless-stopped`, because a session is a place you attach to.
+
+Read the resolved policy without opening the generated compose file:
+
+```bash
+agent-container context
+# runtime: docker (detected)
+# headless restart: no (default)
+```
 
 ### Headless: foreground vs detached
 

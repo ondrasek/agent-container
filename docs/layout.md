@@ -334,6 +334,7 @@ then `~/.config/agent-container/settings.yaml`).
 |---|---|
 | `runtime` | `docker` or `podman` for the implicit/local path |
 | `claude_auth` | `api-key` or `oauth` — which credential Claude Code uses |
+| `headless_restart` | `no` (default) or `on-failure[:N]` — what a FAILED headless run does |
 | `delivery_identity` | the operator-declared key that delivers secrets to a container |
 | `otlp_endpoint` | where run records are exported (Feature 017) |
 | `control_plane_hosts` | which hosts a control plane may manage |

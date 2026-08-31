@@ -150,8 +150,17 @@ def test_task_rides_an_inline_config_to_an_ephemeral_target(wiz, tmp_path):
 
 
 def test_exec_spec_restart_policy(wiz):
+    """Interactive is kept alive; headless is a ONE-SHOT JOB.
+
+    The headless value was `on-failure`, unbounded, until it was measured turning
+    one transient API error into 13 billable model calls in 4 minutes. It is now
+    the named default `no`, overridable with `headless_restart:` — FR-005 only
+    ever said a headless failure "follows the deployment's restart policy", never
+    that the policy had to be unbounded.
+    """
     assert wiz.ExecSpec(mode="interactive").restart_policy() == "unless-stopped"
-    assert wiz.ExecSpec(mode="headless").restart_policy() == "on-failure"
+    assert wiz.ExecSpec(mode="headless").restart_policy() == wiz.HEADLESS_RESTART_DEFAULT
+    assert wiz.HEADLESS_RESTART_DEFAULT == "no"
 
 
 def test_exec_spec_compose_environment(wiz):
@@ -226,7 +235,8 @@ def test_mode_and_workspace_are_independent(wiz):
             )
             svc = m["services"]["agent"]
             # The mode axis drives restart, untouched by the workspace axis.
-            assert svc["restart"] == ("on-failure" if mode == "headless" else "unless-stopped")
+            expected = wiz.HEADLESS_RESTART_DEFAULT if mode == "headless" else "unless-stopped"
+            assert svc["restart"] == expected
 
             # The workspace axis drives the mount, untouched by the mode axis.
             # Matched on the mount TARGET rather than on the whole string: a bind
@@ -469,11 +479,20 @@ def test_up_delivers_task_as_injected_file(up_env, capture_compose, monkeypatch,
 # --- US3: headless (T014) ----------------------------------------------------
 
 
-def test_up_headless_restart_on_failure(up_env, capture_compose, monkeypatch, tmp_path):
+def test_up_headless_restart_policy_reaches_the_model(
+    up_env, capture_compose, monkeypatch, tmp_path
+):
+    """The resolved headless policy is what lands in the compose model.
+
+    Renamed from `..._restart_on_failure`: the default is now `no`, because an
+    unbounded retry turned one transient API error into 13 billable model calls.
+    The assertion follows the named default rather than restating it, so the two
+    cannot drift.
+    """
     wiz = up_env
     _in_workdir(monkeypatch, tmp_path)
     wiz.do_up("acme", spec=wiz.ExecSpec(mode="headless", task="run tests"))
-    assert _model(wiz)["services"]["agent"]["restart"] == "on-failure"
+    assert _model(wiz)["services"]["agent"]["restart"] == wiz.HEADLESS_RESTART_DEFAULT
 
 
 def test_up_headless_foreground_builds_attached_argv_and_exits_with_code(

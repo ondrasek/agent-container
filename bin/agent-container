@@ -10190,6 +10190,51 @@ def resolve_claude_auth(cwd: Path | None = None) -> str | None:
     return v
 
 
+HEADLESS_RESTART_SETTING = "headless_restart"
+
+# Constitution VIII: the default is NAMED, because it is a policy about money.
+#
+# This was `on-failure`, unbounded, and the loop it creates was already known and
+# MEASURED in this codebase — the run-record retention buckets by UTC day to
+# survive it, and the record-clearing argv budget is sized for it, both citing
+# "~9 records in ~40s". What those two mitigations absorb is RECORD VOLUME. What
+# nobody costed is that each restart is a fresh agent run and therefore a fresh
+# billable model call: one transient API error was measured turning into 13 calls
+# in 4 minutes.
+#
+# `no` is the default because retrying an agent is not RESUMING work, it is
+# STARTING OVER — nothing about an agent run is idempotent. A task that commits
+# and pushes would push again on every attempt, which is repetition rather than
+# resilience.
+HEADLESS_RESTART_DEFAULT = "no"
+
+# `always` and `unless-stopped` are deliberately NOT accepted: both resurrect a
+# container that exited 0, and FR-005 requires a headless SUCCESS to terminate and
+# stay terminated. Accepting them would let a settings file quietly contradict the
+# execution model rather than be refused by it.
+HEADLESS_RESTART_RE = re.compile(r"^(no|on-failure(:[1-9][0-9]*)?)$")
+
+
+def resolve_headless_restart(cwd: Path | None = None) -> tuple[str, str]:
+    """The compose `restart:` for a HEADLESS run, and where it came from.
+
+    Origin is reported rather than inferred, so `defaulted` and `declared` stay
+    distinguishable — an operator who wants to know whether a failed run will cost
+    them again should not have to read the generated compose file to find out.
+    """
+    declared = resolve_settings_key(HEADLESS_RESTART_SETTING, cwd)
+    if declared is None:
+        return HEADLESS_RESTART_DEFAULT, "default"
+    v = str(declared).strip().lower()
+    if not HEADLESS_RESTART_RE.match(v):
+        die(
+            f"{HEADLESS_RESTART_SETTING}: {declared!r} is not valid. Use 'no' (the default) "
+            f"or 'on-failure[:N]'. 'always'/'unless-stopped' are refused because a headless "
+            f"SUCCESS must stay terminated (FR-005)."
+        )
+    return v, "settings"
+
+
 DELIVERY_IDENTITY_SETTING = "delivery_identity"
 
 
@@ -10561,8 +10606,15 @@ class ExecSpec:
 
     def restart_policy(self) -> str:
         """Per-mode compose `restart:` — interactive is kept alive; a headless
-        success exits and is not resurrected, a failure follows policy (FR-005)."""
-        return "on-failure" if self.mode == "headless" else "unless-stopped"
+        success exits and is not resurrected, a failure follows policy (FR-005).
+
+        The headless policy is DECLARED (`headless_restart:`), defaulting to `no`.
+        FR-005 says a headless failure "follows the deployment's restart policy" —
+        it never required that policy to be unbounded, so bounding it is a choice
+        this makes at the surface rather than a spec change."""
+        if self.mode != "headless":
+            return "unless-stopped"
+        return resolve_headless_restart()[0]
 
     def compose_environment(self, name: str | None = None) -> dict[str, str]:
         """The non-secret settings delivered as compose environment. The clone URL
@@ -19088,8 +19140,13 @@ def build_agent_context(rt: str, selected_host: str | None = None) -> dict:
     # was read from. Anything needing it — a script, an agent, a sample — had to
     # re-derive the platform preference, and re-derivation is how it drifts.
     _rt, _rt_origin = resolve_runtime_source()
+    _hr, _hr_origin = resolve_headless_restart()
     return {
         "runtime": {"name": _rt, "origin": _rt_origin},
+        # What a FAILED headless run will do. Reported because the answer decides
+        # whether a failure costs once or repeatedly, and reading the generated
+        # compose file to find that out is not a reasonable ask.
+        "headless_restart": {"policy": _hr, "origin": _hr_origin},
         "target": {"host": target.host_name, "container": target.container_name},
         "stages": [
             {"key": s.key, "status": s.status, "detail": s.detail, "hard": s.hard}
@@ -19177,6 +19234,10 @@ def context(
         emit_json(ctx)
         return
     console.print(f"runtime: {ctx['runtime']['name']} ({ctx['runtime']['origin']})")
+    console.print(
+        f"headless restart: {ctx['headless_restart']['policy']} "
+        f"({ctx['headless_restart']['origin']})"
+    )
     console.print(f"target: {ctx['target']['host']} / {ctx['target']['container'] or '-'}")
     console.print("  ".join(f"{s['key']}={s['status']}" for s in ctx["stages"]))
     for p in ctx["problems"]:

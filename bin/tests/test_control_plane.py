@@ -2216,3 +2216,46 @@ def test_absent_settings_reports_a_DETECTED_origin(wiz, tmp_path, monkeypatch):
     rt, origin = wiz.resolve_runtime_source(proj)
     assert origin == "detected"
     assert rt == wiz.runtime_preference()[0]
+
+
+# --- a failed headless run must not retry indefinitely -----------------------
+
+
+def test_headless_defaults_to_no_restart(wiz, tmp_path, monkeypatch):
+    """A headless run is a ONE-SHOT JOB, so a failure stays failed by default.
+
+    This was `on-failure`, unbounded. Retrying an agent is not resuming work — it
+    is starting over, and nothing about an agent run is idempotent: a task that
+    commits and pushes pushes again on every attempt. Measured before the change:
+    one transient API error became 13 billable model calls in 4 minutes.
+    """
+    proj = _settings(tmp_path, monkeypatch, wiz, user="otlp_endpoint: https://x.example\n")
+    assert wiz.resolve_headless_restart(proj) == ("no", "default")
+    assert wiz.ExecSpec(mode="headless").restart_policy() == "no"
+
+
+def test_headless_restart_can_be_declared(wiz, tmp_path, monkeypatch):
+    """An operator running long unattended jobs may still want bounded retries.
+    Both runtimes were measured to honour `on-failure:N` and stop at N."""
+    proj = _settings(tmp_path, monkeypatch, wiz, user="headless_restart: on-failure:3\n")
+    assert wiz.resolve_headless_restart(proj) == ("on-failure:3", "settings")
+
+
+def test_a_policy_that_would_resurrect_a_success_is_refused(wiz, tmp_path, monkeypatch):
+    """`always`/`unless-stopped` restart a container that exited 0, and FR-005
+    requires a headless SUCCESS to terminate and stay terminated.
+
+    Refused rather than accepted, because the alternative is a settings file
+    quietly contradicting the execution model instead of being corrected by it.
+    """
+    for bad in ("always", "unless-stopped"):
+        proj = _settings(tmp_path, monkeypatch, wiz, user=f"headless_restart: {bad}\n")
+        with pytest.raises(wiz.Fatal, match="not valid"):
+            wiz.resolve_headless_restart(proj)
+
+
+def test_interactive_is_untouched_by_the_setting(wiz, tmp_path, monkeypatch):
+    """The setting governs HEADLESS only. An interactive session is a place the
+    operator attaches to; it is kept alive as before."""
+    _settings(tmp_path, monkeypatch, wiz, user="headless_restart: on-failure:9\n")
+    assert wiz.ExecSpec(mode="interactive").restart_policy() == "unless-stopped"
