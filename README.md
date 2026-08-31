@@ -1,10 +1,69 @@
 # agent-container
 
-Always-on, containerized development environment for a single operator. Hosts AI coding agents (Claude Code, Codex, pi-coding-agent), `nvim`, `tmux`, and `git` behind OpenSSH. Designed to run on a personal Linux VPS and be attached to over `ssh`.
+[![ci](https://github.com/ondrasek/agent-container/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ondrasek/agent-container/actions/workflows/ci.yml)
+[![release](https://github.com/ondrasek/agent-container/actions/workflows/publish.yml/badge.svg)](https://github.com/ondrasek/agent-container/actions/workflows/publish.yml)
+[![pages](https://github.com/ondrasek/agent-container/actions/workflows/pages.yml/badge.svg)](https://github.com/ondrasek/agent-container/actions/workflows/pages.yml)
+[![PyPI](https://img.shields.io/pypi/v/agent-container?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/agent-container/)
+[![Python](https://img.shields.io/pypi/pyversions/agent-container?logo=python&logoColor=white)](https://pypi.org/project/agent-container/)
+[![release](https://img.shields.io/github/v/release/ondrasek/agent-container?display_name=tag&sort=semver&logo=github)](https://github.com/ondrasek/agent-container/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/ondrasek/agent-container)](LICENSE)
+[![Conventional Commits](https://img.shields.io/badge/commits-conventional-0f766e)](https://www.conventionalcommits.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Design contract: [`CLAUDE.md`](CLAUDE.md).
-Runtime + base-image decision: [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
-Credential contract: [`docs/credentials.md`](docs/credentials.md).
+**Somewhere for your coding agents to live that isn't your laptop.**
+
+A coding agent halfway through a refactor doesn't care that your Wi-Fi dropped —
+but one running on your laptop dies with the session. `agent-container` puts it on
+a server you own, behind OpenSSH and `tmux`, with its task, its credentials and
+its network boundary declared in YAML you commit. Attach from anywhere; detach
+without consequence.
+
+It hosts Claude Code, Codex and pi-coding-agent alongside `nvim`, `tmux` and
+`git`. It is built for **one operator** running **many parallel environments** on
+a personal Linux VPS.
+
+**📖 [Website and documentation → ondrasek.github.io/agent-container](https://ondrasek.github.io/agent-container/)**
+&nbsp;·&nbsp; [Install](https://ondrasek.github.io/agent-container/install/)
+&nbsp;·&nbsp; [Tutorial](https://ondrasek.github.io/agent-container/tutorial/)
+&nbsp;·&nbsp; [Samples](https://ondrasek.github.io/agent-container/samples/)
+&nbsp;·&nbsp; [Download](https://ondrasek.github.io/agent-container/download/)
+
+```bash
+uv tool install agent-container      # or: pipx install agent-container
+```
+
+### Why not just SSH in and run `tmux` yourself?
+
+Because that is the easy third of the problem. Keeping a process alive is the part
+`tmux` already solves — and this keeps it, rather than reinventing it. The rest is
+what you have to be careful about once an agent runs unattended holding your
+credentials:
+
+- **You would rebuild it from memory every time.** Ports, volumes, git identity,
+  which key is admitted, what the agent was asked to do. Here a directory *is* the
+  desired state: `plan` reports absent / matching / drifted, `apply` converges,
+  `destroy` removes only what the spec owns.
+- **Your secrets would be lying around.** Baked into an image layer, on a command
+  line, on a volume, in a log — the obvious paths all leak. A secret here travels
+  to the container over *that container's own* sshd, and the spec holds a
+  **locator, never a value**.
+- **The agent would have your whole network.** Egress is **default-deny at the
+  packet level**, in a namespace shared with a sidecar that alone holds
+  `NET_ADMIN`. You declare the destinations; the rest is refused, and the refusals
+  are recorded.
+
+### The contracts
+
+Read these before changing behaviour; they are the parts it is expensive to get
+wrong.
+
+| | |
+|---|---|
+| Design contract — the load-bearing invariants | [`CLAUDE.md`](CLAUDE.md) |
+| Credential contract — least exposure, in detail | [`docs/credentials.md`](docs/credentials.md) |
+| Threat model — reconciled by every feature | [`docs/threat-model.md`](docs/threat-model.md) |
+| Runtime + base image, and why | [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md) |
+| How to contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 
 ## How it fits together
 
@@ -43,7 +102,7 @@ agent-container plan                   # validate + show absent/matching/drifted
 agent-container apply                  # converge
 ```
 
-| | |
+| Sample | What it declares |
 |---|---|
 | [`01-workspace-write`](samples/01-workspace-write/) | headless agent, a task, one credential — needs a model key only |
 | [`02-egress-boundary`](samples/02-egress-boundary/) | adds an `egress:` allow-list under `enforcement: strict` |
@@ -1077,6 +1136,48 @@ The version is single-sourced in `pyproject.toml`; check the installed version w
 Until `RELEASE_ENABLED` is set, `publish.yml` stays dormant (so a release can't
 half-fire before PyPI is ready). After both steps, releases are automatic and
 need no stored secrets.
+
+## The website
+
+[ondrasek.github.io/agent-container](https://ondrasek.github.io/agent-container/) is
+rendered from this repository's own markdown — this README, `docs/`,
+`samples/README.md`, `CONTRIBUTING.md` and the ADRs — by
+[`site/build.py`](site/build.py). There is no second copy of the documentation, so
+the published site cannot drift from the code.
+
+`.github/workflows/pages.yml` rebuilds and deploys it on every push to `main` **and
+after every release**, stamping the site with the version that was just shipped.
+Nothing is committed to a `gh-pages` branch and no local step is involved.
+
+The release leg chains off `publish.yml` with `workflow_run`, **not** `release:
+[published]` — and that is not a stylistic choice. python-semantic-release
+authenticates with `secrets.GITHUB_TOKEN`, and [events triggered by
+`GITHUB_TOKEN` never start another workflow
+run](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow)
+(GitHub's recursion guard; everything except `workflow_dispatch` and
+`repository_dispatch`). The push of PSR's own release commit is no fallback
+either — it carries `[skip ci]`. The documented alternatives are a PAT or
+`workflow_run`; a PAT would be a standing credential this project refuses on
+principle, and `workflow_run` is already how `publish.yml` chains off `ci`.
+
+To preview the site locally:
+
+```bash
+uv run --no-project --python 3.14 --with markdown --with pygments site/build.py
+uv run --no-project --python 3.14 site/check.py   # every internal link and anchor
+python3 -m http.server -d site/_site 8000
+```
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) — the ground rules, the single
+quality-gate script that CI and the local Stop hook share, and why Conventional
+Commits are mandatory.
+
+## Author
+
+Built by **Ondrej Krajicek** — [LinkedIn](https://linkedin.com/in/OndrejKrajicek)
+· [Talks](https://ondrasek.github.io/talks) · [GitHub](https://github.com/ondrasek).
 
 ## License
 

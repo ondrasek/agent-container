@@ -4388,7 +4388,13 @@ def test_panic_preview_changes_nothing(acc):
 def test_panic_is_repeatable(acc):
     """S10 (C11, SC-008): nothing to stop is an unambiguous success, not an error."""
     acc.up("accpanic6")
-    assert _panic(acc).returncode == 0
+    # `, first.stderr` is not decoration. This assertion failed intermittently on
+    # CI with no message, and the run summary alone cannot tell `failed` (we saw it
+    # still running) from `undetermined` (we could not tell) — which are different
+    # bugs with different fixes. A bare assert on a real-container operation throws
+    # away the only evidence of which one happened.
+    first = _panic(acc)
+    assert first.returncode == 0, first.stderr
     r = _panic(acc)
     assert r.returncode == 0, r.stderr
     data = json.loads(_panic(acc, "--json").stdout)["data"]

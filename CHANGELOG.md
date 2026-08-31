@@ -2,6 +2,46 @@
 
 <!-- version list -->
 
+## v0.47.2 (2026-08-31)
+
+### Bug Fixes
+
+- **panic**: Settle the verification instead of sampling it once
+  ([`cc8a876`](https://github.com/ondrasek/agent-container/commit/cc8a876051b422a94c8e5c01feb52811ab82223c))
+
+- **samples**: Restore the placeholder repo in 02, so the README is true again
+  ([`4e7352b`](https://github.com/ondrasek/agent-container/commit/4e7352b87396e63d48628831c6c26490d2e7a9f3))
+
+### Documentation
+
+- Lead with the problem, not the category
+  ([`7f860ef`](https://github.com/ondrasek/agent-container/commit/7f860ef14ffe834705c1059f6731f6ebbf5455f0))
+
+
+## v0.47.1 (2026-08-31)
+
+### Bug Fixes
+
+- **pages**: Chain the release leg off workflow_run — `release:` never fired
+  ([`54385c4`](https://github.com/ondrasek/agent-container/commit/54385c4368099eeeb31a0a5c7f15c593a4fe4fc6))
+
+### Documentation
+
+- **contributing**: A commit message must not contain a skip-workflow marker
+  ([`43bdf8e`](https://github.com/ondrasek/agent-container/commit/43bdf8e0b00581d6604ac70b77ee49144ed5eeb4))
+
+
+## v0.47.0 (2026-08-31)
+
+
+## v0.46.0 (2026-08-31)
+
+### Documentation
+
+- **spec**: Specify a scaffold command for new agent projects (022)
+  ([`63e9033`](https://github.com/ondrasek/agent-container/commit/63e9033a426ed669baeff929eca2fbec2dab7df4))
+
+
 ## v0.45.0 (2026-08-30)
 
 

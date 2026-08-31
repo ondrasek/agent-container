@@ -9,7 +9,7 @@ environments:
       mode: headless
       agent: claude
       workspace: persistent
-      repo: https://github.com/ondrasek/agent-container-test-repository
+      repo: https://github.com/YOU/YOUR-SCRATCH-REPO    # <-- EDIT ME
       task: |
         In the git repository at /workspace, create a file
         report.md containing one sentence about what this repository holds.

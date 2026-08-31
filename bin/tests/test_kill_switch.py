@@ -417,3 +417,75 @@ def test_hosts_are_contacted_in_parallel_not_in_sequence(wiz, monkeypatch):
     monkeypatch.setattr(wiz, "kill_verify", lambda h, e, f: {x["name"]: set() for x in e})
     wiz.do_panic(None, None, False, False, False, 5.0, False)
     assert concurrent_peak[0] > 1, "hosts were contacted sequentially"
+
+
+# --- verification is SETTLED, not sampled once -------------------------------
+# `stop` returns on the signal, not on the state change. A single observation
+# taken immediately after acting catches a container mid-transition, and
+# classify_kill calls that `failed` — the tool reporting failure for a stop that
+# worked. These pin the fix AND its limit: re-observing must never invent a
+# `stopped` it did not see.
+
+
+def test_a_stop_still_settling_is_not_reported_failed(wiz):
+    """The flake this exists to remove: the first look still shows the container, a
+    later one does not, and the outcome must follow the LATER look."""
+    readings = iter([{"alpha": {"c1"}}, {"alpha": set()}])
+    got = wiz.settle_kill_reading(lambda: next(readings), sleep=lambda _: None)
+    assert got == {"alpha": set()}
+    assert wiz.classify_kill("alpha", {"c1"}, got["alpha"]) == "stopped"
+
+
+def test_settling_never_invents_a_stop_it_did_not_see(wiz):
+    """The limit. A container that never clears stays reported as present, so it is
+    still `failed` — the budget buys patience, never optimism."""
+    ticks = iter([0.0, 5.0, 10.0, 20.0, 30.0])
+    got = wiz.settle_kill_reading(
+        lambda: {"alpha": {"c1"}}, sleep=lambda _: None, now=lambda: next(ticks)
+    )
+    assert got == {"alpha": {"c1"}}
+    assert wiz.classify_kill("alpha", {"c1"}, got["alpha"]) == "failed"
+
+
+def test_a_clear_first_reading_costs_no_extra_observation(wiz):
+    """The common path must not pay for the rare one: nothing left running means one
+    look and no sleep at all."""
+    calls = []
+    slept = []
+
+    def observe():
+        calls.append(1)
+        return {"alpha": set()}
+
+    got = wiz.settle_kill_reading(observe, sleep=slept.append)
+    assert got == {"alpha": set()}
+    assert len(calls) == 1, "re-observed an already-clear reading"
+    assert slept == [], "slept when there was nothing to wait for"
+
+
+def test_the_first_observation_still_raises_for_undetermined(wiz):
+    """An unreachable host must keep producing `undetermined`. Swallowing the FIRST
+    exception would turn "we could not tell" into "we saw it stopped" — the one
+    substitution this whole feature exists to prevent."""
+
+    def observe():
+        raise OSError("host did not answer")
+
+    with pytest.raises(OSError):
+        wiz.settle_kill_reading(observe, sleep=lambda _: None)
+
+
+def test_a_later_observation_failing_keeps_the_last_good_reading(wiz):
+    """A transient blip after a usable reading must not discard it. The reading in
+    hand is still the best evidence available, and it classifies `failed` — the same
+    answer one observation gave, so this is no regression."""
+    state = {"n": 0}
+
+    def observe():
+        state["n"] += 1
+        if state["n"] == 1:
+            return {"alpha": {"c1"}}
+        raise OSError("blip")
+
+    got = wiz.settle_kill_reading(observe, sleep=lambda _: None)
+    assert got == {"alpha": {"c1"}}
