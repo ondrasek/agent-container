@@ -1,0 +1,37 @@
+# Sample 02 — the same kind of work, from BEHIND a declared egress boundary.
+#
+# EDIT `repo:` to a repository you can write to before applying.
+environments:
+  - name: sample02
+    host: local
+
+    container:
+      mode: headless
+      agent: claude
+      workspace: persistent
+      repo: https://github.com/YOU/YOUR-SCRATCH-REPO    # <-- EDIT ME
+      task: |
+        In the git repository at /workspace, create a file
+        report.md containing one sentence about what this repository holds.
+        Commit it with the message 'sample02 report', create a branch named
+        sample02-report and push it to origin.
+
+    credentials:
+      - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+      # The forge token. Delivered as an env var because GH_TOKEN is not a
+      # provider API key; the git credential helper reads it for the HTTPS push.
+      - { name: GH_TOKEN, source: env, var: SAMPLE_GH_TOKEN }
+
+    # The WHOLE egress policy. Everything not named here is refused at the packet
+    # level, in a namespace the agent shares with a sidecar that alone holds
+    # NET_ADMIN. Declared WITHOUT a port, so these go to the PROXY allowlist and
+    # the agent's TLS is spliced — never terminated, never inspected.
+    #
+    # github.com is here because this environment pushes. A run that only talked
+    # to its model would reach one destination and prove much less.
+    egress:
+      allow:
+        - { provider: anthropic }     # the tool supplies the hosts for a named provider
+        - { host: github.com }
+        # for agent: pi ->  - { host: ollama.com }
+      enforcement: strict             # advisory (default) | strict

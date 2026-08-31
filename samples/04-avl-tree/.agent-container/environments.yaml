@@ -1,0 +1,42 @@
+# Sample 04 — the agent writes real software: an AVL tree, unit tests, a TUI.
+#
+# The hardest sample. A small model will often fail it, and that is information
+# rather than a defect.
+#
+# EDIT `repo:` to a repository you can write to before applying.
+environments:
+  - name: sample04
+    host: local
+
+    container:
+      mode: headless
+      agent: claude
+      workspace: persistent
+      repo: https://github.com/YOU/YOUR-SCRATCH-REPO    # <-- EDIT ME
+
+      task: |
+        In the git repository at /workspace, write a small Python project in the
+        directory avl/sample04. Use ONLY the Python standard library — do NOT
+        install or import any third-party package, and do NOT use an existing
+        tree implementation; write the AVL tree yourself.
+        1. avl/sample04/avl.py — a self-balancing AVL tree. It must define class
+           AVLTree with methods: insert(value: int) -> None,
+           delete(value: int) -> None, contains(value: int) -> bool,
+           in_order() -> list[int] returning every value in ascending order, and
+           height() -> int (an empty tree has height 0). Rebalance with rotations
+           on both insert and delete. Commit with the message 'avl implement'.
+        2. avl/sample04/test_avl.py — unit tests using the standard library
+           `unittest` module (NOT pytest). Cover insert, delete, contains,
+           in-order order, and that the tree stays balanced when values are
+           inserted in ascending order. Run them with `python -m unittest` and
+           make sure they PASS before you commit. Commit with 'avl tests'.
+        3. avl/sample04/tui.py — a text UI reading commands from standard input,
+           one per line: `i <number>` inserts, `d <number>` deletes, `p` prints,
+           `q` quits. After each insert or delete print the tree's contents in
+           ascending order on one line. Exit cleanly on `q` or end of input.
+           Commit with 'avl tui'.
+        Finally create a branch named sample04-avl and push it to origin.
+
+    credentials:
+      - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+      - { name: GH_TOKEN, source: env, var: SAMPLE_GH_TOKEN }

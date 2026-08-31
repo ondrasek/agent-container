@@ -1,0 +1,4 @@
+{
+  "defaultProvider": "ollama",
+  "defaultModel": "kimi-k2.7-code"
+}

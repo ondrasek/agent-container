@@ -2159,3 +2159,60 @@ def test_attach_records_BEFORE_it_execs(wiz):
     someone a shell."""
     body = _func_body(Path(wiz.__file__).read_text(), "cli_attach")
     assert body.index('record_fleet_attribution("attach"') < body.index("os.execvp(")
+
+
+# --- the runtime is CONFIGURATION, not only a guess --------------------------
+
+
+def test_runtime_can_be_declared_in_settings(wiz, tmp_path, monkeypatch):
+    """`runtime:` selects the container runtime, above the platform fallback.
+
+    Before this, the only surfaces were an env var (one invocation) and a
+    platform-aware guess buried in detect_runtime(). A registered host could
+    declare its `--driver`, but the implicit local host — the common case — had
+    nowhere to say it, so the tool picked a runtime nobody had chosen.
+    """
+    proj = _settings(tmp_path, monkeypatch, wiz, user="runtime: podman\n")
+    monkeypatch.delenv("AGENT_CONTAINER_RUNTIME", raising=False)
+    monkeypatch.setattr(wiz.shutil, "which", lambda n: f"/usr/bin/{n}")
+    assert wiz.resolve_runtime_source(proj) == ("podman", "settings")
+
+
+def test_the_environment_still_wins_over_settings(wiz, tmp_path, monkeypatch):
+    """One invocation must be able to override the configured default without
+    editing a file — that is what an env var is for, and it is why it sits above
+    settings rather than below."""
+    proj = _settings(tmp_path, monkeypatch, wiz, user="runtime: podman\n")
+    monkeypatch.setenv("AGENT_CONTAINER_RUNTIME", "docker")
+    monkeypatch.setattr(wiz.shutil, "which", lambda n: f"/usr/bin/{n}")
+    assert wiz.resolve_runtime_source(proj) == ("docker", "environment")
+
+
+def test_an_unknown_runtime_is_refused_not_silently_ignored(wiz, tmp_path, monkeypatch):
+    """A typo must not fall through to the guess.
+
+    Falling back would deploy to a runtime the operator did not name while their
+    settings file says otherwise — the failure mode being that everything works,
+    on the wrong machine, and the file that would explain it is the one being
+    ignored.
+    """
+    proj = _settings(tmp_path, monkeypatch, wiz, user="runtime: containerd\n")
+    monkeypatch.delenv("AGENT_CONTAINER_RUNTIME", raising=False)
+    monkeypatch.setattr(wiz.shutil, "which", lambda n: f"/usr/bin/{n}")
+    with pytest.raises(wiz.Fatal, match="must be 'docker' or 'podman'"):
+        wiz.resolve_runtime_source(proj)
+
+
+def test_absent_settings_reports_a_DETECTED_origin(wiz, tmp_path, monkeypatch):
+    """Absent, configured and forced are three different facts (Constitution VIII).
+
+    `detected` says "nobody chose this, the tool guessed from the platform", and a
+    caller that cannot tell that apart from a declared value has no way to warn an
+    operator that their setup rests on a guess.
+    """
+    proj = _settings(tmp_path, monkeypatch, wiz, user="otlp_endpoint: https://x.example\n")
+    monkeypatch.delenv("AGENT_CONTAINER_RUNTIME", raising=False)
+    monkeypatch.setattr(wiz.shutil, "which", lambda n: f"/usr/bin/{n}")
+    rt, origin = wiz.resolve_runtime_source(proj)
+    assert origin == "detected"
+    assert rt == wiz.runtime_preference()[0]

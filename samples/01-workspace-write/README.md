@@ -1,49 +1,47 @@
-# 01 — a real agent runs and writes to the workspace
+# 01 — a real agent runs headless and writes to the workspace
+
+The whole spec is [`.agent-container/environments.yaml`](.agent-container/environments.yaml).
+Read it first; it is 25 lines and it is the entire sample.
 
 ```bash
-./run.sh claude     # or: ./run.sh pi
+export ANTHROPIC_API_KEY=sk-ant-...
+agent-container plan
+agent-container apply
 ```
 
-**Needs:** a model key only. No repository, no token, no boundary.
+**Needs a model key only** — no repository, no forge token, no boundary.
 
-## What it proves
+## What it declares
 
-The whole stack at once, with a real model doing real work:
-
-- a credential discovered by convention, delivered over the container's own sshd,
-  landing on its own volume — and **resolved by the agent**;
-- canonical config reaching the agent's home (for `pi`, which needs it);
-- the agent **using its tools** to create a file;
-- a completed run record with the task verbatim and exit code 0.
-
-## How it is checked
-
-It asserts a **side effect, never the model's prose**. An LLM's wording is not
-deterministic; a file it was asked to write is. The token is random per run, so
-the check cannot pass on a file left behind by an earlier run — the workspace
-volume persists, which is exactly how that would happen.
-
-The check reads the workspace **volume** from a throwaway container rather than
-asking the agent's container: a headless container has already exited by then,
-and starting it again would re-run the agent.
-
-## Files
-
-| File | Purpose |
+| Field | Why it is there |
 |---|---|
-| `task.txt` | The task, with `@TOKEN@` substituted per run |
-| `run.sh` | Stages config, runs `up --mode headless --foreground`, verifies |
+| `mode: headless` | the agent **is** the workload; the container exits with the agent's exit code |
+| `agent: claude` | the primary agent — change this line to run `pi` |
+| `workspace: persistent` | a named volume, so the result outlives the container |
+| `task:` | the job, in the spec rather than on a command line |
+| `credentials:` | a **locator** — the variable name, never the key |
 
-Configuration comes from [`../_common/`](../_common/) — the pi provider
-declaration and the shared staging logic.
+## Checking it worked
 
-## Reading the result
+The container exits when the agent does, so look at the volume rather than the
+container:
 
+```bash
+agent-container runs ls sample01      # the run record: exit code, task, timing
+docker run --rm -v agent-container-sample01-workspace:/w:ro alpine:3 cat /w/proof.txt
 ```
-delivered 1 credential          the delivery path worked
-Delivered operator-canonical…   pi's models.json/settings.json arrived
-PASS — the agent used its tools the file is really on the volume
-```
 
-A run that reports success while the `PASS` line does not appear is the
-interesting failure: the agent said it was done and wrote nothing.
+Use `podman` there if that is your runtime — `agent-container context` says which
+one is in play, and `runtime:` in `settings.yaml` sets it.
+
+**A run that reports success while `proof.txt` is absent is the interesting
+failure**: the agent said it was done and wrote nothing.
+
+## Re-running
+
+`apply` is idempotent — a matching spec makes no changes, so a second `apply`
+will *not* re-run the agent. To make it run again:
+
+```bash
+agent-container destroy && agent-container apply
+```

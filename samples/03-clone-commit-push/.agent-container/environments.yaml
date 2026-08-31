@@ -1,0 +1,38 @@
+# Sample 03 — clone on start, generate data, transform it, report, PUSH.
+#
+# EDIT `repo:` to a repository you can write to before applying.
+environments:
+  - name: sample03
+    host: local
+
+    container:
+      mode: headless
+      agent: claude
+      workspace: persistent
+      repo: https://github.com/YOU/YOUR-SCRATCH-REPO    # <-- EDIT ME
+
+      # Three commits, not one. A single "write this string" commit proves the
+      # plumbing and nothing about the agent — it cannot tell an agent that
+      # worked from one that echoed its instructions. Step 2 must READ what step
+      # 1 produced and compute over it, so the answer can be recomputed from the
+      # pushed data and a fabricated one caught.
+      task: |
+        In the git repository at /workspace, do the following as THREE SEPARATE
+        git commits, then push. Work only inside the directory data/sample03.
+        1. Create data/sample03/input.csv with the header line `id,item,amount`
+           followed by exactly 8 data rows. Use ids 1 to 8, any item names you
+           like without commas, and integer amounts between 10 and 99. Stage it
+           and commit with the message 'step1 generate'.
+        2. READ data/sample03/input.csv and compute the number of data rows and
+           the sum of the amount column. Create data/sample03/summary.md
+           containing exactly two lines:
+           ROWS=<the number of data rows>
+           TOTAL=<the sum of the amount column>
+           Stage it and commit with the message 'step2 transform'.
+        3. Create data/sample03/report.md with one sentence describing what you
+           computed. Stage it and commit with the message 'step3 report'.
+        Finally create a branch named sample03-pipeline and push it to origin.
+
+    credentials:
+      - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+      - { name: GH_TOKEN, source: env, var: SAMPLE_GH_TOKEN }

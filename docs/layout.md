@@ -324,3 +324,51 @@ There is no compatibility mode — the tool **refuses** and names every file tha
 
 **Container names, ports and volume names are unchanged**, so environments you already run stay
 findable and tear down cleanly. Only file locations moved.
+
+## `settings.yaml` — the declared defaults
+
+At **either** config level, project winning per key (`.agent-container/settings.yaml`,
+then `~/.config/agent-container/settings.yaml`).
+
+| Key | What it decides |
+|---|---|
+| `runtime` | `docker` or `podman` for the implicit/local path |
+| `claude_auth` | `api-key` or `oauth` — which credential Claude Code uses |
+| `delivery_identity` | the operator-declared key that delivers secrets to a container |
+| `otlp_endpoint` | where run records are exported (Feature 017) |
+| `control_plane_hosts` | which hosts a control plane may manage |
+
+### `runtime` — and why it is configuration rather than a guess
+
+```yaml
+# ~/.config/agent-container/settings.yaml
+runtime: podman
+```
+
+Resolution order, each level able to be absent:
+
+1. **`AGENT_CONTAINER_RUNTIME`** — one invocation, wins over everything.
+2. **`runtime:` in `settings.yaml`** — the configured default.
+3. **The platform preference** — docker first on macOS, podman first on Linux.
+
+**A registered host is unaffected**: its `--driver` was recorded by `host add` and
+continues to govern that host. This setting is for the *implicit local* path,
+which previously had no configuration surface at all — so the tool selected a
+runtime nobody had chosen, and said nothing about it.
+
+**An unrecognised value is refused, not ignored.** Falling back to the guess would
+deploy to a runtime the operator did not name while the file that would explain it
+sits there being skipped.
+
+**The resolution is reported**, so nothing has to re-derive it:
+
+```bash
+agent-container context          # runtime: docker (detected)
+agent-container context --json   # {"runtime": {"name": "docker", "origin": "..."}}
+```
+
+`origin` is one of **`environment`**, **`settings`** or **`detected`** — and the
+three are kept distinct on purpose (Constitution VIII). `detected` means *nobody
+chose this, the tool guessed from the platform*, which is a materially different
+claim from a value someone declared.
+

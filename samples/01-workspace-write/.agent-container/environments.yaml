@@ -1,0 +1,30 @@
+# Sample 01 — a real agent runs headless and writes to the workspace.
+#
+# THIS FILE IS THE SAMPLE. `agent-container apply` reads it, validates it, and
+# reconciles the environment it declares. Nothing is generated at run time.
+#
+# To run pi instead of Claude Code, change `agent:` below and swap the
+# credential — both alternatives are written out in comments.
+environments:
+  - name: sample01
+    host: local
+
+    container:
+      mode: headless          # the agent IS the workload; the container exits with it
+      agent: claude           # claude | codex | pi | opencode
+      workspace: persistent    # a named volume that survives recreation
+
+      # The task is part of the SPEC, not a flag. It is recorded verbatim in the
+      # run record, so never put a credential here — nothing redacts it.
+      task: |
+        Create a file at /workspace/proof.txt whose contents are exactly:
+        SAMPLE-01-OK
+
+    # References, NEVER values. `source: env` reads the variable at apply time;
+    # the value travels to the container over its own sshd and lands on a
+    # per-credential volume. It is never written into this file, the compose
+    # model, or argv.
+    credentials:
+      - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+      # for agent: pi ->
+      # - { name: OLLAMA_API_KEY, source: env, var: OLLAMA_API_KEY }

@@ -30,26 +30,33 @@ Key property: **detach is non-destructive at every layer.** Closing the SSH conn
 
 ## See it actually work — [`samples/`](samples/)
 
-Four runnable scenarios, each a directory holding the configuration files and a
-`run.sh`. They use a **real agent against a real model**, so they cost money and
-are not deterministic — which is exactly what makes them worth having, since
-every other test in this repository stubs the agent binary with a shell script.
+Four **agent specifications** you can apply. Each is a project directory whose
+`.agent-container/environments.yaml` is the sample — plain YAML, git-trackable,
+declaring the container, the task, the credentials as locators, and (in 02) the
+egress boundary.
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...        # or CLAUDE_CODE_OAUTH_TOKEN, or OLLAMA_API_KEY for pi
-cd samples/01-workspace-write && ./run.sh claude
+cd samples && ./setup-once.sh          # declares a delivery identity, once per machine
+export ANTHROPIC_API_KEY=sk-ant-...
+cd 01-workspace-write
+agent-container plan                   # validate + show absent/matching/drifted
+agent-container apply                  # converge
 ```
 
 | | |
 |---|---|
-| [`01-workspace-write`](samples/01-workspace-write/) | credential delivery, canonical config, real tool use, a run record |
-| [`02-egress-boundary`](samples/02-egress-boundary/) | the same work from behind a declared boundary — and proof the boundary was there |
-| [`03-clone-commit-push`](samples/03-clone-commit-push/) | clone → generate → transform → report → **push**, verified on the forge |
-| [`04-avl-tree`](samples/04-avl-tree/) | the agent writes working software, checked by **running** it |
+| [`01-workspace-write`](samples/01-workspace-write/) | headless agent, a task, one credential — needs a model key only |
+| [`02-egress-boundary`](samples/02-egress-boundary/) | adds an `egress:` allow-list under `enforcement: strict` |
+| [`03-clone-commit-push`](samples/03-clone-commit-push/) | `repo:` clone-on-start, a three-commit pipeline, a forge token |
+| [`04-avl-tree`](samples/04-avl-tree/) | the agent writes working software, verified by running it |
 
-Each stages its setup into a disposable `AGENT_CONTAINER_ROOT` under `~/.cache`,
-so nothing touches your real configuration and no credential is ever written into
-this repository.
+They use a real agent against a real model, so runs **cost money** and are not
+deterministic — which is what makes them worth having, since every other test in
+this repository stubs the agent binary with a shell script.
+
+**No secret is in these files.** `credentials:` entries are locators; the value
+is read from your environment at apply time and travels to the container over its
+own sshd, never into the spec or the compose model.
 
 ## Deploy to a Hetzner VPS
 

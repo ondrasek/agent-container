@@ -1,56 +1,54 @@
 # 02 — the same work, from behind a declared egress boundary
 
 ```bash
-export SAMPLE_REPO=https://github.com/<you>/<scratch-repo>
-export SAMPLE_GH_TOKEN=ghp_...
-./run.sh claude     # or: ./run.sh pi
+$EDITOR .agent-container/environments.yaml     # set repo: to your own
+export ANTHROPIC_API_KEY=sk-ant-... SAMPLE_GH_TOKEN=ghp_...
+agent-container plan
+agent-container apply
 ```
 
-## What it proves
+## What makes this one different
 
-That an agent can do **real work through an enforced boundary** — and, just as
-importantly, that the boundary was actually there. A passing run with no sidecar
-proves nothing about egress, so the sample checks for the sidecar explicitly and
-fails if it is missing.
-
-This exercises a **different path** from a port-based rule. The destinations are
-declared *without a port*, which puts them in the **proxy** allowlist rather than
-the netfilter one: the agent's TLS is redirected to squid, which **splices** it.
-TLS is never terminated and never inspected — a decrypting proxy would see every
-`Authorization` header and create a new plaintext credential location inside the
-component meant to reduce exposure.
-
-It also puts **credential delivery under a boundary**, which moves the published
-port to the sidecar — the agent container has none of its own. Delivery has to
-connect to that port, so this is where those two features have to agree.
-
-## The declaration is the whole policy
+One block:
 
 ```yaml
 egress:
   allow:
-    - provider: anthropic      # or:  - host: ollama.com
-    - host: github.com
+    - { provider: anthropic }
+    - { host: github.com }
+  enforcement: strict
 ```
 
-Everything not named is refused at the **packet level**, in a namespace the agent
-shares with a sidecar that alone holds `NET_ADMIN`. `github.com` is declared
-alongside the model API because this sample clones and pushes — a run that only
-talked to its model would reach one destination and prove much less.
+That list is the **whole policy**. Everything not named is refused at the packet
+level, in a network namespace the agent shares with a sidecar that alone holds
+`NET_ADMIN`.
 
-## Files
+Both entries are declared **without a port**, which is what selects the **proxy**
+path rather than a netfilter rule: the agent's TLS is redirected to squid, which
+**splices** it. It is never terminated and never inspected — a decrypting proxy
+would see every `Authorization` header and create a new plaintext credential
+location inside the component meant to reduce exposure.
 
-| File | Purpose |
-|---|---|
-| `environments.yaml.template` | The declarative environment; `run.sh` fills in the name, agent and allow-list |
-| `run.sh` | Builds a project dir, deploys from inside it, checks the sidecar, prints the egress record |
+`{ provider: anthropic }` names a *provider*; the tool supplies the hosts.
+`{ host: github.com }` is a plain destination — the declaration governs **all**
+egress, not just the model API, which is why the forge has to be named too.
 
-The task is shared with sample 03 — same work, one with a boundary and one
-without, which is what makes the comparison meaningful.
+## Proving the boundary was really there
 
-## Reading the result
+A passing run with no sidecar proves nothing about egress:
 
-`egress <name>` reports **undeclared** egress: what the boundary refused, and
-anything it permitted that the declaration does not name. **Silence is the good
-outcome** — it means nothing was refused. When an environment has no boundary at
-all, it says so rather than answering nothing.
+```bash
+docker ps -a --filter name=agent-egress-sample02   # the sidecar must exist
+agent-container egress sample02                    # what it refused
+```
+
+`egress` reports **undeclared** egress — what was refused, and anything permitted
+that the declaration does not name. **Silence is the good outcome.** When an
+environment has no boundary at all it says so, rather than answering nothing.
+
+## Try breaking it
+
+Delete the `- { host: github.com }` line, `destroy`, `apply` again. The model
+call still works and the push fails — and `agent-container egress sample02` names
+github.com as refused. That is the boundary doing its job, and it is a more
+convincing demonstration than a run that passes.

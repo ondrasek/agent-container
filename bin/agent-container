@@ -4573,26 +4573,76 @@ except Exception:
     _ORIG_TERMIOS = None
 
 
-def detect_runtime() -> str:
-    """Resolve the container runtime.
+RUNTIME_SETTING = "runtime"
+RUNTIME_CHOICES = ("docker", "podman")
 
-    AGENT_CONTAINER_RUNTIME (validated docker|podman, must be on PATH) always wins.
-    Otherwise the default is platform-aware: on macOS the operator runs Lima +
-    docker-cli, so prefer docker then podman; on Linux (the VPS) prefer podman
-    then docker. Dies if neither is installed.
+# The platform-aware fallback, NAMED because it is a policy and Constitution VIII
+# says a policy needs a surface. On macOS the operator runs Lima + docker-cli, so
+# docker is the likelier one; on Linux (the VPS) podman is, and it is what ADR
+# 0001 makes the default. Both orders are guesses about the machine, which is
+# exactly why `runtime:` exists above them — a guess is what you fall back to,
+# not what you configure with.
+RUNTIME_PREFERENCE_DARWIN = ("docker", "podman")
+RUNTIME_PREFERENCE_OTHER = ("podman", "docker")
+
+
+def runtime_preference() -> tuple[str, ...]:
+    return (
+        RUNTIME_PREFERENCE_DARWIN if sys.platform.startswith("darwin") else RUNTIME_PREFERENCE_OTHER
+    )
+
+
+def _validated_runtime(value: str, origin: str) -> str:
+    if value not in RUNTIME_CHOICES:
+        # Wording preserved deliberately: a pre-existing test pins it, and an
+        # error message an operator may have grepped for is part of the contract.
+        die(f"{origin} must be 'docker' or 'podman', got: {value!r}")
+    if not shutil.which(value):
+        die(f"{origin} selects '{value}', which is not on PATH")
+    return value
+
+
+def resolve_runtime_source(cwd: Path | None = None) -> tuple[str, str]:
+    """The runtime AND where the choice came from, as (runtime, origin).
+
+    Origin is reported, never inferred by the caller, because `detected` and
+    `configured` are different facts: the first is a guess about this machine and
+    the second is a decision somebody made. Collapsing them is what let the tool
+    pick a runtime it never mentioned — and what made an external script
+    re-derive the platform order and get it wrong on macOS.
+
+    Precedence, each level able to be absent:
+      1. AGENT_CONTAINER_RUNTIME  — one invocation, wins over everything
+      2. `runtime:` in settings.yaml — the configured default (project, then user)
+      3. the platform preference   — a named fallback, not a configuration
+
+    A REGISTERED host is unaffected: its `--driver` was recorded when it was
+    added and continues to govern that host. This is the implicit/local path,
+    which had no configuration surface at all and therefore always guessed.
     """
     forced = os.environ.get("AGENT_CONTAINER_RUNTIME")
     if forced:
-        if forced not in ("podman", "docker"):
-            die(f"AGENT_CONTAINER_RUNTIME must be 'docker' or 'podman', got: {forced}")
-        if not shutil.which(forced):
-            die(f"AGENT_CONTAINER_RUNTIME={forced} but '{forced}' is not on PATH")
-        return forced
-    order = ("docker", "podman") if sys.platform.startswith("darwin") else ("podman", "docker")
-    for rt in order:
+        return _validated_runtime(forced, "AGENT_CONTAINER_RUNTIME"), "environment"
+
+    declared = resolve_settings_key(RUNTIME_SETTING, cwd)
+    if declared is not None:
+        return _validated_runtime(
+            str(declared).strip().lower(), f"settings.yaml {RUNTIME_SETTING}:"
+        ), "settings"
+
+    for rt in runtime_preference():
         if shutil.which(rt):
-            return rt
-    die("neither 'podman' nor 'docker' on PATH (install one, or set AGENT_CONTAINER_RUNTIME)")
+            return rt, "detected"
+    die(
+        f"neither 'podman' nor 'docker' on PATH. Install one, set "
+        f"AGENT_CONTAINER_RUNTIME, or declare `{RUNTIME_SETTING}:` in settings.yaml"
+    )
+
+
+def detect_runtime() -> str:
+    """The container runtime for the implicit/local path. See
+    resolve_runtime_source() for the precedence and why the origin is kept."""
+    return resolve_runtime_source()[0]
 
 
 def query(argv: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -18949,7 +18999,14 @@ def build_agent_context(rt: str, selected_host: str | None = None) -> dict:
         {"name": hname, "driver": hrec.get("driver"), "context": hrec.get("context")}
         for hname, hrec in sorted(registry_hosts(reg).items())
     ]
+    # The RESOLVED runtime and WHERE it came from. Reported because it was a
+    # decision the tool made and never stated: `context` claimed to be "what the
+    # tool knows" while omitting which runtime every other answer in the payload
+    # was read from. Anything needing it — a script, an agent, a sample — had to
+    # re-derive the platform preference, and re-derivation is how it drifts.
+    _rt, _rt_origin = resolve_runtime_source()
     return {
+        "runtime": {"name": _rt, "origin": _rt_origin},
         "target": {"host": target.host_name, "container": target.container_name},
         "stages": [
             {"key": s.key, "status": s.status, "detail": s.detail, "hard": s.hard}
@@ -19036,6 +19093,7 @@ def context(
     if as_json:
         emit_json(ctx)
         return
+    console.print(f"runtime: {ctx['runtime']['name']} ({ctx['runtime']['origin']})")
     console.print(f"target: {ctx['target']['host']} / {ctx['target']['container'] or '-'}")
     console.print("  ".join(f"{s['key']}={s['status']}" for s in ctx["stages"]))
     for p in ctx["problems"]:

@@ -1,99 +1,99 @@
-# Samples — run the real-agent tests yourself
+# Samples — agent specifications you can apply
 
-Each subdirectory is **one real-agent scenario**, with the configuration files it
-needs and a `run.sh` that wires them together. These are the same scenarios the
-acceptance tier runs in CI, extracted so you can run them without pytest.
+Each subdirectory is a **project**: a folder with a `.agent-container/`
+directory holding the YAML the CLI reads. That folder *is* the sample. It is
+plain text, git-trackable, and it is what `agent-container apply` reconciles —
+nothing here is generated at run time.
 
-They use a **real agent against a real model**, so every run **costs money** and
-none of them is deterministic. That is the point: everything else in this
-repository's test suite stubs the agent binary with a shell script, which proves
-the plumbing and nothing about whether an agent can actually work in here.
+```
+samples/01-workspace-write/
+└── .agent-container/
+    ├── environments.yaml            the spec: name, host, container, task,
+    │                                credentials, egress
+    └── sample01.config/pi/          canonical config, delivered to the agent's
+        ├── models.json              home by the <name>.config/<agent>/ convention
+        └── settings.json            (used only when agent: pi)
+```
 
-| Sample | What it proves | Needs a repo? |
+| Sample | What it declares | Needs a repo? |
 |---|---|---|
-| [`01-workspace-write`](01-workspace-write/) | The whole stack: credential delivery, canonical config, a real model, tool use, a run record | no |
-| [`02-egress-boundary`](02-egress-boundary/) | The same work done from **behind a declared egress boundary** — and that the boundary was really there | yes |
-| [`03-clone-commit-push`](03-clone-commit-push/) | Clone on start → generate data → transform it → report → **push**, as three commits | yes |
-| [`04-avl-tree`](04-avl-tree/) | The agent writes **working software** — an AVL tree, unit tests, a TUI — verified by running it | yes |
+| [`01-workspace-write`](01-workspace-write/) | A headless agent, a task, one credential | no |
+| [`02-egress-boundary`](02-egress-boundary/) | The same, plus an `egress:` allow-list under `enforcement: strict` | yes |
+| [`03-clone-commit-push`](03-clone-commit-push/) | `repo:` clone-on-start, a three-commit pipeline task, a forge token | yes |
+| [`04-avl-tree`](04-avl-tree/) | The hardest task — real software, tests and a TUI | yes |
 
-Start with **01**. It needs nothing but a model key, and if it fails, none of the
-others will tell you anything you did not already learn.
+Start with **01**: it needs only a model key.
 
-## Prerequisites
-
-1. **A container runtime** — Podman (the default) or Docker, with `compose` v2.
-2. **A model credential**, exported for the agent you want to run:
-
-   ```bash
-   export ANTHROPIC_API_KEY=sk-ant-...          # claude, API key
-   export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-...    # claude, subscription — preferred if you have one
-   export OLLAMA_API_KEY=...                    # pi, via Ollama Cloud
-   ```
-
-   With a subscription token present, the samples select it and set
-   `claude_auth: oauth`; otherwise they use the API key. **Exactly one is wired** —
-   Claude refuses to be told twice.
-
-3. **For samples 02–04, a git repository you can write to**, plus a token:
-
-   ```bash
-   export SAMPLE_REPO=https://github.com/<you>/<a-scratch-repo>
-   export SAMPLE_GH_TOKEN=ghp_...     # PAT with 'repo' scope
-   ```
-
-   There is deliberately **no default repository**. Every run pushes a new
-   branch, so use a throwaway. A *private* repo is the better test: a public one
-   would clone happily with a junk token and tell you nothing about whether the
-   credential path works.
-
-## Running one
+## Once per machine
 
 ```bash
-cd samples/01-workspace-write
-./run.sh claude      # or: ./run.sh pi
+./setup-once.sh
 ```
 
-## Where things go, and what never leaves your machine
+The single imperative step, and it exists for a reason worth reading: delivering
+a credential needs an operator-**declared** SSH identity (Constitution IX), and
+the tool deliberately refuses to generate one — a tool-minted key would be a
+standing credential granting entry to every environment it ever deploys. The
+script creates one under `~/.config/agent-container/`, declares it in
+`settings.yaml` and admits its public half in your key collection. Nothing it
+writes goes into this repository.
 
-Every sample stages its configuration into a **disposable root**:
+## Then, per sample
 
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...        # or OLLAMA_API_KEY, for agent: pi
+export SAMPLE_GH_TOKEN=ghp_...             # samples 02-04 only
+
+cd 01-workspace-write
+agent-container plan          # validates and shows absent / matching / drifted
+agent-container apply         # converge
 ```
-~/.cache/agent-container-samples/<sample-name>/{config,state,data}
+
+`plan` mutates nothing, so it is always safe to run first. `apply` is
+**idempotent**: a matching spec makes no changes; a drifted one is announced,
+then recreated.
+
+**Samples 02–04 need one edit before they will work.** `repo:` points at a
+placeholder — change it to a repository you can write to. A throwaway is right;
+each run pushes a branch. Prefer a *private* one: a public repo clones happily
+with a junk token, which would tell you nothing about whether the credential
+path works.
+
+To run `pi` instead of Claude Code, change `agent:` and swap the credential
+entry. Both alternatives are written out in comments beside the line you change.
+
+## No secret is in these files, by construction
+
+`credentials:` entries are **locators, never values**:
+
+```yaml
+credentials:
+  - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
 ```
 
-`AGENT_CONTAINER_ROOT` relocates config, state and data together, so a sample
-**cannot disturb your real setup**, and cleaning up is `rm -rf` on one directory.
-Override it if you want them elsewhere.
+The variable is read at apply time; the value travels to the container over that
+container's own sshd and lands on a per-credential volume. It is never written
+into this file, into the compose model the tool generates, or onto a command
+line. That is why these samples can be committed and why they ask you to export
+a variable instead of filling in a blank.
 
-**No credential is ever written into this repository.** The samples read keys
-from your environment and write them into that disposable root at `0600` — which
-is why you will not find an `.env` file here to fill in. The one place a key
-would be easy to commit by accident is the one place these samples refuse to put
-it.
+`source:` also accepts `file`, `keychain`, `command`, `onepassword` and
+`bitwarden` — see [`docs/agent-as-code.md`](../docs/agent-as-code.md).
 
-## What the samples deliberately do NOT do
+## Cleaning up
 
-They touch **no undocumented surface**. Nothing writes into a container by hand,
-nothing edits a compose file, nothing sets a private variable. Configuration
-travels the same conventions the documentation describes:
+```bash
+agent-container destroy       # removes only what THIS spec declares and owns
+```
 
-- the credential rides `<name>.<provider>.key` onto its own volume, delivered
-  over the container's own sshd under a declared identity (Constitution IX);
-- agent config rides `<name>.config/<agent>/…` onto the agent's home;
-- the egress policy is declared in `.agent-container/environments.yaml`.
+## When a sample fails
 
-If one of those conventions breaks, a sample breaks with it. That is the second
-reason these exist.
+Not automatically a bug — a model can simply be bad at the task, and 04 is hard
+for a small one. The distinction:
 
-## If a sample fails
-
-A failure here is **not automatically a bug in agent-container** — a model can
-simply be bad at the task, and sample 04 is a genuinely hard one for a small
-model. The distinction to draw:
-
-- **The run failed, or a credential was not delivered** → an `agent-container`
-  problem. `logs <name>` and the run record will say where it stopped.
+- **`apply` failed, or a credential was not delivered** → an `agent-container`
+  problem. Re-run with `-v` for the exact commands, and read `logs <name>`.
 - **The run succeeded but the output is wrong or incomplete** → usually model
-  capability. Sample 03 caught exactly this once: a model did the first half of
-  the task, committed, and silently skipped the branch-and-push half. The honest
-  fix was a better model, not a smaller task.
+  capability. One model did the first half of 03 faithfully, committed, and
+  silently skipped the branch-and-push half; the honest fix was a better model,
+  not a smaller task.

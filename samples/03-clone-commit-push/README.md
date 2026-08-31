@@ -1,49 +1,38 @@
 # 03 — clone, generate, transform, report, push
 
 ```bash
-export SAMPLE_REPO=https://github.com/<you>/<scratch-repo>
-export SAMPLE_GH_TOKEN=ghp_...
-./run.sh claude     # or: ./run.sh pi
+$EDITOR .agent-container/environments.yaml     # set repo: to your own
+export ANTHROPIC_API_KEY=sk-ant-... SAMPLE_GH_TOKEN=ghp_...
+agent-container plan && agent-container apply
 ```
 
-## What it proves
+## What it declares
 
-Clone-on-start and push, end to end, with **evidence that outlives the
-container**. A commit made inside a container that is torn down seconds later
-proves nothing to anyone looking at the repository afterwards — so the branch is
-read back from the forge.
+`repo:` gives clone-on-start, and `GH_TOKEN` arrives as a declared credential —
+delivered as an environment variable because it is not a provider API key, which
+is what the git credential helper reads for the HTTPS push.
 
 Use a **private** repository if you can. A public clone succeeds with a junk
 token, so it would exercise none of the credential path.
 
-## Why three commits, and why the data matters
+## Why the task has three steps
 
 A single "write this string to a file" commit proves the plumbing and nothing
 about the agent: it cannot distinguish an agent that worked from one that echoed
 its instructions back.
 
-Here **step 2 must read what step 1 produced** and compute over it. That makes
-the result checkable *against the agent's own data*:
+Step 2 must **read what step 1 produced** and compute over it, which makes the
+result checkable against the agent's own data:
 
 ```bash
-cat data/<agent>-<token>/summary.md
-awk -F, 'NR>1 {n++; s+=$3} END {print "ROWS="n; print "TOTAL="s}' data/<agent>-<token>/input.csv
+git clone --branch sample03-pipeline <your repo> /tmp/check && cd /tmp/check
+cat data/sample03/summary.md
+awk -F, 'NR>1 {n++; s+=$3} END {print "ROWS="n; print "TOTAL="s}' data/sample03/input.csv
 ```
 
 Checking that `summary.md` merely *exists* would accept any number in it.
 Recomputing the sum is what separates an agent that processed the data from one
-that wrote a plausible-looking file. `run.sh` prints these commands when it
-finishes.
-
-Each run pushes its **own branch**. A shared branch would make two agents racing
-the same remote a source of flakiness that says nothing about either.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `task.txt` | The three-step task; `@TOKEN@`, `@BRANCH@`, `@DIR@` substituted per run |
-| `run.sh` | Deploys with `--repo`, passes `GH_TOKEN` via `--env-file`, prints verification commands |
+that wrote a plausible-looking file.
 
 ## A failure worth recognising
 
