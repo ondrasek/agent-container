@@ -77,6 +77,59 @@ run_check() {
     out=$("$@" 2>&1) || fail "$name" "$cmd" "$out"
 }
 
+# --- parallel execution ------------------------------------------------------
+#
+# The checks are INDEPENDENT — different tools reading the same files, and five
+# shell suites that each mktemp their own workspace (no fixed container or
+# directory names, verified). Run serially they took ~184s on a 16-core machine,
+# of which pytest is 59s and the shell suites 114s. Nothing was waiting on
+# anything; the wall-clock was just the sum.
+#
+# This matters more than a normal test suite because the gate is a STOP HOOK: it
+# runs after every turn, so its cost is paid constantly rather than once.
+#
+# ORDER IS PRESERVED FOR REPORTING even though execution is not. The serial
+# version was deliberately ordered "fastest / most-likely-to-fail first" so an
+# operator saw the most probable failure first; that intent survives by REPORTING
+# the earliest-declared failure, not the earliest-finishing one. Otherwise which
+# error you saw would depend on a race.
+PAR_DIR=""
+par_names=(); par_cmds=(); par_pids=()
+
+spawn_check() {  # spawn_check <check|nonempty> <name> <cmd...>
+    local mode="$1" name="$2"; shift 2
+    [ -n "$PAR_DIR" ] || PAR_DIR=$(mktemp -d)
+    local i=${#par_names[@]}
+    par_names+=("$name"); par_cmds+=("$*")
+    (
+        if [ "$mode" = "nonempty" ]; then
+            # Same stdout-only rule as run_check_nonempty: uv's install progress
+            # goes to stderr and must not read as a finding.
+            out=$("$@" 2>/dev/null); rc=$?
+            if [ -n "$out" ]; then printf '%s' "$out" >"$PAR_DIR/$i.out"; echo 1 >"$PAR_DIR/$i.rc"
+            elif [ "$rc" -ne 0 ]; then "$@" >"$PAR_DIR/$i.out" 2>&1; echo 1 >"$PAR_DIR/$i.rc"
+            else : >"$PAR_DIR/$i.out"; echo 0 >"$PAR_DIR/$i.rc"; fi
+        else
+            out=$("$@" 2>&1); rc=$?
+            printf '%s' "$out" >"$PAR_DIR/$i.out"; echo "$rc" >"$PAR_DIR/$i.rc"
+        fi
+    ) &
+    par_pids+=($!)
+}
+
+await_checks() {
+    local pid; for pid in "${par_pids[@]}"; do wait "$pid" || true; done
+    local i rc
+    for i in "${!par_names[@]}"; do
+        rc=$(cat "$PAR_DIR/$i.rc" 2>/dev/null || echo 1)
+        if [ "$rc" -ne 0 ]; then
+            fail "${par_names[$i]}" "${par_cmds[$i]}" "$(cat "$PAR_DIR/$i.out" 2>/dev/null)"
+        fi
+    done
+    rm -rf "$PAR_DIR"; PAR_DIR=""
+    par_names=(); par_cmds=(); par_pids=()
+}
+
 # Like run_check, but for tools whose "clean" is EMPTY output (they may exit 0
 # even when reporting findings — e.g. vulture, refurb). Their findings go to
 # STDOUT; uv's "Installed N packages" progress (emitted on a fresh runner, e.g.
@@ -113,7 +166,17 @@ REFURB=(uv run --no-project --with 'refurb>=2.3,<2.4' refurb)
 # annotations (file:line) under Actions; it auto-detects GITHUB_ACTIONS and is a
 # no-op locally, so it rides in the one shared pytest env without changing local
 # behavior. It's a test-only plugin — never a runtime dep of the CLI.
+# pytest-xdist: 1588 hermetic tests in ~17s across workers vs ~59s in one
+# process, and the suite was already parallel-safe (measured — every test passed
+# unchanged under -n 8). PINNED like every other tool here: an unpinned `--with`
+# takes the newest release, so a stale local cache and a fresh CI runner can
+# disagree and only CI fails.
+#
+# `-n auto` rather than a fixed count: this runs CONCURRENTLY with the other
+# checks, and a CI runner has far fewer cores than a workstation, so a hardcoded
+# width would oversubscribe there and under-use here.
 PYT=(uv run --no-project "${DEPS[@]}" --with pytest
+     --with 'pytest-xdist>=3.6,<4'
      --with 'pytest-github-actions-annotate-failures>=0.2,<1' pytest)
 
 # ty resolves third-party imports against a Python environment. Left to its own
@@ -150,8 +213,8 @@ fi
 # Ordered fastest / most-likely-to-fail first: static checks (lint, types,
 # security) before the behavioural ones (self-test, pytest, shell suites).
 # bandit `-ll` = MEDIUM+ only; the CLI's legitimate subprocess calls are all LOW.
-run_check "ruff-check"        "${RUFF[@]}" check
-run_check "ruff-format"       "${RUFF[@]}" format --check
+spawn_check check    "ruff-check"        "${RUFF[@]}" check
+spawn_check check    "ruff-format"       "${RUFF[@]}" format --check
 
 # ty (inline, with phantom-import self-heal). A corrupted volatile-TMPDIR venv
 # yields PHANTOM `unresolved-import` on the third-party deps (typer/questionary/
@@ -169,20 +232,24 @@ if [ "$ty_rc" -ne 0 ] \
 fi
 [ "$ty_rc" -eq 0 ] || fail "ty" "$_ty_cmd" "$ty_out"
 
-run_check "bandit"            "${BANDIT[@]}" -q -ll bin/agent-container
-run_check_nonempty "vulture"  "${VULTURE[@]}" bin/agent-container --min-confidence 80
-run_check "xenon"             "${XENON[@]}" --max-absolute B --max-modules A --max-average A bin/agent-container
-run_check_nonempty "refurb"   "${REFURB[@]}" bin/agent-container --quiet
-run_check "self-test"         ./bin/agent-container --self-test
-run_check "pytest"            "${PYT[@]}" bin/tests -x -q
-run_check "shell-entrypoint"      bash bin/tests/test_entrypoint.sh
-run_check "shell-execution"       bash bin/tests/test_entrypoint_execution.sh
-run_check "shell-completions"     bash bin/tests/test_completions.sh
-run_check "shell-tmux-layout"     bash bin/tests/test_entrypoint_tmux_layout.sh
+spawn_check check    "bandit"            "${BANDIT[@]}" -q -ll bin/agent-container
+spawn_check nonempty "vulture"  "${VULTURE[@]}" bin/agent-container --min-confidence 80
+spawn_check check    "xenon"             "${XENON[@]}" --max-absolute B --max-modules A --max-average A bin/agent-container
+spawn_check nonempty "refurb"   "${REFURB[@]}" bin/agent-container --quiet
+spawn_check check    "self-test"         ./bin/agent-container --self-test
+spawn_check check    "pytest"            "${PYT[@]}" bin/tests -x -q -n auto
+spawn_check check    "shell-entrypoint"      bash bin/tests/test_entrypoint.sh
+spawn_check check    "shell-execution"       bash bin/tests/test_entrypoint_execution.sh
+spawn_check check    "shell-completions"     bash bin/tests/test_completions.sh
+spawn_check check    "shell-tmux-layout"     bash bin/tests/test_entrypoint_tmux_layout.sh
 # Every shell suite is enumerated by hand here, so a new file under bin/tests/ is
 # a suite NOBODY runs until this list names it — the pytest line above globs a
 # directory, this one does not, and the difference is invisible in a green gate.
-run_check "shell-repository"      bash bin/tests/test_entrypoint_repository.sh
+spawn_check check    "shell-repository"      bash bin/tests/test_entrypoint_repository.sh
+
+# One barrier, at the end: every check above runs concurrently and the earliest
+# DECLARED failure is the one reported.
+await_checks
 
 debuglog "=== ALL CHECKS PASSED ==="
 exit 0
