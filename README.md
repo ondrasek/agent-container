@@ -1108,9 +1108,21 @@ rendered from this repository's own markdown — this README, `docs/`,
 the published site cannot drift from the code.
 
 `.github/workflows/pages.yml` rebuilds and deploys it on every push to `main` **and
-on every published GitHub Release**, stamping the site with the version that was
-just shipped. Nothing is committed to a `gh-pages` branch and no local step is
-involved. To preview it:
+after every release**, stamping the site with the version that was just shipped.
+Nothing is committed to a `gh-pages` branch and no local step is involved.
+
+The release leg chains off `publish.yml` with `workflow_run`, **not** `release:
+[published]` — and that is not a stylistic choice. python-semantic-release
+authenticates with `secrets.GITHUB_TOKEN`, and [events triggered by
+`GITHUB_TOKEN` never start another workflow
+run](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow)
+(GitHub's recursion guard; everything except `workflow_dispatch` and
+`repository_dispatch`). The push of PSR's own release commit is no fallback
+either — it carries `[skip ci]`. The documented alternatives are a PAT or
+`workflow_run`; a PAT would be a standing credential this project refuses on
+principle, and `workflow_run` is already how `publish.yml` chains off `ci`.
+
+To preview the site locally:
 
 ```bash
 uv run --no-project --python 3.14 --with markdown --with pygments site/build.py
