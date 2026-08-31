@@ -5,14 +5,29 @@
 # second copy of the documentation to keep in step. Editing a doc IS editing the
 # site; this workflow only decides WHEN the rendering happens.
 #
-# It happens on three triggers, and the release one is the point:
+# It happens on four triggers, and the release one is the point:
 #
-#   release: [published]  python-semantic-release creates the GitHub Release at
-#                         the end of publish.yml. That event fires this workflow,
-#                         which reads the release's tag and publishes a site
-#                         stamped with the version that was just shipped. No
-#                         Claude hook, no manual step, nothing local: the release
-#                         and the site it documents come from the same commit.
+#   workflow_run on       THE RELEASE LEG. python-semantic-release creates the
+#   "release"             GitHub Release at the end of publish.yml (whose `name:`
+#                         is "release"), and this fires when that workflow
+#                         concludes. By then the tag, the release and the version
+#                         bump on main all exist, so the build reads them and
+#                         publishes a site stamped with the version just shipped.
+#
+#                         `release: [published]` CANNOT be used for this and was
+#                         measured not to fire: publish.yml authenticates PSR
+#                         with secrets.GITHUB_TOKEN, and events triggered by
+#                         GITHUB_TOKEN never start another workflow run — GitHub's
+#                         recursion guard, everything except workflow_dispatch and
+#                         repository_dispatch. The push of PSR's own release
+#                         commit is no fallback either: it carries [skip ci].
+#                         The documented alternatives are a PAT or workflow_run;
+#                         a PAT is a standing credential this project refuses on
+#                         principle (Constitution III), and workflow_run is
+#                         already how publish.yml chains off ci — proven here.
+#
+#   release: [published]  kept for a release a HUMAN publishes from the UI, which
+#                         is not GITHUB_TOKEN-authored and so does fire.
 #   push to main          keeps docs edits visible without waiting for a release
 #                         (a docs-only merge produces no release at all).
 #   workflow_dispatch     manual re-publish.
@@ -24,6 +39,16 @@ name: pages
 on:
   push:
     branches: [main]
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+    # NO `branches:` filter here, deliberately. On a workflow_run trigger that
+    # field matches the TRIGGERING workflow's head branch, and publish.yml is
+    # itself workflow_run-triggered (off ci), so what its head_branch resolves to
+    # is not something to bet the release leg on — a filter that silently fails
+    # to match reproduces exactly the bug this trigger exists to fix. publish.yml
+    # only ever runs on main anyway, and the job's `if` already refuses a
+    # non-success conclusion.
   release:
     types: [published]
   workflow_dispatch: {}
@@ -41,10 +66,22 @@ permissions:
 jobs:
   build:
     name: render the site
+    # A workflow_run leg must not publish off a FAILED release: publish.yml can
+    # conclude 'failure' or 'skipped' (RELEASE_ENABLED unset), and neither is a
+    # state whose version the site should claim. Any other event runs normally.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          # A release event documents THAT release, so check out its tag. Every
+          # other trigger documents the tip of main — and on the workflow_run leg
+          # that tip is PSR's version-bump commit, which is the whole point.
+          ref: >-
+            ${{ github.event_name == 'release'
+                && github.event.release.tag_name || 'main' }}
           # The build stamps the site with the last commit date; a shallow
           # checkout of depth 1 still carries that, but tags are needed for the
           # release-URL fallback when this runs from a push.
@@ -70,8 +107,11 @@ jobs:
             url="$RELEASE_URL"
             date="${RELEASE_AT%%T*}"
           else
-            # A push or a manual run: describe the most recent published release,
-            # falling back to the version in pyproject.toml when none exists yet.
+            # A push, a manual run, or the workflow_run release leg: describe the
+            # most recent published release. On the release leg publish.yml has
+            # already concluded, so the tag it just created IS the latest — there
+            # is no race to lose here. Falls back to the version in
+            # pyproject.toml (build.py's own default) when no release exists yet.
             tag="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
             url="$(gh release view --json url --jq .url 2>/dev/null || true)"
             date="$(gh release view --json publishedAt --jq .publishedAt 2>/dev/null || true)"

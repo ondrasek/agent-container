@@ -81,10 +81,17 @@ no human in the loop and no stored PyPI token:
 
 ## How releases reach this website
 
-This site is rebuilt automatically by the `pages` workflow whenever a release is
-published, and whenever `main` changes. It is generated from the repository's own
-markdown, so the published documentation is always the documentation of the
-current release. The version above is read from the tag at build time.
+This site is rebuilt automatically by the `pages` workflow after every release,
+and on every push to `main`. It is generated from the repository's own markdown,
+so the published documentation is always the documentation of the current
+release. The version above is read from the tag at build time.
+
+The release leg chains off the release workflow with `workflow_run` rather than
+listening for `release: [published]`, because
+[an event triggered by `GITHUB_TOKEN` never starts another workflow run](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow)
+— and python-semantic-release, which creates the release, authenticates with
+exactly that token. The alternative would be a personal access token: a standing
+credential, which is the thing this whole project is built to avoid.
 
 ## Version history
 
