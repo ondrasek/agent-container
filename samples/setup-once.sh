@@ -14,7 +14,18 @@
 #   ~/.config/agent-container/authorized_keys       admits its public half
 set -eu
 
-CFG="${AGENT_CONTAINER_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-container}"
+# The SAME resolution the CLI uses, in the same order. Missing the
+# AGENT_CONTAINER_ROOT step here would write the delivery identity somewhere the
+# CLI does not read — and the symptom would be `apply` reporting "no delivery
+# identity" while the file plainly exists, which sends you to look at the file
+# rather than at the two different paths.
+if [ -n "${AGENT_CONTAINER_CONFIG_DIR:-}" ]; then
+    CFG="$AGENT_CONTAINER_CONFIG_DIR"
+elif [ -n "${AGENT_CONTAINER_ROOT:-}" ]; then
+    CFG="$AGENT_CONTAINER_ROOT/config"
+else
+    CFG="${XDG_CONFIG_HOME:-$HOME/.config}/agent-container"
+fi
 mkdir -p "$CFG"
 
 if [ -f "$CFG/delivery_key" ]; then
