@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.47.2 (2026-08-31)
+
+### Bug Fixes
+
+- **panic**: Settle the verification instead of sampling it once
+  ([`cc8a876`](https://github.com/ondrasek/agent-container/commit/cc8a876051b422a94c8e5c01feb52811ab82223c))
+
+- **samples**: Restore the placeholder repo in 02, so the README is true again
+  ([`4e7352b`](https://github.com/ondrasek/agent-container/commit/4e7352b87396e63d48628831c6c26490d2e7a9f3))
+
+### Documentation
+
+- Lead with the problem, not the category
+  ([`7f860ef`](https://github.com/ondrasek/agent-container/commit/7f860ef14ffe834705c1059f6731f6ebbf5455f0))
+
+
 ## v0.47.1 (2026-08-31)
 
 ### Bug Fixes
