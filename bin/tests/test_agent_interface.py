@@ -324,6 +324,11 @@ def test_aac_apply_refuses_without_yes_on_non_tty(wiz, tmp_path, monkeypatch):
     monkeypatch.setattr(wiz, "ensure_tunnel", lambda host: None)
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     monkeypatch.setattr(wiz, "env_live_config", lambda hr, n: None)
+    # An env file must resolve, or the precheck refuses before the confirmation is
+    # ever reached — which would make this test pass on the wrong refusal.
+    envf = tmp_path / "e.env"
+    envf.write_text("GIT_USER_NAME=t\nGIT_USER_EMAIL=t@example.invalid\n")
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: envf)
     deployed: list = []
     monkeypatch.setattr(wiz, "do_up", lambda name, **kw: deployed.append(name))
     with pytest.raises(wiz.Fatal) as e:

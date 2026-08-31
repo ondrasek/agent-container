@@ -314,6 +314,42 @@ entrypoint says which it skipped and why.
 that one is used; the setting exists for when both are, where guessing would pick
 one silently and leave the operator debugging the wrong half.
 
+### Every declared credential is PUSHED, whatever its name
+
+A `credentials:` entry is delivered over the container's own sshd onto its own
+volume — **all of them**, not a privileged few:
+
+| Credential name | Lands as |
+|---|---|
+| a known provider (`anthropic`, `openai`, or their `*_API_KEY` spellings) | a file the agent's config reads (`apikey/<provider>`) |
+| **anything else** — `GH_TOKEN`, `OLLAMA_API_KEY`, any provider with no entry | a file exported as that environment variable (`env/<NAME>`) |
+
+**This used to be a four-name allowlist.** Only `anthropic` and `openai` (two
+spellings each) took the pushed channel. Everything else — including the forge
+token — was written into a `<name>.cred.env` beside the generated compose file,
+which then named it in `env_file:`. Constitution IX forbids exactly that, in
+those words: a secret must not be *"written to a staging file that the
+description references"*. Measured on a real deployment, not inferred.
+
+Two consequences worth knowing:
+
+- **`<name>.cred.env` is no longer written at all**, so your own env file reaches
+  the container unmodified rather than being copied. An upgrade **deletes** any
+  stale one and says so — it holds plaintext and nothing else would ever rewrite
+  it. Rotate anything it held that you cannot vouch for.
+- **A credential the tool used to refuse now works.** The old channel rejected
+  any value containing leading/trailing whitespace, an inline ` #`, or a leading
+  quote — because compose's env-file parser would have corrupted it. That was the
+  channel's limitation dressed as a validation rule. A file round-trips
+  byte-exact, so the guard is gone.
+
+Each credential still gets **its own volume**, so it can be withdrawn by name:
+
+```bash
+agent-container creds ls acme          # apikey/anthropic, env/GH_TOKEN
+agent-container creds remove acme env/GH_TOKEN
+```
+
 ### The key collection — declare devices once (Feature 020)
 
 An `authorized_keys` file at either config level is auto-injected into every

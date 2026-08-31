@@ -52,7 +52,10 @@ require_env() {
     fi
 }
 
-require_env GH_TOKEN
+# GH_TOKEN is NOT checked here: it may be delivered as a credential, which cannot
+# have happened yet — the container must be running before the CLI can push into
+# it. Checked in section 2e, immediately after delivery. GIT_USER_NAME/EMAIL are
+# non-secret and come from the env file, so they are still checked at boot.
 require_env GIT_USER_NAME
 require_env GIT_USER_EMAIL
 
@@ -1145,6 +1148,38 @@ elif [[ -n "${_want_id}" ]]; then
         log "WARNING: credential delivery did not complete within ${_dw_max}s — continuing WITHOUT the pushed secrets; agents may fall back to env/.env"
     fi
 fi
+
+# --- 2e. Delivered ENV credentials ------------------------------------------
+# One directory per variable under `env/`, each its own volume, each pushed over
+# this container's own sshd. The directory name IS the variable name — no mapping
+# table, so a credential the CLI has no provider entry for still arrives correctly.
+#
+# These used to ride a staged env-file that the compose model referenced, which
+# Constitution IX forbids in those words. GH_TOKEN was the common case.
+#
+# RUNS HERE, not with the provider-key exports further down, because the git
+# credential helper and `require_env GH_TOKEN` below both need the value already
+# in the environment. Delivery cannot happen earlier — the container has to be up
+# for the CLI to push into it — so this is the first point at which it can.
+ENV_INJECT_DIR="${DELIVER_DIR}/env"
+for _ev in "${ENV_INJECT_DIR}"/*/value; do
+    [[ -f "${_ev}" ]] || continue
+    _name="$(basename "$(dirname "${_ev}")")"
+    [[ "${_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { log "NOTE: delivered credential '${_name}' is not a usable variable name; skipped"; continue; }
+    # The operator's own .env wins, same precedence the provider keys use: an
+    # explicitly set value is a decision, and a delivered one is a default.
+    [[ -n "${!_name:-}" ]] && continue
+    printf -v "${_name}" '%s' "$(cat "${_ev}")"
+    export "${_name?}"
+    log "exported ${_name} from its delivered credential (pushed, never described)"
+done
+unset _ev _name
+
+# GH_TOKEN is required, and it may arrive by EITHER channel — the operator's env
+# file or a declared credential delivered just above — so it is checked here
+# rather than with the other required vars at boot. Checking it before delivery
+# would refuse a container whose credential was seconds away.
+require_env GH_TOKEN
 
 # --- 3. Git identity + credential helper ------------------------------------
 # Identity is non-secret; logging the name is fine. Email is also non-secret

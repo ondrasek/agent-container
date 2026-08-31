@@ -28,11 +28,19 @@ ref="$1"
 # A strict charset, anchored, with no '.' at all — so '..' cannot appear and the ref
 # can never escape SECRETS_DIR. Rejecting is safe here: the tool controls these names,
 # so a rejection means a bug rather than an operator mistake.
-[[ "${ref}" =~ ^[a-z0-9]([a-z0-9_-]*)?(/[a-z0-9]([a-z0-9_-]*)?)?$ ]] \
+# UPPERCASE is allowed as well as lowercase, because an `env/<NAME>` ref carries the
+# environment-variable name verbatim and those are conventionally uppercase. Case is
+# the only thing that widened: still no '.' at all, so '..' cannot appear and the ref
+# cannot escape SECRETS_DIR.
+[[ "${ref}" =~ ^[A-Za-z0-9]([A-Za-z0-9_-]*)?(/[A-Za-z0-9]([A-Za-z0-9_-]*)?)?$ ]] \
     || die "refusing malformed secret ref: ${ref}"
 
+# `env` joins `apikey`: a credential the agent reads from the ENVIRONMENT (GH_TOKEN,
+# a provider key with no entry in the tool's provider table). It arrives the same way
+# every other secret does — over this container's own sshd, onto its own volume —
+# rather than through a staged file the compose model references (Constitution IX).
 case "${ref%%/*}" in
-    apikey|sentinel) ;;
+    apikey|env|sentinel) ;;
     *) die "unknown secret kind: ${ref%%/*}" ;;
 esac
 

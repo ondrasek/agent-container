@@ -846,6 +846,17 @@ INJECT_KNOWN_HOSTS_PATH = "/run/agent-container/known_hosts"
 # an earlier version used.
 SECRETS_DIR = "/run/agent-container-secrets"
 INJECT_APIKEY_DIR = f"{SECRETS_DIR}/apikey"
+# Credentials that reach the agent as ENVIRONMENT VARIABLES (GH_TOKEN, a provider key
+# for an agent this tool has no provider entry for) land here — one directory per
+# variable, delivered over the container's own sshd like any other secret.
+#
+# They used to be written into a staged `<name>.cred.env` that the generated compose
+# model REFERENCED with `env_file:`. Constitution IX forbids exactly that, in those
+# words: a secret must not be "written to a staging file that the description
+# references". The apikey path was already compliant; everything outside a
+# four-name allowlist was not, which meant GH_TOKEN and every provider but
+# anthropic/openai took the non-compliant route. Measured, not inferred.
+INJECT_ENV_DIR = f"{SECRETS_DIR}/env"
 RECEIVE_SECRET_BIN = "agent-container-receive-secret"
 INJECT_CONFIG_DIR = "/run/agent-container/config"
 # Feature 017 FR-004/R4: the host registry SNAPSHOT a control plane reads on
@@ -10104,7 +10115,7 @@ INJECT_DELIVERED_SENTINEL = f"{SECRETS_DIR}/sentinel/value"
 # The target is the same string the entrypoint reads, so a new producer writing into
 # the api-key directory is classified correctly without having to remember to name
 # itself a certain way; a name-prefix rule would silently misclassify it as public.
-SECRET_INJECT_DIRS = (INJECT_APIKEY_DIR + "/",)
+SECRET_INJECT_DIRS = (INJECT_APIKEY_DIR + "/", INJECT_ENV_DIR + "/")
 
 
 def is_secret_target(target: str) -> bool:
@@ -17209,6 +17220,26 @@ def _precheck_environments(environments: list[dict], host_override: str | None =
                 f"environment {name}: host provisioning ({env['host'].get('provision')}) "
                 f"requires HCLOUD_TOKEN in the environment"
             )
+        # THE PRECONDITION `apply` DIES ON, CHECKED WHERE `plan` CAN SEE IT.
+        #
+        # Every environment needs an env file: the container's entrypoint requires
+        # GIT_USER_NAME/GIT_USER_EMAIL at boot, so one is mandatory even for an
+        # environment that never pushes. `plan` used to report such an environment
+        # as ready and `apply` then failed on it — "planned clean, then died" is the
+        # exact shape this project treats as a defect, because the check was
+        # available and simply was not run at the earlier surface.
+        #
+        # Reported per environment and named, so a multi-environment project says
+        # WHICH one is missing it rather than failing at the first.
+        if resolve_env_file(name) is None:
+            cands = ", ".join(str(cd) for cd in env_file_candidates(name, Path.cwd()))
+            die(
+                f"environment {name}: no env file found. Looked in: {cands}",
+                remedy=(
+                    f"create {name}.env beside the spec with GIT_USER_NAME and "
+                    f"GIT_USER_EMAIL (GH_TOKEN may instead be a declared credential)"
+                ),
+            )
         c = env.get("container") or {}
         if c.get("workspace") == "bind":
             die(
@@ -17562,7 +17593,6 @@ def stage_declared_credentials(
     d.mkdir(parents=True, exist_ok=True)
     d.chmod(0o700)
     configs: list[tuple[str, str, str]] = []
-    env_lines: list[str] = []
     ssh = SshCreds()
     for cred in creds or []:
         target = cred.get("target")
@@ -17594,34 +17624,44 @@ def stage_declared_credentials(
         else:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cname):
                 die(
-                    f"credential {cname}: name is not a valid environment-variable identifier "
-                    f"for env delivery. Use a provider name (anthropic/openai) for an API key."
+                    f"credential {cname}: name is not a valid environment-variable identifier. "
+                    f"It becomes an env var in the container, so it must be one."
                 )
             if "\n" in value:
                 die(
-                    f"credential {cname}: a multi-line value cannot be delivered as an env var. "
-                    f"Use a provider name for an API key; multi-line SSH-key delivery is a "
-                    f"follow-on increment."
+                    f"credential {cname}: a multi-line value is not delivered as an env var. "
+                    f"Multi-line material is an SSH key in practice — declare it with an "
+                    f"explicit `target:` so it rides the ssh-injection channel instead."
                 )
-            # Fail closed on values compose's env-file (dotenv) parsing would mangle —
-            # leading/trailing whitespace, an inline ' #' comment, or a leading quote.
-            if value != value.strip() or " #" in value or value[:1] in {'"', "'"}:
-                die(
-                    f"credential {cname}: the value contains whitespace/#/quote characters that "
-                    f"compose's env-file parsing would mangle — deliver it as a provider API key "
-                    f"(file channel), not an env var."
-                )
-            env_lines.append(f"{cname}={value}")
-    if not env_lines:
-        return configs, base_env_file, ssh  # nothing to merge — pass the base env through
-    merged = d / f"{name}.cred.env"
-    parts: list[str] = []
-    if base_env_file and base_env_file.is_file():
-        parts.append(base_env_file.read_text().rstrip("\n"))
-    parts.extend(env_lines)
-    merged.write_text("\n".join(p for p in parts if p) + "\n")
-    merged.chmod(0o600)
-    return configs, merged, ssh
+            # SAME CHANNEL AS A PROVIDER KEY: pushed over the container's own sshd
+            # onto its own volume, never described. This branch used to append to an
+            # env-file the compose model then REFERENCED, which Constitution IX
+            # forbids in those words.
+            #
+            # The dotenv-mangling guard that stood here is GONE with it, and that is
+            # the tell that the old channel was wrong rather than merely risky: it
+            # refused any value containing leading/trailing whitespace, an inline
+            # ` #`, or a leading quote — not because such a credential is invalid,
+            # but because compose's env-file parser would have corrupted it. A
+            # credential the tool cannot carry without mangling was a channel
+            # problem, and the file channel reads the value back byte-exact.
+            configs.append((f"cred_env_{cname}", value, f"{INJECT_ENV_DIR}/{cname}"))
+    # NO MERGED ENV FILE IS WRITTEN ANY MORE. Every declared credential now rides the
+    # pushed channel, so the operator's own env file passes through untouched and the
+    # tool contributes no file of its own for the description to reference.
+    #
+    # An UPGRADE leaves one behind, holding plaintext, and it would sit there
+    # indefinitely because nothing rewrites it — so delete it and say so, the same
+    # treatment Features 018 and 019 gave the staged private keys they retired.
+    stale = d / f"{name}.cred.env"
+    if stale.is_file():
+        stale.unlink()
+        warn(
+            f"removed {stale}: it held credential values in plaintext and was referenced "
+            f"by the generated compose model. Credentials are now pushed to the container "
+            f"instead (Constitution IX). Rotate anything it held that you cannot vouch for."
+        )
+    return configs, base_env_file, ssh
 
 
 def do_aac_apply(
@@ -18054,17 +18094,47 @@ def creds_ls(
     host_name, host_rec = resolve_deploy_host(host)
     held = held_cred_refs(host_rec, name)
     declared = [f"apikey/{p}" for p in sorted(discover_apikey_files(name))]
+    # ALSO what the SPEC declares, not only the convention key files. Without this
+    # a declarative project's credentials were invisible until they had been
+    # delivered — so "no credentials" was printed for an environment whose
+    # environments.yaml declares several, which is absence reported for something
+    # present. Best-effort: `creds ls` runs from anywhere, and a broken or absent
+    # spec must not make an inspection command fail.
+    with contextlib.suppress(Exception):
+        if (root := find_project_root()) is not None:
+            for env in load_project_spec(root, skip_unknown=True):
+                if env.get("name") != name:
+                    continue
+                for cred in env.get("credentials") or []:
+                    cname = cred.get("name")
+                    if not cname:
+                        continue
+                    provider = CRED_PROVIDER.get(cname)
+                    declared.append(f"apikey/{provider}" if provider else f"env/{cname}")
+    declared = sorted(set(declared))
     if not held and not declared:
         log(f"{name}: no credentials")
         return
-    for ref in sorted(set(held) | set(declared)):
-        if ref in held and ref in declared:
+    # MATCHED BY SLUG, not by the ref string. A volume name is the slug of a ref —
+    # lowercased, with '_' folded to '-' — so a held credential reconstructed from
+    # its volume can never be string-equal to a declared ref like
+    # `env/GH_TOKEN`. Comparing the strings reported ONE credential twice: as
+    # declared-but-undelivered AND as held-but-undeclared, i.e. as both about to
+    # arrive and about to be deleted. Caught by running it, not by reading it.
+    #
+    # The DECLARED spelling is what gets displayed, because it is the one the
+    # operator wrote and the one `creds remove` will be given.
+    held_by_slug = {cred_slug(r): r for r in held}
+    declared_by_slug = {cred_slug(r): r for r in declared}
+    for slug in sorted(set(held_by_slug) | set(declared_by_slug)):
+        in_held, in_declared = slug in held_by_slug, slug in declared_by_slug
+        if in_held and in_declared:
             state = "held, declared"
-        elif ref in held:
+        elif in_held:
             state = "held, NO LONGER DECLARED — removed on the next deploy"
         else:
             state = "declared, not yet delivered"
-        log(f"  {ref}  [{state}]")
+        log(f"  {declared_by_slug.get(slug) or held_by_slug[slug]}  [{state}]")
 
 
 @creds_app.command("remove")

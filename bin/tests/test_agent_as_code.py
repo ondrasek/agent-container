@@ -335,9 +335,17 @@ def test_verify_refuses_bind_workspace(wiz, tmp_path):
 
 
 @pytest.fixture
-def aac_env(wiz, monkeypatch):
+def aac_env(wiz, monkeypatch, tmp_path):
     """Stub host resolution + live state + effects so apply/status are hermetic."""
     monkeypatch.setattr(wiz, "resolve_deploy_host", lambda h: (h or "local", LOCAL_HOST))
+    # Every environment needs an env file — the container's entrypoint requires
+    # GIT_USER_NAME/GIT_USER_EMAIL at boot — and `plan` now checks that where it
+    # can be seen instead of leaving `apply` to die on it. Part of being hermetic,
+    # so it lives here rather than in each test; the tests ABOUT its absence
+    # override this afterwards, which monkeypatch ordering makes work.
+    _hermetic_env = tmp_path / "hermetic.env"
+    _hermetic_env.write_text("GIT_USER_NAME=t\nGIT_USER_EMAIL=t@example.invalid\n")
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: _hermetic_env)
     monkeypatch.setattr(wiz, "ensure_tunnel", lambda host: None)
     # Default: running containers are inspected as existence-level matches (no real
     # `docker inspect` subprocess in the hermetic tier). Drift tests override this.
@@ -558,16 +566,62 @@ def test_stage_credentials_provider_apikey_file_channel(wiz, tmp_path, monkeypat
     assert staged == "sk-anthropic"
 
 
-def test_stage_credentials_env_delivery_merges_base(wiz, tmp_path, monkeypatch):
+def test_env_credentials_are_PUSHED_not_written_beside_the_description(wiz, tmp_path, monkeypatch):
+    """Constitution IX: a secret must not be "written to a staging file that the
+    description references" — and this test used to assert exactly that it was.
+
+    `GH_TOKEN` was merged into a 0600 `<name>.cred.env` which the generated compose
+    model then named in `env_file:`. Only four credential NAMES (anthropic/openai,
+    two spellings each) took the compliant pushed channel; everything else — every
+    other provider, and the forge token — took this one. Measured on a real deploy
+    before the fix.
+
+    It now goes where a provider key goes: onto its own volume, over the container's
+    own sshd, and the operator's base env file passes through untouched.
+    """
     monkeypatch.setenv("GT", "ghp_secret")
     base = tmp_path / "base.env"
     base.write_text("GIT_USER_NAME=x\n")
     creds = [{"name": "GH_TOKEN", "source": "env", "var": "GT"}]
     configs, env_file, _ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, base)
-    assert configs == []
-    text = env_file.read_text()
-    assert "GIT_USER_NAME=x" in text and "GH_TOKEN=ghp_secret" in text  # merged
-    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+    # Delivered as a secret, targeted at the env-kind directory.
+    assert configs == [("cred_env_GH_TOKEN", "ghp_secret", f"{wiz.INJECT_ENV_DIR}/GH_TOKEN")]
+    # ...and classified as a secret, which is what keeps it out of the description.
+    assert wiz.is_secret_target(f"{wiz.INJECT_ENV_DIR}/GH_TOKEN")
+    public, secrets = wiz.split_injected(configs)
+    assert public == [] and secrets == [(f"{wiz.INJECT_ENV_DIR}/GH_TOKEN", "ghp_secret")]
+
+    # The base env file is passed through UNCHANGED — no merged copy is made.
+    assert env_file == base
+    assert base.read_text() == "GIT_USER_NAME=x\n"
+
+    # THE ABSENCE IS THE POINT: no file anywhere under the state dir holds the value.
+    # Asserted by walking rather than by naming the old file, so a future channel
+    # that stages plaintext somewhere new fails here too.
+    leaked = [
+        f
+        for f in tmp_path.rglob("*")
+        if f.is_file() and "ghp_secret" in f.read_text(errors="ignore")
+    ]
+    assert leaked == [], f"credential value found on disk in: {leaked}"
+
+
+def test_a_stale_cred_env_from_an_older_version_is_removed(wiz, tmp_path, monkeypatch):
+    """An upgrade leaves the old plaintext file behind, and nothing would rewrite it.
+
+    Same treatment Features 018 and 019 gave the staged private keys they retired:
+    delete it and say so, rather than leaving a credential on disk that the tool no
+    longer knows it wrote.
+    """
+    monkeypatch.setenv("GT", "ghp_secret")
+    d = wiz.host_state_dir("local")
+    d.mkdir(parents=True, exist_ok=True)
+    stale = d / "acme.cred.env"
+    stale.write_text("GH_TOKEN=old_plaintext\n")
+    creds = [{"name": "GH_TOKEN", "source": "env", "var": "GT"}]
+    wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert not stale.exists(), "the stale plaintext env file was left on disk"
 
 
 def test_stage_credentials_multiline_env_value_refused(wiz, tmp_path):
@@ -599,8 +653,10 @@ def test_apply_injects_declared_credentials(wiz, aac_env, tmp_path, monkeypatch)
 
 def test_apply_pre_resolves_credentials_before_any_deploy(wiz, aac_env, tmp_path, monkeypatch):
     # Regression (verification HIGH / FR-016): a missing source in a LATER env must
-    # die BEFORE any earlier env is deployed.
-    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: None)
+    # die BEFORE any earlier env is deployed. The fixture's env file is left in
+    # place: this test is about CREDENTIAL resolution ordering, and stubbing the
+    # env file away would now trip the earlier env-file precheck instead, making
+    # the test pass for a reason it was not written to check.
     monkeypatch.delenv("MISSING_K", raising=False)
     root = _project(
         tmp_path,
@@ -614,9 +670,15 @@ def test_apply_pre_resolves_credentials_before_any_deploy(wiz, aac_env, tmp_path
     assert aac_env["up"] == []  # env 'a' was NOT deployed
 
 
-def test_apply_preserves_convention_env_as_merge_base(wiz, aac_env, tmp_path, monkeypatch):
-    # Regression (verification HIGH): credentials must MERGE onto the convention .env
-    # (GH_TOKEN/GIT_*), not replace it.
+def test_apply_preserves_the_convention_env_file(wiz, aac_env, tmp_path, monkeypatch):
+    """The operator's convention `.env` reaches the container UNTOUCHED.
+
+    The original regression this guards — credentials must not REPLACE the
+    convention env file — still holds, and now holds trivially: declared
+    credentials no longer go into an env file at all, so there is nothing to merge
+    and nothing that could clobber it. The assertion changed from "merged" to
+    "passed through", and the value it used to look for must now be ABSENT.
+    """
     conv = tmp_path / "conv.env"
     conv.write_text("GH_TOKEN=from-dotenv\n")
     monkeypatch.setattr(wiz, "resolve_env_file", lambda name: conv)
@@ -630,16 +692,34 @@ def test_apply_preserves_convention_env_as_merge_base(wiz, aac_env, tmp_path, mo
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     wiz.do_aac_apply(yes=True)
     _name, kw = aac_env["up"][0]
-    (merged_path,) = kw["env_file_override"]  # Feature 011: a list of one here
-    merged = merged_path.read_text()
-    assert "GH_TOKEN=from-dotenv" in merged and "OTHER=sk-live" in merged
+    (passed,) = kw["env_file_override"]  # Feature 011: a list of one here
+    assert passed == conv, "the operator's env file was replaced or copied"
+    text = passed.read_text()
+    assert "GH_TOKEN=from-dotenv" in text  # preserved
+    assert "sk-live" not in text, "a declared credential was written into the env file"
 
 
-def test_env_credential_dotenv_unsafe_value_refused(wiz, tmp_path, monkeypatch):
-    monkeypatch.setenv("V", "tok #comment")  # an inline ' #' would be mangled by dotenv
+def test_a_value_dotenv_would_have_mangled_now_survives(wiz, tmp_path, monkeypatch):
+    """The tool used to REFUSE this credential. Now it carries it.
+
+    An inline ` #`, a leading quote, or surrounding whitespace would all be
+    corrupted by compose's env-file parser, so the old channel had to reject any
+    value containing them. That refusal was the channel's limitation wearing the
+    costume of a validation rule: the credential was always perfectly valid.
+
+    Delivered as a file over SSH, the value round-trips byte-exact, so the guard
+    is gone and this asserts what replaced it.
+    """
+    awkward = "  tok #comment 'quoted'  "
+    monkeypatch.setenv("V", awkward)
     creds = [{"name": "TOK", "source": "env", "var": "V"}]
-    with pytest.raises(wiz.Fatal, match="mangle"):
-        wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    configs, env_file, _ssh = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    (_cfg_name, value, target) = configs[0]
+    assert target == f"{wiz.INJECT_ENV_DIR}/TOK"
+    # Only the trailing newline strip the file channel already documented; the
+    # interior '#' and quotes are untouched.
+    assert value == awkward.rstrip("\n")
+    assert env_file is None
 
 
 def test_env_credential_invalid_name_refused(wiz, tmp_path, monkeypatch):
@@ -1129,6 +1209,13 @@ def test_plan_status_never_invokes_a_resolver(wiz, aac_env, tmp_path, monkeypatc
 
 
 def test_apply_resolves_and_delivers_command_credential(wiz, aac_env, tmp_path, monkeypatch):
+    """A `command:` credential still resolves — and is now DELIVERED, not described.
+
+    The resolver contract is unchanged; only the channel moved. This asserted the
+    resolved value appeared in a staged env file, which is the placement
+    Constitution IX forbids, so it now asserts it appears among the pushed secrets
+    and in no file at all.
+    """
     root = _project(tmp_path, _CMD_SPEC)
     monkeypatch.chdir(root)
     (root / ".env").write_text("GH_TOKEN=x\n")
@@ -1136,8 +1223,14 @@ def test_apply_resolves_and_delivers_command_credential(wiz, aac_env, tmp_path, 
     monkeypatch.setattr(wiz, "_run_resolver", lambda argv, name, **k: "sk-resolved\n")
     wiz.do_aac_apply(yes=True)
     _name, kw = aac_env["up"][0]
-    (env_file,) = kw["env_file_override"]  # Feature 011: a list of one here
-    assert env_file is not None and "MYSECRET=sk-resolved" in env_file.read_text()
+    injected = kw.get("extra_injected_configs") or []
+    assert (f"{wiz.INJECT_ENV_DIR}/MYSECRET", "sk-resolved") in [
+        (tgt, val) for _n, val, tgt in injected
+    ], injected
+    # The resolver's trailing newline is still stripped, and nothing was staged.
+    assert not any(
+        f.is_file() and "sk-resolved" in f.read_text(errors="ignore") for f in tmp_path.rglob("*")
+    )
 
 
 # --- T007a: delivery regression guard (FR-012) -------------------------------
@@ -1159,9 +1252,14 @@ def test_delivery_strips_trailing_newline_for_apikey_and_env(wiz, tmp_path, monk
     creds = [{"name": "anthropic", "source": "command", "argv": ["x"]}]
     configs, _e, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
     assert configs[0][1] == "sk-value"  # stripped
+    # The same strip applies to an env-kind credential, which is now delivered as a
+    # file rather than written into an env file — so the assertion reads the value
+    # handed to the delivery channel instead of a staged line.
     creds = [{"name": "MYVAR", "source": "onepassword", "vault": "v", "item": "i", "field": "f"}]
-    _c, env_file, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
-    assert env_file.read_text().rstrip("\n").endswith("MYVAR=sk-value")  # no stray newline
+    cfgs, env_file, _s = wiz.stage_declared_credentials("local", "acme", creds, tmp_path, None)
+    assert cfgs[0][2] == f"{wiz.INJECT_ENV_DIR}/MYVAR"
+    assert cfgs[0][1] == "sk-value"  # stripped, no stray newline
+    assert env_file is None
 
 
 def test_delivery_ensures_trailing_newline_for_ssh_target(wiz, tmp_path, monkeypatch):
@@ -1918,3 +2016,50 @@ def test_the_allowlist_and_the_boundary_membership_cannot_alias(wiz):
     a = {"allow": [{"host": "redis"}], "sidecars_outside": []}
     b = {"allow": [], "sidecars_outside": ["redis"]}
     assert wiz.egress_config_token(a) != wiz.egress_config_token(b)
+
+
+# --- plan must catch what apply dies on --------------------------------------
+
+
+def test_plan_refuses_an_environment_with_no_env_file(wiz, aac_env, tmp_path, monkeypatch):
+    """`plan` reported an environment ready and `apply` then died on it.
+
+    Every environment needs an env file — the entrypoint requires
+    GIT_USER_NAME/GIT_USER_EMAIL at boot, so one is mandatory even when nothing
+    pushes. The check existed; it just was not run at the earlier surface, which
+    is the "planned clean, then failed" shape this project treats as a defect.
+    Measured on sample 01 before the fix.
+    """
+    root = _project(tmp_path, "environments:\n  - name: acme\n    host: local\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: None)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="acme: no env file found"):
+        wiz.do_aac_status()
+
+
+def test_plan_names_WHICH_environment_lacks_one(wiz, aac_env, tmp_path, monkeypatch):
+    """A multi-environment project must say which one is missing it, not just fail."""
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: has\n    host: local\n  - name: lacks\n    host: local\n",
+    )
+    monkeypatch.chdir(root)
+    ok = tmp_path / "ok.env"
+    ok.write_text("GIT_USER_NAME=x\n")
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: ok if name == "has" else None)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="lacks: no env file found"):
+        wiz.do_aac_status()
+
+
+def test_plan_passes_once_the_env_file_exists(wiz, aac_env, tmp_path, monkeypatch):
+    """The guard must not become a blanket refusal — the ordinary case still plans."""
+    root = _project(tmp_path, "environments:\n  - name: acme\n    host: local\n")
+    monkeypatch.chdir(root)
+    ok = tmp_path / "ok.env"
+    ok.write_text("GIT_USER_NAME=x\n")
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: ok)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    rows = wiz.do_aac_status()
+    assert [r["name"] for r in rows] == ["acme"]

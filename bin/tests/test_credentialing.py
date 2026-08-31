@@ -1075,10 +1075,25 @@ def test_the_receiver_refuses_a_traversing_ref():
     m = re.search(r"\[\[ \"\$\{ref\}\" =~ (\^\S+\$) \]\]", body)
     assert m, "the ref guard is gone"
     pat = re.compile(m.group(1))
-    for bad in ("../etc/passwd", "apikey/../../x", "a/./b", "/abs", "APIKEY/x", "a/b/c"):
+    # Traversal and shape. Every one of these is barred by the charset itself.
+    for bad in ("../etc/passwd", "apikey/../../x", "a/./b", "/abs", "a/b/c"):
         assert not pat.fullmatch(bad), f"guard accepted {bad!r}"
     for good in ("apikey/anthropic", "sentinel", "apikey/open-ai_2"):
         assert pat.fullmatch(good), f"guard rejected {good!r}"
+
+    # UPPERCASE is now inside the charset, because an `env/<NAME>` ref carries an
+    # environment-variable name verbatim and those are uppercase by convention.
+    assert pat.fullmatch("env/GH_TOKEN")
+    # Widening the charset did NOT widen what the receiver accepts: the KIND is
+    # checked separately against a closed list, so a mis-cased kind is still
+    # refused — by the second guard rather than the first. Asserted here so the
+    # two are not confused for one another later.
+    assert pat.fullmatch("APIKEY/x"), "charset no longer bars case"
+    kinds = re.search(r"case \"\$\{ref%%/\*\}\" in\n\s*([a-z|]+)\)", body)
+    assert kinds, "the kind allowlist is gone"
+    allowed = set(kinds.group(1).split("|"))
+    assert allowed == {"apikey", "env", "sentinel"}, allowed
+    assert "APIKEY" not in allowed
 
 
 # --- R8: credentials PERSIST, on one volume each ------------------------------
@@ -1255,3 +1270,77 @@ def test_ssh_and_unix_endpoints_are_not_flagged(wiz, monkeypatch):
     # A local host (no context) is a socket by definition — nothing to ask.
     wiz.warn_if_cleartext_endpoint("docker", "")
     assert warned == []
+
+
+# --- `creds ls` must not report absence for something declared ---------------
+
+
+def test_creds_ls_reports_spec_declared_credentials(wiz, tmp_path, monkeypatch, capsys):
+    """It printed "no credentials" for an environment whose spec declares two.
+
+    `held` is read from the volumes (correct — held and declared can differ, and
+    that difference is the point), but `declared` only ever covered the convention
+    `<name>.<provider>.key` files. A declarative project's credentials were
+    therefore invisible until after they had been delivered, so the command
+    reported absence for something plainly present in environments.yaml.
+
+    Observed for real: an environment that had just been given a credential was
+    reported as holding none.
+    """
+    proj = tmp_path / ".agent-container"
+    proj.mkdir(parents=True)
+    (proj / "environments.yaml").write_text(
+        "environments:\n"
+        "  - name: acme\n"
+        "    host: local\n"
+        "    credentials:\n"
+        "      - { name: ANTHROPIC_API_KEY, source: env, var: AK }\n"
+        "      - { name: GH_TOKEN, source: env, var: GT }\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(wiz, "resolve_deploy_host", lambda h: ("local", {}))
+    monkeypatch.setattr(wiz, "held_cred_refs", lambda rec, n: [])
+    monkeypatch.setattr(wiz, "discover_apikey_files", lambda n: [])
+    wiz.creds_ls("acme")
+    out = capsys.readouterr().err
+    assert "no credentials" not in out
+    # A provider name routes to the apikey channel, everything else to env — the
+    # same rule the delivery side uses, so the report matches what will happen.
+    assert "apikey/anthropic" in out
+    assert "env/GH_TOKEN" in out
+    assert "not yet delivered" in out
+
+
+def test_creds_ls_matches_held_to_declared_across_the_slug(wiz, tmp_path, monkeypatch, capsys):
+    """A held credential and its declaration must be recognised as ONE credential.
+
+    A volume name is the SLUG of a ref — lowercased, `_` folded to `-` — so a held
+    `env/GH_TOKEN` comes back as `env/gh-token` and never string-matches the
+    declared spelling. The report then listed the same credential twice: once as
+    declared-but-not-yet-delivered and once as held-but-no-longer-declared, i.e.
+    as simultaneously arriving and about to be deleted.
+
+    Observed on a live deployment, which is the only place it could show up: both
+    halves are correct in isolation and only disagree when they meet.
+    """
+    proj = tmp_path / ".agent-container"
+    proj.mkdir(parents=True)
+    (proj / "environments.yaml").write_text(
+        "environments:\n  - name: acme\n    host: local\n    credentials:\n"
+        "      - { name: GH_TOKEN, source: env, var: GT }\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(wiz, "resolve_deploy_host", lambda h: ("local", {}))
+    monkeypatch.setattr(wiz, "discover_apikey_files", lambda n: [])
+    # What the volume actually reconstructs to, slugged.
+    monkeypatch.setattr(wiz, "held_cred_refs", lambda rec, n: ["env/gh-token"])
+    wiz.creds_ls("acme")
+    out = capsys.readouterr().err
+
+    assert "NO LONGER DECLARED" not in out, "a declared credential was reported as orphaned"
+    assert "not yet delivered" not in out, "a held credential was reported as undelivered"
+    assert out.count("GH_TOKEN") == 1, f"reported more than once:\n{out}"
+    assert "held, declared" in out
+    # The DECLARED spelling is shown — it is what the operator wrote, and what
+    # `creds remove` will be handed.
+    assert "env/GH_TOKEN" in out
