@@ -182,6 +182,14 @@ Two details that are load-bearing rather than incidental:
   > quietly rewritten, because "no rule is needed here" is precisely the shape of a control that
   > looks deliberate while enforcing nothing.
 
+> **Verified under podman end to end**, since reading the rules is what let the
+> previous claim stand for months: a declared boundary deployed under
+> `runtime: podman`, the sidecar reported healthy, credentials were delivered
+> over SSH to the port that moves to the sidecar, the agent resolved both
+> declared destinations and pushed to the forge, and `egress <name>` recorded
+> nothing refused. Under the old `-d 127.0.0.11` rule none of that could have
+> resolved.
+
 - **Two rules that look like plumbing and are not.** A REDIRECT rewrites the *destination* and
   leaves the source alone, so a redirected query arrives at unbound carrying the namespace's
   bridge address — and unbound answers `127.0.0.0/8` only, so it **REFUSES** it. That refusal is
