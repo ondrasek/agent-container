@@ -10,7 +10,17 @@
 [![Conventional Commits](https://img.shields.io/badge/commits-conventional-0f766e)](https://www.conventionalcommits.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Always-on, containerized development environment for a single operator. Hosts AI coding agents (Claude Code, Codex, pi-coding-agent), `nvim`, `tmux`, and `git` behind OpenSSH. Designed to run on a personal Linux VPS and be attached to over `ssh`.
+**Somewhere for your coding agents to live that isn't your laptop.**
+
+A coding agent halfway through a refactor doesn't care that your Wi-Fi dropped —
+but one running on your laptop dies with the session. `agent-container` puts it on
+a server you own, behind OpenSSH and `tmux`, with its task, its credentials and
+its network boundary declared in YAML you commit. Attach from anywhere; detach
+without consequence.
+
+It hosts Claude Code, Codex and pi-coding-agent alongside `nvim`, `tmux` and
+`git`. It is built for **one operator** running **many parallel environments** on
+a personal Linux VPS.
 
 **📖 [Website and documentation → ondrasek.github.io/agent-container](https://ondrasek.github.io/agent-container/)**
 &nbsp;·&nbsp; [Install](https://ondrasek.github.io/agent-container/install/)
@@ -22,10 +32,38 @@ Always-on, containerized development environment for a single operator. Hosts AI
 uv tool install agent-container      # or: pipx install agent-container
 ```
 
-Design contract: [`CLAUDE.md`](CLAUDE.md).
-Runtime + base-image decision: [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
-Credential contract: [`docs/credentials.md`](docs/credentials.md).
-Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+### Why not just SSH in and run `tmux` yourself?
+
+Because that is the easy third of the problem. Keeping a process alive is the part
+`tmux` already solves — and this keeps it, rather than reinventing it. The rest is
+what you have to be careful about once an agent runs unattended holding your
+credentials:
+
+- **You would rebuild it from memory every time.** Ports, volumes, git identity,
+  which key is admitted, what the agent was asked to do. Here a directory *is* the
+  desired state: `plan` reports absent / matching / drifted, `apply` converges,
+  `destroy` removes only what the spec owns.
+- **Your secrets would be lying around.** Baked into an image layer, on a command
+  line, on a volume, in a log — the obvious paths all leak. A secret here travels
+  to the container over *that container's own* sshd, and the spec holds a
+  **locator, never a value**.
+- **The agent would have your whole network.** Egress is **default-deny at the
+  packet level**, in a namespace shared with a sidecar that alone holds
+  `NET_ADMIN`. You declare the destinations; the rest is refused, and the refusals
+  are recorded.
+
+### The contracts
+
+Read these before changing behaviour; they are the parts it is expensive to get
+wrong.
+
+| | |
+|---|---|
+| Design contract — the load-bearing invariants | [`CLAUDE.md`](CLAUDE.md) |
+| Credential contract — least exposure, in detail | [`docs/credentials.md`](docs/credentials.md) |
+| Threat model — reconciled by every feature | [`docs/threat-model.md`](docs/threat-model.md) |
+| Runtime + base image, and why | [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md) |
+| How to contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 
 ## How it fits together
 

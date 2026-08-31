@@ -1973,6 +1973,25 @@ KILL_HOST_TIMEOUT = 30.0
 # produce, and collapsing either into `failed` or `stopped` is the failure this
 # feature exists to prevent.
 KILL_OUTCOMES = ("stopped", "already-stopped", "failed", "undetermined")
+# `stop` returns when the runtime has SIGNALLED the container, not when the
+# container has left the running set — the state transition, and the `ps` view
+# behind it, settle a moment later. A single observation taken immediately after
+# acting therefore catches a container mid-transition, and classify_kill calls
+# that `failed`: the tool reporting failure for a stop that in fact worked.
+# Measured, as an intermittent test_panic_is_repeatable failure on a loaded CI
+# runner — the first `panic` of a just-started environment, exiting 1.
+#
+# So the observation is RE-TAKEN until it comes back clear, or this budget runs
+# out. Note what this cannot do: re-observing never manufactures a false
+# `stopped`, because `stopped` still requires SEEING an empty set (FR-014), and an
+# environment still present when the budget expires is still reported `failed`.
+# It removes a false negative and adds no false positive.
+#
+# 15s against KILL_HOST_TIMEOUT's 30s: long enough to outlast a graceful SIGTERM
+# stop on a contended host, short enough that a genuinely stuck container is still
+# reported inside one host's budget rather than hanging the run.
+KILL_SETTLE_TIMEOUT = 15.0
+KILL_SETTLE_INTERVAL = 0.5
 # Outcomes that mean "this environment is not running and we SAW that".
 KILL_OK_OUTCOMES = ("stopped", "already-stopped")
 # Feature 014 caps the store by ENTRY COUNT only — nothing bounds an entry's size,
@@ -2562,6 +2581,66 @@ def kill_verify(host_rec: dict, entries: list[dict], form: str) -> dict[str, set
     }
 
 
+def settle_kill_reading(
+    observe,
+    timeout: float = KILL_SETTLE_TIMEOUT,
+    interval: float = KILL_SETTLE_INTERVAL,
+    *,
+    sleep=time.sleep,
+    now=time.monotonic,
+) -> dict[str, set[str]]:
+    """Re-take `observe()` until every environment reads clear, or time runs out.
+
+    `observe` returns the kill_verify shape: {name: set of containers still there}.
+    Returns the LAST reading taken, so a name that never clears is classified on
+    what was actually seen rather than on an assumption.
+
+    The FIRST reading is never swallowed: if it raises, the caller still gets its
+    exception and reports `undetermined`, exactly as it did when there was only one
+    reading. A LATER reading that raises just ends the polling and keeps the last
+    good reading — the alternative would turn a transient blip into a worse answer
+    than the one already in hand.
+
+    Clear on the first look — the overwhelmingly common case — costs nothing:
+
+    >>> settle_kill_reading(lambda: {"a": set()})
+    {'a': set()}
+
+    A container caught mid-transition clears on a later look:
+
+    >>> readings = iter([{"a": {"c1"}}, {"a": {"c1"}}, {"a": set()}])
+    >>> settle_kill_reading(lambda: next(readings), sleep=lambda _: None)
+    {'a': set()}
+
+    One that never clears is still reported as present, so it is still `failed`:
+
+    >>> ticks = iter([0.0, 10.0, 20.0])
+    >>> settle_kill_reading(
+    ...     lambda: {"a": {"c1"}}, sleep=lambda _: None, now=lambda: next(ticks)
+    ... )
+    {'a': {'c1'}}
+
+    Only the environments that have not cleared keep the loop alive; a mixed
+    reading waits for the laggard and reports both:
+
+    >>> readings = iter([{"a": set(), "b": {"c2"}}, {"a": set(), "b": set()}])
+    >>> r = settle_kill_reading(lambda: next(readings), sleep=lambda _: None)
+    >>> sorted((k, sorted(v)) for k, v in r.items())
+    [('a', []), ('b', [])]
+    """
+    reading = observe()  # first look: let it raise, as the single look used to
+    deadline = now() + timeout
+    while any(reading.values()):
+        if now() >= deadline:
+            break
+        sleep(interval)
+        try:
+            reading = observe()
+        except Fatal, OSError, subprocess.SubprocessError:
+            break
+    return reading
+
+
 def classify_kill(name: str, before: set[str], after: set[str]) -> str:
     """Exactly one of KILL_OUTCOMES for one environment (C3, data-model §3).
 
@@ -2658,7 +2737,11 @@ def _kill_one_host(
             )
 
     try:
-        after = kill_verify(host_rec, acted, form)
+        # Settled rather than sampled once: `stop` returns on the signal, not on
+        # the state change, so an immediate single look reports a working stop as
+        # `failed` (see KILL_SETTLE_TIMEOUT). Still an observation — `stopped`
+        # continues to require seeing an empty set.
+        after = settle_kill_reading(lambda: kill_verify(host_rec, acted, form))
     except (Fatal, OSError, subprocess.SubprocessError) as e:
         return results + [
             {"name": x["name"], "host": host_name, "outcome": "undetermined",
