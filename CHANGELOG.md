@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.47.1 (2026-08-31)
+
+### Bug Fixes
+
+- **pages**: Chain the release leg off workflow_run — `release:` never fired
+  ([`54385c4`](https://github.com/ondrasek/agent-container/commit/54385c4368099eeeb31a0a5c7f15c593a4fe4fc6))
+
+### Documentation
+
+- **contributing**: A commit message must not contain a skip-workflow marker
+  ([`43bdf8e`](https://github.com/ondrasek/agent-container/commit/43bdf8e0b00581d6604ac70b77ee49144ed5eeb4))
+
+
 ## v0.47.0 (2026-08-31)
 
 
