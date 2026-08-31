@@ -1668,3 +1668,53 @@ def test_an_empty_override_is_not_a_relocation(load_wiz, tmp_path):
     resolve the config dir to the process's cwd."""
     wiz = load_wiz(xdg_config=tmp_path / "xc", own_config="")
     assert wiz.CONFIG_DIR == tmp_path / "xc" / "agent-container"
+
+
+# --- host registration guidance must match the RUNTIME, not assume docker ----
+
+
+def test_host_add_hint_names_the_flag_for_the_runtime_in_use(wiz, monkeypatch):
+    """Docker has contexts, podman has system connections — and `host add`
+    supported both all along via `--driver`. Every HINT, though, said
+    `--docker-context`, so a podman operator was told to register their host with
+    a flag that does not apply to them.
+
+    The capability was runtime-agnostic; the guidance was not, and the guidance is
+    the half an operator actually reads.
+    """
+    monkeypatch.setattr(wiz.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setenv("AGENT_CONTAINER_RUNTIME", "podman")
+    assert "--connection <name>" in wiz.host_add_hint()
+    assert "--docker-context" not in wiz.host_add_hint()
+    monkeypatch.setenv("AGENT_CONTAINER_RUNTIME", "docker")
+    assert "--docker-context <ctx>" in wiz.host_add_hint()
+    assert "--connection" not in wiz.host_add_hint()
+
+
+def test_host_add_hint_never_raises(wiz, monkeypatch):
+    """It is used INSIDE error messages. A hint that dies while explaining a
+    failure replaces a useful diagnostic with a confusing one, so an unresolvable
+    runtime degrades to the generic wording instead of propagating."""
+
+    def boom(*a, **k):
+        raise RuntimeError("no runtime")
+
+    monkeypatch.setattr(wiz, "resolve_runtime_source", boom)
+    assert "agent-container host add" in wiz.host_add_hint()
+
+
+def test_no_hint_hardcodes_docker_any_more(wiz):
+    """The literal was in five places; a sixth would reintroduce the bug silently.
+
+    Asserted over the SOURCE because the point is that no call site spells it out
+    — one helper owns the wording, so a runtime added later changes one line.
+    """
+    import pathlib
+
+    src = pathlib.Path("bin/agent-container").read_text()
+    offenders = [
+        ln
+        for ln in src.splitlines()
+        if "host add" in ln and "--docker-context" in ln and "def host_add_hint" not in ln
+    ]
+    assert offenders == [], "a hint still hardcodes --docker-context:\n" + "\n".join(offenders)

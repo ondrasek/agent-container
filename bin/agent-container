@@ -3633,7 +3633,7 @@ def doctor_collect(name: str | None, host: str | None) -> tuple[str, list[Check]
                 "host-resolution",
                 "blocking",
                 f"cannot resolve a host: {e}",
-                remedy="register one: agent-container host add local --docker-context <ctx>",
+                remedy=f"register one: {host_add_hint(DEFAULT_HOST)}",
             )
         )
 
@@ -4696,6 +4696,27 @@ def _validated_runtime(value: str, origin: str) -> str:
     return value
 
 
+def host_add_hint(name: str = "<name>") -> str:
+    """`host add` spelled for the RUNTIME IN USE, not for docker.
+
+    The two runtimes name the same concept differently — docker has contexts,
+    podman has system connections — and the tool has always supported both via
+    `--driver`. Every hint, though, said `--docker-context`, so a podman operator
+    was told to register their host with a flag that does not apply to them. The
+    capability was runtime-agnostic; the guidance was not, which is the half an
+    operator actually reads.
+
+    Never raises: this is used inside error messages and a hint that dies while
+    explaining a failure is worse than a hint that is slightly generic.
+    """
+    try:
+        rt = resolve_runtime_source()[0]
+    except Exception:
+        rt = ""
+    flag = "--connection <name>" if rt == "podman" else "--docker-context <ctx>"
+    return f"agent-container host add {name} {flag}"
+
+
 def resolve_runtime_source(cwd: Path | None = None) -> tuple[str, str]:
     """The runtime AND where the choice came from, as (runtime, origin).
 
@@ -5154,7 +5175,7 @@ def do_host_ls(as_json: bool) -> None:
         emit_json({"default": default, "hosts": hosts})
         return
     if not hosts:
-        log("no hosts registered (add one: agent-container host add <name> --docker-context <ctx>)")
+        log(f"no hosts registered (add one: {host_add_hint()})")
         return
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     for col in ("NAME", "DRIVER", "CONTEXT", "ADDRESS", "DEFAULT"):
@@ -8421,7 +8442,7 @@ def _resolve_deploy_host_unscoped(host_name: str | None) -> tuple[str, dict]:
             return default, h
     log(
         f"no hosts registered; using an implicit local host "
-        f"(register one with: agent-container host add {DEFAULT_HOST} --docker-context <ctx>)"
+        f"(register one with: {host_add_hint(DEFAULT_HOST)})"
     )
     return DEFAULT_HOST, implicit_local_host()
 
@@ -14680,7 +14701,7 @@ def _rec_blocked(s: EnvSnapshot) -> RecommendedAction | None:
         return RecommendedAction(
             "setup_host",
             "no host is configured yet — a host is where containers run",
-            "agent-container host add <name> --docker-context <ctx>",
+            host_add_hint(),
             t,
         )
     if image.status != STAGE_SATISFIED:
@@ -14750,7 +14771,7 @@ def valid_actions(s: EnvSnapshot) -> list[RecommendedAction]:
         RecommendedAction(
             "setup_host",
             "register or provision another host",
-            "agent-container host add <name> --docker-context <ctx>",
+            host_add_hint(),
             t,
         )
     )
@@ -18853,7 +18874,11 @@ app.add_typer(host_app, name="host")
 @host_app.command("add")
 def host_add(
     name: str = typer.Argument(..., help="Host short name (registry key)."),
-    driver: str = typer.Option("docker", "--driver", help="Runtime driver: docker or podman."),
+    driver: str | None = typer.Option(
+        None,
+        "--driver",
+        help="Runtime driver: docker or podman (default: the resolved runtime).",
+    ),
     docker_context: str | None = typer.Option(
         None,
         "--docker-context",
@@ -18899,6 +18924,12 @@ def host_add(
     """Register a container-runtime host (where `up --host NAME` deploys), or
     provision a cloud server with --provider hetzner --create."""
     set_json_mode(as_json)
+    # THE SURFACE DECIDES WHAT ABSENCE MEANS (Constitution VIII). The option reports
+    # absence; this resolves it to the runtime actually in use, rather than the
+    # hardcoded "docker" it used to default to — which contradicted the
+    # platform-aware detection and the `runtime:` setting, and quietly registered a
+    # docker host for an operator whose whole setup is podman.
+    driver = driver or detect_runtime()
     cli_host_add(
         name,
         driver,
