@@ -40,7 +40,7 @@ Pin a specific version instead of `main`:
 git clone --branch v{{VERSION}} --depth 1 https://github.com/ondrasek/agent-container.git
 ```
 
-<div class="callout">
+<div class="callout" markdown="1">
 <span class="label">You need a checkout on the host</span>
 
 A PyPI install is a complete **client**. But `build` needs a checkout as the

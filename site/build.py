@@ -557,6 +557,10 @@ def make_md() -> markdown.Markdown:
     return markdown.Markdown(
         extensions=[
             "extra",  # tables, fenced code, attr_list, def_list, footnotes
+            # Without this, markdown inside a raw <div> (the callouts on the
+            # site-authored pages) is passed through verbatim — backticks and
+            # asterisks reach the reader as literal punctuation.
+            "md_in_html",
             "codehilite",
             "toc",
             "sane_lists",

@@ -52,7 +52,7 @@ loginctl enable-linger "$USER"
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-<div class="callout">
+<div class="callout" markdown="1">
 <span class="label">Why lingering matters</span>
 
 `enable-linger` is **load-bearing** for the always-on model: it keeps your
@@ -175,7 +175,7 @@ on every connection.
 For the Quadlet path, whose credentials already flow through the env-file, set
 `SSH_AUTHORIZED_KEYS` (newline-separated public keys) in that file instead.
 
-<div class="callout warn">
+<div class="callout warn" markdown="1">
 <span class="label">The grant lasts only until the next recreate</span>
 
 The tool does not create access it cannot withdraw, so `down`/`up` removes a
@@ -188,7 +188,7 @@ byte-for-byte. It used to be a deduped union with the persisted file — which
 meant a key injected once could never be withdrawn.
 </div>
 
-<div class="callout">
+<div class="callout" markdown="1">
 <span class="label">The host key is captured, never supplied</span>
 
 The container generates its own ed25519 host key on the `-ssh` volume, and it
@@ -244,7 +244,7 @@ Everything is where you left it. Behind the scenes attach is just
 tmux needs, and `attach -t main` joins the existing session rather than creating a
 new one, which would mask exactly the bug you care about.
 
-<div class="callout warn">
+<div class="callout warn" markdown="1">
 <span class="label">The one way to lose work</span>
 
 Detach is non-destructive at every layer, but **the container is not your backup**.
