@@ -1426,6 +1426,51 @@ PYSEED
     fi
 fi
 
+# Codex — pre-answer the WORKSPACE TRUST prompt, for the same reason Claude's
+# first-run flags are pre-answered above: an operator who injected credentials and
+# config attaches expecting a working agent, and a dialog asking them to trust the
+# directory the tool just created is the injection not having landed, from where
+# they are sitting.
+#
+# Codex gates on `trust_level` under a `[projects."<path>"]` table in
+# `~/.codex/config.toml` (confirmed against the shipped binary: `trust_level`,
+# `projects` and `trusted`/`untrusted` are all present in it). Written to the
+# VOLUME copy, which covers both homes — when a key is injected CODEX_HOME is
+# redirected to an ephemeral dir that is SEEDED by copying this one.
+#
+# APPENDED, never rewritten. config.toml is canonical config the operator may
+# deliver (section 3a) and it is their file; tomllib PARSES it to decide whether
+# the table is already there, and only an absent one is appended. Parse to decide,
+# append to write — never a regex over a structured format.
+_codex_cfg="${AGENT_CONTAINER_HOME}/.codex/config.toml"
+_codex_ws="${AGENT_CONTAINER_WORKSPACE:-/workspace}"
+if command -v python3 >/dev/null 2>&1; then
+    AC_CFG="${_codex_cfg}" AC_WS="${_codex_ws}" python3 - <<'PYCODEX' || log "NOTE: could not seed codex workspace trust; codex may ask about ${_codex_ws}"
+import os, pathlib, tomllib
+
+cfg = pathlib.Path(os.environ["AC_CFG"])
+ws = os.environ["AC_WS"]
+cfg.parent.mkdir(parents=True, exist_ok=True)
+text = cfg.read_text() if cfg.is_file() else ""
+try:
+    data = tomllib.loads(text) if text.strip() else {}
+except tomllib.TOMLDecodeError:
+    # THEIRS AND MALFORMED: leave it completely alone. Appending to a file the
+    # tool cannot parse risks compounding the damage, and codex will report the
+    # real error better than we can.
+    raise SystemExit(0)
+if str((data.get("projects") or {}).get(ws, {}).get("trust_level", "")).strip():
+    raise SystemExit(0)  # already answered, by the operator or a previous boot
+sep = "" if text.endswith("\n") or not text else "\n"
+with cfg.open("a") as fh:
+    fh.write(f'{sep}\n[projects."{ws}"]\ntrust_level = "trusted"\n')
+print("seeded")
+PYCODEX
+    if [[ -s "${_codex_cfg}" ]]; then
+        log "Codex workspace trust pre-answered for ${_codex_ws} (attach opens on the agent, not a trust prompt)"
+    fi
+fi
+
 # Codex — redirect CODEX_HOME to an EPHEMERAL dir so an api-key login writes
 # auth.json THERE, never onto the -codex volume (H1). Try the non-interactive
 # api-key login reading the injected file on STDIN; if that codex build lacks it,

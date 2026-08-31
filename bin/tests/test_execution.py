@@ -580,3 +580,95 @@ def test_agent_rejection_names_every_valid_value(wiz):
     msg = str(ei.value)
     for a in wiz.AGENTS:
         assert a in msg, f"rejection message omits '{a}': {msg}"
+
+
+# --- an injected agent must not open on a wizard (codex workspace trust) ------
+
+
+def _codex_seed_block() -> str:
+    """The PYCODEX heredoc out of entrypoint.sh, so the test exercises the code
+    that actually ships rather than a copy that can drift from it."""
+    import pathlib
+    import re
+
+    body = pathlib.Path("image/entrypoint.sh").read_text()
+    # The heredoc line carries a trailing `|| log …`, so anything up to the
+    # newline must be skipped before the body starts.
+    m = re.search(r"<<'PYCODEX'[^\n]*\n(.*?)\nPYCODEX\n", body, re.S)
+    assert m, "the codex trust-seeding block is gone from entrypoint.sh"
+    return m.group(1)
+
+
+def _run_seed(tmp_path, initial=None, ws="/workspace"):
+    import subprocess
+    import sys
+
+    cfg = tmp_path / "config.toml"
+    if initial is not None:
+        cfg.write_text(initial)
+    r = subprocess.run(
+        [sys.executable, "-c", _codex_seed_block()],
+        env={"AC_CFG": str(cfg), "AC_WS": ws, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    return cfg.read_text() if cfg.is_file() else None
+
+
+def test_codex_workspace_trust_is_seeded_when_absent(wiz, tmp_path):
+    """Claude's first-run flags were pre-answered; codex's TRUST prompt was not.
+
+    An operator who injected credentials and config attaches expecting a working
+    agent, and being asked to trust the directory the tool just created is the
+    injection not having landed, from where they are sitting. Codex gates on
+    `trust_level` under `[projects."<path>"]` — confirmed against the shipped
+    binary, which carries `trust_level`, `projects` and `trusted`/`untrusted`.
+    """
+    import tomllib
+
+    out = _run_seed(tmp_path)
+    assert tomllib.loads(out)["projects"]["/workspace"]["trust_level"] == "trusted"
+
+
+def test_codex_trust_appends_to_the_operators_own_config(wiz, tmp_path):
+    """config.toml is canonical config the operator may deliver — it is THEIR
+    file. The table is appended; everything already in it survives, and the
+    result must still parse."""
+    import tomllib
+
+    out = _run_seed(tmp_path, initial='model = "o3"\n')
+    data = tomllib.loads(out)
+    assert data["model"] == "o3"
+    assert data["projects"]["/workspace"]["trust_level"] == "trusted"
+
+
+def test_codex_trust_never_overrides_a_declared_answer(wiz, tmp_path):
+    """If the operator said `untrusted`, that is a decision, not an absence.
+
+    Absent and declared are different facts (Constitution VIII) — and this is the
+    one that would matter, because silently promoting a directory the operator
+    deliberately distrusted is the opposite of what the setting is for.
+    """
+    import tomllib
+
+    initial = '[projects."/workspace"]\ntrust_level = "untrusted"\n'
+    out = _run_seed(tmp_path, initial=initial)
+    assert tomllib.loads(out)["projects"]["/workspace"]["trust_level"] == "untrusted"
+
+
+def test_codex_trust_seeding_is_idempotent(wiz, tmp_path):
+    """It runs on EVERY boot, so a second pass must add nothing."""
+    cfg = tmp_path / "config.toml"
+    _run_seed(tmp_path)
+    once = cfg.read_text()
+    _run_seed(tmp_path, initial=once)
+    assert cfg.read_text().count("trust_level") == 1
+
+
+def test_codex_trust_leaves_a_malformed_config_alone(wiz, tmp_path):
+    """Appending to a file the tool cannot parse risks compounding the damage,
+    and codex reports the real error better than this can."""
+    broken = "this is [not toml\n"
+    assert _run_seed(tmp_path, initial=broken) == broken

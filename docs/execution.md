@@ -140,6 +140,28 @@ doing the work is the container and the egress declaration, never the agent's ow
 consent dialog. Scope a task accordingly, and declare egress if the container
 should not reach the whole internet.
 
+**An injected agent must not open on a wizard**, and the gate differs per agent —
+so this was settled by inspecting each one rather than seeding them all alike:
+
+| Agent | First-run gate | What the entrypoint does |
+|---|---|---|
+| `claude` | `hasCompletedOnboarding`, `hasTrustDialogAccepted`, and approval of the injected key in `~/.claude.json` | pre-answers all three, **merged** into the operator's file |
+| `codex` | workspace **trust** — `trust_level` under `[projects."<path>"]` in `~/.codex/config.toml` | appends the table for `/workspace` if, and only if, no answer is already there |
+| `opencode` | **none** | nothing — verified by running it headless from a completely clean state with only an env credential |
+| `pi` | **none observed** | nothing beyond seeding its config from `~/.pi/agent` |
+
+The codex file is the operator's, and canonical config they may deliver, so it is
+**parsed** with `tomllib` to decide and only **appended** to — never rewritten. A
+declared `trust_level` is left alone in either direction: promoting a directory
+the operator deliberately marked `untrusted` is the opposite of what the setting
+is for. A `config.toml` that does not parse is left completely alone, because
+codex reports that error better than this can.
+
+**opencode was checked, not assumed.** Its binary contains ~3800 occurrences of
+"onboarding" — all of them `wsl.onboarding.*`, bundled editor/WSL strings with no
+bearing on the CLI. Seeding on that evidence would have been inventing a fix for
+a problem it does not have.
+
 **opencode is the one agent with two volumes.** It follows XDG and splits
 configuration (`~/.config/opencode`) from credentials and session history
 (`~/.local/share/opencode/auth.json`, `opencode.db`), and both must survive
