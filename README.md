@@ -1,10 +1,31 @@
 # agent-container
 
+[![ci](https://github.com/ondrasek/agent-container/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ondrasek/agent-container/actions/workflows/ci.yml)
+[![release](https://github.com/ondrasek/agent-container/actions/workflows/publish.yml/badge.svg)](https://github.com/ondrasek/agent-container/actions/workflows/publish.yml)
+[![pages](https://github.com/ondrasek/agent-container/actions/workflows/pages.yml/badge.svg)](https://github.com/ondrasek/agent-container/actions/workflows/pages.yml)
+[![PyPI](https://img.shields.io/pypi/v/agent-container?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/agent-container/)
+[![Python](https://img.shields.io/pypi/pyversions/agent-container?logo=python&logoColor=white)](https://pypi.org/project/agent-container/)
+[![release](https://img.shields.io/github/v/release/ondrasek/agent-container?display_name=tag&sort=semver&logo=github)](https://github.com/ondrasek/agent-container/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/ondrasek/agent-container)](LICENSE)
+[![Conventional Commits](https://img.shields.io/badge/commits-conventional-0f766e)](https://www.conventionalcommits.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 Always-on, containerized development environment for a single operator. Hosts AI coding agents (Claude Code, Codex, pi-coding-agent), `nvim`, `tmux`, and `git` behind OpenSSH. Designed to run on a personal Linux VPS and be attached to over `ssh`.
+
+**📖 [Website and documentation → ondrasek.github.io/agent-container](https://ondrasek.github.io/agent-container/)**
+&nbsp;·&nbsp; [Install](https://ondrasek.github.io/agent-container/install/)
+&nbsp;·&nbsp; [Tutorial](https://ondrasek.github.io/agent-container/tutorial/)
+&nbsp;·&nbsp; [Samples](https://ondrasek.github.io/agent-container/samples/)
+&nbsp;·&nbsp; [Download](https://ondrasek.github.io/agent-container/download/)
+
+```bash
+uv tool install agent-container      # or: pipx install agent-container
+```
 
 Design contract: [`CLAUDE.md`](CLAUDE.md).
 Runtime + base-image decision: [`docs/decisions/0001-runtime-and-base-image.md`](docs/decisions/0001-runtime-and-base-image.md).
 Credential contract: [`docs/credentials.md`](docs/credentials.md).
+Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## How it fits together
 
@@ -1077,6 +1098,36 @@ The version is single-sourced in `pyproject.toml`; check the installed version w
 Until `RELEASE_ENABLED` is set, `publish.yml` stays dormant (so a release can't
 half-fire before PyPI is ready). After both steps, releases are automatic and
 need no stored secrets.
+
+## The website
+
+[ondrasek.github.io/agent-container](https://ondrasek.github.io/agent-container/) is
+rendered from this repository's own markdown — this README, `docs/`,
+`samples/README.md`, `CONTRIBUTING.md` and the ADRs — by
+[`site/build.py`](site/build.py). There is no second copy of the documentation, so
+the published site cannot drift from the code.
+
+`.github/workflows/pages.yml` rebuilds and deploys it on every push to `main` **and
+on every published GitHub Release**, stamping the site with the version that was
+just shipped. Nothing is committed to a `gh-pages` branch and no local step is
+involved. To preview it:
+
+```bash
+uv run --no-project --python 3.14 --with markdown --with pygments site/build.py
+uv run --no-project --python 3.14 site/check.py   # every internal link and anchor
+python3 -m http.server -d site/_site 8000
+```
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) — the ground rules, the single
+quality-gate script that CI and the local Stop hook share, and why Conventional
+Commits are mandatory.
+
+## Author
+
+Built by **Ondrej Krajicek** — [LinkedIn](https://linkedin.com/in/OndrejKrajicek)
+· [Talks](https://ondrasek.github.io/talks) · [GitHub](https://github.com/ondrasek).
 
 ## License
 

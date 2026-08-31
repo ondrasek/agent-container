@@ -1,0 +1,117 @@
+# Publish the website to GitHub Pages.
+#
+# The site is generated from the repository's OWN markdown — README.md, docs/,
+# samples/README.md, CONTRIBUTING.md, CHANGELOG.md, the ADRs — so there is no
+# second copy of the documentation to keep in step. Editing a doc IS editing the
+# site; this workflow only decides WHEN the rendering happens.
+#
+# It happens on three triggers, and the release one is the point:
+#
+#   release: [published]  python-semantic-release creates the GitHub Release at
+#                         the end of publish.yml. That event fires this workflow,
+#                         which reads the release's tag and publishes a site
+#                         stamped with the version that was just shipped. No
+#                         Claude hook, no manual step, nothing local: the release
+#                         and the site it documents come from the same commit.
+#   push to main          keeps docs edits visible without waiting for a release
+#                         (a docs-only merge produces no release at all).
+#   workflow_dispatch     manual re-publish.
+#
+# Deployment uses the Pages *workflow* source (not a branch), so no generated
+# HTML is ever committed to the repository.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+# One deploy at a time. Never cancel one in flight — a half-published site is
+# worse than a slightly stale one — but a newer queued build supersedes an older
+# queued build.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: render the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The build stamps the site with the last commit date; a shallow
+          # checkout of depth 1 still carries that, but tags are needed for the
+          # release-URL fallback when this runs from a push.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Resolve the release this build documents
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          RELEASE_AT: ${{ github.event.release.published_at }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "release" ] && [ -n "${RELEASE_TAG:-}" ]; then
+            # Triggered BY the release: take the version straight from the event
+            # payload rather than asking the API what the latest release is —
+            # those can differ for the seconds around a publish.
+            tag="$RELEASE_TAG"
+            url="$RELEASE_URL"
+            date="${RELEASE_AT%%T*}"
+          else
+            # A push or a manual run: describe the most recent published release,
+            # falling back to the version in pyproject.toml when none exists yet.
+            tag="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
+            url="$(gh release view --json url --jq .url 2>/dev/null || true)"
+            date="$(gh release view --json publishedAt --jq .publishedAt 2>/dev/null || true)"
+            date="${date%%T*}"
+          fi
+          if [ -n "${tag:-}" ]; then
+            echo "SITE_VERSION=${tag#v}" >> "$GITHUB_ENV"
+            echo "SITE_RELEASE_URL=$url" >> "$GITHUB_ENV"
+            echo "SITE_RELEASE_DATE=$date" >> "$GITHUB_ENV"
+          else
+            echo "no published release yet — build.py will read pyproject.toml"
+          fi
+          echo "SITE_BUILT=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: >
+          uv run --no-project --python 3.14
+          --with 'markdown>=3.6,<4' --with 'pygments>=2.17,<3'
+          site/build.py
+
+      - name: Check every internal link and anchor
+        # A dead cross-document anchor is invisible in review and obvious to a
+        # reader. Fail the build rather than publish one.
+        run: uv run --no-project --python 3.14 site/check.py
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/_site
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # deploy to the Pages site
+      id-token: write # OIDC token the deploy action verifies
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

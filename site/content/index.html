@@ -1,0 +1,278 @@
+<section class="hero" id="content">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div>
+        <a class="eyebrow" href="download/">v{{VERSION}} &middot; MIT &middot; Podman &amp; Docker</a>
+        <h1>Your agents keep working after you close the lid.</h1>
+        <p class="lede">
+          An always-on, containerized development environment for a single operator.
+          Claude Code, Codex, <code>nvim</code>, <code>tmux</code> and <code>git</code>
+          behind OpenSSH on your own VPS. <strong>Detach is non-destructive at every
+          layer</strong> — close the laptop, the agent keeps going.
+        </p>
+        <div class="cta">
+          <a class="btn btn-primary" href="install/">Install</a>
+          <a class="btn btn-ghost" href="tutorial/">Read the tutorial</a>
+          <a class="btn btn-ghost" href="https://github.com/ondrasek/agent-container" rel="noopener">Source</a>
+        </div>
+        <div class="pill-row">
+          <span class="pill">rootless</span>
+          <span class="pill">compose v2</span>
+          <span class="pill">packet-level egress</span>
+          <span class="pill">no baked credentials</span>
+          <span class="pill">python 3.14</span>
+        </div>
+      </div>
+
+      <div class="terminal" aria-label="Example terminal session">
+        <div class="bar">
+          <span class="dot" style="background:#ff5f57"></span>
+          <span class="dot" style="background:#febc2e"></span>
+          <span class="dot" style="background:#28c840"></span>
+          <span class="t">ondra@laptop — agent-container</span>
+        </div>
+<pre><span class="cm"># declare it once, in YAML you commit</span>
+<span class="p">$</span> agent-container plan
+  acme   <span class="hl">absent</span>   → will create
+
+<span class="p">$</span> agent-container apply
+  <span class="ok">✓</span> image built on host hz1
+  <span class="ok">✓</span> credential ANTHROPIC_API_KEY delivered
+  <span class="ok">✓</span> egress boundary: strict
+  <span class="ok">✓</span> acme up — sshd :2206, tmux "main"
+
+<span class="cm"># attach from anywhere; detach loses nothing</span>
+<span class="p">$</span> agent-container attach acme
+<span class="cm">[ you are now inside tmux on the VPS ]</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <h2>What it actually is</h2>
+    <p class="sub">
+      A container image plus a single-file CLI. The image holds the agents and the
+      tooling; the CLI generates a compose project and runs it <em>on the target
+      host</em>, over a local or remote container context. Your laptop is a client.
+    </p>
+
+    <div class="ascii">laptop                                        VPS (Hetzner / Debian 12)
+------                                        ------------------------
+~/.config/agent-container/hosts.conf          user systemd (linger enabled)
+  ACME_HOST=vps1.example                        |
+  ACME_PORT=2218                                +-- Quadlet: agent-container-acme.container
+                                                    |
+$ agent-container attach acme                       +-- container: agent-container-acme
+   |                                                    +-- sshd  (port 2222 -> host 2218)
+   |  ssh -p 2218 dev@vps1.example -t tmux              +-- tmux session "main"
+   |     attach -t main                                     +-- nvim
+   v                                                        +-- claude
+[ you are now inside tmux on the VPS ]                       +-- codex
+                                                             +-- /workspace (named volume)
+detach (Ctrl-B d)
+  -> back on laptop; agents keep running on the VPS</div>
+
+    <div class="callout">
+      <span class="label">The key property</span>
+      <p>
+        Closing the SSH connection leaves tmux running. tmux retains every pane's
+        state. The container stays up because it was launched detached and is
+        supervised by user systemd or a restart policy. Lingering keeps user-level
+        systemd alive across SSH logout. <strong>The only way work is lost is if you —
+        or an agent — fail to <code>git push</code></strong>, which is exactly why the
+        design contract forbids it.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="section band">
+  <div class="wrap">
+    <h2>Design commitments</h2>
+    <p class="sub">
+      Each of these is a written invariant with tests behind it, not an aspiration.
+      The full contract is <a href="https://github.com/ondrasek/agent-container/blob/main/CLAUDE.md" rel="noopener"><code>CLAUDE.md</code></a>.
+    </p>
+    <div class="cards">
+
+      <a class="card" href="docs/agent-as-code/">
+        <h3><span class="ico">[01]</span>Agent as code</h3>
+        <p>
+          A directory <em>is</em> the desired state. <code>.agent-container/environments.yaml</code>
+          declares the container, the task, the credentials as locators and the egress
+          boundary. <code>plan</code> shows absent/matching/drifted; <code>apply</code>
+          converges; <code>destroy</code> removes only what the spec owns.
+        </p>
+        <span class="more">How the spec works →</span>
+      </a>
+
+      <a class="card" href="docs/credentials/">
+        <h3><span class="ico">[02]</span>Least-exposure credentials</h3>
+        <p>
+          Never baked into an image, never on argv, never printed, never on a volume.
+          Secrets travel to the container over <em>its own</em> sshd, authenticated by
+          an operator-<strong>declared</strong> identity — the tool refuses to mint a key
+          for you, because a tool-minted key is a standing credential.
+        </p>
+        <span class="more">Read the contract →</span>
+      </a>
+
+      <a class="card" href="docs/egress/">
+        <h3><span class="ico">[03]</span>Packet-level egress</h3>
+        <p>
+          Default-deny in a network namespace shared with an egress sidecar, which
+          alone holds <code>NET_ADMIN</code>. Squid <strong>splices, never bumps</strong>
+          — no TLS interception. A declaration governs all egress, and the strength
+          claim is tested for absence of overclaim.
+        </p>
+        <span class="more">See the boundary →</span>
+      </a>
+
+      <a class="card" href="docs/execution/">
+        <h3><span class="ico">[04]</span>Interactive or headless</h3>
+        <p>
+          Interactive keeps the container alive with the agent in a tmux window you
+          attach to. Headless runs the task as the container's workload and exits —
+          <strong>the container's exit code is the result</strong>. A success is not
+          resurrected.
+        </p>
+        <span class="more">Execution modes →</span>
+      </a>
+
+      <a class="card" href="docs/observability/">
+        <h3><span class="ico">[05]</span>Two legs, one payload</h3>
+        <p>
+          An unconditional local trail plus an export that is <code>curl</code>,
+          write-time, fail-open and zero-dependency — protocol only, never a backend
+          package. <code>accepted</code> means <em>this endpoint accepted this
+          record</em> and nothing more.
+        </p>
+        <span class="more">Observability →</span>
+      </a>
+
+      <a class="card" href="docs/control-plane/">
+        <h3><span class="ico">[06]</span>Drive it from a phone</h3>
+        <p>
+          A second image with no agents but a standing key: an ordinary environment
+          that can reach the others. The authorised key <em>is</em> the boundary and
+          <code>revoke</code> is the only narrowing. <code>panic</code> from inside
+          excludes itself and says so.
+        </p>
+        <span class="more">Control plane →</span>
+      </a>
+
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <h2>Three commands to a running agent</h2>
+    <p class="sub">
+      Assuming a Debian 12 host with Podman and lingering enabled — the
+      <a href="tutorial/">tutorial</a> walks that part from an empty VPS.
+    </p>
+
+    <div class="steps">
+      <div class="step">
+        <h3>Install the CLI</h3>
+        <p>A single PEP 723 script. <a href="https://docs.astral.sh/uv/" rel="noopener">uv</a> is the only prerequisite.</p>
+<pre>uv tool install agent-container</pre>
+      </div>
+
+      <div class="step">
+        <h3>Declare the environment</h3>
+        <p>
+          Plain YAML you commit. <code>credentials:</code> entries are
+          <strong>locators, not values</strong> — the variable is read at apply time and
+          never enters the file or the generated compose model.
+        </p>
+<pre><span class="cm"># .agent-container/environments.yaml</span>
+environments:
+  - name: acme
+    host: hz1
+
+    container:
+      mode: headless        <span class="cm"># the agent IS the workload</span>
+      agent: claude
+      workspace: persistent
+      repo: https://github.com/you/your-repo
+      task: |
+        Triage the failing CI, commit the fix and push it.
+
+    credentials:
+      - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
+      - { name: GH_TOKEN, source: env, var: FORGE_TOKEN }
+
+    egress:
+      allow:
+        - { provider: anthropic }
+        - { host: github.com }
+      enforcement: strict   <span class="cm"># advisory (default) | strict</span></pre>
+      </div>
+
+      <div class="step">
+        <h3>Converge, then attach</h3>
+        <p>
+          <code>plan</code> mutates nothing, so it is always safe first.
+          <code>apply</code> is idempotent: a matching spec makes no change, a drifted
+          one is announced and recreated.
+        </p>
+<pre>agent-container plan
+agent-container apply
+agent-container attach acme</pre>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <span class="label">Worth knowing before you run the samples</span>
+      <p>
+        They use a real agent against a real model, so runs <strong>cost money</strong>
+        and are not deterministic. That is exactly what makes them worth having —
+        every other test in the repository stubs the agent binary with a shell
+        script. See <a href="samples/">the four samples</a>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="section band">
+  <div class="wrap">
+    <h2>Where to go next</h2>
+    <p class="sub">Everything on this site is rendered from the repository's own markdown, so it cannot drift from the code.</p>
+    <div class="cards">
+      <a class="card" href="install/">
+        <h3>Installation</h3>
+        <p>PyPI, an editable checkout, shell completions for bash and zsh, and the oh-my-zsh plugin.</p>
+        <span class="more">Install →</span>
+      </a>
+      <a class="card" href="tutorial/">
+        <h3>Tutorial</h3>
+        <p>Eight steps from a freshly provisioned VPS to an agent you can detach from and reattach to.</p>
+        <span class="more">Start the tutorial →</span>
+      </a>
+      <a class="card" href="samples/">
+        <h3>Samples</h3>
+        <p>Four applicable specifications, from one credential and a task up to an agent that writes working software.</p>
+        <span class="more">See the samples →</span>
+      </a>
+      <a class="card" href="docs/">
+        <h3>Documentation</h3>
+        <p>Fourteen subsystem documents, two architecture decision records and twenty-one feature specifications.</p>
+        <span class="more">Browse the docs →</span>
+      </a>
+      <a class="card" href="guide/">
+        <h3>Reference guide</h3>
+        <p>The complete README: the whole CLI surface, the image layering, the entrypoint and the release pipeline.</p>
+        <span class="more">Open the guide →</span>
+      </a>
+      <a class="card" href="contributing/">
+        <h3>Contributing</h3>
+        <p>The ground rules, the one quality-gate script that CI and the local hook share, and Conventional Commits.</p>
+        <span class="more">How to contribute →</span>
+      </a>
+    </div>
+  </div>
+</section>

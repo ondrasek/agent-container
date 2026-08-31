@@ -33,3 +33,8 @@ dist/
 build/
 # NOTE: uv.lock IS committed. agent-container is an application/CLI (not a library), so
 # the lockfile is checked in for reproducible dev envs (`uv sync`). Do not ignore it.
+
+# Generated website. `site/build.py` renders it from the repository markdown and
+# the `pages` workflow deploys it from the Pages artifact — no generated HTML is
+# ever committed.
+site/_site/
