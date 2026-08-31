@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.46.0 (2026-08-31)
+
+### Documentation
+
+- **spec**: Specify a scaffold command for new agent projects (022)
+  ([`63e9033`](https://github.com/ondrasek/agent-container/commit/63e9033a426ed669baeff929eca2fbec2dab7df4))
+
+
 ## v0.45.0 (2026-08-30)
 
 
