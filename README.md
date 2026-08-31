@@ -64,7 +64,7 @@ agent-container plan                   # validate + show absent/matching/drifted
 agent-container apply                  # converge
 ```
 
-| | |
+| Sample | What it declares |
 |---|---|
 | [`01-workspace-write`](samples/01-workspace-write/) | headless agent, a task, one credential — needs a model key only |
 | [`02-egress-boundary`](samples/02-egress-boundary/) | adds an `egress:` allow-list under `enforcement: strict` |

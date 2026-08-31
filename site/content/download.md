@@ -25,7 +25,7 @@ agent-container --version
 
 ## Source code
 
-| | |
+| What | Where |
 |---|---|
 | **Clone** | `git clone https://github.com/ondrasek/agent-container.git` |
 | **This release, tagged** | [`v{{VERSION}}`]({{RELEASE_URL}}) |

@@ -196,6 +196,9 @@ code, kbd, samp { font-family: var(--mono); font-size: .875em; }
   background: var(--bg-code); border: 1px solid var(--border);
   padding: .1em .35em; border-radius: 5px; color: var(--text);
 }
+/* A link whose whole label is code must still LOOK like a link — the rule above
+   would otherwise paint it body-text colour and it reads as inert. */
+.prose a > code { color: inherit; border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 
 pre {
   background: var(--term-bg); color: var(--term-text);
@@ -311,7 +314,7 @@ pre code { background: none; border: 0; padding: 0; color: inherit; white-space:
 .card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 1.35rem 1.4rem;
-  transition: border-color .14s, transform .14s;
+  transition: border-color .14s, transform .14s; min-width: 0;
 }
 a.card { display: block; color: inherit; }
 a.card:hover { border-color: var(--accent); text-decoration: none; transform: translateY(-2px); }
@@ -325,8 +328,11 @@ a.card:hover { border-color: var(--accent); text-decoration: none; transform: tr
 
 .band { background: var(--bg-soft); border-block: 1px solid var(--border); }
 
-.steps { counter-reset: s; display: grid; gap: 1.75rem; }
-.step { position: relative; padding-left: 2.7rem; counter-increment: s; }
+/* minmax(0, 1fr) + min-width:0 on the item: a grid item's automatic minimum size
+   is its content's, so a wide <pre> inside one pushes the whole page into
+   horizontal scroll instead of scrolling inside its own box. */
+.steps { counter-reset: s; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.75rem; }
+.step { position: relative; padding-left: 2.7rem; counter-increment: s; min-width: 0; }
 .step::before {
   content: counter(s); position: absolute; left: 0; top: .1rem;
   width: 1.8rem; height: 1.8rem; border-radius: 50%;
