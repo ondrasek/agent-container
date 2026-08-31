@@ -121,6 +121,21 @@ moves the minor digit, so the message is the only place the break is recorded.
 Write commit messages **from a file** (`git commit -F msg.txt`), not with `-m`:
 backticks in a `-m` string are command substitution in your shell.
 
+### Never let a commit message contain a skip-workflow marker
+
+GitHub recognises five markers — the bracketed `skip ci`, `ci skip`, `no ci`,
+`skip actions` and `actions skip` — and matches them **anywhere in the message**,
+not just the subject line. For a pull request it checks the **HEAD** commit.
+
+So a message that merely *quotes* one, while explaining CI behaviour, silences its
+own CI. That is worse than it sounds here: `publish.yml` chains off `ci` with
+`workflow_run`, so a skipped `ci` means no release, which means no site rebuild —
+the whole ladder goes quiet and the PR looks like it is simply still waiting. If
+you need to write about the markers, describe them instead of pasting them.
+
+(`python-semantic-release` puts one in its own release commit on purpose, so that
+commit does not re-trigger the pipeline that created it.)
+
 ## Where a change goes
 
 Keep the layers separate; this is the architecture, not a preference.
