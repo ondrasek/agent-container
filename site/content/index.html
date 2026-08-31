@@ -2,13 +2,15 @@
   <div class="wrap">
     <div class="hero-grid">
       <div>
-        <a class="eyebrow" href="download/">v{{VERSION}} &middot; MIT &middot; Podman &amp; Docker</a>
+        <a class="eyebrow" href="download/">v{{VERSION}} &middot; MIT &middot; rootless Podman or Docker</a>
         <h1>Your agents keep working after you close the lid.</h1>
         <p class="lede">
-          An always-on, containerized development environment for a single operator.
-          Claude Code, Codex, <code>nvim</code>, <code>tmux</code> and <code>git</code>
-          behind OpenSSH on your own VPS. <strong>Detach is non-destructive at every
-          layer</strong> — close the laptop, the agent keeps going.
+          A coding agent halfway through a refactor doesn't care that your Wi-Fi
+          dropped — but one running on your laptop dies with the session.
+          <strong>agent-container puts it on your own server</strong>, behind
+          OpenSSH and tmux, with its task, its credentials and its network
+          boundary declared in YAML you commit. Attach from anywhere. Detach
+          without consequence.
         </p>
         <div class="cta">
           <a class="btn btn-primary" href="install/">Install</a>
@@ -20,7 +22,7 @@
           <span class="pill">compose v2</span>
           <span class="pill">packet-level egress</span>
           <span class="pill">no baked credentials</span>
-          <span class="pill">python 3.14</span>
+          <span class="pill">one-file CLI</span>
         </div>
       </div>
 
@@ -31,7 +33,7 @@
           <span class="dot" style="background:#28c840"></span>
           <span class="t">ondra@laptop — agent-container</span>
         </div>
-<pre><span class="cm"># declare it once, in YAML you commit</span>
+<pre><span class="cm"># the spec is a file in your repo, not a pile of flags</span>
 <span class="p">$</span> agent-container plan
   acme   <span class="hl">absent</span>   → will create
 
@@ -51,11 +53,71 @@
 
 <section class="section">
   <div class="wrap">
-    <h2>What it actually is</h2>
+    <h2>&ldquo;Why not just SSH in and run tmux myself?&rdquo;</h2>
+    <p class="sub">
+      Because that gets you the easy third of this. The interesting part isn't
+      keeping a process alive — it's everything you have to be careful about once
+      an agent is running unattended with your credentials.
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <h3>You'd do it by hand, every time</h3>
+        <p>
+          Ports, volumes, git identity, which key is admitted, what the agent was
+          asked to do. Set up by memory, undocumented, and impossible to
+          re-create identically. Here the directory <em>is</em> the desired
+          state: <code>plan</code> tells you absent / matching / drifted,
+          <code>apply</code> converges, <code>destroy</code> removes only what the
+          spec owns.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Your secrets would be lying around</h3>
+        <p>
+          The obvious paths all leak: baked into an image layer, passed on a
+          command line, written to a volume, echoed into a log. This tool does
+          none of them. A secret travels to the container over
+          <em>that container's own</em> sshd and the spec holds a
+          <strong>locator, never a value</strong>.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>The agent would have your whole network</h3>
+        <p>
+          An unattended agent with a shell can reach anything the host can. Here
+          egress is <strong>default-deny at the packet level</strong>, in a
+          namespace shared with a sidecar that alone holds <code>NET_ADMIN</code>.
+          You declare the destinations; everything else is refused, and refusals
+          are recorded.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <span class="label">And one thing tmux genuinely does give you</span>
+      <p>
+        Detach really is non-destructive at every layer, and that property is kept
+        rather than reinvented: closing SSH leaves tmux running, tmux retains every
+        pane, and the container stays up because it was launched detached under
+        user systemd or a restart policy. <strong>The only way to lose work is to
+        not <code>git push</code></strong> — which is why the design contract
+        forbids depending on container persistence at all.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="section band">
+  <div class="wrap">
+    <h2>How it fits together</h2>
     <p class="sub">
       A container image plus a single-file CLI. The image holds the agents and the
       tooling; the CLI generates a compose project and runs it <em>on the target
-      host</em>, over a local or remote container context. Your laptop is a client.
+      host</em>, over a local or remote container context. Your laptop is only a
+      client.
     </p>
 
     <div class="ascii">laptop                                        VPS (Hetzner / Debian 12)
@@ -73,101 +135,93 @@ $ agent-container attach acme                       +-- container: agent-contain
                                                              +-- /workspace (named volume)
 detach (Ctrl-B d)
   -> back on laptop; agents keep running on the VPS</div>
-
-    <div class="callout">
-      <span class="label">The key property</span>
-      <p>
-        Closing the SSH connection leaves tmux running. tmux retains every pane's
-        state. The container stays up because it was launched detached and is
-        supervised by user systemd or a restart policy. Lingering keeps user-level
-        systemd alive across SSH logout. <strong>The only way work is lost is if you —
-        or an agent — fail to <code>git push</code></strong>, which is exactly why the
-        design contract forbids it.
-      </p>
-    </div>
   </div>
 </section>
 
-<section class="section band">
+<section class="section">
   <div class="wrap">
-    <h2>Design commitments</h2>
+    <h2>What it refuses to get wrong</h2>
     <p class="sub">
-      Each of these is a written invariant with tests behind it, not an aspiration.
-      The full contract is <a href="https://github.com/ondrasek/agent-container/blob/main/CLAUDE.md" rel="noopener"><code>CLAUDE.md</code></a>.
+      Each of these is a written invariant with tests behind it, and each is
+      phrased as a refusal because that is how it is enforced. The contract is
+      <a href="https://github.com/ondrasek/agent-container/blob/main/CLAUDE.md" rel="noopener"><code>CLAUDE.md</code></a>.
     </p>
     <div class="cards">
 
-      <a class="card" href="docs/agent-as-code/">
-        <h3><span class="ico">[01]</span>Agent as code</h3>
-        <p>
-          A directory <em>is</em> the desired state. <code>.agent-container/environments.yaml</code>
-          declares the container, the task, the credentials as locators and the egress
-          boundary. <code>plan</code> shows absent/matching/drifted; <code>apply</code>
-          converges; <code>destroy</code> removes only what the spec owns.
-        </p>
-        <span class="more">How the spec works →</span>
-      </a>
-
       <a class="card" href="docs/credentials/">
-        <h3><span class="ico">[02]</span>Least-exposure credentials</h3>
+        <h3>It will not mint you a key</h3>
         <p>
-          Never baked into an image, never on argv, never printed, never on a volume.
-          Secrets travel to the container over <em>its own</em> sshd, authenticated by
-          an operator-<strong>declared</strong> identity — the tool refuses to mint a key
-          for you, because a tool-minted key is a standing credential.
+          Delivering a credential needs an operator-<strong>declared</strong> SSH
+          identity, and the tool deliberately refuses to generate one — a
+          tool-minted key would be a standing credential granting entry to every
+          environment it ever deploys. Undeclared means refused. And the keys it
+          admits are <strong>declared</strong>, rewritten from that declaration on
+          every boot — because a deduped union can never revoke.
         </p>
-        <span class="more">Read the contract →</span>
+        <span class="more">The credential contract →</span>
       </a>
 
       <a class="card" href="docs/egress/">
-        <h3><span class="ico">[03]</span>Packet-level egress</h3>
+        <h3>It will not inspect your TLS</h3>
         <p>
-          Default-deny in a network namespace shared with an egress sidecar, which
-          alone holds <code>NET_ADMIN</code>. Squid <strong>splices, never bumps</strong>
-          — no TLS interception. A declaration governs all egress, and the strength
-          claim is tested for absence of overclaim.
+          Squid <strong>splices, never bumps</strong>. The boundary decides where
+          traffic may go, not what is in it — so a declaration is enforceable
+          without becoming a man in the middle. The strength claim is tested for
+          absence of overclaim.
         </p>
-        <span class="more">See the boundary →</span>
+        <span class="more">The egress boundary →</span>
+      </a>
+
+      <a class="card" href="docs/inventory/">
+        <h3>It will not say &ldquo;stopped&rdquo; unless it saw it stop</h3>
+        <p>
+          Everything destructive verifies by <strong>observation</strong>. An
+          unreachable host is reported <code>undetermined</code> — never
+          <code>stopped</code> — and an unverified destroy writes no outcome at
+          all. A report that overstates success ends an investigation early.
+        </p>
+        <span class="more">Inventory and the kill switch →</span>
       </a>
 
       <a class="card" href="docs/execution/">
-        <h3><span class="ico">[04]</span>Interactive or headless</h3>
+        <h3>It will not resurrect a finished job</h3>
         <p>
-          Interactive keeps the container alive with the agent in a tmux window you
-          attach to. Headless runs the task as the container's workload and exits —
-          <strong>the container's exit code is the result</strong>. A success is not
-          resurrected.
+          In headless mode the agent <em>is</em> the workload and the container's
+          exit code is the result. A success exits and stays exited; a failure
+          follows the restart policy. Interactive mode keeps the container alive
+          with the agent in a tmux window you attach to.
         </p>
         <span class="more">Execution modes →</span>
       </a>
 
       <a class="card" href="docs/observability/">
-        <h3><span class="ico">[05]</span>Two legs, one payload</h3>
+        <h3>It will not pull in a backend SDK</h3>
         <p>
-          An unconditional local trail plus an export that is <code>curl</code>,
-          write-time, fail-open and zero-dependency — protocol only, never a backend
-          package. <code>accepted</code> means <em>this endpoint accepted this
-          record</em> and nothing more.
+          The local trail is unconditional; the export is <code>curl</code>,
+          write-time, fail-open and <strong>zero-dependency</strong> — protocol
+          only, never a vendor package. And <code>accepted</code> means <em>this
+          endpoint accepted this record</em>, nothing more.
         </p>
         <span class="more">Observability →</span>
       </a>
 
       <a class="card" href="docs/control-plane/">
-        <h3><span class="ico">[06]</span>Drive it from a phone</h3>
+        <h3>It will not let a control plane destroy itself</h3>
         <p>
-          A second image with no agents but a standing key: an ordinary environment
-          that can reach the others. The authorised key <em>is</em> the boundary and
-          <code>revoke</code> is the only narrowing. <code>panic</code> from inside
-          excludes itself and says so.
+          There is a second image — no agents, but a standing key — so you can
+          drive everything from a phone. Its passphrase is printed
+          <strong>once</strong>, with no recovery, and <code>panic</code> invoked
+          from inside it <strong>excludes itself and says so</strong> rather than
+          cutting the branch it is sitting on.
         </p>
-        <span class="more">Control plane →</span>
+        <span class="more">The control plane →</span>
       </a>
 
     </div>
   </div>
 </section>
 
-<section class="section">
+<section class="section band">
   <div class="wrap">
     <h2>Three commands to a running agent</h2>
     <p class="sub">
@@ -186,8 +240,8 @@ detach (Ctrl-B d)
         <h3>Declare the environment</h3>
         <p>
           Plain YAML you commit. <code>credentials:</code> entries are
-          <strong>locators, not values</strong> — the variable is read at apply time and
-          never enters the file or the generated compose model.
+          <strong>locators, not values</strong> — the variable is read at apply
+          time and never enters the file or the generated compose model.
         </p>
 <pre><span class="cm"># .agent-container/environments.yaml</span>
 environments:
@@ -217,23 +271,55 @@ environments:
         <h3>Converge, then attach</h3>
         <p>
           <code>plan</code> mutates nothing, so it is always safe first.
-          <code>apply</code> is idempotent: a matching spec makes no change, a drifted
-          one is announced and recreated.
+          <code>apply</code> is idempotent: a matching spec makes no change, a
+          drifted one is announced and recreated.
         </p>
 <pre>agent-container plan
 agent-container apply
 agent-container attach acme</pre>
       </div>
     </div>
+  </div>
+</section>
 
-    <div class="callout warn">
-      <span class="label">Worth knowing before you run the samples</span>
-      <p>
-        They use a real agent against a real model, so runs <strong>cost money</strong>
-        and are not deterministic. That is exactly what makes them worth having —
-        every other test in the repository stubs the agent binary with a shell
-        script. See <a href="samples/">the four samples</a>.
-      </p>
+<section class="section">
+  <div class="wrap">
+    <h2>Honest about the edges</h2>
+    <p class="sub">Two things worth knowing before you invest an afternoon.</p>
+
+    <div class="cards">
+      <div class="card">
+        <h3>Out of scope, deliberately</h3>
+        <p>
+          IDE integrations beyond SSH, tmux and <code>nvim</code>. Multi-user
+          access control — this is a <strong>single-operator</strong> tool, and the
+          admitted-key model assumes that. Kubernetes. Devcontainers were
+          considered and rejected; there is no <code>.devcontainer/</code> and
+          there will not be.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>The samples cost real money</h3>
+        <p>
+          The <a href="samples/">four samples</a> run a real agent against a real
+          model, so they are neither free nor deterministic. That is exactly why
+          they exist — every other test in the repository stubs the agent binary
+          with a shell script, and a stub cannot tell you whether the credential
+          path actually works.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>You need a checkout on the host</h3>
+        <p>
+          A PyPI install is a complete <em>client</em>. But <code>build</code>
+          needs the repository as its build context and no prebuilt image is
+          published to any registry, so the machine that actually runs containers
+          needs the source. <a href="install/">The install page</a> is explicit
+          about which commands work where.
+        </p>
+      </div>
     </div>
   </div>
 </section>
@@ -241,11 +327,14 @@ agent-container attach acme</pre>
 <section class="section band">
   <div class="wrap">
     <h2>Where to go next</h2>
-    <p class="sub">Everything on this site is rendered from the repository's own markdown, so it cannot drift from the code.</p>
+    <p class="sub">
+      Every page here is rendered from the repository's own markdown, so the
+      documentation cannot drift from the code that ships.
+    </p>
     <div class="cards">
       <a class="card" href="install/">
         <h3>Installation</h3>
-        <p>PyPI, an editable checkout, shell completions for bash and zsh, and the oh-my-zsh plugin.</p>
+        <p>PyPI, an editable checkout, host preparation, and shell completions for bash, zsh and oh-my-zsh.</p>
         <span class="more">Install →</span>
       </a>
       <a class="card" href="tutorial/">
@@ -260,7 +349,7 @@ agent-container attach acme</pre>
       </a>
       <a class="card" href="docs/">
         <h3>Documentation</h3>
-        <p>Fourteen subsystem documents, two architecture decision records and twenty-one feature specifications.</p>
+        <p>Fourteen subsystem documents, two architecture decision records, and every feature specification.</p>
         <span class="more">Browse the docs →</span>
       </a>
       <a class="card" href="guide/">
@@ -270,7 +359,7 @@ agent-container attach acme</pre>
       </a>
       <a class="card" href="contributing/">
         <h3>Contributing</h3>
-        <p>The ground rules, the one quality-gate script that CI and the local hook share, and Conventional Commits.</p>
+        <p>The ground rules, the one quality-gate script CI and the local hook share, and Conventional Commits.</p>
         <span class="more">How to contribute →</span>
       </a>
     </div>
