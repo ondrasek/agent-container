@@ -24,6 +24,19 @@ samples/01-workspace-write/
 
 Start with **01**: it needs only a model key.
 
+## Check your CLI is current first
+
+These samples use the declarative verbs (`plan`, `apply`, `destroy`). An older
+install will answer **`no such command`** — which looks like a broken sample and
+is not:
+
+```bash
+agent-container --version          # an install too old to have this also lacks `plan`
+uv tool upgrade agent-container    # if it is behind
+```
+
+Or run the repo copy directly: `./bin/agent-container plan`.
+
 ## Once per machine
 
 ```bash
