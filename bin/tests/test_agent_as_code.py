@@ -2063,3 +2063,40 @@ def test_plan_passes_once_the_env_file_exists(wiz, aac_env, tmp_path, monkeypatc
     monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
     rows = wiz.do_aac_status()
     assert [r["name"] for r in rows] == ["acme"]
+
+
+def test_plan_accepts_an_env_file_DECLARED_in_the_spec(wiz, aac_env, tmp_path, monkeypatch):
+    """`container.env_file` is a documented field, and apply honours it BEFORE the
+    convention chain. The precheck originally checked only the convention, so it
+    refused specs that used the field — valid specs, rejected by their own guard.
+
+    Found by the acceptance tier, which the local gate deliberately excludes: every
+    hermetic test used the convention path, so none of them could see it.
+    """
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: acme\n    host: local\n"
+        "    container:\n      env_file: ./ci.env\n",
+    )
+    (root / "ci.env").write_text("GIT_USER_NAME=t\nGIT_USER_EMAIL=t@example.invalid\n")
+    monkeypatch.chdir(root)
+    # The convention chain finds NOTHING — the declared field is the only source,
+    # which is exactly the case that used to be refused.
+    monkeypatch.setattr(wiz, "resolve_env_file", lambda name: None)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    assert [r["name"] for r in wiz.do_aac_status()] == ["acme"]
+
+
+def test_plan_refuses_a_declared_env_file_that_is_missing(wiz, aac_env, tmp_path, monkeypatch):
+    """Declaring a file that is not there is a different failure from declaring
+    none, and it must not silently fall through to the convention chain — that
+    would deploy with an env file the operator did not name."""
+    root = _project(
+        tmp_path,
+        "environments:\n  - name: acme\n    host: local\n"
+        "    container:\n      env_file: ./absent.env\n",
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(wiz, "host_container_names", lambda host, include_stopped=False: set())
+    with pytest.raises(wiz.Fatal, match="container.env_file .* does not exist"):
+        wiz.do_aac_status()

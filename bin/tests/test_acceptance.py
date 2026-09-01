@@ -1724,6 +1724,9 @@ def test_declarative_apply_ro_spec_credential_drift_destroy(acc):
     proj = acc.tmp / "aacproj"
     _write_project(proj, name, agent="claude")
     acc.register(name)  # ensure teardown even if an assertion fails mid-test
+    # Declared credentials are PUSHED over the container's own sshd now, which
+    # needs an authorised identity the tool will not mint for itself.
+    _seed_delivery_identity(acc, "aacacc")
     env = {"MYSECRET_SRC": secret}
 
     # apply → the declared environment converges to a running container.
@@ -1740,7 +1743,13 @@ def test_declarative_apply_ro_spec_credential_drift_destroy(acc):
 
     # T013 / SC-004: the referenced credential reached the container as an env var,
     # and NO plaintext of the value appears anywhere in the tracked project dir.
-    got = _exec(name, ["printenv", "MYSECRET"])
+    # NOT `printenv` from a bare exec. A delivered credential is no longer in the
+    # CONTAINER's base environment — it cannot be, because putting it there means
+    # putting it in the compose model, which is the Constitution IX violation this
+    # channel exists to end. It reaches the agent (a child of the entrypoint) and
+    # every INTERACTIVE shell, which sources ~/.agent-env/env — where the managed
+    # region references the credential's own volume by path rather than by value.
+    got = _exec(name, ["bash", "-ic", 'printf %s "$MYSECRET"'])
     assert got.returncode == 0 and got.stdout.strip() == secret
     on_disk = [p for p in proj.rglob("*") if p.is_file() and secret in p.read_text(errors="ignore")]
     assert on_disk == [], f"SC-004 breach: plaintext secret found in project dir: {on_disk}"
@@ -1843,6 +1852,11 @@ def test_declarative_command_source_injects_without_plaintext(acc):
     spec_file.write_text(_CMD_CRED_PROJECT.format(name=name))
     (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
     acc.register(name)
+    # A declared credential is now PUSHED over the container's own sshd rather
+    # than written into a staged env file, so the tool must be authorised to log
+    # in — and it deliberately will not mint a key for that. Same requirement an
+    # operator meets with samples/setup-once.sh.
+    _seed_delivery_identity(acc, "cmd008")
     # The secret lives ONLY in the operator's environment; the spec names the variable.
     env = {"RESOLVER_SRC_008": secret}
 
@@ -1851,7 +1865,13 @@ def test_declarative_command_source_injects_without_plaintext(acc):
     _wait_container_state(f"agent-container-{name}", "running")
 
     # the resolver's value reached the container (trailing newline stripped, FR-012)...
-    got = _exec(name, ["printenv", "MYSECRET"])
+    # NOT `printenv` from a bare exec. A delivered credential is no longer in the
+    # CONTAINER's base environment — it cannot be, because putting it there means
+    # putting it in the compose model, which is the Constitution IX violation this
+    # channel exists to end. It reaches the agent (a child of the entrypoint) and
+    # every INTERACTIVE shell, which sources ~/.agent-env/env — where the managed
+    # region references the credential's own volume by path rather than by value.
+    got = _exec(name, ["bash", "-ic", 'printf %s "$MYSECRET"'])
     assert got.returncode == 0 and got.stdout.strip() == secret
     # ...and no plaintext anywhere in the tracked project or the tool's output (SC-001)
     on_disk = [p for p in proj.rglob("*") if p.is_file() and secret in p.read_text(errors="ignore")]

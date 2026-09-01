@@ -672,3 +672,40 @@ def test_codex_trust_leaves_a_malformed_config_alone(wiz, tmp_path):
     and codex reports the real error better than this can."""
     broken = "this is [not toml\n"
     assert _run_seed(tmp_path, initial=broken) == broken
+
+
+def test_credential_volumes_are_excluded_from_the_drift_comparison(wiz, monkeypatch):
+    """A pushed credential must not make `apply` permanently non-idempotent.
+
+    Per-credential volumes are DYNAMIC — one per declared credential, addressed by
+    prefix — and `reconcile_cred_volumes` owns their lifecycle. `desired` here is
+    the FIXED volume set, which deliberately excludes them, so leaving them on the
+    deployed side made every credentialed environment report drift: the volume was
+    declared by the deployment that created it and "no longer declared" by the very
+    next plan.
+
+    Latent until credentials stopped riding an env file — it fires for anything
+    whose credentials are PUSHED, which is now all of them rather than a hardcoded
+    two providers. Found by the acceptance tier asserting SC-002 idempotence.
+    """
+    fixed = wiz.per_container_volumes("acme")
+    deployed = set(fixed) | {wiz.cred_volume_name("acme", "env/GH_TOKEN")}
+    monkeypatch.setattr(wiz, "deployed_volume_set", lambda h, n: deployed)
+    adopt, release = wiz.volume_set_migration("local", "acme", fixed)
+    assert (adopt, release) == ([], []), (
+        f"a credential volume was treated as drift: add={adopt} release={release}"
+    )
+
+
+def test_a_genuinely_missing_volume_is_still_reported(wiz, monkeypatch):
+    """The exclusion must not blind the check to what it exists for.
+
+    Feature 016 added a tenth volume while every identity check kept passing, so
+    this comparison is the only thing that notices a changed volume SET. Narrowing
+    it to ignore credential volumes must not also ignore a real one.
+    """
+    fixed = wiz.per_container_volumes("acme")
+    deployed = set(fixed) - {fixed[-1]} | {wiz.cred_volume_name("acme", "env/GH_TOKEN")}
+    monkeypatch.setattr(wiz, "deployed_volume_set", lambda h, n: deployed)
+    adopt, release = wiz.volume_set_migration("local", "acme", fixed)
+    assert adopt == [fixed[-1]] and release == []

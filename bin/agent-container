@@ -8181,7 +8181,21 @@ def volume_set_migration(host: str, name: str, desired: list[str]) -> tuple[list
     deployed = deployed_volume_set(host, name)
     if deployed is None:
         return [], []
-    want = set(desired)
+    # PER-CREDENTIAL VOLUMES ARE NOT PART OF THIS COMPARISON, on either side.
+    # They are dynamic — one per declared credential, addressed by prefix — and
+    # `reconcile_cred_volumes` owns their whole lifecycle, creating and pruning
+    # them against the declaration on every deploy. `desired` here is the FIXED
+    # set, which deliberately excludes them, so leaving them in `deployed` made
+    # every credentialed environment report perpetual drift: the volume was
+    # declared by the deployment that created it and "no longer declared" by the
+    # very next plan, so `apply` could never be idempotent for such an
+    # environment.
+    #
+    # Latent until now, and only because few environments reached this path: it
+    # fires for anything whose credentials are PUSHED, which since Constitution
+    # IX's repair is all of them rather than a hardcoded two providers.
+    deployed = {v for v in deployed if CRED_VOLUME_INFIX not in v}
+    want = {v for v in desired if CRED_VOLUME_INFIX not in v}
     return sorted(want - deployed), sorted(deployed - want)
 
 
@@ -17223,7 +17237,9 @@ def _verify_ro_spec_delivery(aac_configs: list[tuple[str, str, str]], spec: Exec
         )
 
 
-def _precheck_environments(environments: list[dict], host_override: str | None = None) -> None:
+def _precheck_environments(
+    environments: list[dict], host_override: str | None = None, root: Path | None = None
+) -> None:
     """Reject unsupported/unsafe environments UP FRONT — before any deploy — so a
     later environment's problem never leaves earlier ones partially applied (FR-003,
     even on the `--host` override path where the per-env host guard is short-circuited)."""
@@ -17252,7 +17268,24 @@ def _precheck_environments(environments: list[dict], host_override: str | None =
         #
         # Reported per environment and named, so a multi-environment project says
         # WHICH one is missing it rather than failing at the first.
-        if resolve_env_file(name) is None:
+        c = env.get("container") or {}
+        # THE SAME RESOLUTION `apply` USES, and it has to be: a spec may declare
+        # `container.env_file`, which apply honours BEFORE the convention chain
+        # (`base_env = root/env_file if declared else resolve_env_file(name)`).
+        # Checking only the convention chain refused environments that declare the
+        # field — a documented one — so this guard rejected valid specs. Caught by
+        # the acceptance tier, which the local gate deliberately excludes; the
+        # hermetic tests all used the convention path and could not see it.
+        _declared_env = c.get("env_file")
+        if _declared_env and root is not None:
+            _p = (root / str(_declared_env)).resolve()
+            if not _p.is_file():
+                die(
+                    f"environment {name}: container.env_file {_declared_env!r} does not exist "
+                    f"({_p})",
+                    remedy="create that file, or drop the field to use the <name>.env convention",
+                )
+        elif not _declared_env and resolve_env_file(name) is None:
             cands = ", ".join(str(cd) for cd in env_file_candidates(name, Path.cwd()))
             die(
                 f"environment {name}: no env file found. Looked in: {cands}",
@@ -17261,7 +17294,6 @@ def _precheck_environments(environments: list[dict], host_override: str | None =
                     f"GIT_USER_EMAIL (GH_TOKEN may instead be a declared credential)"
                 ),
             )
-        c = env.get("container") or {}
         if c.get("workspace") == "bind":
             die(
                 f"environment {name}: workspace=bind would expose /workspace/.agent-container "
@@ -17435,7 +17467,7 @@ def do_aac_status(host_override: str | None = None, skip_unknown: bool = False) 
         )
     log(f"project root: {root}")
     environments = load_project_spec(root, skip_unknown)
-    _precheck_environments(environments, host_override)
+    _precheck_environments(environments, host_override, root)
     return plan_payload(_reconcile_plan(environments, host_override))
 
 
@@ -17700,7 +17732,7 @@ def do_aac_apply(
     log(f"project root: {root}")
     environments = load_project_spec(root, skip_unknown)
     _precheck_environments(
-        environments, host_override
+        environments, host_override, root
     )  # reject unsupported/unsafe envs before ANY deploy (FR-003)
     plans = _reconcile_plan(environments, host_override)
     todo = [p for p in plans if p[4] != "matching"]

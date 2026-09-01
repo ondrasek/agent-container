@@ -1162,6 +1162,7 @@ fi
 # in the environment. Delivery cannot happen earlier — the container has to be up
 # for the CLI to push into it — so this is the first point at which it can.
 ENV_INJECT_DIR="${DELIVER_DIR}/env"
+_delivered_names=()
 for _ev in "${ENV_INJECT_DIR}"/*/value; do
     [[ -f "${_ev}" ]] || continue
     _name="$(basename "$(dirname "${_ev}")")"
@@ -1171,9 +1172,53 @@ for _ev in "${ENV_INJECT_DIR}"/*/value; do
     [[ -n "${!_name:-}" ]] && continue
     printf -v "${_name}" '%s' "$(cat "${_ev}")"
     export "${_name?}"
+    _delivered_names+=("${_name}")
     log "exported ${_name} from its delivered credential (pushed, never described)"
 done
 unset _ev _name
+
+# AN ATTACHED SHELL MUST SEE THEM TOO, and exporting here is not enough: sshd
+# started earlier in this script, so a shell opened over SSH is not a child of
+# this process and inherits nothing from it. Before this channel existed the
+# value rode the compose env-file and was therefore in the CONTAINER's base
+# environment, which every process saw. It no longer can be — that is precisely
+# what Constitution IX forbids — so the shell env has to be told separately.
+#
+# It matters concretely: the git credential helper expands ${GH_TOKEN} at push
+# time from the shell's environment, so without this an operator who attaches and
+# pushes by hand gets an auth failure with nothing to explain it.
+#
+# A REFERENCE, NEVER THE VALUE. ~/.agent-env/env is on a persistent volume, and a
+# credential must not be written to one (Constitution III) — so the line reads the
+# value at shell start from the credential's own volume, exactly as Claude's
+# apiKeyHelper does. Delete the credential and the line yields nothing.
+#
+# A MANAGED REGION, rewritten every boot: the file is the operator's and they may
+# edit it, so everything outside the markers is preserved byte-for-byte, and a
+# credential that stops being delivered stops being referenced. Same idiom as the
+# authorized_keys region and the ~/.ssh/config block.
+_env_begin="# >>> agent-container delivered credentials (managed) >>>"
+_env_end="# <<< agent-container delivered credentials (managed) <<<"
+if [[ -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
+    _tmp_env="${AGENT_CONTAINER_ENV_FILE}.new"
+    awk -v b="${_env_begin}" -v e="${_env_end}" '
+        $0 == b { skip = 1 } { if (!skip) print } $0 == e { skip = 0 }
+    ' "${AGENT_CONTAINER_ENV_FILE}" > "${_tmp_env}"
+    if ((${#_delivered_names[@]})); then
+        {
+            printf '%s\n' "${_env_begin}"
+            for _n in "${_delivered_names[@]}"; do
+                printf '%s="$(cat %s/%s/value 2>/dev/null)"\n' "${_n}" "${ENV_INJECT_DIR}" "${_n}"
+            done
+            printf '%s\n' "${_env_end}"
+        } >> "${_tmp_env}"
+    fi
+    mv -f "${_tmp_env}" "${AGENT_CONTAINER_ENV_FILE}"
+    if ((${#_delivered_names[@]})); then
+        log "shell-env region references ${#_delivered_names[@]} delivered credential(s) (by path, never by value)"
+    fi
+fi
+unset _n _tmp_env _env_begin _env_end
 
 # GH_TOKEN is required, and it may arrive by EITHER channel — the operator's env
 # file or a declared credential delivered just above — so it is checked here
