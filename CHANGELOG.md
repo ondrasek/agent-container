@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.49.3 (2026-09-01)
+
+### Bug Fixes
+
+- **credentials**: A start wait must not borrow the build budget
+  ([`2ea867e`](https://github.com/ondrasek/agent-container/commit/2ea867e90df42016bfbaa7289be8bd4ca5826919))
+
+### Continuous Integration
+
+- Make the podman leg diagnosable — per-test timeout and unbuffered output
+  ([`b9a8076`](https://github.com/ondrasek/agent-container/commit/b9a807696feb9116734b41d1bfd44f04eefa0f49))
+
+
 ## v0.49.2 (2026-09-01)
 
 
