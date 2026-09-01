@@ -10375,6 +10375,40 @@ def revoke_cred(host: str, host_rec: dict, name: str, ref: str) -> tuple[bool, b
     return deleted, r.returncode == 0
 
 
+def wait_container_running(host_rec: dict, name: str, budget: float | None = None) -> bool:
+    """Block until the container is RUNNING; return whether it got there.
+
+    COMPOSE RETURNING IS NOT THE CONTAINER BEING EXECABLE, and the gap is
+    runtime-dependent. Under docker `compose up -d` returns late enough that the
+    next `exec` reliably finds the container, so three call sites simply assumed
+    it. Under podman the same sequence loses the race and reports
+
+        Error: no container with name or ID "agent-container-x" found
+
+    a lookup failure immediately after compose printed `Started` — which reads as
+    though the container never existed rather than as a race. Measured on CI's
+    podman leg, where it took out nine acceptance tests.
+
+    RUNNING, not merely created: a `created` container accepts no exec session
+    ("can only create exec sessions on running containers"), so waiting for mere
+    existence trades one race for a narrower one.
+
+    The budget covers an IMAGE BUILD on the paths that may trigger one, which is
+    minutes rather than seconds — hence AGENT_CONTAINER_BUILD_TIMEOUT rather than
+    the container's own 90s sentinel.
+    """
+    if budget is None:
+        budget = float(os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", str(BUILD_WAIT_TIMEOUT)))
+    base = driver_runtime_argv(host_rec)
+    cname = container_name(name)
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        if runtime_container_running(base, cname):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
     """Hand the freshly-mounted credential volumes to `dev`.
 
@@ -10391,6 +10425,16 @@ def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
     """
     if not refs:
         return
+    # WAIT HERE, not at the call sites. This is the first thing that touches the
+    # container, so "is it there yet" is this operation's own precondition rather
+    # than something each of three callers has to remember — which is exactly how
+    # the race got fixed on the foreground path and stayed live on the detached
+    # and `start` paths. Callers that stub this function stub the wait with it.
+    if not wait_container_running(host_rec, name):
+        die(
+            f"{container_name(name)} did not reach a running state, so its "
+            f"credential volumes could not be handed to {DEFAULT_SSH_USER}"
+        )
     paths = shlex.join(f"{SECRETS_DIR}/{r}" for r in refs)
     argv = driver_runtime_argv(host_rec) + [
         "exec", "-u", "root", container_name(name),
@@ -11195,26 +11239,6 @@ def compose_up_exec(
             # only THEN start racing the sentinel. The container's own 90s begins
             # when its entrypoint reaches that point, which is after it is running —
             # so the two clocks start together rather than one inside the other.
-            build_budget = int(
-                os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", str(BUILD_WAIT_TIMEOUT))
-            )
-            deadline = time.monotonic() + build_budget
-            base = driver_runtime_argv(host_rec)
-            cname = container_name(name)
-            # RUNNING, not merely created. Delivery execs into the container, and
-            # a container in `created` state accepts no exec session — "can only
-            # create exec sessions on running containers: container state improper".
-            # Waiting only for existence traded one race for a narrower one.
-            while time.monotonic() < deadline:
-                if runtime_container_running(base, cname):
-                    break
-                time.sleep(0.5)
-            else:
-                warn(
-                    f"credential delivery gave up waiting for {cname} to start after "
-                    f"{build_budget}s; the container will continue without its secrets"
-                )
-                return
             try:
                 claim_cred_mounts(host_rec, name, _cred_refs)
                 deliver_secrets(
