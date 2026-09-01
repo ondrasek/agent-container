@@ -92,19 +92,46 @@ jobs:
         run: uv build
 
   acceptance:
-    name: acceptance (real container)
+    name: acceptance (${{ matrix.runtime }})
     runs-on: ubuntu-latest
+    # BOTH RUNTIMES, EXPLICITLY. The suite honours AGENT_CONTAINER_RUNTIME and
+    # otherwise falls back to detect_runtime(), whose order is platform-aware:
+    # podman first on Linux, docker first on macOS. So CI covered podman only and
+    # a developer's machine covered docker only — neither environment ran both,
+    # and nothing said so. That is how a docker-only DNS rule survived months of
+    # green builds while being inert under the runtime ADR 0001 makes the DEFAULT.
+    #
+    # The axis is on THIS job alone: every other job is hermetic and touches no
+    # container runtime, so an axis there would double the cost and cover nothing.
+    strategy:
+      # A runtime-specific failure is the entire point of this axis, so the legs
+      # must not cancel each other — fail-fast would let the first failure hide
+      # whether the other runtime is also broken, or only that one is.
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    env:
+      AGENT_CONTAINER_RUNTIME: ${{ matrix.runtime }}
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+      - name: Verify the docker leg has a usable daemon
+        if: matrix.runtime == 'docker'
+        # Preinstalled on ubuntu-latest, but ASSERTED rather than assumed: a
+        # runtime that is installed is not the same as one that is usable, and a
+        # leg that silently degraded would report green for coverage it lost.
+        run: |
+          set -eux
+          docker version --format '{{.Server.Version}}'
+          docker ps
       - name: Ensure a podman service, so the podman driver is really covered
-        # The tool's DEFAULT runtime is podman (ADR 0001), and until now EVERY
-        # acceptance test used docker or the implicit local docker daemon — which
-        # is exactly why a control-plane image with no podman client shipped
-        # unnoticed. Installed and STARTED explicitly rather than relying on what
-        # the runner image happens to contain, so the coverage cannot quietly
-        # disappear when a runner image changes.
+        if: matrix.runtime == 'podman'
+        # Installed and STARTED explicitly rather than relying on what the runner
+        # image happens to contain, so this leg cannot quietly become a no-op when
+        # a runner image changes. This step predates the matrix above: it was
+        # added because a control-plane image with no podman client once shipped
+        # unnoticed, and it is now the setup for the podman leg specifically.
         run: |
           set -eux
           command -v podman || sudo apt-get update -qq && sudo apt-get install -y -qq podman
@@ -115,9 +142,13 @@ jobs:
           podman system connection add ci "unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" || true
           podman --connection ci ps
       - name: Run acceptance suite
-        # Builds the image (docker preinstalled on ubuntu-latest) and drives real
-        # containers through the rootless SSH-identity flows. `-m acceptance`
-        # overrides the default `-m 'not acceptance'` from pyproject. No secrets.
+        # Builds the image and drives real containers through the rootless
+        # SSH-identity flows, under the runtime this leg selected —
+        # AGENT_CONTAINER_RUNTIME is set at the job level, and the suite reads it
+        # in preference to its own detection. `-m acceptance` overrides the
+        # default `-m 'not acceptance'` from pyproject. No secrets: the
+        # real-agent tests skip themselves without a provider key, naming what
+        # goes uncovered.
         run: >
           uv run --no-project --python 3.14 --with pytest
           --with 'pytest-github-actions-annotate-failures>=0.2,<1'
