@@ -249,15 +249,36 @@ def _run_cli(
     # and are unaffected; this only fixes the default.
     if cwd is None:
         cwd = _neutral_cwd()
-    return subprocess.run(
-        argv,
-        env=env,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            argv,
+            env=env,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        # SURFACE WHAT IT HAD SAID. `capture_output` means a timeout discards the
+        # partial stdout/stderr with the exception, so a CLI that hung reported the
+        # command line and nothing about WHERE — three CI runs of ~85 minutes each
+        # established only that egress deploys hang under rootless podman, because
+        # the compose output that would have named the step died with the process.
+        #
+        # Re-raised, not swallowed: the test still fails on timeout. It just fails
+        # with evidence.
+        out = (e.stdout or b"") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = (e.stderr or b"") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode(errors="replace")
+        raise AssertionError(
+            f"CLI timed out after {timeout}s: {' '.join(map(str, argv))}\n"
+            f"--- partial stdout ---\n{out[-4000:]}\n"
+            f"--- partial stderr ---\n{err[-4000:]}"
+        ) from e
 
 
 def _gen_keypair(path: Path) -> Path:
