@@ -101,7 +101,14 @@ jobs:
     # default while holding the concurrency group — so every later push on this
     # ref queues behind a job nobody is reading. 45 minutes is roughly double what
     # the single-runtime job took; exceeding it is information, not noise.
-    timeout-minutes: 45
+    # 100 rather than 45, on evidence. Docker finishes the suite in ~19 minutes;
+    # rootless podman on a GitHub runner is roughly four times slower at the same
+    # work — every container create/start/exec goes through fuse-overlayfs and a
+    # user-space network stack. The 45 was set before that was measurable, when
+    # slow and broken were indistinguishable because a harness bug was making
+    # every test rebuild the image. With that fixed the leg runs CLEAN as far as
+    # it gets; what it needs now is the time the work actually takes.
+    timeout-minutes: 100
     # THE PODMAN LEG IS ADVISORY TODAY, AND THAT IS A STATEMENT OF FACT RATHER
     # THAN A PREFERENCE: the acceptance suite does not currently pass under
     # rootless podman in CI. Its first full run reached 24% in 45 minutes with
@@ -192,7 +199,7 @@ jobs:
         # continue-on-error does absorb. The job-level 45 stays as a backstop for
         # anything that hangs outside this command.
         run: >
-          timeout 40m
+          timeout 85m
           uv run --no-project --python 3.14 --with pytest
           --with 'pytest-github-actions-annotate-failures>=0.2,<1'
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' --with 'pyyaml>=6,<7'
