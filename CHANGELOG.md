@@ -2,6 +2,49 @@
 
 <!-- version list -->
 
+## v0.49.0 (2026-09-01)
+
+### Bug Fixes
+
+- **credentials**: Three regressions the acceptance tier caught that the gate cannot
+  ([`4679b1e`](https://github.com/ondrasek/agent-container/commit/4679b1e81cfbf0940057aa2ebc847b74ca161006))
+
+- **host**: Register a host in the RUNTIME's terms, not always docker's
+  ([`01d6dbe`](https://github.com/ondrasek/agent-container/commit/01d6dbe707200cd0e28f3f713271c1bff0eb9c2b))
+
+### Continuous Integration
+
+- Bound the acceptance job at 45 minutes
+  ([`017a25e`](https://github.com/ondrasek/agent-container/commit/017a25e8bb29b93f2268e32908240b33a1d27424))
+
+- Bound the acceptance step, not the job, so an advisory leg can be absorbed
+  ([`e3f1c1f`](https://github.com/ondrasek/agent-container/commit/e3f1c1f404b9ad8c39af7661cdaa100841f15d4d))
+
+- Install podman on BOTH matrix legs, not only the podman one
+  ([`bb368ee`](https://github.com/ondrasek/agent-container/commit/bb368ee5ab7ca26403da6074e9a3cbe2db752d13))
+
+- Keep the podman leg advisory until the suite actually passes under it
+  ([`caabc74`](https://github.com/ondrasek/agent-container/commit/caabc74ad80ecc20996c327c67f0bbb5f5fda346))
+
+- Run the acceptance tier under BOTH runtimes, not whichever one is default
+  ([`1503299`](https://github.com/ondrasek/agent-container/commit/15032996da1495ce888811794eaaa930e0c9ea5f))
+
+### Documentation
+
+- **egress**: Record that the podman DNS path is now verified, not just written
+  ([`64dbea1`](https://github.com/ondrasek/agent-container/commit/64dbea172aa8c7c81bfcc0d9bd7e0033ecc45e65))
+
+### Features
+
+- **entrypoint**: Pre-answer codex's workspace trust, and settle the other agents
+  ([`24de3ee`](https://github.com/ondrasek/agent-container/commit/24de3ee652584735832a429124c90afcde6312ae))
+
+### Performance Improvements
+
+- **quality-gate**: Run the checks concurrently — 184s to ~48s
+  ([`191745c`](https://github.com/ondrasek/agent-container/commit/191745cbb671af175e2f3ea19c8b275bf76b21e2))
+
+
 ## v0.48.0 (2026-08-31)
 
 
