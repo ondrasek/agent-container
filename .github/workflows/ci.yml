@@ -183,7 +183,16 @@ jobs:
         # default `-m 'not acceptance'` from pyproject. No secrets: the
         # real-agent tests skip themselves without a provider key, naming what
         # goes uncovered.
+        # `timeout 40m`, INSIDE the step, and the distinction is load-bearing.
+        # A job-level timeout CANCELS the job, and a cancelled job cancels the
+        # whole RUN regardless of continue-on-error — measured: the run concluded
+        # `cancelled` with the docker leg green, and publish.yml requires
+        # `success`, so releases stayed blocked by the very leg that was supposed
+        # to be advisory. A step that EXITS NON-ZERO is an ordinary failure, which
+        # continue-on-error does absorb. The job-level 45 stays as a backstop for
+        # anything that hangs outside this command.
         run: >
+          timeout 40m
           uv run --no-project --python 3.14 --with pytest
           --with 'pytest-github-actions-annotate-failures>=0.2,<1'
           --with 'typer>=0.12,<1' --with 'questionary>=2.0,<3' --with 'rich>=13,<15' --with 'pyyaml>=6,<7'
