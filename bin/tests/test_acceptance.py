@@ -274,10 +274,24 @@ def _run_cli(
             out = out.decode(errors="replace")
         if isinstance(err, bytes):
             err = err.decode(errors="replace")
+        # THE RUNTIME'S VIEW AT THE MOMENT OF THE HANG. The streams alone were not
+        # enough: the build output filled the tail and the interesting part — what
+        # compose was waiting FOR — was never in them. What matters is whether the
+        # containers exist and what state they are in, especially the egress
+        # sidecar, since the agent service gates on `service_healthy` and a
+        # never-healthy sidecar is an unbounded wait handed to the compose provider.
+        try:
+            ps = subprocess.run(
+                [RUNTIME, "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+                capture_output=True, text=True, timeout=60,
+            ).stdout  # fmt: skip
+        except Exception as probe_err:  # never let the diagnostic hide the failure
+            ps = f"<could not list containers: {probe_err}>"
         raise AssertionError(
             f"CLI timed out after {timeout}s: {' '.join(map(str, argv))}\n"
-            f"--- partial stdout ---\n{out[-4000:]}\n"
-            f"--- partial stderr ---\n{err[-4000:]}"
+            f"--- {RUNTIME} ps -a at timeout ---\n{ps}\n"
+            f"--- partial stderr (tail) ---\n{err[-2500:]}\n"
+            f"--- partial stdout (tail) ---\n{out[-1500:]}"
         ) from e
 
 
