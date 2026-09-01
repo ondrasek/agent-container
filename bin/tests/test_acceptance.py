@@ -159,14 +159,25 @@ def _cli_env(state_dir: Path) -> dict[str, str]:
     # connection registry, which lives under $XDG_CONFIG_HOME/containers/. Its
     # connection list read EMPTY, `podman --connection <name>` resolved nothing, and
     # every deploy died at connect time — making the DEFAULT runtime (ADR 0001) the
-    # one we could not test. XDG_STATE_HOME and XDG_DATA_HOME below are left as they
-    # were: podman keeps nothing under either, so neither collides.
+    # one we could not test.
     env["AGENT_CONTAINER_CONFIG_DIR"] = str(state_dir / "xdgconfig" / "agent-container")
     # Feature 016: the run-record store is DATA, not state. Without this the suite
     # would write records into the developer's real ~/.local/share/agent-container
     # and — worse — read them back, so a `runs list` assertion could pass on a
     # record left behind by an earlier session instead of the one it just made.
-    env["XDG_DATA_HOME"] = str(state_dir / "xdgdata")
+    #
+    # THE TOOL'S OWN VARIABLE, for exactly the reason the paragraph above gives for
+    # the config dir — and this one had the same bug, undiscovered because it only
+    # bites on ONE platform. Rootless podman on Linux keeps its image graphroot
+    # under $XDG_DATA_HOME/containers/storage, so moving that variable gave every
+    # test its own podman image store: the session-built image was invisible
+    # ("no such image: localhost/agent-container:latest: image not known") and each
+    # test rebuilt from scratch, which is why the CI podman leg reached 24% in 45
+    # minutes. Invisible on macOS, where podman is a remote client to a VM and the
+    # host's XDG_DATA_HOME is irrelevant, and on docker, whose storage belongs to
+    # the daemon. The old comment asserted "podman keeps nothing under either" —
+    # true for XDG_STATE_HOME, false for this one.
+    env["AGENT_CONTAINER_DATA_DIR"] = str(state_dir / "xdgdata" / "agent-container")
     return env
 
 
@@ -325,7 +336,7 @@ def _wait_until(predicate, what: str, timeout: int = 60) -> None:
 
 
 def _runs_store_of(state_dir: Path) -> Path:
-    """The durable run store under the isolated XDG_DATA_HOME (see _cli_env).
+    """The durable run store under the isolated AGENT_CONTAINER_DATA_DIR (_cli_env).
 
     Derived from the same constant the harness sets, so a change to the isolation
     scheme breaks this loudly instead of making every trail assertion read as
