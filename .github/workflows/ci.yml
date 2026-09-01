@@ -94,6 +94,14 @@ jobs:
   acceptance:
     name: acceptance (${{ matrix.runtime }})
     runs-on: ubuntu-latest
+    # BOUNDED, because the first matrix run showed why: the docker leg failed in
+    # minutes while the podman leg ran the same suite for over 90 without
+    # finishing. Rootless podman is genuinely slower, but "slower" and "hung" look
+    # identical from here, and with no timeout a stuck leg burns the 6-hour
+    # default while holding the concurrency group — so every later push on this
+    # ref queues behind a job nobody is reading. 45 minutes is roughly double what
+    # the single-runtime job took; exceeding it is information, not noise.
+    timeout-minutes: 45
     # BOTH RUNTIMES, EXPLICITLY. The suite honours AGENT_CONTAINER_RUNTIME and
     # otherwise falls back to detect_runtime(), whose order is platform-aware:
     # podman first on Linux, docker first on macOS. So CI covered podman only and
