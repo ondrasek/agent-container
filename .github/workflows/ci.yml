@@ -134,7 +134,16 @@ jobs:
           docker version --format '{{.Server.Version}}'
           docker ps
       - name: Ensure a podman service, so the podman driver is really covered
-        if: matrix.runtime == 'podman'
+        # RUNS ON BOTH LEGS, deliberately, and gating it on the podman leg was a
+        # mistake this pipeline caught on its first matrix run. Two tests register
+        # a host with `--driver podman` and assert the tool drives podman for it —
+        # coverage of the DRIVER, which is independent of whichever runtime the leg
+        # selected by default. Skipping the setup on the docker leg made them error
+        # with the fixture's own warning: "the acceptance job installs and starts
+        # one on purpose — if that step changed, this coverage vanished with it".
+        #
+        # One apt install is cheaper than losing a guard that was written to
+        # survive precisely this edit.
         # Installed and STARTED explicitly rather than relying on what the runner
         # image happens to contain, so this leg cannot quietly become a no-op when
         # a runner image changes. This step predates the matrix above: it was
