@@ -10398,7 +10398,7 @@ def wait_container_running(host_rec: dict, name: str, budget: float | None = Non
     the container's own 90s sentinel.
     """
     if budget is None:
-        budget = float(os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", str(BUILD_WAIT_TIMEOUT)))
+        budget = float(CONTAINER_START_TIMEOUT)
     base = driver_runtime_argv(host_rec)
     cname = container_name(name)
     deadline = time.monotonic() + budget
@@ -10409,7 +10409,9 @@ def wait_container_running(host_rec: dict, name: str, budget: float | None = Non
     return False
 
 
-def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
+def claim_cred_mounts(
+    host_rec: dict, name: str, refs: list[str], wait_budget: float | None = None
+) -> None:
     """Hand the freshly-mounted credential volumes to `dev`.
 
     A named volume mounts root-owned unless its mount point already exists in the
@@ -10430,7 +10432,7 @@ def claim_cred_mounts(host_rec: dict, name: str, refs: list[str]) -> None:
     # than something each of three callers has to remember — which is exactly how
     # the race got fixed on the foreground path and stayed live on the detached
     # and `start` paths. Callers that stub this function stub the wait with it.
-    if not wait_container_running(host_rec, name):
+    if not wait_container_running(host_rec, name, wait_budget):
         die(
             f"{container_name(name)} did not reach a running state, so its "
             f"credential volumes could not be handed to {DEFAULT_SSH_USER}"
@@ -10944,6 +10946,14 @@ def record_never_started(host_name: str, name: str, spec: ExecSpec, reason: str)
 # been discovered, staged, and never sent.
 BUILD_WAIT_TIMEOUT = 1800  # seconds; env: AGENT_CONTAINER_BUILD_TIMEOUT
 
+# The OTHER wait, and it must not borrow the one above. Once `compose up` has
+# RETURNED, a container that is going to start has started — the gap being closed
+# is a scheduling race measured in milliseconds under podman, not an image build.
+# Giving this the build budget meant a deploy whose container was never going to
+# run (a test asserting a refusal, an operator's broken image) sat for THIRTY
+# MINUTES before saying so, which reads as a hang and was one.
+CONTAINER_START_TIMEOUT = 90  # seconds; matches the container's own sentinel wait
+
 
 def compose_up_exec(
     host_name: str,
@@ -11240,7 +11250,17 @@ def compose_up_exec(
             # when its entrypoint reaches that point, which is after it is running —
             # so the two clocks start together rather than one inside the other.
             try:
-                claim_cred_mounts(host_rec, name, _cred_refs)
+                # This thread starts BEFORE `compose up --build`, so its wait may
+                # legitimately span an image build — minutes. The other call sites
+                # run after compose returned and use the short default.
+                claim_cred_mounts(
+                    host_rec,
+                    name,
+                    _cred_refs,
+                    wait_budget=float(
+                        os.environ.get("AGENT_CONTAINER_BUILD_TIMEOUT", str(BUILD_WAIT_TIMEOUT))
+                    ),
+                )
                 deliver_secrets(
                     host_name, host_rec, name, secrets_to_deliver, delivery_id=_delivery_id
                 )
