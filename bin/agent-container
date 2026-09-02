@@ -930,6 +930,32 @@ EGRESS_SERVICE_KEY = "egress"
 # at nothing, and the symptom is an unreachable DECLARED destination, which reads
 # as the allowlist being wrong.
 EGRESS_PORT = 3127
+
+# WHICH GATE EACH RUNTIME GETS. This differs by runtime because the runtimes
+# differ, not as a preference.
+#
+# docker runs healthchecks in the daemon, so `service_healthy` works — and it is
+# PROVEN here: S18's negative arm (an undeclared ssh endpoint must be refused)
+# passes with it, and failed every single time it was relaxed. Docker's model is
+# left byte-identical for exactly that reason.
+#
+# podman schedules healthchecks with systemd transient timers, and under a
+# rootless podman socket service they never fire. The sidecar reports `starting`
+# forever — never `unhealthy`, which would at least fail fast — so
+# `service_healthy` there is not a gate, it is a deadlock: measured on CI as
+# `Up 20 minutes (starting)` beside an agent stuck in `Created`, on every egress
+# test, every run. Ordering-only is the only condition that can complete, and the
+# agent's own in-container wait (entrypoint 2f) is what closes the window there.
+#
+# An unknown driver gets docker's proven gate: the failure mode of waiting too
+# long is a slow deploy, and of not waiting at all is an unguarded boundary.
+EGRESS_GATE_BY_DRIVER = {"docker": "service_healthy", "podman": "service_started"}
+
+
+def egress_depends_condition(driver: str | None) -> str:
+    return EGRESS_GATE_BY_DRIVER.get(driver or "", "service_healthy")
+
+
 EGRESS_ACL_PATH = "/etc/squid/allowed_sni.acl"
 EGRESS_UNBOUND_PATH = "/etc/unbound/allowed.conf"
 # A shell fragment the entrypoint SOURCES before flipping the policy to DROP,
@@ -7876,6 +7902,7 @@ def build_compose_model(
     environment: dict[str, str] | None = None,
     workspace_mount: object = _WORKSPACE_DEFAULT,
     declare_workspace_volume: bool = True,
+    driver: str | None = None,
     egress_filter_body: str | None = None,
     egress_unbound_body: str | None = None,
     egress_ports_body: str | None = None,
@@ -7961,7 +7988,9 @@ def build_compose_model(
         # by exec'ing the probe, then start the agent — which keeps the guarantee
         # and needs no healthcheck scheduler. That is a deploy-path change and is
         # not being made blind at the end of a long session.
-        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}}
+        service["depends_on"] = {
+            EGRESS_SERVICE_KEY: {"condition": egress_depends_condition(driver)}
+        }
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
@@ -11185,6 +11214,8 @@ def compose_up_exec(
         mounts,
         injected_configs=injected,
         cred_refs=_cred_refs,
+        # The runtime decides which dependency condition compose can honour.
+        driver=(host_rec or {}).get("driver"),
         restart=spec.restart_policy(),
         environment=env_settings | _egress_env,
         role=spec.role,

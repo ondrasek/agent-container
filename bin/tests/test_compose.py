@@ -1037,3 +1037,41 @@ def test_the_boundary_gate_lives_in_the_entrypoint(wiz):
     assert "AGENT_CONTAINER_EGRESS_TIMEOUT" in body
     # ...and refuses rather than continuing into a boundary that never came up.
     assert "did not begin serving" in body
+
+
+def test_the_egress_gate_is_chosen_per_runtime(wiz):
+    """docker keeps its PROVEN gate; podman gets one it can actually honour.
+
+    Not a preference — a statement about the runtimes. docker runs healthchecks
+    in the daemon, so `service_healthy` works, and S18's negative arm (an
+    undeclared ssh endpoint must be refused) passes with it and failed every time
+    it was relaxed. podman schedules healthchecks with systemd transient timers,
+    which under a rootless podman socket service never fire: the sidecar reports
+    `starting` forever — never `unhealthy`, which would at least fail fast — so
+    compose waits without bound. Measured on CI as `Up 20 minutes (starting)`
+    beside an agent stuck in `Created`, on every egress test, every run.
+
+    An UNKNOWN driver gets docker's gate: waiting too long is a slow deploy,
+    not waiting at all is an unguarded boundary.
+    """
+    for driver, want in (("docker", "service_healthy"), ("podman", "service_started")):
+        model = wiz.build_compose_model("acme", "/ctx", driver=driver, egress_filter_body="# rules")
+        assert model["services"]["agent"]["depends_on"] == {"egress": {"condition": want}}
+    assert wiz.egress_depends_condition(None) == "service_healthy"
+    assert wiz.egress_depends_condition("nonesuch") == "service_healthy"
+
+
+def test_podmans_relaxed_gate_is_backed_by_the_in_container_wait(wiz):
+    """podman's ordering-only condition is only safe because the AGENT waits.
+
+    Relaxing the condition without that wait is exactly what broke S18, three
+    times. These two facts are one contract: if the entrypoint gate is ever
+    removed, podman's gate must go back to blocking.
+    """
+    import pathlib
+
+    body = pathlib.Path("image/entrypoint.sh").read_text()
+    assert "AGENT_CONTAINER_EGRESS" in body
+    assert "/dev/tcp/127.0.0.1/" in body  # it probes the boundary
+    assert "AGENT_CONTAINER_EGRESS_TIMEOUT" in body  # bounded
+    assert "did not begin serving" in body  # and refuses rather than proceeding
