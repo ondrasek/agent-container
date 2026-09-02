@@ -109,23 +109,11 @@ jobs:
     # every test rebuild the image. With that fixed the leg runs CLEAN as far as
     # it gets; what it needs now is the time the work actually takes.
     timeout-minutes: 100
-    # THE PODMAN LEG IS ADVISORY TODAY, AND THAT IS A STATEMENT OF FACT RATHER
-    # THAN A PREFERENCE: the acceptance suite does not currently pass under
-    # rootless podman in CI. Its first full run reached 24% in 45 minutes with
-    # ~9 failures, dominated by "no container with name or ID" — containers not
-    # coming up at all. That is real, pre-existing, and exactly what this axis was
-    # added to reveal; it is not something the axis should also be blamed for.
-    #
-    # It must not BLOCK, because publish.yml triggers on this workflow concluding
-    # `success` — so a permanently failing leg would stop every release
-    # (Principle VII: every substantive merge to main is one). Blocking releases
-    # on a known-broken path is not enforcement, it is a stopped clock.
-    #
-    # It must not be SILENT either, which is why the leg still runs and still
-    # reports. Remove this line the moment the suite passes under podman; leaving
-    # it once it does would be the "control that enforces nothing while reading as
-    # deliberate" this project keeps finding.
-    continue-on-error: ${{ matrix.runtime == 'podman' }}
+    # BOTH LEGS GATE. The podman leg was advisory while the suite did not pass
+    # under it; it passes now — 166 passed, 13 skipped, 0 failed, in 38m25s — so
+    # the exemption is gone, exactly as the commit that added it promised. Leaving
+    # it after the fact would be the "control that enforces nothing while reading
+    # as deliberate" this project keeps finding in its own past.
     # BOTH RUNTIMES, EXPLICITLY. The suite honours AGENT_CONTAINER_RUNTIME and
     # otherwise falls back to detect_runtime(), whose order is platform-aware:
     # podman first on Linux, docker first on macOS. So CI covered podman only and
