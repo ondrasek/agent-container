@@ -262,21 +262,22 @@ def test_agent_joins_the_namespace_and_gains_no_capability(wiz, tmp_path):
     withp = _model(wiz, tmp_path, egress_filter_body="")
     agent = withp["services"]["agent"]
     assert agent["network_mode"] == "service:egress"
-    # `service_healthy`, not the bare list and not `service_started`: an agent
-    # placed inside the boundary before it serves gets bare connection refusals
-    # for everything, declared or not — indistinguishable from an allowlist that
-    # denies the world.
+    # ORDERING ONLY — and the guarantee is enforced by the TOOL, not by this line.
     #
-    # `service_started` WAS tried, to work around podman never leaving `starting`
-    # under a rootless socket service (systemd-timer healthchecks that never
-    # fire). It was reverted the same day: S18's negative arm — "an UNDECLARED ssh
-    # endpoint accepted a push" — failed on the docker leg with it in place.
-    # Causation was not established, and that is the point: a boundary guarantee
-    # does not get traded against a CI timeout on a hypothesis.
+    # `service_healthy` expressed the right thing and delegated it to the wrong
+    # place: the runtime's healthcheck scheduler. Podman's is systemd transient
+    # timers, which never fire under a rootless podman socket service, so the
+    # sidecar reported `starting` forever and compose waited without bound —
+    # measured at `Up 20 minutes (starting)` beside an agent stuck in `Created`.
     #
-    # `test_the_boundary_gate_lives_in_the_entrypoint` asserts the agent ALSO
-    # verifies this from inside. Both, not either.
-    assert agent["depends_on"] == {"egress": {"condition": "service_healthy"}}
+    # do_up now starts the sidecar ALONE, runs EGRESS_READY_PROBE against it
+    # itself, and only then starts the agent. That is the same statement, bounded,
+    # and it does not depend on the runtime running anything on our behalf.
+    #
+    # Relaxing this condition WITHOUT that barrier is what briefly let an agent
+    # start early, and S18's negative arm caught it. The pair below is the
+    # contract: this assertion plus test_the_tool_waits_for_the_boundary_itself.
+    assert agent["depends_on"] == {"egress": {"condition": "service_started"}}
     assert "cap_add" not in agent, "the agent must gain no capability — this is the whole design"
 
 
@@ -1037,3 +1038,46 @@ def test_the_boundary_gate_lives_in_the_entrypoint(wiz):
     assert "AGENT_CONTAINER_EGRESS_TIMEOUT" in body
     # ...and refuses rather than continuing into a boundary that never came up.
     assert "did not begin serving" in body
+
+
+def test_the_tool_waits_for_the_boundary_itself(wiz, monkeypatch):
+    """The barrier that replaced `service_healthy` must actually be in the deploy.
+
+    Asserted on the SOURCE of the deploy path rather than by running a deploy,
+    because the property is structural: the sidecar is brought up alone, the
+    readiness probe is run against it, and only then is the agent started.
+    Without this the compose condition is ordering-only and nothing closes the
+    window.
+
+    `compose_up_exec` is the one place every deploy path funnels through — `up`,
+    `apply`, `redeploy` and the wizard — so asserting it here covers all of them.
+    """
+    import inspect
+
+    body = inspect.getsource(wiz.compose_up_exec)
+    assert "wait_egress_serving" in body, "the tool no longer waits for the boundary"
+    assert "EGRESS_SERVICE_KEY" in body, "the sidecar is no longer started on its own first"
+    # It REFUSES rather than proceeding into a boundary that never came up.
+    assert "did not begin serving" in body
+
+
+def test_one_readiness_statement_not_two(wiz):
+    """The healthcheck and the tool's wait must be the SAME probe.
+
+    Two copies of "is the boundary serving" could disagree, and the one that
+    mattered would be whichever the runtime happened to run — which is the failure
+    this constant exists to prevent.
+    """
+    model = wiz.build_compose_model(
+        "acme",
+        "/ctx",
+        None,
+        None,
+        [],
+        egress_filter_body="# rules",
+    )
+    hc = model["services"]["egress"]["healthcheck"]["test"]
+    assert hc[0] == "CMD-SHELL"
+    assert hc[1] == wiz.EGRESS_READY_PROBE
+    # ...and it checks BOTH daemons, not just the proxy.
+    assert "53" in wiz.EGRESS_READY_PROBE and str(wiz.EGRESS_PORT) in wiz.EGRESS_READY_PROBE

@@ -930,6 +930,20 @@ EGRESS_SERVICE_KEY = "egress"
 # at nothing, and the symptom is an unreachable DECLARED destination, which reads
 # as the allowlist being wrong.
 EGRESS_PORT = 3127
+
+# THE ONE readiness statement, used by the sidecar's healthcheck AND by the tool's
+# own wait before it starts the agent. Two copies of "is the boundary serving"
+# could disagree, and the one that mattered would be whichever the runtime chose
+# to run — which is the whole problem this constant exists to remove.
+#
+# Both daemons, not just squid: unbound is started FIRST (squid resolves its
+# upstreams through it) and squid is exec'd last, so squid's port alone implies
+# unbound was launched — but "launched" is not "listening", and the DNS half is
+# the half an agent hits first.
+EGRESS_READY_PROBE = (
+    f"netstat -lnt | grep -qE '[:.]{EGRESS_PORT}[[:space:]]'"
+    " && netstat -lnu | grep -qE '[:.]53[[:space:]]'"
+)
 EGRESS_ACL_PATH = "/etc/squid/allowed_sni.acl"
 EGRESS_UNBOUND_PATH = "/etc/unbound/allowed.conf"
 # A shell fragment the entrypoint SOURCES before flipping the policy to DROP,
@@ -7519,7 +7533,7 @@ def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dic
                 # placed inside the boundary and started before it serves gets
                 # bare connection refusals for everything, declared or not.
                 # Restored with the agent's gate; see the note there.
-                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}},
+                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_started"}},
             }
             for svc in inside
         }
@@ -7961,7 +7975,7 @@ def build_compose_model(
         # by exec'ing the probe, then start the agent — which keeps the guarantee
         # and needs no healthcheck scheduler. That is a deploy-path change and is
         # not being made blind at the end of a long session.
-        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}}
+        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_started"}}
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
@@ -8131,8 +8145,7 @@ def build_compose_model(
                     # the healthcheck would never pass — the agent would then never
                     # start, since it waits on `service_healthy`. Trailing whitespace
                     # is the correct delimiter and keeps `:53` from matching `:5353`.
-                    "netstat -lnt | grep -qE '[:.]3127[[:space:]]'"
-                    " && netstat -lnu | grep -qE '[:.]53[[:space:]]'",
+                    EGRESS_READY_PROBE,
                 ],
                 "interval": "2s",
                 "timeout": "2s",
@@ -10408,6 +10421,41 @@ def revoke_cred(host: str, host_rec: dict, name: str, ref: str) -> tuple[bool, b
     return deleted, r.returncode == 0
 
 
+def wait_egress_serving(host_rec: dict, name: str, budget: float | None = None) -> bool:
+    """Block until the egress sidecar is actually SERVING, by asking it directly.
+
+    THE TOOL IS THE BARRIER, not the compose file. `depends_on: service_healthy`
+    expressed this and was correct on docker, but it delegates the check to the
+    runtime's healthcheck scheduler — and podman's is systemd transient timers,
+    which under a rootless podman socket service never fire. The sidecar then sits
+    in `starting` forever (never `unhealthy`, which would at least fail fast) and
+    compose waits without bound. Measured: `Up 20 minutes (starting)` beside an
+    agent stuck in `Created`, on every egress test, every CI run.
+
+    Running the SAME probe ourselves is strictly stronger than that condition: it
+    is the identical statement (EGRESS_READY_PROBE, one constant, no second copy
+    to drift), it is bounded, it says what failed, and it does not depend on the
+    runtime running anything on our behalf. The agent is started only after this
+    returns true, so the ordering guarantee S18 protects is enforced by
+    construction rather than by a condition the runtime may never evaluate.
+    """
+    if budget is None:
+        budget = float(CONTAINER_START_TIMEOUT)
+    argv = driver_runtime_argv(host_rec) + [
+        "exec",
+        egress_container_name(name),
+        "sh",
+        "-c",
+        EGRESS_READY_PROBE,
+    ]
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        if query(argv, timeout=15).returncode == 0:
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def wait_container_running(host_rec: dict, name: str, budget: float | None = None) -> bool:
     """Block until the container is RUNNING; return whether it got there.
 
@@ -11303,6 +11351,42 @@ def compose_up_exec(
                 warn(f"credential delivery failed: {e}")
 
         threading.Thread(target=_deliver_when_up, daemon=True).start()
+    # TWO PHASES WHEN THERE IS A BOUNDARY, and the tool is the barrier between
+    # them. The sidecar comes up alone; we verify it is SERVING with its own
+    # readiness probe; only then does the agent start.
+    #
+    # This replaces `depends_on: service_healthy` as the thing that closes the
+    # window, and it closes it harder: that condition delegated the check to the
+    # runtime's healthcheck scheduler, and podman's is systemd transient timers
+    # which never fire under a rootless socket service — so the gate that looked
+    # like the guarantee was, on that runtime, a wait that never ended. Relaxing
+    # the condition WITHOUT putting this here is what briefly let an agent start
+    # early, and S18's negative arm caught it; the barrier is the point, not the
+    # condition.
+    if boundary_file is not None:
+        rc = run_child(
+            driver_compose_argv(
+                host_rec,
+                project,
+                compose_file,
+                "up",
+                "-d",
+                "--build",
+                EGRESS_SERVICE_KEY,
+                override=override,
+                boundary=boundary_file,
+            )
+        ).returncode
+        if rc != 0:
+            die(f"the egress boundary for '{name}' failed to start (exit {rc})")
+        if not wait_egress_serving(host_rec, name):
+            die(
+                f"the egress boundary for '{name}' did not begin serving within "
+                f"{CONTAINER_START_TIMEOUT}s — refusing to start the agent inside a "
+                f"boundary that is not up, because every request would fail as though "
+                f"the allowlist denied it"
+            )
+        log(f"egress boundary for {name} is serving; starting the agent inside it")
     rc = run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     if foreground:
         # The container's exit code IS the agent result — surface it as our own,
