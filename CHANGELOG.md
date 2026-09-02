@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.50.0 (2026-09-02)
+
+### Bug Fixes
+
+- **egress**: Choose the compose gate per runtime, because the runtimes differ
+  ([`e68c545`](https://github.com/ondrasek/agent-container/commit/e68c545872adb9aec08a707724af2ae3daaa5ea4))
+
+- **egress**: Enforce the boundary gate in the agent, not via a runtime healthcheck
+  ([`e825ade`](https://github.com/ondrasek/agent-container/commit/e825ade4330e27957ccaaacf22a25ec862fb9307))
+
+- **egress**: The TOOL waits for the boundary, instead of asking the runtime to
+  ([`2bce516`](https://github.com/ondrasek/agent-container/commit/2bce516228c0095dfcc923b946e9c437e86b4fcf))
+
+### Testing
+
+- **acceptance**: Record the runtime's view when a CLI times out
+  ([`b0e10aa`](https://github.com/ondrasek/agent-container/commit/b0e10aaeca68cd1e53bfce77b2832c179343f4f5))
+
+
 ## v0.49.3 (2026-09-01)
 
 ### Bug Fixes
