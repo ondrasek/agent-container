@@ -262,21 +262,21 @@ def test_agent_joins_the_namespace_and_gains_no_capability(wiz, tmp_path):
     withp = _model(wiz, tmp_path, egress_filter_body="")
     agent = withp["services"]["agent"]
     assert agent["network_mode"] == "service:egress"
-    # ORDERING ONLY, and the guarantee moved rather than vanished.
+    # `service_healthy`, not the bare list and not `service_started`: an agent
+    # placed inside the boundary before it serves gets bare connection refusals
+    # for everything, declared or not — indistinguishable from an allowlist that
+    # denies the world.
     #
-    # This was `service_healthy`, which handed an unbounded wait to the runtime:
-    # podman schedules healthchecks with systemd transient timers, and under a
-    # rootless podman socket service those never fire — the sidecar stayed in
-    # `starting` and `compose up` waited forever with the agent in `Created`.
-    # Measured at 20+ minutes on CI, on three egress tests, every run.
+    # `service_started` WAS tried, to work around podman never leaving `starting`
+    # under a rootless socket service (systemd-timer healthchecks that never
+    # fire). It was reverted the same day: S18's negative arm — "an UNDECLARED ssh
+    # endpoint accepted a push" — failed on the docker leg with it in place.
+    # Causation was not established, and that is the point: a boundary guarantee
+    # does not get traded against a CI timeout on a hypothesis.
     #
-    # The window it closed is real (an agent inside a boundary that is not yet
-    # serving gets bare refusals for everything, which looks like a policy that
-    # denies the world), so the wait now lives in the AGENT'S ENTRYPOINT, where
-    # the party that must not run early enforces it and no runtime healthcheck
-    # scheduler is involved. `test_the_boundary_gate_lives_in_the_entrypoint`
-    # below asserts it is actually there — this pair is the whole contract.
-    assert agent["depends_on"] == {"egress": {"condition": "service_started"}}
+    # `test_the_boundary_gate_lives_in_the_entrypoint` asserts the agent ALSO
+    # verifies this from inside. Both, not either.
+    assert agent["depends_on"] == {"egress": {"condition": "service_healthy"}}
     assert "cap_add" not in agent, "the agent must gain no capability — this is the whole design"
 
 
@@ -1014,8 +1014,12 @@ def test_the_resolver_probe_is_bounded_and_never_raises(wiz):
 
 
 def test_the_boundary_gate_lives_in_the_entrypoint(wiz):
-    """The compose gate was relaxed to `service_started`; this is where the
-    guarantee went, and it must not be possible to relax one without the other.
+    """Defence in depth: the agent verifies the boundary is serving from INSIDE,
+    rather than trusting compose's ordering alone.
+
+    Added when `service_started` was being tried and kept after that was reverted,
+    because it is worth having on its own: it costs one bounded wait and it is the
+    only check that survives a runtime whose healthcheck scheduler does not run.
 
     Asserted against the shipped entrypoint rather than a copy: an agent that
     starts inside a boundary before it serves gets bare connection refusals for

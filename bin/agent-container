@@ -7515,12 +7515,11 @@ def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dic
         "services": {
             svc: {
                 "network_mode": f"service:{EGRESS_SERVICE_KEY}",
-                # `service_started` for the same reason as the agent: waiting on
-                # `service_healthy` is an unbounded wait on a status podman may
-                # never update. An operator sidecar cannot be given the agent's
-                # in-container wait, so it may briefly see refusals — the trade is
-                # a bounded start against a deploy that never returns.
-                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_started"}},
+                # `service_healthy` for the same reason as the agent: a sidecar
+                # placed inside the boundary and started before it serves gets
+                # bare connection refusals for everything, declared or not.
+                # Restored with the agent's gate; see the note there.
+                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}},
             }
             for svc in inside
         }
@@ -7942,7 +7941,27 @@ def build_compose_model(
         # run early is the one enforcing it, and it works identically on both
         # runtimes rather than depending on the runtime running a healthcheck at
         # all. The healthcheck stays in the model — it is still what `ps` reports.
-        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_started"}}
+        # RESTORED to `service_healthy` after `service_started` was tried and a
+        # SECURITY assertion failed on the docker leg: S18's negative arm — "an
+        # UNDECLARED ssh endpoint accepted a push" — which is the boundary not
+        # blocking. Whether the relaxation caused it or merely coincided with it
+        # was not established, and that is precisely why it goes back: a boundary
+        # guarantee is not something to trade against a CI timeout on a hypothesis.
+        #
+        # The in-agent wait added alongside it (entrypoint section 2f) STAYS. It is
+        # defence in depth and costs nothing: it makes the agent verify the
+        # boundary is serving rather than trusting the ordering, which is true
+        # regardless of which condition compose uses.
+        #
+        # The podman consequence is unchanged and still open: podman schedules
+        # healthchecks with systemd transient timers, and under a rootless socket
+        # service on CI they never fire, so the sidecar stays `starting` and this
+        # gate never releases. The fix is to stop asking COMPOSE to express the
+        # dependency at all — start the sidecar, have the TOOL wait for readiness
+        # by exec'ing the probe, then start the agent — which keeps the guarantee
+        # and needs no healthcheck scheduler. That is a deploy-path change and is
+        # not being made blind at the end of a long session.
+        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}}
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read
