@@ -7515,10 +7515,12 @@ def build_sidecar_boundary_overlay(override: Path | None, egress: object) -> dic
         "services": {
             svc: {
                 "network_mode": f"service:{EGRESS_SERVICE_KEY}",
-                # `service_healthy` for the same reason as the agent: a sidecar
-                # placed inside the boundary and started before it serves gets
-                # bare connection refusals for everything, declared or not.
-                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}},
+                # `service_started` for the same reason as the agent: waiting on
+                # `service_healthy` is an unbounded wait on a status podman may
+                # never update. An operator sidecar cannot be given the agent's
+                # in-container wait, so it may briefly see refusals — the trade is
+                # a bounded start against a deploy that never returns.
+                "depends_on": {EGRESS_SERVICE_KEY: {"condition": "service_started"}},
             }
             for svc in inside
         }
@@ -7925,10 +7927,22 @@ def build_compose_model(
         # SC-011 asserts the set stays empty.
         service.pop("ports", None)
         service["network_mode"] = f"service:{EGRESS_SERVICE_KEY}"
-        # `service_healthy`, not the list form: the list form waits only for the
-        # container to be STARTED, which is true long before squid and unbound are
-        # serving. This is what closes the window described on the healthcheck.
-        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_healthy"}}
+        # ORDERING ONLY. This was `service_healthy`, and that handed an UNBOUNDED
+        # wait to the runtime: podman schedules healthchecks with systemd transient
+        # timers, and under a rootless podman socket service on CI those never fire
+        # — so the sidecar sat in `starting` (not even `unhealthy`, which would at
+        # least fail fast) and `compose up` waited forever. Measured: 20+ minutes
+        # with the agent stuck in `Created`, on three egress tests, every run.
+        #
+        # The window that gate closed is real — an agent placed inside the boundary
+        # before it serves gets bare refusals for everything, declared or not — so
+        # it is not dropped, it MOVES INTO THE AGENT: the entrypoint waits for the
+        # proxy port before doing anything that needs egress (section 2f). That is
+        # strictly better than a compose condition, because the party that must not
+        # run early is the one enforcing it, and it works identically on both
+        # runtimes rather than depending on the runtime running a healthcheck at
+        # all. The healthcheck stays in the model — it is still what `ps` reports.
+        service["depends_on"] = {EGRESS_SERVICE_KEY: {"condition": "service_started"}}
     env = dict(environment or {})  # Feature 004 non-secret settings (mode/agent/clone-url)
     if egress_filter_body is not None:
         # Feature 012. Lowercase variants too: curl, git and most HTTP clients read

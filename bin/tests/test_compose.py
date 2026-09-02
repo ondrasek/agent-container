@@ -262,12 +262,21 @@ def test_agent_joins_the_namespace_and_gains_no_capability(wiz, tmp_path):
     withp = _model(wiz, tmp_path, egress_filter_body="")
     agent = withp["services"]["agent"]
     assert agent["network_mode"] == "service:egress"
-    # `service_healthy`, not the bare list: the list form waits only for the
-    # container to be STARTED, and netfilter is installed before squid serves —
-    # so the agent would run against a boundary that refuses everything, which
-    # is indistinguishable from "nothing is declared" (measured: curl exit 7
-    # immediately after `up`, exit 0 three seconds later).
-    assert agent["depends_on"] == {"egress": {"condition": "service_healthy"}}
+    # ORDERING ONLY, and the guarantee moved rather than vanished.
+    #
+    # This was `service_healthy`, which handed an unbounded wait to the runtime:
+    # podman schedules healthchecks with systemd transient timers, and under a
+    # rootless podman socket service those never fire — the sidecar stayed in
+    # `starting` and `compose up` waited forever with the agent in `Created`.
+    # Measured at 20+ minutes on CI, on three egress tests, every run.
+    #
+    # The window it closed is real (an agent inside a boundary that is not yet
+    # serving gets bare refusals for everything, which looks like a policy that
+    # denies the world), so the wait now lives in the AGENT'S ENTRYPOINT, where
+    # the party that must not run early enforces it and no runtime healthcheck
+    # scheduler is involved. `test_the_boundary_gate_lives_in_the_entrypoint`
+    # below asserts it is actually there — this pair is the whole contract.
+    assert agent["depends_on"] == {"egress": {"condition": "service_started"}}
     assert "cap_add" not in agent, "the agent must gain no capability — this is the whole design"
 
 
@@ -1002,3 +1011,25 @@ def test_the_resolver_probe_is_bounded_and_never_raises(wiz):
     started = time.monotonic()
     assert wiz.resolve_host_addresses("no-such-host.invalid", 22, timeout=2.0) is None
     assert time.monotonic() - started < 10, "the probe must not stall a deploy"
+
+
+def test_the_boundary_gate_lives_in_the_entrypoint(wiz):
+    """The compose gate was relaxed to `service_started`; this is where the
+    guarantee went, and it must not be possible to relax one without the other.
+
+    Asserted against the shipped entrypoint rather than a copy: an agent that
+    starts inside a boundary before it serves gets bare connection refusals for
+    everything, declared or not — indistinguishable from an allowlist that denies
+    the world. Deleting this wait would restore that failure silently, because
+    every test that deploys WITHOUT a boundary would still pass.
+    """
+    import pathlib
+
+    body = pathlib.Path("image/entrypoint.sh").read_text()
+    assert "AGENT_CONTAINER_EGRESS" in body
+    # It waits on the proxy port, and it is BOUNDED — an unbounded wait here would
+    # only move the hang from compose into the container.
+    assert "/dev/tcp/127.0.0.1/" in body
+    assert "AGENT_CONTAINER_EGRESS_TIMEOUT" in body
+    # ...and refuses rather than continuing into a boundary that never came up.
+    assert "did not begin serving" in body

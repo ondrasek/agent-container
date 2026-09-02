@@ -1226,6 +1226,49 @@ unset _n _tmp_env _env_begin _env_end
 # would refuse a container whose credential was seconds away.
 require_env GH_TOKEN
 
+# --- 2f. Wait for the egress boundary to be SERVING --------------------------
+# The gate that used to be `depends_on: service_healthy` in the compose model,
+# moved here — to the party that must not run early.
+#
+# It had to move: podman schedules healthchecks with systemd transient timers,
+# and under a rootless podman socket service (CI) those never fire, so the
+# sidecar stayed in `starting` and `compose up` waited forever with this
+# container stuck in `Created`. Measured at 20+ minutes.
+#
+# The guarantee is unchanged and is now runtime-independent: an agent placed
+# inside the boundary before it serves gets bare connection refusals for
+# EVERYTHING, declared or not, which looks exactly like a policy that denies the
+# world. So block until the proxy answers.
+#
+# THE PROXY PORT IS A SUFFICIENT SIGNAL. The sidecar starts unbound FIRST —
+# squid resolves its upstreams through it — and then `exec`s squid last, so a
+# connection accepted on the proxy port means both daemons are up. Read from
+# HTTPS_PROXY rather than hardcoded, so one constant governs on both sides.
+#
+# Bounded, and loud on expiry: continuing would produce a container that fails
+# every request for reasons that look like the allowlist.
+if [[ -n "${AGENT_CONTAINER_EGRESS:-}" ]]; then
+    _egress_port="${HTTPS_PROXY##*:}"
+    if [[ "${_egress_port}" =~ ^[0-9]+$ ]]; then
+        _bw=0
+        _bw_max="${AGENT_CONTAINER_EGRESS_TIMEOUT:-90}"
+        until (exec 3<>"/dev/tcp/127.0.0.1/${_egress_port}") 2>/dev/null; do
+            ((_bw >= _bw_max)) && break
+            sleep 1
+            _bw=$((_bw + 1))
+        done
+        exec 3<&- 2>/dev/null || true
+        exec 3>&- 2>/dev/null || true
+        if ((_bw >= _bw_max)); then
+            die "egress boundary did not begin serving on 127.0.0.1:${_egress_port} within ${_bw_max}s — refusing to start the agent inside a boundary that is not up, because every request would fail as though the allowlist denied it"
+        fi
+        log "egress boundary is serving on 127.0.0.1:${_egress_port} (waited ${_bw}s)"
+    else
+        log "NOTE: egress declared but no proxy port found in HTTPS_PROXY; not waiting"
+    fi
+    unset _egress_port _bw _bw_max
+fi
+
 # --- 3. Git identity + credential helper ------------------------------------
 # Identity is non-secret; logging the name is fine. Email is also non-secret
 # but we still don't echo it — keep the log surface minimal.
