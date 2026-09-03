@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.52.0 (2026-09-03)
+
+### Bug Fixes
+
+- **tests**: Keep the PR branch when the test fails
+  ([`2531a7b`](https://github.com/ondrasek/agent-container/commit/2531a7b0a2a5371e9e88f3ea8997f8b2068f3fac))
+
+
 ## v0.51.0 (2026-09-03)
 
 
