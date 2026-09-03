@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.53.0 (2026-09-03)
+
+### Features
+
+- **telemetry**: Export host metrics for the container itself
+  ([`ec7c86d`](https://github.com/ondrasek/agent-container/commit/ec7c86da27708acfbcdbab9d628ea382ef871987))
+
+
 ## v0.52.0 (2026-09-03)
 
 ### Bug Fixes
