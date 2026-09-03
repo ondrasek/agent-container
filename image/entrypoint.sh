@@ -1220,6 +1220,162 @@ if [[ -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
 fi
 unset _n _tmp_env _env_begin _env_end
 
+# --- Host/OS metrics (Feature 017 fan-out, the non-agent half) ---------------
+# The agents report what THEY did; nothing reported what the box was doing while
+# they did it. That gap is the one an operator hits first: a run that took twenty
+# minutes and a run that took twenty minutes because it was wedged against its
+# memory limit look identical in an agent's own telemetry.
+#
+# NO COLLECTOR, NO EXPORTER PACKAGE. Same rule as the run-record exporter: this
+# speaks the OTLP/HTTP+JSON protocol with curl and jq, both already in the image.
+# Adding otelcol would mean a second supervised process, a config file, and a
+# release to track, to read six numbers out of files the container can already
+# read.
+#
+# CGROUP v2 FIRST, /proc AS THE FALLBACK. Inside a container /proc/meminfo shows
+# the HOST's memory, not this container's limit — the number an operator cares
+# about is how close the agent came to being OOM-killed, and only the cgroup
+# knows that. Every read is guarded: a missing file yields no data point rather
+# than a malformed payload that makes the collector reject the whole request.
+HOST_METRICS_INTERVAL="${AGENT_CONTAINER_HOST_METRICS_INTERVAL:-30}"
+
+_hm_read() {
+    # First whitespace-separated field of a file, or empty. Never fails.
+    [[ -r "$1" ]] && read -r _hm_v < "$1" 2>/dev/null && printf '%s' "${_hm_v%% *}"
+}
+
+_hm_cgroup_field() {
+    # `key value` line from a cgroup stat file (cpu.stat, memory.stat).
+    [[ -r "$1" ]] || return 0
+    awk -v k="$2" '$1 == k { print $2; exit }' "$1" 2>/dev/null
+}
+
+host_metrics_payload() {
+    local now_ns start_ns cpu_usec mem_cur mem_max load1 procs disk_used disk_avail
+    now_ns="$(date +%s%N 2>/dev/null)"
+    case "${now_ns}" in
+        *[!0-9]*|"") now_ns="$(( $(date +%s) * 1000000000 ))" ;;
+    esac
+    start_ns="${_HM_START_NS:-${now_ns}}"
+
+    cpu_usec="$(_hm_cgroup_field /sys/fs/cgroup/cpu.stat usage_usec)"
+    mem_cur="$(_hm_read /sys/fs/cgroup/memory.current)"
+    mem_max="$(_hm_read /sys/fs/cgroup/memory.max)"
+    # `max` is cgroup's "no limit" sentinel and is NOT a number: emitting it would
+    # make the collector reject the batch. An absent limit is simply not reported.
+    [[ "${mem_max}" == "max" ]] && mem_max=""
+    load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+    procs="$(_hm_cgroup_field /sys/fs/cgroup/pids.current "")"
+    [[ -n "${procs}" ]] || procs="$(_hm_read /sys/fs/cgroup/pids.current)"
+    # The WORKSPACE, not /: that is the volume an agent fills, and a full one is
+    # the failure that reads as "the agent stopped working" with no other clue.
+    disk_used="$(df -B1 --output=used /workspace 2>/dev/null | tail -n1 | tr -dc '0-9')"
+    disk_avail="$(df -B1 --output=avail /workspace 2>/dev/null | tail -n1 | tr -dc '0-9')"
+
+    jq -cn \
+        --arg svc "${OTEL_SERVICE_NAME:-agent-container}" \
+        --arg env_name "${AGENT_CONTAINER_NAME:-unknown}" \
+        --arg agent "${AGENT_CONTAINER_AGENT:-unknown}" \
+        --arg now "${now_ns}" \
+        --arg start "${start_ns}" \
+        --arg cpu_usec "${cpu_usec}" \
+        --arg mem_cur "${mem_cur}" \
+        --arg mem_max "${mem_max}" \
+        --arg load1 "${load1}" \
+        --arg procs "${procs}" \
+        --arg disk_used "${disk_used}" \
+        --arg disk_avail "${disk_avail}" '
+        def num($s): if ($s | length) > 0 and ($s | test("^[0-9]+([.][0-9]+)?$")) then ($s | tonumber) else null end;
+        # DATAPOINT attributes, not only resource ones. A resource attribute
+        # survives into Loki but the OTLP->Prometheus conversion promotes only
+        # `service.*`, so `agent_container.agent` was silently dropped and a
+        # dashboard could not ask "all containers running claude". Measured by
+        # reading the labels back off the series, not assumed from the payload.
+        def attrs: [
+            { key: "environment", value: { stringValue: $env_name } },
+            { key: "agent",       value: { stringValue: $agent } }
+        ];
+        def gauge($name; $unit; $v):
+            if $v == null then empty
+            else { name: $name, unit: $unit,
+                   gauge: { dataPoints: [ { asDouble: $v, timeUnixNano: $now,
+                                            attributes: attrs } ] } } end;
+        def counter($name; $unit; $v):
+            if $v == null then empty
+            else { name: $name, unit: $unit,
+                   sum: { aggregationTemporality: 2, isMonotonic: true,
+                          dataPoints: [ { asDouble: $v, timeUnixNano: $now,
+                                          startTimeUnixNano: $start,
+                                          attributes: attrs } ] } } end;
+        {
+          resourceMetrics: [ {
+            resource: { attributes: [
+              { key: "service.name",      value: { stringValue: $svc } },
+              { key: "service.namespace", value: { stringValue: "agent-container" } },
+              { key: "agent_container.environment", value: { stringValue: $env_name } },
+              { key: "agent_container.agent",       value: { stringValue: $agent } }
+            ] },
+            scopeMetrics: [ {
+              scope: { name: "agent-container/host" },
+              metrics: [
+                counter("container.cpu.time";        "s";  (num($cpu_usec) | if . == null then null else . / 1000000 end)),
+                gauge(  "container.memory.usage";    "By"; num($mem_cur)),
+                gauge(  "container.memory.limit";    "By"; num($mem_max)),
+                gauge(  "system.cpu.load_average.1m";"1";  num($load1)),
+                gauge(  "container.processes.count"; "1";  num($procs)),
+                gauge(  "workspace.disk.used";       "By"; num($disk_used)),
+                gauge(  "workspace.disk.available";  "By"; num($disk_avail))
+              ]
+            } ]
+          } ]
+        }' 2>/dev/null
+}
+
+host_metrics_export_once() {
+    local endpoint="$1" payload
+    payload="$(host_metrics_payload)"
+    [[ -n "${payload}" ]] || return 0
+    # FAIL-OPEN AND SILENT. This runs on a timer for the life of the container;
+    # a collector that goes away must not produce a line of log per interval,
+    # which would bury the entrypoint's real output. The run-record exporter
+    # reports its outcome because each record is a distinct thing an operator
+    # asked about; a sampled gauge is not.
+    curl -sS -m "${OTLP_TIMEOUT:-10}" -X POST "${endpoint}" \
+        -H 'Content-Type: application/json' \
+        --data-binary @- <<< "${payload}" > /dev/null 2>&1 || true
+}
+
+host_metrics_start() {
+    local base="$1" endpoint interval
+    interval="${HOST_METRICS_INTERVAL}"
+    # NAMED DEFAULT, EXPLICIT OFF (Constitution VIII). `0` or `off` disables
+    # sampling without disabling telemetry, which an operator exporting to a
+    # metered backend may well want; an absent variable is the 30s default and
+    # says so in the log below.
+    case "${interval}" in
+        0|off|no|false) log "host metrics disabled (AGENT_CONTAINER_HOST_METRICS_INTERVAL=${interval})"; return 0 ;;
+        *[!0-9]*|"") log "WARNING: ignoring non-numeric AGENT_CONTAINER_HOST_METRICS_INTERVAL=${interval}; using 30s"; interval=30 ;;
+    esac
+    command -v jq > /dev/null 2>&1 || { log "WARNING: jq is missing; host metrics disabled"; return 0; }
+    endpoint="${base%/}/v1/metrics"
+    export _HM_START_NS
+    _HM_START_NS="$(date +%s%N 2>/dev/null)"
+    case "${_HM_START_NS}" in
+        *[!0-9]*|"") _HM_START_NS="$(( $(date +%s) * 1000000000 ))" ;;
+    esac
+    # Backgrounded and disowned: the sampler must never hold the container open,
+    # and a headless run that finishes must not wait on a sleep. It dies with the
+    # container, which is the correct lifetime for a per-container sampler.
+    (
+        while :; do
+            host_metrics_export_once "${endpoint}"
+            sleep "${interval}"
+        done
+    ) > /dev/null 2>&1 &
+    disown 2>/dev/null || true
+    log "host metrics sampling every ${interval}s -> ${endpoint}"
+}
+
 # --- 2e-bis. ONE ENDPOINT, EVERY EMITTER (Feature 017 fan-out) ---------------
 # The tool already exports its OWN run records to `otlp_endpoint`. Everything
 # else in the container that can speak OTLP stayed silent, which is the worse
@@ -1421,7 +1577,11 @@ PYEOF
             || log "WARNING: could not link the pi telemetry extension; the run continues without it"
     fi
 
-    log "telemetry fan-out configured for ${_otlp_base} (claude, codex, pi, opencode + OTEL_* for any SDK)"
+    # 9. THE BOX ITSELF. Agents report what they did; this reports what the
+    #    container was doing while they did it.
+    host_metrics_start "${_otlp_base}"
+
+    log "telemetry fan-out configured for ${_otlp_base} (claude, codex, pi, opencode, host + OTEL_* for any SDK)"
     unset _otlp_base _otlp_proto _otlp_service _otel_begin _otel_end _tmp_otel _codex_cfg _oc_cfg _pi_ext_dir _pi_pkg
 fi
 

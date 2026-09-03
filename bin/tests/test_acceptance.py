@@ -8086,6 +8086,37 @@ def test_one_declared_endpoint_configures_every_emitter(acc):
     oc = _exec(name, ["cat", "/home/dev/.config/opencode/opencode.json"])
     assert "@devtheops/opencode-plugin-otel" in oc.stdout, oc.stdout
 
+    # THE BOX ITSELF, not only the agents. A run that took twenty minutes and a
+    # run that took twenty minutes because it was wedged against its memory limit
+    # look identical in an agent's own telemetry; the host sampler is what tells
+    # them apart. It reads cgroup v2 and /proc with curl and jq — no collector, no
+    # exporter package — so this asserts it STARTED and that its payload is
+    # well-formed OTLP rather than trusting the log line.
+    logs = subprocess.run(
+        [RUNTIME, "logs", f"agent-container-{name}"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    assert "host metrics sampling every" in logs.stdout + logs.stderr, (
+        "the host-metrics sampler did not start:\n" + (logs.stdout + logs.stderr)[-1500:]
+    )
+    built = _exec(
+        name, ["bash", "-lc", "source /entrypoint.sh >/dev/null 2>&1; host_metrics_payload"]
+    )
+    if built.returncode == 0 and built.stdout.strip():
+        doc = json.loads(built.stdout)
+        metrics = doc["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        names = {m["name"] for m in metrics}
+        assert "container.memory.usage" in names, names
+        assert "workspace.disk.used" in names, names
+        # ATTRIBUTES ON THE DATA POINT, not only the resource. The OTLP->Prometheus
+        # conversion promotes `service.*` and drops the rest, so an agent recorded
+        # only as a resource attribute vanishes and no dashboard can ask "every
+        # container running claude". Read off the series to confirm, not assumed.
+        for m in metrics:
+            dps = (m.get("gauge") or m.get("sum"))["dataPoints"]
+            keys = {a["key"] for a in dps[0].get("attributes", [])}
+            assert {"environment", "agent"} <= keys, f"{m['name']} lost its attributes: {keys}"
+
     # pi's extension is linked from the globally-installed package: `pi install`
     # would reach npm, which a boundary need not permit.
     pi = _exec(name, ["sh", "-c",
