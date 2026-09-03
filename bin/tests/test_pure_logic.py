@@ -429,6 +429,21 @@ _NPM_PACKAGE_TO_AGENT = {
     "opencode-ai": "opencode",
 }
 
+# Packages that are NOT agents and must not be counted as one. Telemetry
+# extensions for the agents that have no built-in OTLP support (pi, opencode);
+# Claude Code and Codex need none because they export on their own.
+#
+# A SEPARATE SET rather than an entry in the mapping above, because that mapping
+# feeds the "installs exactly the canonical agents" comparison — calling
+# `@desek/pi-opentelemetry` a pi package would let a REMOVED pi still satisfy the
+# check via its telemetry extension, which is the drift this guard exists to
+# catch. Listed explicitly rather than pattern-matched on "otel", so a package
+# nobody declared still fails.
+_NPM_NON_AGENT_PACKAGES = {
+    "@devtheops/opencode-plugin-otel",
+    "@desek/pi-opentelemetry",
+}
+
 
 def _canonical_agents(wiz) -> set[str]:
     return set(wiz.AGENTS)
@@ -634,6 +649,7 @@ def test_dockerfile_installs_exactly_the_canonical_agents(wiz, rel):
         )
     body = path.read_text()
     pkgs = set(re.findall(r"npm i -g (?:--ignore-scripts )?(\S+)", body))
+    pkgs -= _NPM_NON_AGENT_PACKAGES
     unmapped = pkgs - set(_NPM_PACKAGE_TO_AGENT)
     assert not unmapped, (
         f"{rel} installs npm package(s) with no agent mapping: {unmapped}. "

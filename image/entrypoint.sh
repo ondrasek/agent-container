@@ -1220,6 +1220,211 @@ if [[ -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
 fi
 unset _n _tmp_env _env_begin _env_end
 
+# --- 2e-bis. ONE ENDPOINT, EVERY EMITTER (Feature 017 fan-out) ---------------
+# The tool already exports its OWN run records to `otlp_endpoint`. Everything
+# else in the container that can speak OTLP stayed silent, which is the worse
+# half of a trail: the operator sees that a run happened and nothing about what
+# the agent did inside it — token spend, tool calls, model latency — while a
+# collector sits configured and reachable.
+#
+# So one declaration configures every emitter. The endpoint is a DESTINATION,
+# not a credential, so it travels the ordinary environment channel and is written
+# to config files freely; a header carrying a token would not be, which is why
+# none is written here.
+#
+# THE BASE URL IS DERIVED, NOT ASSUMED. `otlp_endpoint` names a signal path
+# (`…/v1/logs`) because that is what the tool's own curl exporter POSTs to, but
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is defined as the BASE that each SDK appends
+# `/v1/<signal>` to. Passing the tool's value through unchanged produces
+# `…/v1/logs/v1/metrics`, a 404 per export, fail-open, and a silent gap.
+if [[ -n "${AGENT_CONTAINER_OTLP_ENDPOINT:-}" ]]; then
+    _otlp_base="${AGENT_CONTAINER_OTLP_ENDPOINT%/}"
+    _otlp_base="${_otlp_base%/v1/logs}"
+    _otlp_base="${_otlp_base%/v1/metrics}"
+    _otlp_base="${_otlp_base%/v1/traces}"
+
+    # http/protobuf, not grpc: the OTLP/HTTP port is the one the tool's own
+    # exporter already proves reachable, and a boundary that permits it does not
+    # thereby permit 4317. Every agent below accepts this value.
+    _otlp_proto="${AGENT_CONTAINER_OTLP_PROTOCOL:-http/protobuf}"
+    _otlp_service="agent-container-${AGENT_CONTAINER_NAME:-unknown}"
+
+    # 1. THE OPEN STANDARD, for everything that reads it. Any OTel SDK in the
+    #    container — a tool the agent installs, a test harness, a language
+    #    runtime's auto-instrumentation — picks these up with no further wiring.
+    #    This is also all pi needs beyond its enable flag.
+    export OTEL_EXPORTER_OTLP_ENDPOINT="${_otlp_base}"
+    export OTEL_EXPORTER_OTLP_PROTOCOL="${_otlp_proto}"
+    export OTEL_SERVICE_NAME="${_otlp_service}"
+    export OTEL_RESOURCE_ATTRIBUTES="service.name=${_otlp_service},service.namespace=agent-container"
+
+    # 2. CLAUDE CODE — first-party, environment-driven.
+    export CLAUDE_CODE_ENABLE_TELEMETRY=1
+    export OTEL_METRICS_EXPORTER=otlp
+    export OTEL_LOGS_EXPORTER=otlp
+
+    # 3. PI — the baked extension is a hard no-op unless switched on; it reads
+    #    the standard OTEL_* variables exported above for everything else.
+    export PI_OTEL_ENABLE=1
+
+    # 4. OPENCODE — its plugin reads its OWN variables rather than the standard
+    #    ones, so the same endpoint is restated under the names it looks for.
+    export OPENCODE_ENABLE_TELEMETRY=1
+    export OPENCODE_OTLP_ENDPOINT="${_otlp_base}"
+    export OPENCODE_OTLP_PROTOCOL="${_otlp_proto}"
+
+    # 5. THE SAME SET FOR INTERACTIVE SHELLS. The exports above reach the
+    #    HEADLESS run because the entrypoint is its parent; an operator who
+    #    attaches gets a fresh shell that inherits none of it. Managed region,
+    #    same idiom as the delivered-credentials block: rewritten every boot,
+    #    everything outside the markers preserved, so an endpoint that stops
+    #    being declared stops being exported.
+    _otel_begin="# >>> agent-container telemetry (managed) >>>"
+    _otel_end="# <<< agent-container telemetry (managed) <<<"
+    if [[ -f "${AGENT_CONTAINER_ENV_FILE}" ]]; then
+        _tmp_otel="${AGENT_CONTAINER_ENV_FILE}.otel"
+        awk -v b="${_otel_begin}" -v e="${_otel_end}" '
+            $0 == b { skip = 1 } { if (!skip) print } $0 == e { skip = 0 }
+        ' "${AGENT_CONTAINER_ENV_FILE}" > "${_tmp_otel}"
+        {
+            printf '%s\n' "${_otel_begin}"
+            printf 'export OTEL_EXPORTER_OTLP_ENDPOINT=%q\n' "${_otlp_base}"
+            printf 'export OTEL_EXPORTER_OTLP_PROTOCOL=%q\n' "${_otlp_proto}"
+            printf 'export OTEL_SERVICE_NAME=%q\n' "${_otlp_service}"
+            printf 'export OTEL_RESOURCE_ATTRIBUTES=%q\n' "service.name=${_otlp_service},service.namespace=agent-container"
+            printf 'export CLAUDE_CODE_ENABLE_TELEMETRY=1\n'
+            printf 'export OTEL_METRICS_EXPORTER=otlp\n'
+            printf 'export OTEL_LOGS_EXPORTER=otlp\n'
+            printf 'export PI_OTEL_ENABLE=1\n'
+            printf 'export OPENCODE_ENABLE_TELEMETRY=1\n'
+            printf 'export OPENCODE_OTLP_ENDPOINT=%q\n' "${_otlp_base}"
+            printf 'export OPENCODE_OTLP_PROTOCOL=%q\n' "${_otlp_proto}"
+            printf '%s\n' "${_otel_end}"
+        } >> "${_tmp_otel}"
+        mv -f "${_tmp_otel}" "${AGENT_CONTAINER_ENV_FILE}"
+    fi
+
+    # 6. CODEX — config file ONLY. Codex does not read OTEL_* environment
+    #    variables at all, and it ignores an `[otel]` section in a project-local
+    #    config, so this must be the user-level file. Written with python's
+    #    tomllib/round-trip rather than appended blindly: the file already
+    #    carries workspace-trust state that an append could invalidate.
+    _codex_cfg="${AGENT_CONTAINER_HOME}/.codex/config.toml"
+    mkdir -p "${AGENT_CONTAINER_HOME}/.codex"
+    if OTLP_BASE="${_otlp_base}" CODEX_CFG="${_codex_cfg}" python3 - <<'PYEOF'
+import os
+import re
+
+path = os.environ["CODEX_CFG"]
+base = os.environ["OTLP_BASE"]
+try:
+    with open(path) as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+
+# Drop any block we wrote before, then append the current one. Marker-delimited
+# for the same reason every other managed region here is: the operator owns the
+# rest of the file.
+begin = "# >>> agent-container telemetry (managed) >>>"
+end = "# <<< agent-container telemetry (managed) <<<"
+text = re.sub(
+    re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "", text, flags=re.S
+)
+if text and not text.endswith("\n"):
+    text += "\n"
+block = f"""{begin}
+[otel]
+environment = "agent-container"
+exporter = "otlp-http"
+metrics_exporter = "otlp-http"
+log_user_prompt = false
+
+[otel.exporter.otlp-http]
+endpoint = "{base}"
+protocol = "binary"
+
+[otel.trace_exporter.otlp-http]
+endpoint = "{base}"
+protocol = "binary"
+
+[otel.metrics_exporter.otlp-http]
+endpoint = "{base}"
+protocol = "binary"
+{end}
+"""
+with open(path, "w") as fh:
+    fh.write(text + block)
+PYEOF
+    then
+        log "codex telemetry configured (${_codex_cfg})"
+    else
+        # NEVER FATAL. Telemetry configuration failing must not stop a run — the
+        # same fail-open rule the tool's own exporter follows.
+        log "WARNING: could not configure codex telemetry; the run continues without it"
+    fi
+
+    # 7. OPENCODE PLUGIN REGISTRATION. The package is baked; this only names it,
+    #    so no network is touched. Merged into any existing config rather than
+    #    overwriting: the file is the operator's.
+    _oc_cfg="${AGENT_CONTAINER_HOME}/.config/opencode/opencode.json"
+    mkdir -p "${AGENT_CONTAINER_HOME}/.config/opencode"
+    if OC_CFG="${_oc_cfg}" python3 - <<'PYEOF'
+import json
+import os
+
+path = os.environ["OC_CFG"]
+plugin = "@devtheops/opencode-plugin-otel"
+try:
+    with open(path) as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        cfg = {}
+except (FileNotFoundError, ValueError):
+    cfg = {}
+
+cfg.setdefault("$schema", "https://opencode.ai/config.json")
+plugins = cfg.get("plugin")
+if not isinstance(plugins, list):
+    plugins = []
+# Compare by NAME, because an entry may be a bare string or a [name, options]
+# tuple — appending blindly would register the plugin twice on every boot.
+def named(entry):
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, list) and entry:
+        return entry[0]
+    return None
+
+if plugin not in [named(e) for e in plugins]:
+    plugins.append(plugin)
+cfg["plugin"] = plugins
+with open(path, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+    fh.write("\n")
+PYEOF
+    then
+        log "opencode telemetry plugin registered (${_oc_cfg})"
+    else
+        log "WARNING: could not register the opencode telemetry plugin; the run continues without it"
+    fi
+
+    # 8. PI EXTENSION REGISTRATION. `pi install` would reach npm, which a
+    #    boundary need not permit, so the globally-installed package is linked
+    #    into pi's extension directory instead. Best-effort by design.
+    _pi_ext_dir="${AGENT_CONTAINER_HOME}/.pi/extensions"
+    _pi_pkg="$(npm root -g 2>/dev/null)/@desek/pi-opentelemetry"
+    if [[ -d "${_pi_pkg}" ]]; then
+        mkdir -p "${_pi_ext_dir}"
+        ln -sfn "${_pi_pkg}" "${_pi_ext_dir}/pi-opentelemetry" 2>/dev/null \
+            && log "pi telemetry extension linked (${_pi_ext_dir}/pi-opentelemetry)" \
+            || log "WARNING: could not link the pi telemetry extension; the run continues without it"
+    fi
+
+    log "telemetry fan-out configured for ${_otlp_base} (claude, codex, pi, opencode + OTEL_* for any SDK)"
+    unset _otlp_base _otlp_proto _otlp_service _otel_begin _otel_end _tmp_otel _codex_cfg _oc_cfg _pi_ext_dir _pi_pkg
+fi
+
 # GH_TOKEN is required, and it may arrive by EITHER channel — the operator's env
 # file or a declared credential delivered just above — so it is checked here
 # rather than with the other required vars at boot. Checking it before delivery

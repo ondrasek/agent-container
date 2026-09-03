@@ -90,6 +90,22 @@ RUN npm i -g @anthropic-ai/claude-code \
     && npm i -g opencode-ai \
     && npm cache clean --force
 
+# --- Layer 3b: OTLP telemetry extensions for the agents that lack it ---------
+# Claude Code and Codex export OpenTelemetry themselves — Claude Code from
+# environment variables, Codex from `~/.codex/config.toml`. pi and opencode do
+# NOT: each needs a third-party extension, so telemetry for them is a dependency
+# decision rather than a configuration one.
+#
+# These are COMMUNITY packages, not first-party ones, and that is the trade being
+# made: uniform telemetry across all four agents in exchange for two more npm
+# publishers in the image's trust boundary. They are installed globally at BUILD
+# time and merely REGISTERED at runtime, because the alternative — installing on
+# first use — is a network fetch behind an egress boundary that does not declare
+# npm, i.e. a silent no-op exactly when telemetry is expected to work.
+RUN npm i -g @devtheops/opencode-plugin-otel \
+    && npm i -g @desek/pi-opentelemetry \
+    && npm cache clean --force
+
 # --- Layer 4: Neovim from upstream stable tarball ---------------------------
 # Debian 12's nvim package is too old. Upstream ships per-architecture tarballs;
 # pick the one matching the build platform (amd64 -> x86_64 / linux64 legacy

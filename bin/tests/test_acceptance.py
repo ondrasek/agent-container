@@ -7097,7 +7097,17 @@ def _agent_project(acc, name: str, profile: dict) -> None:
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "acc-delivery", "-f", str(ident)],
             check=True,
         )
-    (cfg / "settings.yaml").write_text(f"delivery_identity: {ident}\n")
+    # 2b. OPTIONAL OTLP ENDPOINT, opt-in by environment so CI is unaffected.
+    #     Export runs IN THE CONTAINER (the entrypoint's `runs_otlp_export`), so the
+    #     collector has to be reachable from there — on a docker host that means the
+    #     bridge gateway, not 127.0.0.1, which inside a container is the container.
+    #     Behind an egress boundary the collector is ordinary outbound traffic and
+    #     must be DECLARED, or export is refused; it fails open, so the run still
+    #     passes and the gap is reported rather than hidden.
+    settings = f"delivery_identity: {ident}\n"
+    if otlp := (os.environ.get("AGENT_CONTAINER_ACC_OTLP_ENDPOINT") or "").strip():
+        settings += f"otlp_endpoint: {otlp}\n"
+    (cfg / "settings.yaml").write_text(settings)
     (cfg / "authorized_keys").write_text(ident.with_suffix(".pub").read_text())
 
     if not profile["custom_provider"]:
@@ -7532,15 +7542,27 @@ def _avl_task(agent: str, token: str, branch: str) -> str:
     )
 
 
-def _run_in_throwaway(files: dict[str, str], script: str) -> subprocess.CompletedProcess:
+def _run_in_throwaway(
+    files: dict[str, str], script: str, image: str = "python:3.13-slim"
+) -> subprocess.CompletedProcess:
     """Run `script` against `files` in a disposable container, no network.
 
     The agent's code is executed to check it WORKS — and executing code an LLM
     wrote is exactly the thing not to do on the host. It runs in a throwaway
     container with `--network none`, which is the same reasoning this whole tool
     is built on: the container is the blast radius.
+
+    `--network none` also means NOTHING CAN BE INSTALLED here, so a script needing
+    a package must be given an `image` that already has it. A caller that tried
+    `pip install pytest` got returncode 1 with empty stdout AND empty stderr — the
+    `&&` short-circuited, and the failure said nothing about its own cause.
     """
-    setup = "mkdir -p /w && cd /w\n"
+    # /tmp/w, not /w: OUR image runs as the unprivileged `dev` user (rootless by
+    # decision), so a top-level mkdir is denied — `mkdir: cannot create directory
+    # '/w': Permission denied`, and then every later line fails for a reason that
+    # has nothing to do with the code under test. /tmp is writable for root and
+    # for dev alike, so the same helper serves both images.
+    setup = "mkdir -p /tmp/w && cd /tmp/w\n"
     for name, text in files.items():
         b64 = base64.b64encode(text.encode()).decode()
         # `dirname` so a PACKAGE can be reconstructed, not just flat files —
@@ -7549,7 +7571,7 @@ def _run_in_throwaway(files: dict[str, str], script: str) -> subprocess.Complete
         setup += f'mkdir -p "$(dirname {name})"\n'
         setup += f"printf %s '{b64}' | base64 -d > {name}\n"
     return subprocess.run(
-        [RUNTIME, "run", "--rm", "--network", "none", "python:3.13-slim",
+        [RUNTIME, "run", "--rm", "--network", "none", image,
          "sh", "-c", setup + script],
         capture_output=True, text=True, timeout=600,
     )  # fmt: skip
@@ -7581,19 +7603,19 @@ def _assert_avl_on_github(agent: str, token: str, branch: str, pat: str, ctx: st
         assert not bad, f"avl.py imports {mod} instead of implementing its own tree"
 
     # 1. THEIR tests must actually pass.
-    r = _run_in_throwaway(files, "cd /w && python -m unittest test_avl -v 2>&1 | tail -25")
+    r = _run_in_throwaway(files, "cd /tmp/w && python -m unittest test_avl -v 2>&1 | tail -25")
     assert r.returncode == 0, f"the agent's OWN unit tests fail:\n{r.stdout}\n{r.stderr}"
     assert "OK" in r.stdout, f"unittest did not report OK:\n{r.stdout}"
 
     # 2. OUR correctness check, including the height bound a plain BST cannot meet.
-    r = _run_in_throwaway({**files, "verify.py": _AVL_VERIFY}, "cd /w && python verify.py")
+    r = _run_in_throwaway({**files, "verify.py": _AVL_VERIFY}, "cd /tmp/w && python verify.py")
     assert "VERIFY-OK" in r.stdout, (
         f"the tree is not a working AVL:\n{r.stdout}\n{r.stderr[-1200:]}"
     )
 
     # 3. The TUI runs and responds to input.
     r = _run_in_throwaway(
-        files, "cd /w && printf 'i 5\\ni 3\\ni 8\\nd 3\\np\\nq\\n' | python tui.py"
+        files, "cd /tmp/w && printf 'i 5\\ni 3\\ni 8\\nd 3\\np\\nq\\n' | python tui.py"
     )
     assert r.returncode == 0, f"tui.py exited {r.returncode}:\n{r.stdout}\n{r.stderr[-800:]}"
     assert "5" in r.stdout and "8" in r.stdout, f"the TUI printed no tree contents:\n{r.stdout}"
@@ -7903,13 +7925,30 @@ def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
         # 3. THE DIFF touches the package and the tests, and nothing outside them.
         changed = _github_pr_files(pr_number, pat)
         assert changed, "the PR contains no file changes"
-        new_mods = [
+        # TOUCHED, not necessarily ADDED. The README says new operations go in "a
+        # module under mathkit/", and `basic.py` is one — so extending it follows
+        # the convention as written. Demanding a NEW file failed an agent for a
+        # choice the repository permits: the assertion was testing its author's
+        # taste rather than the stated rule. Whether the operation is reachable
+        # THROUGH THE REGISTRY is the real requirement, and that is checked below
+        # by running it.
+        touched = [
             p for p, st in changed.items()
-            if p.startswith("mathkit/") and p.endswith(".py") and st == "added"
+            if p.startswith("mathkit/") and p.endswith(".py") and st in ("added", "modified")
         ]  # fmt: skip
-        assert new_mods, f"no new module under mathkit/: {changed}"
+        assert touched, f"the PR changes no module under mathkit/: {changed}"
         assert any(p.startswith("tests/") for p in changed), f"no tests added: {changed}"
-        stray = [p for p in changed if not (p.startswith(("mathkit/", "tests/")))]
+        # REPO HYGIENE IS NOT A STRAY CHANGE. The point of this check is to catch a
+        # PR that sprays unrelated edits, not one that adds a `.gitignore` for the
+        # `__pycache__` its own test run produced — which is what a careful
+        # contributor does and what failed an agent here. Allowed by NAME, not by
+        # pattern: a rule like "anything at the root" would readmit exactly the
+        # scattershot diff this is meant to catch.
+        allowed_extra = {".gitignore"}
+        stray = [
+            p for p in changed
+            if not p.startswith(("mathkit/", "tests/")) and p not in allowed_extra
+        ]  # fmt: skip
         assert not stray, f"the PR changes files outside the package and its tests: {stray}"
 
         # 4. OUR CHECK, against the code on the PR's head — including that the
@@ -7924,16 +7963,22 @@ def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
             assert got is not None, f"{path} is not readable on {branch}"
             files[path] = got
 
-        v = _run_in_throwaway({**files, "verify.py": _MEDIAN_VERIFY}, "cd /w && python verify.py")
+        v = _run_in_throwaway(
+            {**files, "verify.py": _MEDIAN_VERIFY}, "cd /tmp/w && python verify.py"
+        )
         assert "MEDIAN-OK" in v.stdout, (
             f"the pushed change does not satisfy the registry convention or is "
             f"numerically wrong:\n{v.stdout}\n{v.stderr[-1500:]}"
         )
 
         # 5. THEIR OWN tests must pass too — on the same code, in the same box.
+        # OUR image, because pytest is baked into it and the sandbox has no network
+        # to install one from. Running the agent's tests on the same interpreter the
+        # agent itself had is also the more honest check.
         t = _run_in_throwaway(
-            {**files, "run_tests.py": "import pytest, sys; sys.exit(pytest.main(['-q', 'tests']))"},
-            "cd /w && pip install -q pytest >/dev/null 2>&1 && python run_tests.py 2>&1 | tail -20",
+            files,
+            "cd /tmp/w && python3 -m pytest -q tests 2>&1 | tail -25",
+            image="localhost/agent-container:latest",
         )
         assert t.returncode == 0, f"the agent's own tests fail:\n{t.stdout}\n{t.stderr[-800:]}"
         passed = True
