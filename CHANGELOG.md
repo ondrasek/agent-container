@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.50.1 (2026-09-03)
+
+### Bug Fixes
+
+- **creds**: An unreachable runtime is undetermined, not empty
+  ([`e57e39a`](https://github.com/ondrasek/agent-container/commit/e57e39a2f4f26b04e3b4b9f0846e6fc3ab5405cc))
+
+
 ## v0.50.0 (2026-09-02)
 
 ### Bug Fixes
