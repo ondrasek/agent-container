@@ -260,8 +260,11 @@ _agent_container() {
             __agent_container_add_names __agent_container_names_local # local runtime only
             ;;
         purge)
+            if [[ "${prev}" == "--host" ]]; then
+                return 0
+            fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "-y --yes -v --verbose" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--host -y --yes --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only
@@ -283,8 +286,11 @@ _agent_container() {
             __agent_container_add_names __agent_container_names       # local + remote hosts.conf
             ;;
         logs)
+            if [[ "${prev}" == "--host" ]]; then
+                return 0
+            fi
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-follow --egress --json -v --verbose" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--no-follow --egress --host --json -v --verbose" -- "${cur}") )
                 return 0
             fi
             __agent_container_add_names __agent_container_names_local # local runtime only

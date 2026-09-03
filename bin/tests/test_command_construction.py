@@ -989,7 +989,9 @@ def capture_logs(wiz, monkeypatch):
 
     monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
     monkeypatch.setattr(wiz, "run_child", fake_run_child)
-    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: True)
+    # The host-aware seam: `do_logs` addresses a runtime by ARGV (so it can carry
+    # `--context`/`--connection` for a remote host), not by a bare binary name.
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda base, cname: True)
     return calls
 
 
@@ -1013,6 +1015,61 @@ def test_logs_egress_reads_the_boundary_not_the_agent(wiz, capture_logs):
     assert wiz.container_name("acme") not in argv
 
 
+def test_logs_reads_a_REMOTE_container_when_given_a_host(wiz, capture_logs, monkeypatch):
+    """`logs` used to call `detect_runtime()` unconditionally, so it could only ever
+    read a LOCAL container.
+
+    That made the command an operator reaches for when a REMOTE deployment
+    misbehaves the one command that could not see it — the answer was to leave the
+    tool for a raw `ssh ... docker logs`, which is the fallback the tool exists to
+    remove. The runtime must be addressed by argv so the context travels with it.
+    """
+    monkeypatch.setattr(
+        wiz, "resolve_deploy_host",
+        lambda h: ("hz1", {"driver": "docker", "context": "agent-container-hz1"}),
+    )  # fmt: skip
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda rec, **k: None)
+    assert wiz.do_logs("acme", follow=False, host="hz1") == 0
+    (argv,) = capture_logs
+    assert argv == [
+        "docker", "--context", "agent-container-hz1", "logs", "agent-container-acme",
+    ]  # fmt: skip
+
+
+def test_logs_opens_the_tunnel_before_reading_a_remote_log(wiz, capture_logs, monkeypatch):
+    """The remote context IS a forwarded socket, so it does not exist until the
+    tunnel is up — the same omission that made `creds ls` report a delivered
+    credential as undelivered."""
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        wiz, "resolve_deploy_host",
+        lambda h: ("hz1", {"driver": "docker", "context": "agent-container-hz1"}),
+    )  # fmt: skip
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda rec, **k: opened.append(rec))
+    wiz.do_logs("acme", follow=False, host="hz1")
+    assert opened, "a remote log read must open the tunnel first"
+
+
+def test_purge_forwards_its_host_instead_of_silently_going_local(wiz, monkeypatch):
+    """`purge` is sugar for `down --purge`, and `cli_down` always took a host — the
+    sugar simply never passed one.
+
+    So `down --host` hit the remote while `purge --host` was not even accepted, and
+    a remote environment had NO purge at all: the one command that removes
+    CREDENTIAL volumes. Dropping the host here would purge whatever local
+    environment happened to share the name, which is worse than refusing.
+    """
+    seen: dict = {}
+    monkeypatch.setattr(
+        wiz,
+        "cli_down",
+        lambda name, purge, yes, host=None: seen.update(name=name, purge=purge, yes=yes, host=host),
+    )
+    monkeypatch.setattr(wiz, "emit_action", lambda *a, **k: None)
+    wiz.purge("acme", yes=True, host="hz1", as_json=False)
+    assert seen == {"name": "acme", "purge": True, "yes": True, "host": "hz1"}
+
+
 def test_logs_egress_names_the_missing_boundary_as_policy_not_breakage(wiz, monkeypatch):
     """An environment with no declaration has no boundary container. The runtime's
     bare 'no such container' reads as a tool fault; the truth is that nothing was
@@ -1020,7 +1077,7 @@ def test_logs_egress_names_the_missing_boundary_as_policy_not_breakage(wiz, monk
     down.
     """
     monkeypatch.setattr(wiz, "detect_runtime", lambda: "podman")
-    monkeypatch.setattr(wiz, "container_exists", lambda rt, cname: False)
+    monkeypatch.setattr(wiz, "runtime_container_exists", lambda base, cname: False)
     monkeypatch.setattr(wiz, "run_child", lambda argv: pytest.fail("must not reach the runtime"))
     with pytest.raises(wiz.Fatal) as e:
         wiz.do_logs("acme", follow=False, egress=True)

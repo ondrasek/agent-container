@@ -14398,7 +14398,7 @@ def wizard_handover(
         )
 
 
-def do_logs(name: str, follow: bool, egress: bool = False) -> int:
+def do_logs(name: str, follow: bool, egress: bool = False, host: str | None = None) -> int:
     """Stream the agent container's log, or — with `egress` — the boundary's.
 
     THE BOUNDARY'S LOG IS THE ONLY PLACE A REFUSAL IS RECORDED (FR-020d), and
@@ -14415,14 +14415,21 @@ def do_logs(name: str, follow: bool, egress: bool = False) -> int:
     # the more revealing ones — the boundary log carries every refusal.
     #
     # Recorded on the CONTROL PLANE'S OWN volume rather than the target
-    # environment's, because this command has no host record: it acts on the local
-    # runtime (`detect_runtime`), so there is nothing to run a write against. The
-    # environment is NAMED in the record, so the trail still answers "who read
-    # whose log" — it is the location that differs, not the content.
+    # environment's. The environment is NAMED in the record, so the trail still
+    # answers "who read whose log" — it is the location that differs, not the
+    # content.
     record_fleet_attribution("logs", [name])
-    rt = detect_runtime()
+    # HOST-AWARE since the Hetzner pass. This used to call `detect_runtime()`
+    # unconditionally, so `logs` could only ever read a LOCAL container: the one
+    # command an operator reaches for when a remote deployment misbehaves was the
+    # one that could not see it. Reading a remote log meant leaving the tool for a
+    # raw `ssh … docker logs`, which is exactly the fallback the tool exists to
+    # remove.
+    _, host_rec = resolve_deploy_host(host)
+    ensure_tunnel(host_rec)
+    base = driver_runtime_argv(host_rec)
     target = egress_container_name(name) if egress else container_name(name)
-    if egress and not container_exists(rt, target):
+    if egress and not runtime_container_exists(base, target):
         # The runtime's own "no such container" reads as a tool fault, when the
         # truth is a policy fact: this environment has no boundary to log. That is
         # the FR-020e confusion — a declaration outcome presented as infrastructure
@@ -14432,7 +14439,7 @@ def do_logs(name: str, follow: bool, egress: bool = False) -> int:
             f"environment is only given one when its spec declares `egress:` AND the "
             f"declaration is enforceable — check `agent-container status`."
         )
-    argv = [rt, "logs"] + (["-f"] if follow else []) + [target]
+    argv = base + ["logs"] + (["-f"] if follow else []) + [target]
     try:
         return run_child(argv).returncode  # inherited stdio (stdout->stderr in JSON mode)
     except KeyboardInterrupt:
@@ -18700,11 +18707,16 @@ def wipe(
 def purge(
     name: str = typer.Argument(..., help="Container short name."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
+    host: str | None = typer.Option(None, "--host", help="Host the environment runs on."),
     as_json: bool = JSON_OPT,
 ) -> None:
     """Sugar for: down NAME --purge."""
     set_json_mode(as_json)
-    cli_down(name, purge=True, yes=yes)
+    # `--host` FORWARDED, not dropped. `cli_down` has always taken a host; `purge`
+    # simply never passed one, so the sugar silently targeted the local runtime
+    # while `down --host` targeted the remote. A remote environment therefore had
+    # no purge at all — the one command that removes CREDENTIAL volumes.
+    cli_down(name, purge=True, yes=yes, host=host)
     emit_action("purge", name=name)
 
 
@@ -19261,11 +19273,12 @@ def logs(
             "NXDOMAIN means the name genuinely does not exist."
         ),
     ),
+    host: str | None = typer.Option(None, "--host", help="Host the environment runs on."),
     as_json: bool = JSON_OPT,
 ) -> None:
     """Tail container logs."""
     set_json_mode(as_json)
-    rc = do_logs(name, follow=not no_follow, egress=egress)
+    rc = do_logs(name, follow=not no_follow, egress=egress, host=host)
     # The log STREAM itself is the container's own output and is not wrapped; the
     # envelope reports the outcome so an agent can tell success from failure.
     # `source` because the two streams answer different questions and a caller

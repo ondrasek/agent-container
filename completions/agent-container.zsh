@@ -227,7 +227,9 @@ _agent-container() {
                 purge)
                     _arguments \
                         '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '--host[Host the container runs on]:host:' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation]' \
+                        '--json[Emit machine-readable JSON]' \
                         '*:container:__agent_container_names_local'
                     ;;
                 list)
@@ -248,6 +250,7 @@ _agent-container() {
                         '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
                         '--no-follow[Print logs without following]' \
                         '--egress[Read the egress boundary log, where refusals are recorded]' \
+                        '--host[Host the container runs on]:host:' \
                         '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names_local'
                     ;;
