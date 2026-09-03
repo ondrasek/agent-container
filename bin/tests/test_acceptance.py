@@ -7858,6 +7858,7 @@ def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
     acc.register(name)
 
     pr_number: int | None = None
+    passed = False
     try:
         r = acc.cli(
             ["up", name, "--mode", "headless", "--agent", profile["agent"],
@@ -7935,5 +7936,18 @@ def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
             "cd /w && pip install -q pytest >/dev/null 2>&1 && python run_tests.py 2>&1 | tail -20",
         )
         assert t.returncode == 0, f"the agent's own tests fail:\n{t.stdout}\n{t.stderr[-800:]}"
+        passed = True
     finally:
-        _github_cleanup_pr(pr_number, branch, pat)
+        # KEPT ON FAILURE, deleted on success. Cleaning up unconditionally deleted
+        # the pushed branch before it could be examined — which happened while
+        # diagnosing this very test, and turned "the agent did most of the work and
+        # the last call was refused" into "nothing on the forge, cause unknown".
+        # A green run leaves nothing behind; a red one leaves the evidence.
+        if passed:
+            _github_cleanup_pr(pr_number, branch, pat)
+        else:
+            print(
+                f"\nKEPT FOR DIAGNOSIS: branch {branch}"
+                + (f" and PR #{pr_number}" if pr_number else " (no PR was opened)")
+                + f" on {_REPO_SLUG} — delete them once you are done."
+            )
