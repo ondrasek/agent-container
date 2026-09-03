@@ -7996,3 +7996,127 @@ def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
                 + (f" and PR #{pr_number}" if pr_number else " (no PR was opened)")
                 + f" on {_REPO_SLUG} — delete them once you are done."
             )
+
+
+# --- Feature 017 fan-out: one endpoint configures every emitter --------------
+
+
+def _otel_env(name: str) -> dict[str, str]:
+    """The telemetry environment an INTERACTIVE shell in `name` would see.
+
+    Read through `bash -ic`, because that is the shell an operator gets on
+    attach and the env file is sourced from `.bashrc`. A LOGIN shell (`-lc`) is
+    not interactive and sources none of it — which is why the first version of
+    this check saw an empty environment and looked like a broken fan-out.
+    """
+    r = _exec(name, ["bash", "-ic",
+                     "env | grep -E '^(OTEL_|CLAUDE_CODE_|PI_OTEL_|OPENCODE_)' | sort"])  # fmt: skip
+    out = {}
+    for line in r.stdout.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip()
+    return out
+
+
+def test_one_declared_endpoint_configures_every_emitter(acc):
+    """FR-009 fan-out: `otlp_endpoint` reaches the agents, not just the tool.
+
+    Before this, the tool exported its own run records and every other emitter in
+    the container stayed silent — the operator could see THAT a run happened and
+    nothing about what the agent did inside it, while a collector sat configured
+    and reachable.
+
+    The endpoint is a destination rather than a credential, so it travels the
+    ordinary environment channel and is written into config files; a header
+    carrying a token would not be, and none is written.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    endpoint = "http://collector.invalid:4318/v1/logs"
+    (cfg / "settings.yaml").write_text(f"otlp_endpoint: {endpoint}\n")
+
+    name = "accotel"
+    acc.register(name)
+    acc.up(name)
+
+    env = _otel_env(name)
+    assert env, "an interactive shell saw no telemetry environment at all"
+
+    # THE BASE, NOT THE SIGNAL PATH. `otlp_endpoint` names `…/v1/logs` because
+    # that is what the tool's own curl exporter POSTs to, while an SDK appends
+    # `/v1/<signal>` to what it is given. Passing it through unchanged yields
+    # `…/v1/logs/v1/metrics` — a 404 per export, fail-open, and a silent gap that
+    # looks exactly like an agent that emitted nothing.
+    base = "http://collector.invalid:4318"
+    assert env.get("OTEL_EXPORTER_OTLP_ENDPOINT") == base, (
+        f"the signal path was not stripped: {env.get('OTEL_EXPORTER_OTLP_ENDPOINT')!r}"
+    )
+    assert "/v1/logs" not in env.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+
+    # ATTRIBUTABLE. Without the environment's own name every container in a fleet
+    # reports under one indistinguishable service, and the trail cannot answer
+    # "which environment produced this" — the question it exists for.
+    assert env.get("OTEL_SERVICE_NAME") == f"agent-container-{name}", env
+    assert "unknown" not in env.get("OTEL_SERVICE_NAME", "")
+
+    # Claude Code reads its switch and exporters from the environment.
+    assert env.get("CLAUDE_CODE_ENABLE_TELEMETRY") == "1", env
+    assert env.get("OTEL_METRICS_EXPORTER") == "otlp", env
+    assert env.get("OTEL_LOGS_EXPORTER") == "otlp", env
+
+    # pi's extension is a hard no-op without its switch; it reads the standard
+    # OTEL_* variables for everything else.
+    assert env.get("PI_OTEL_ENABLE") == "1", env
+
+    # opencode's plugin reads its OWN names rather than the standard ones, so the
+    # same endpoint has to be restated under them.
+    assert env.get("OPENCODE_ENABLE_TELEMETRY") == "1", env
+    assert env.get("OPENCODE_OTLP_ENDPOINT") == base, env
+
+    # CODEX IS CONFIG-ONLY. It reads no OTEL_* variable at all, and ignores an
+    # `[otel]` section in a project-local config — so the block has to be in the
+    # user-level file or it does nothing, silently.
+    codex = _exec(name, ["cat", "/home/dev/.codex/config.toml"])
+    assert "[otel]" in codex.stdout, f"codex has no telemetry block:\n{codex.stdout}"
+    assert base in codex.stdout, f"codex block does not carry the endpoint:\n{codex.stdout}"
+    assert "/v1/logs" not in codex.stdout, "codex got the signal path, not the base"
+
+    # opencode's plugin has to be REGISTERED, not merely installed.
+    oc = _exec(name, ["cat", "/home/dev/.config/opencode/opencode.json"])
+    assert "@devtheops/opencode-plugin-otel" in oc.stdout, oc.stdout
+
+    # pi's extension is linked from the globally-installed package: `pi install`
+    # would reach npm, which a boundary need not permit.
+    pi = _exec(name, ["sh", "-c",
+                      "readlink -f /home/dev/.pi/extensions/pi-opentelemetry || echo MISSING"])  # fmt: skip
+    assert "pi-opentelemetry" in pi.stdout and "MISSING" not in pi.stdout, pi.stdout
+
+
+def test_no_declared_endpoint_configures_nothing(acc):
+    """ABSENT IS NOT DEFAULTED (Constitution VIII).
+
+    With no endpoint declared, nothing may be switched on: a container that
+    exports telemetry nobody asked for is sending its operator's activity to a
+    destination they never named. The agents' own switches must stay unset —
+    not set to a falsy value, which some of these read as truthy.
+    """
+    cfg = _config_dir_of(acc.state_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "settings.yaml").write_text("# no otlp_endpoint declared\n")
+
+    name = "accnotel"
+    acc.register(name)
+    acc.up(name)
+
+    env = _otel_env(name)
+    for var in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "CLAUDE_CODE_ENABLE_TELEMETRY",
+        "PI_OTEL_ENABLE",
+        "OPENCODE_ENABLE_TELEMETRY",
+    ):
+        assert var not in env, f"{var} was set with no endpoint declared: {env}"
+
+    codex = _exec(name, ["sh", "-c", "cat /home/dev/.codex/config.toml 2>/dev/null || true"])
+    assert "[otel]" not in codex.stdout, f"codex was configured anyway:\n{codex.stdout}"

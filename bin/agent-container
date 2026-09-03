@@ -10798,6 +10798,13 @@ class ExecSpec:
         CLI's host-side build-context override)."""
         env = {"AGENT_CONTAINER_MODE": self.mode, "AGENT_CONTAINER_AGENT": self.agent}
         env["AGENT_CONTAINER_ROLE"] = self.role
+        # The environment's OWN name, for telemetry that has to be attributable.
+        # Without it the entrypoint's OTEL_SERVICE_NAME fell back to
+        # `agent-container-unknown`, so every container in a fleet reported under
+        # one indistinguishable service and the trail could not answer "which
+        # environment produced this" — the question it exists for.
+        if name:
+            env["AGENT_CONTAINER_NAME"] = name
         # Resolved on the OPERATOR's side for the same reason the OTLP endpoint is:
         # the container holds no `.agent-container/` and no user config, so it has
         # nothing to resolve a setting FROM. Delivered only when declared, so an
