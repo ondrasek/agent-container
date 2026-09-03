@@ -49,6 +49,7 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
+        python3-pytest \
         fd-find \
         ripgrep \
     && sed -i 's/^# *\(C.UTF-8\)/\1/' /etc/locale.gen || true \
@@ -56,6 +57,15 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# `python3-pytest` is baked for the same reason as everything else here: a real
+# agent asked to "run the test suite" on a Python repository reaches for pytest,
+# and without it the only way forward is `pip install` at runtime. Behind an
+# egress boundary that is not a slow path, it is a REFUSED one — pypi.org is not
+# a declared destination — so the agent burns its turns retrying a download and
+# never reaches the work. Measured: the pull-request test failed with a wall of
+# `pypi.org A IN REFUSED` and no pull request. The Debian package rather than pip
+# because Debian 12 marks its Python externally-managed (PEP 668).
+#
 # `fd` is the name every agent looks for; Debian ships the binary as `fdfind`
 # because of a name clash with an unrelated package. Without this link
 # pi-coding-agent decides `fd` is missing and DOWNLOADS its own copy at runtime,
@@ -119,6 +129,33 @@ RUN set -eux; \
         "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"; \
     chmod 0755 /usr/local/bin/yq; \
     yq --version
+
+# --- Layer 4c: GitHub CLI ---------------------------------------------------
+# An agent that can commit and push but cannot open a pull request stops one step
+# short of a reviewable handover, and the REST API is a poor substitute: it means
+# hand-assembling JSON with a token on the command line, which is exactly the
+# shape this project keeps credentials OUT of. `gh` reads GH_TOKEN from the
+# environment, which is already how the token reaches the container.
+#
+# Upstream tarball rather than GitHub's apt repo: one fewer signing key and
+# sources.list entry in the image, and the same arch-aware idiom as nvim/yq
+# above. Note the tarball's inner directory carries the version, so it is
+# resolved with a glob rather than --strip-components on a guessed name.
+RUN set -eux; \
+    cd /tmp; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "${ARCH}" in \
+        amd64|arm64) : ;; \
+        *) echo "unsupported architecture for gh: ${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    VER="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
+        | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -n1)"; \
+    test -n "${VER}"; \
+    curl -fsSLO "https://github.com/cli/cli/releases/download/v${VER}/gh_${VER}_linux_${ARCH}.tar.gz"; \
+    tar -xzf "gh_${VER}_linux_${ARCH}.tar.gz"; \
+    install -m 0755 "gh_${VER}_linux_${ARCH}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "gh_${VER}_linux_${ARCH}" "gh_${VER}_linux_${ARCH}.tar.gz"; \
+    gh --version | head -n1
 
 # --- Layer 5: user + ROOTLESS sshd config -----------------------------------
 # The container is fully rootless: no sudo, no root at runtime. All system deps

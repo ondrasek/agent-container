@@ -7543,6 +7543,10 @@ def _run_in_throwaway(files: dict[str, str], script: str) -> subprocess.Complete
     setup = "mkdir -p /w && cd /w\n"
     for name, text in files.items():
         b64 = base64.b64encode(text.encode()).decode()
+        # `dirname` so a PACKAGE can be reconstructed, not just flat files —
+        # `mathkit/__init__.py` needs its directory to exist first. Harmless for a
+        # flat name, whose dirname is ".".
+        setup += f'mkdir -p "$(dirname {name})"\n'
         setup += f"printf %s '{b64}' | base64 -d > {name}\n"
     return subprocess.run(
         [RUNTIME, "run", "--rm", "--network", "none", "python:3.13-slim",
@@ -7630,3 +7634,306 @@ def test_a_REAL_agent_writes_a_working_AVL_tree_with_tests(acc, profile):
     combined = r.stdout + r.stderr
     assert r.returncode == 0, f"the agent run failed:\n{combined[-3000:]}"
     _assert_avl_on_github(profile["agent"], token, branch, pat, combined)
+
+
+# --- A REAL agent opening a REVIEWABLE pull request --------------------------
+# The pipeline test proves an agent can push, and the AVL test proves it can write
+# a correct algorithm from a specification. Neither proves it can do the thing a
+# team actually asks of a contributor: read a repository it did not write, extend
+# it WITHOUT breaking what is there, and hand the result over for review.
+#
+# The difference that matters is the CONVENTION. `mathkit` reaches every operation
+# through a registry, and the README says so. A new operation written as a
+# standalone function passes every "did it compute a median" check and is still
+# wrong for this repository — so the verification looks the operation up through
+# the registry (`get_op("median")`), which only resolves if the agent found and
+# followed the convention. It cannot be satisfied by ignoring the existing code.
+
+_PR_BASE = "main"
+_REPO_SLUG = "ondrasek/agent-container-test-repository"
+
+# OUR check, run against THEIR pushed code. Every assertion goes through the
+# registry rather than importing the function directly.
+_MEDIAN_VERIFY = r"""
+from mathkit import get_op, list_ops
+
+med = get_op("median")                 # resolves ONLY via the existing registry
+assert "median" in list_ops(), f"median is not registered: {list_ops()}"
+
+assert med([3, 1, 2]) == 2, "median of an odd-length list is the middle value"
+assert med([1, 2, 3, 4]) == 2.5, "even-length median is the mean of the two middle values"
+assert med([5]) == 5, "median of a single value is that value"
+assert med([2, 1]) == 1.5, "median of two values is their mean"
+# UNSORTED input: a median that assumes sorted input is the common wrong answer.
+assert med([9, 1, 5, 3, 7]) == 5, "median must sort its input"
+assert med([10, 2, 8, 4]) == 6, "median must sort before taking the middle pair"
+
+# EXTENDED, not replaced: the operations that were already there must still work.
+assert get_op("mean")([1, 2, 3]) == 2.0, "the existing mean operation broke"
+assert get_op("sum")([1, 2, 3]) == 6, "the existing sum operation broke"
+print("MEDIAN-OK")
+"""
+
+
+def _pr_task(agent: str, branch: str, token: str) -> str:
+    """The task names the OUTCOME and the mechanism, not the design.
+
+    The explicit `checkout` of the base branch is not ceremony. A clone lands on
+    the repository's DEFAULT branch, and this repository's default is a leftover
+    e2e branch containing nothing but a `runs/` directory — so the agent read an
+    empty tree, had no conventions to follow, and could not open a pull request
+    into an unrelated history. Depending on a forge SETTING for a test's starting
+    state is a dependency worth removing even once that setting is fixed.
+
+    It deliberately does not say where to put the code or how to register it —
+    that is what the repository's README and existing modules are for, and finding
+    them is the part being tested. The `gh` invocation IS spelled out: which forge
+    command to use is plumbing, not the thing under test, and pinning it keeps a
+    failure attributable to the work rather than to a guess about tooling.
+    """
+    return (
+        f"You are working in the git repository at /workspace.\n"
+        f"START by running: git fetch origin {_PR_BASE} && git checkout {_PR_BASE}\n"
+        f"FIRST read README.md and the existing code under mathkit/ — this "
+        f"repository has a convention for how operations are registered and "
+        f"looked up, and your change MUST follow it.\n"
+        f"1. Add an operation named `median` that returns the median of a list of "
+        f"numbers: the middle value when the count is odd, and the mean of the two "
+        f"middle values when the count is even. It must work for unsorted input.\n"
+        f"2. Add pytest tests for it under tests/.\n"
+        f"3. Run the whole test suite and make sure everything passes, including "
+        f"the tests that were already there.\n"
+        f"4. Commit your work, create a branch named {branch}, and push it to "
+        f"origin.\n"
+        f"5. Open a pull request from {branch} into {_PR_BASE} using the `gh` CLI, "
+        f"which is installed and reads its token from $GH_TOKEN:\n"
+        f"gh pr create --base {_PR_BASE} --head {branch} --title '...' --body '...'\n"
+        f"The pull request TITLE must contain the exact text {token}. The BODY "
+        f"must explain, in at least two sentences, what you changed and how it "
+        f"fits the repository's existing conventions."
+    )
+
+
+def _pat_can_open_pull_requests(pat: str) -> bool:
+    """Can this token CREATE a pull request? Probed without creating one.
+
+    A fine-grained PAT that carries `contents: write` — enough to clone, branch,
+    commit and push — does NOT necessarily carry `pull requests: write`, and the
+    difference is invisible until the last step of the run fails. Measured: real
+    agents did the whole task, pushed, called `gh pr create`, and got a 403; the
+    only trace was `api.github.com` in the resolver log, so the test failed with
+    "no pull request" and no cause.
+
+    `head == base` is the probe, because the permission check happens BEFORE the
+    validation: an authorised token is refused with 422 (a PR from a branch to
+    itself is nonsense) and an unauthorised one with 403. Neither creates anything.
+    """
+    r = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "-X", "POST", "-H", f"Authorization: Bearer {pat}",
+         "-H", "Accept: application/vnd.github+json",
+         "-H", "Content-Type: application/json",
+         "-d", json.dumps({"title": "probe", "head": _PR_BASE, "base": _PR_BASE}),
+         f"https://api.github.com/repos/{_REPO_SLUG}/pulls"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    return r.stdout.strip() != "403"
+
+
+def _github_pr_for_head(branch: str, pat: str) -> dict | None:
+    """The open PR whose head is `branch`, read from the forge."""
+    r = subprocess.run(
+        ["curl", "-s", "-H", f"Authorization: Bearer {pat}",
+         "-H", "Accept: application/vnd.github+json",
+         f"https://api.github.com/repos/{_REPO_SLUG}/pulls"
+         f"?state=all&head=ondrasek:{branch}"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    try:
+        prs = json.loads(r.stdout)
+        return prs[0] if prs else None
+    except Exception:
+        return None
+
+
+def _github_pr_files(number: int, pat: str) -> dict[str, str]:
+    """Path -> change status for every file in the PR."""
+    r = subprocess.run(
+        ["curl", "-s", "-H", f"Authorization: Bearer {pat}",
+         "-H", "Accept: application/vnd.github+json",
+         f"https://api.github.com/repos/{_REPO_SLUG}/pulls/{number}/files?per_page=100"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+    try:
+        return {f["filename"]: f["status"] for f in json.loads(r.stdout)}
+    except Exception:
+        return {}
+
+
+def _github_cleanup_pr(number: int | None, branch: str, pat: str) -> None:
+    """Close the PR and delete the branch.
+
+    Unconditional teardown, because this tier had already left 56 abandoned
+    `e2e/*` branches on the repository and made one of them its default branch. A
+    test that needs a forge has to clean up on the forge.
+    """
+    if number:
+        subprocess.run(
+            ["curl", "-s", "-X", "PATCH", "-H", f"Authorization: Bearer {pat}",
+             "-H", "Accept: application/vnd.github+json",
+             f"https://api.github.com/repos/{_REPO_SLUG}/pulls/{number}",
+             "-d", '{"state": "closed"}'],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+    subprocess.run(
+        ["curl", "-s", "-X", "DELETE", "-H", f"Authorization: Bearer {pat}",
+         "-H", "Accept: application/vnd.github+json",
+         f"https://api.github.com/repos/{_REPO_SLUG}/git/refs/heads/{branch}"],
+        capture_output=True, text=True, timeout=120,
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("profile", _AGENT_PROFILES)
+def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
+    """The full contributor loop: read an unfamiliar repository, extend it, open a PR.
+
+    Everything here is evidence that outlives the container and is read back from
+    the forge rather than from the agent's own output — a run that claims to have
+    opened a pull request and did not is precisely the failure worth catching.
+
+    `api.github.com` is declared as a SEPARATE destination from `github.com`: the
+    push goes to one host and the pull request to the other, so an allowlist that
+    covers only the clone leaves the agent able to do the work and unable to hand
+    it over. That asymmetry is invisible until an agent tries both.
+
+    This is also the only test that exercises `gh`, which is baked into the image
+    for exactly this step: an agent that can commit and push but cannot open a
+    pull request stops one step short of a reviewable handover.
+    """
+    pat = (os.environ.get("AGENT_CONTAINER_TEST_REPOSITORY_PAT") or "").strip()
+    if not pat:
+        pytest.skip(
+            "NOT COVERED without AGENT_CONTAINER_TEST_REPOSITORY_PAT: that an agent "
+            "can read an unfamiliar repository, follow its conventions, and open a "
+            "pull request through the egress boundary."
+        )
+    # The base branch is a PRECONDITION, and its absence is reported as such
+    # rather than as a mysterious 422 from the pulls endpoint.
+    if not _github_file("README.md", _PR_BASE, pat):
+        pytest.skip(
+            f"NOT COVERED: the test repository has no '{_PR_BASE}' branch to open a "
+            f"pull request against. Seed one (README.md + mathkit/ + tests/) — see "
+            f"the module docstring above this test."
+        )
+
+    if not _pat_can_open_pull_requests(pat):
+        pytest.skip(
+            "NOT COVERED: AGENT_CONTAINER_TEST_REPOSITORY_PAT cannot create pull "
+            "requests (403). It has `contents: write` — enough to clone, push and "
+            "run every other test in this tier — but this test needs `pull "
+            "requests: write` on the token as well. Everything up to the handover "
+            "would still be exercised; the handover itself would not."
+        )
+
+    name = f"accpr{profile['agent']}"
+    _agent_project(acc, name, profile)
+    token = f"PR-{uuid.uuid4().hex[:12]}"
+    branch = f"e2e/pr-{profile['agent']}-{token}"
+
+    proj = acc.tmp / f"proj{name}"
+    (proj / ".agent-container").mkdir(parents=True, exist_ok=True)
+    (proj / ".agent-container" / f"{name}.env").write_text(
+        f"GH_TOKEN={pat}\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n"
+    )
+    # Only `egress:` in the spec; the container settings ride the FLAGS, matching
+    # the egress test above. `up` reads the project spec for the boundary but the
+    # agent/workspace/repo triple is passed explicitly there, and copying the
+    # proven shape keeps a failure here attributable to this test's subject rather
+    # than to which surface carries a setting.
+    (proj / ".agent-container" / "environments.yaml").write_text(
+        f"environments:\n  - name: {name}\n    host: local\n"
+        f"    egress:\n      allow:\n{profile['egress_allow']}"
+        f"        - host: api.github.com\n"
+    )
+    acc.register(name)
+
+    pr_number: int | None = None
+    try:
+        r = acc.cli(
+            ["up", name, "--mode", "headless", "--agent", profile["agent"],
+             "--workspace", "persistent", "--foreground", "--repo", _TEST_REPO,
+             "--task", _pr_task(profile["agent"], branch, token)],
+            cwd=proj, timeout=2400,
+        )  # fmt: skip
+        combined = r.stdout + r.stderr
+        assert r.returncode == 0, f"the agent run failed:\n{combined[-3000:]}"
+
+        # The boundary really was in place: without it, "the PR crossed the
+        # boundary" would be a claim about nothing.
+        sidecar = subprocess.run(
+            [RUNTIME, "ps", "-a", "--filter", f"name=agent-egress-{name}",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=60,
+        )  # fmt: skip
+        assert f"agent-egress-{name}" in sidecar.stdout, (
+            "no egress sidecar: the pull request was opened WITHOUT a boundary, so "
+            f"it says nothing about api.github.com being declared.\n{sidecar.stdout}"
+        )
+
+        # 1. THE HANDOVER EXISTS, on the forge.
+        pr = _github_pr_for_head(branch, pat)
+        assert pr, (
+            f"no pull request whose head is {branch}. The branch may have been "
+            f"pushed without a PR being opened, which is the half-done outcome this "
+            f"test exists to catch:\n{combined[-2500:]}"
+        )
+        pr_number = pr["number"]
+        assert pr["base"]["ref"] == _PR_BASE, f"PR targets {pr['base']['ref']!r}"
+        assert pr["state"] == "open", f"PR is {pr['state']}"
+
+        # 2. IT IS REVIEWABLE: the token proves it is THIS run's PR, and the body
+        #    proves the agent described its work rather than opening an empty PR.
+        assert token in (pr["title"] or ""), f"PR title lacks {token}: {pr['title']!r}"
+        body = (pr["body"] or "").strip()
+        assert body.count(".") >= 2 and len(body) >= 80, (
+            f"the PR body does not explain the change (needs >=2 sentences): {body!r}"
+        )
+
+        # 3. THE DIFF touches the package and the tests, and nothing outside them.
+        changed = _github_pr_files(pr_number, pat)
+        assert changed, "the PR contains no file changes"
+        new_mods = [
+            p for p, st in changed.items()
+            if p.startswith("mathkit/") and p.endswith(".py") and st == "added"
+        ]  # fmt: skip
+        assert new_mods, f"no new module under mathkit/: {changed}"
+        assert any(p.startswith("tests/") for p in changed), f"no tests added: {changed}"
+        stray = [p for p in changed if not (p.startswith(("mathkit/", "tests/")))]
+        assert not stray, f"the PR changes files outside the package and its tests: {stray}"
+
+        # 4. OUR CHECK, against the code on the PR's head — including that the
+        #    operation resolves THROUGH THE REGISTRY, which is the convention.
+        wanted = [p for p in changed if p.endswith(".py")]
+        for p in ("mathkit/__init__.py", "mathkit/basic.py"):
+            if p not in wanted:
+                wanted.append(p)
+        files = {}
+        for path in wanted:
+            got = _github_file(path, branch, pat)
+            assert got is not None, f"{path} is not readable on {branch}"
+            files[path] = got
+
+        v = _run_in_throwaway({**files, "verify.py": _MEDIAN_VERIFY}, "cd /w && python verify.py")
+        assert "MEDIAN-OK" in v.stdout, (
+            f"the pushed change does not satisfy the registry convention or is "
+            f"numerically wrong:\n{v.stdout}\n{v.stderr[-1500:]}"
+        )
+
+        # 5. THEIR OWN tests must pass too — on the same code, in the same box.
+        t = _run_in_throwaway(
+            {**files, "run_tests.py": "import pytest, sys; sys.exit(pytest.main(['-q', 'tests']))"},
+            "cd /w && pip install -q pytest >/dev/null 2>&1 && python run_tests.py 2>&1 | tail -20",
+        )
+        assert t.returncode == 0, f"the agent's own tests fail:\n{t.stdout}\n{t.stderr[-800:]}"
+    finally:
+        _github_cleanup_pr(pr_number, branch, pat)
