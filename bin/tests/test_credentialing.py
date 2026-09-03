@@ -1194,6 +1194,56 @@ def test_held_refs_come_from_the_volumes_not_the_config(wiz, monkeypatch):
     assert wiz.held_cred_refs({"driver": "docker", "context": ""}, "acme") == ["apikey/anthropic"]
 
 
+def test_an_unreachable_runtime_is_undetermined_not_empty(wiz, monkeypatch):
+    """UNREACHABLE IS NOT EMPTY, and the difference is the whole finding.
+
+    A failed volume query used to return [] — the same answer as "asked, and there
+    are none" — so `creds ls` reported "declared, not yet delivered" about a
+    credential that had been delivered successfully seconds earlier. Observed on a
+    REAL remote host, where the query fails whenever the tunnel is not up. This is
+    the same mistake the inventory names as "unreachable ⇒ undetermined, never
+    stopped": absence of evidence reported as evidence of absence.
+    """
+    rec = {"driver": "docker", "context": ""}
+    # A runtime that ANSWERS with nothing: genuinely no credentials.
+    monkeypatch.setattr(
+        wiz, "query",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, "", ""),
+    )  # fmt: skip
+    assert wiz.held_cred_refs(rec, "acme") == []
+
+    # A runtime we could not ASK: undetermined, and distinguishable from the above.
+    monkeypatch.setattr(
+        wiz, "query",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", "cannot connect"),
+    )  # fmt: skip
+    assert wiz.held_cred_refs(rec, "acme") is None
+
+    # And a query that cannot even be launched is undetermined too, not a crash.
+    def _boom(argv, **k):
+        raise OSError("no such context")
+
+    monkeypatch.setattr(wiz, "query", _boom)
+    assert wiz.held_cred_refs(rec, "acme") is None
+
+
+def test_revoke_refuses_rather_than_revoking_nothing_and_claiming_success(wiz, monkeypatch):
+    """A revocation that cannot see its target must FAIL, not report success.
+
+    `creds remove --all` over an unreadable holding would revoke nothing and exit 0
+    — an operator revoking a leaked key would be told it was done.
+    """
+    monkeypatch.setattr(
+        wiz, "resolve_deploy_host", lambda h: ("hz1", {"driver": "docker", "context": ""})
+    )
+    monkeypatch.setattr(wiz, "ensure_tunnel", lambda rec, **k: None)
+    monkeypatch.setattr(wiz, "held_cred_refs", lambda rec, n: None)
+    with pytest.raises(wiz.Fatal) as e:  # cli() turns Fatal into exit 1
+        wiz.creds_rm("acme", None, all_creds=True, yes=True, host="hz1", as_json=False)
+    assert "undetermined" in str(e.value).lower()
+    assert "nothing was revoked" in str(e.value).lower()
+
+
 def test_revoke_deletes_in_the_running_container_and_drops_the_volume(wiz, monkeypatch, tmp_path):
     """BOTH, because either alone is incomplete.
 

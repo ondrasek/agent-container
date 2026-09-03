@@ -650,14 +650,23 @@ def cred_volume_prefix(name: str) -> str:
     return f"{CONTAINER_PREFIX}{name}{CRED_VOLUME_INFIX}"
 
 
-def existing_cred_volumes(host_rec: dict, name: str) -> list[str]:
+def existing_cred_volumes(host_rec: dict, name: str) -> list[str] | None:
     """Credential volumes the runtime currently holds for `name`, by prefix."""
+    # UNREACHABLE IS NOT EMPTY. Both used to return [], so a host we could not
+    # query reported "holds no credentials" — and `creds ls` then said "declared,
+    # not yet delivered" about a credential that had just been delivered
+    # successfully. Observed on a REMOTE host, where the query fails whenever the
+    # tunnel is not up; absence of evidence rendered as evidence of absence, which
+    # is the same mistake the inventory work named as "unreachable ⇒ undetermined,
+    # never stopped".
+    #
+    # None means "could not tell"; [] still means "asked, and there are none".
     try:
         r = query(driver_runtime_argv(host_rec) + ["volume", "ls", "--format", "{{.Name}}"])
     except Fatal, OSError, subprocess.SubprocessError:
-        return []
+        return None
     if r.returncode != 0:
-        return []
+        return None
     pref = cred_volume_prefix(name)
     # `or ""`: a runtime that answers with no output is "no volumes", not a crash.
     return sorted(v.strip() for v in (r.stdout or "").splitlines() if v.strip().startswith(pref))
@@ -673,7 +682,13 @@ def reconcile_cred_volumes(host_rec: dict, name: str, declared_refs: list[str]) 
     """
     keep = {cred_volume_name(name, r) for r in declared_refs}
     removed = []
-    for vol in existing_cred_volumes(host_rec, name):
+    present = existing_cred_volumes(host_rec, name)
+    if present is None:
+        # Could not enumerate, so we do not know what is there to prune. Pruning
+        # nothing is the safe action, but claiming we pruned is not: say it.
+        warn(f"could not enumerate credential volumes for {name}; nothing was pruned this deploy")
+        return []
+    for vol in present:
         if vol in keep:
             continue
         r = query(driver_runtime_argv(host_rec) + ["volume", "rm", vol])
@@ -8580,7 +8595,11 @@ def assert_host_empty(host: dict) -> None:
         die(
             f"refusing to destroy: {len(names)} container(s) still present "
             f"({', '.join(names)}); remove them first "
-            f"(e.g. agent-container down <name> --host {hostname})"
+            # `--yes` IS PART OF THE REMEDY. `down` is destructive and refuses
+            # without it on a non-TTY, so the hint as written failed for exactly
+            # the caller most likely to be reading it — a script tearing a host
+            # down. A remedy that does not run is not a remedy.
+            f"(e.g. agent-container down <name> --host {hostname} --yes)"
         )
 
 
@@ -10388,15 +10407,18 @@ def _delivery_ssh_argv(host: str, identity: Path, address: str, port: int) -> li
     ]  # fmt: skip
 
 
-def held_cred_refs(host_rec: dict, name: str) -> list[str]:
+def held_cred_refs(host_rec: dict, name: str) -> list[str] | None:
     """The credential refs an environment currently HOLDS, from its volume names.
 
     Derived from the volumes rather than from the config, because the two can differ
     — which is the whole reason this is worth showing an operator.
     """
+    vols = existing_cred_volumes(host_rec, name)
+    if vols is None:
+        return None  # could not ask the runtime; the caller must say so
     pref = cred_volume_prefix(name)
     out = []
-    for vol in existing_cred_volumes(host_rec, name):
+    for vol in vols:
         slug = vol[len(pref) :]
         kind, _, rest = slug.partition("-")
         out.append(f"{kind}/{rest}" if rest else kind)
@@ -11794,7 +11816,17 @@ def down_container(
     # PREFIX rather than listed in the fixed identity contract.
     try:
         if compose_file.is_file() and CRED_VOLUME_INFIX in compose_file.read_text():
-            vols = [*vols, *existing_cred_volumes(host_rec, name)]
+            cred_vols = existing_cred_volumes(host_rec, name)
+            if cred_vols is None:
+                # A purge that cannot SEE the credential volumes cannot remove them,
+                # and they hold secrets. Silence here would report a completed purge
+                # over credentials still on disk — say what was left instead.
+                warn(
+                    f"could not enumerate credential volumes for {name}: they may be "
+                    f"LEFT BEHIND on {host_name}; re-run once the host is reachable"
+                )
+                cred_vols = []
+            vols = [*vols, *cred_vols]
     except (Fatal, OSError, subprocess.SubprocessError) as e:
         warn(f"could not enumerate credential volumes for {name}: {e}")
 
@@ -18253,6 +18285,10 @@ def creds_ls(
     set_json_mode(as_json)
     validate_name(name)
     host_name, host_rec = resolve_deploy_host(host)
+    # The volume query runs THROUGH the tunnel on a remote host, so open it first.
+    # Without this the query always failed remotely and every credential read as
+    # "not yet delivered" — including ones delivered seconds earlier.
+    ensure_tunnel(host_rec)
     held = held_cred_refs(host_rec, name)
     declared = [f"apikey/{p}" for p in sorted(discover_apikey_files(name))]
     # ALSO what the SPEC declares, not only the convention key files. Without this
@@ -18273,6 +18309,17 @@ def creds_ls(
                     provider = CRED_PROVIDER.get(cname)
                     declared.append(f"apikey/{provider}" if provider else f"env/{cname}")
     declared = sorted(set(declared))
+    if held is None:
+        # We could not observe the runtime, so we do not know what it holds. Say that,
+        # and still show what the config DECLARES — labelled as declaration, not state.
+        log(
+            f"{name}: cannot reach the runtime on host '{host_name}' — what it holds is undetermined"
+        )
+        for ref in declared:
+            log(f"  {ref}  [declared; delivery undetermined]")
+        if not declared:
+            log("  (no credentials declared)")
+        return
     if not held and not declared:
         log(f"{name}: no credentials")
         return
@@ -18318,7 +18365,15 @@ def creds_rm(
     if not ref and not all_creds:
         die("creds rm: name a credential (e.g. apikey/anthropic) or pass --all")
     host_name, host_rec = resolve_deploy_host(host)
+    ensure_tunnel(host_rec)
     held = held_cred_refs(host_rec, name)
+    if held is None:
+        # Revocation must not proceed on a guess: --all over an unreadable holding
+        # would revoke nothing and report success, which is the opposite of what a
+        # revocation command must do when it cannot see its target.
+        die(
+            f"cannot reach the runtime on host '{host_name}': what {name} holds is undetermined, so nothing was revoked"
+        )
     # Narrowed, not cast: `ref` is optional on the command line and the guard above
     # already rejected the both-absent case, but the type has to say so too.
     targets: list[str] = held if all_creds else [ref] if ref else []
