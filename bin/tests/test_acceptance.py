@@ -1840,9 +1840,18 @@ def test_declarative_provisioned_host_hetzner(acc):
     hostname = "aac-prov-acc"  # RFC-1123 (no underscore)
     proj = acc.tmp / "provproj"
     (proj / ".agent-container").mkdir(parents=True)
+    # SAME OVERRIDES AS THE SIBLING PROVISIONING TEST. This used to hard-code
+    # `cx22`/`nbg1`, and cx22 has since been DEPRECATED by Hetzner — so the test
+    # failed for everyone who opted in ("server type 104 is deprecated"), which a
+    # CI-skipped test hides until someone runs it. A server type is a moving
+    # external fact, and which types exist in which location varies BY PROJECT, so
+    # it belongs in configuration rather than in a literal here.
+    srv_type = os.environ.get("AGENT_CONTAINER_ACC_SERVER_TYPE", "cpx11")
+    srv_loc = os.environ.get("AGENT_CONTAINER_ACC_LOCATION", "nbg1")
     (proj / ".agent-container" / "environments.yaml").write_text(
         f"environments:\n  - name: {name}\n"
-        f"    host: {{ provision: hetzner, name: {hostname}, server_type: cx22, location: nbg1 }}\n"
+        f"    host: {{ provision: hetzner, name: {hostname}, "
+        f"server_type: {srv_type}, location: {srv_loc} }}\n"
         f"    container:\n      env_file: ./ci.env\n"
     )
     (proj / "ci.env").write_text("GH_TOKEN=x\nGIT_USER_NAME=T\nGIT_USER_EMAIL=t@example.com\n")
@@ -1854,10 +1863,16 @@ def test_declarative_provisioned_host_hetzner(acc):
         assert f"provisioning host {hostname}" in r.stderr
         # the provisioned host is registered as tool-created
         show = acc.cli(["host", "show", hostname, "--json"], extra_env=tok)
-        assert (
-            '"created_by_tool": true' in show.stdout.replace(" ", "").replace("\n", "").lower()
-            or '"created_by_tool":true' in show.stdout.lower()
-        )
+        # PARSED, not string-matched. Both arms of the previous check were
+        # inverted — one looked for the SPACED form in a space-stripped string,
+        # the other for the UNSPACED form in the raw (pretty-printed) output — so
+        # neither could ever match and the assertion could not pass. Invisible
+        # because this test needs two opt-ins and real money to run. Whether a
+        # host is tool-created is exactly what `--json` exists to answer, so ask
+        # the document rather than its formatting.
+        host_doc = json.loads(show.stdout)
+        assert host_doc["data"]["created_by_tool"] is True, show.stdout
+        assert host_doc["data"]["provisioning"]["provider"] == "hetzner", show.stdout
     finally:
         # destroy --deprovision removes the container AND the spec-created server.
         d = acc.cli(["destroy", "-y", "--deprovision"], cwd=proj, extra_env=tok, timeout=1200)
