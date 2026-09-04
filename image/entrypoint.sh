@@ -1251,6 +1251,8 @@ _hm_cgroup_field() {
 }
 
 host_metrics_payload() {
+    # SAME KEY AS EVERY OTHER SIGNAL. A memory sample that cannot be joined to the
+    # run it was taken during is a number without a question attached.
     local now_ns start_ns cpu_usec mem_cur mem_max load1 procs disk_used disk_avail
     now_ns="$(date +%s%N 2>/dev/null)"
     case "${now_ns}" in
@@ -1276,6 +1278,7 @@ host_metrics_payload() {
         --arg svc "${OTEL_SERVICE_NAME:-agent-container}" \
         --arg env_name "${AGENT_CONTAINER_NAME:-unknown}" \
         --arg agent "${AGENT_CONTAINER_AGENT:-unknown}" \
+        --arg run_id "${RUNS_ID:-}" \
         --arg now "${now_ns}" \
         --arg start "${start_ns}" \
         --arg cpu_usec "${cpu_usec}" \
@@ -1294,7 +1297,9 @@ host_metrics_payload() {
         def attrs: [
             { key: "environment", value: { stringValue: $env_name } },
             { key: "agent",       value: { stringValue: $agent } }
-        ];
+        ] + (if ($run_id | length) > 0
+             then [ { key: "run_id", value: { stringValue: $run_id } } ]
+             else [] end);
         def gauge($name; $unit; $v):
             if $v == null then empty
             else { name: $name, unit: $unit,
@@ -1412,7 +1417,30 @@ if [[ -n "${AGENT_CONTAINER_OTLP_ENDPOINT:-}" ]]; then
     export OTEL_EXPORTER_OTLP_ENDPOINT="${_otlp_base}"
     export OTEL_EXPORTER_OTLP_PROTOCOL="${_otlp_proto}"
     export OTEL_SERVICE_NAME="${_otlp_service}"
-    export OTEL_RESOURCE_ATTRIBUTES="service.name=${_otlp_service},service.namespace=agent-container"
+
+    # CORRELATION IS THE POINT, and `run_id` is the key that carries it. The tool
+    # stamps every run record with one; putting the SAME id on the resource makes
+    # every OTel SDK in the container attach it to everything it emits, so a
+    # Claude Code api_request, a host memory sample and the tool's own record all
+    # answer to one query. Without it the three are simultaneous and unrelatable —
+    # an operator can see that a run was slow and that memory was high and cannot
+    # say they were the same run.
+    #
+    # RUNS_ID is set when the record is opened, which happens well before this
+    # point; it is empty only if record-keeping itself failed, and then the
+    # attribute is simply omitted rather than exported as an empty string that
+    # would join unrelated runs together under "".
+    _otel_attrs="service.name=${_otlp_service},service.namespace=agent-container"
+    _otel_attrs="${_otel_attrs},agent_container.environment=${AGENT_CONTAINER_NAME:-unknown}"
+    _otel_attrs="${_otel_attrs},agent_container.agent=${AGENT_CONTAINER_AGENT:-unknown}"
+    _otel_attrs="${_otel_attrs},agent_container.mode=${AGENT_CONTAINER_MODE:-unknown}"
+    if [[ -n "${RUNS_ID:-}" ]]; then
+        # service.instance.id as well as our own key: a collector that knows
+        # nothing about this tool still separates two runs of one environment,
+        # because that is the standard attribute for "which instance".
+        _otel_attrs="${_otel_attrs},agent_container.run_id=${RUNS_ID},service.instance.id=${RUNS_ID}"
+    fi
+    export OTEL_RESOURCE_ATTRIBUTES="${_otel_attrs}"
 
     # 2. CLAUDE CODE — first-party, environment-driven.
     export CLAUDE_CODE_ENABLE_TELEMETRY=1
@@ -1447,7 +1475,7 @@ if [[ -n "${AGENT_CONTAINER_OTLP_ENDPOINT:-}" ]]; then
             printf 'export OTEL_EXPORTER_OTLP_ENDPOINT=%q\n' "${_otlp_base}"
             printf 'export OTEL_EXPORTER_OTLP_PROTOCOL=%q\n' "${_otlp_proto}"
             printf 'export OTEL_SERVICE_NAME=%q\n' "${_otlp_service}"
-            printf 'export OTEL_RESOURCE_ATTRIBUTES=%q\n' "service.name=${_otlp_service},service.namespace=agent-container"
+            printf 'export OTEL_RESOURCE_ATTRIBUTES=%q\n' "${_otel_attrs}"
             printf 'export CLAUDE_CODE_ENABLE_TELEMETRY=1\n'
             printf 'export OTEL_METRICS_EXPORTER=otlp\n'
             printf 'export OTEL_LOGS_EXPORTER=otlp\n'
@@ -1467,12 +1495,17 @@ if [[ -n "${AGENT_CONTAINER_OTLP_ENDPOINT:-}" ]]; then
     #    carries workspace-trust state that an append could invalidate.
     _codex_cfg="${AGENT_CONTAINER_HOME}/.codex/config.toml"
     mkdir -p "${AGENT_CONTAINER_HOME}/.codex"
-    if OTLP_BASE="${_otlp_base}" CODEX_CFG="${_codex_cfg}" python3 - <<'PYEOF'
+    if OTLP_BASE="${_otlp_base}" CODEX_CFG="${_codex_cfg}" \
+       AC_ENV_NAME="${AGENT_CONTAINER_NAME:-agent-container}" python3 - <<'PYEOF'
 import os
 import re
 
 path = os.environ["CODEX_CFG"]
 base = os.environ["OTLP_BASE"]
+# Codex has no resource-attribute channel, so the one free-text field it does
+# have carries the environment name. Without it every codex container reports
+# under the same literal and the trail cannot say WHICH one emitted a span.
+env_name = os.environ.get("AC_ENV_NAME") or "agent-container"
 try:
     with open(path) as fh:
         text = fh.read()
@@ -1491,7 +1524,7 @@ if text and not text.endswith("\n"):
     text += "\n"
 block = f"""{begin}
 [otel]
-environment = "agent-container"
+environment = "{env_name}"
 exporter = "otlp-http"
 metrics_exporter = "otlp-http"
 log_user_prompt = false
@@ -1582,7 +1615,7 @@ PYEOF
     host_metrics_start "${_otlp_base}"
 
     log "telemetry fan-out configured for ${_otlp_base} (claude, codex, pi, opencode, host + OTEL_* for any SDK)"
-    unset _otlp_base _otlp_proto _otlp_service _otel_begin _otel_end _tmp_otel _codex_cfg _oc_cfg _pi_ext_dir _pi_pkg
+    unset _otlp_base _otlp_proto _otlp_service _otel_attrs _otel_begin _otel_end _tmp_otel _codex_cfg _oc_cfg _pi_ext_dir _pi_pkg
 fi
 
 # GH_TOKEN is required, and it may arrive by EITHER channel — the operator's env

@@ -32,6 +32,7 @@ import tempfile
 import textwrap
 import time
 import types
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -7872,10 +7873,20 @@ def test_a_REAL_agent_opens_a_reviewable_pull_request(acc, profile):
     # agent/workspace/repo triple is passed explicitly there, and copying the
     # proven shape keeps a failure here attributable to this test's subject rather
     # than to which surface carries a setting.
+    # THE COLLECTOR IS OUTBOUND TRAFFIC TOO. Export from inside a boundary is
+    # governed by the same declaration as everything else, and it fails OPEN — so
+    # an undeclared collector produces a run that passes with no telemetry, which
+    # reads as "the agent emitted nothing" rather than "the boundary refused it".
+    # Declared with an explicit port, which selects the packet filter: the
+    # collector is plain HTTP to a host that no TLS handshake names.
+    allow = f"{profile['egress_allow']}        - host: api.github.com\n"
+    if otlp := (os.environ.get("AGENT_CONTAINER_ACC_OTLP_ENDPOINT") or "").strip():
+        parsed = urllib.parse.urlsplit(otlp)
+        if parsed.hostname:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            allow += f"        - host: {parsed.hostname}\n          port: {port}\n"
     (proj / ".agent-container" / "environments.yaml").write_text(
-        f"environments:\n  - name: {name}\n    host: local\n"
-        f"    egress:\n      allow:\n{profile['egress_allow']}"
-        f"        - host: api.github.com\n"
+        f"environments:\n  - name: {name}\n    host: local\n    egress:\n      allow:\n{allow}"
     )
     acc.register(name)
 
