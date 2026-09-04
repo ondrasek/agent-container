@@ -2285,6 +2285,93 @@ headless_shutdown() {
     exit "${rc}"
 }
 
+# --- Agent session artifacts -> OTLP (the fallback for silent agents) --------
+# Claude Code and opencode export their own telemetry. codex and pi DO NOT: both
+# were measured making zero export attempts with a valid, loaded config — codex
+# in `codex exec` AND in its interactive TUI, pi under `pi -p` — using a socket
+# that logged every connection. Their activity would otherwise be invisible
+# while the two chatty agents are fully traced, which is the worst kind of
+# observability: uneven, and silently so.
+#
+# So what they DO leave behind is shipped instead. This is deliberately not a
+# reimplementation of their telemetry — it is the session record they already
+# write, given the same run_id as everything else, so a codex run is at least
+# as traceable as the tool's own record of it.
+#
+# READ-ONLY AND AFTER THE FACT. Nothing here touches the running agent: the
+# tee-the-live-process alternative would sit in the path that propagates the
+# agent's exit code, which is pinned by tests and is the one behaviour a
+# telemetry feature must not put at risk.
+ship_agent_session() {
+    local agent="$1" endpoint="${AGENT_CONTAINER_OTLP_ENDPOINT:-}" src="" n=0
+    [[ -n "${endpoint}" ]] || return 0
+    command -v curl > /dev/null 2>&1 && command -v jq > /dev/null 2>&1 || return 0
+
+    # THE ROLLOUT, not `history.jsonl`. `codex exec` never touches history.jsonl
+    # — only the interactive TUI does — but every codex run writes a full session
+    # transcript under `sessions/<Y>/<M>/<D>/rollout-*.jsonl`. Shipping the former
+    # exported the PREVIOUS interactive session, or nothing at all, while
+    # reporting success. Newest by mtime, because a container may hold several.
+    local codex_home="${CODEX_HOME:-${AGENT_CONTAINER_HOME}/.codex}"
+    case "${agent}" in
+        codex) src="$(find "${codex_home}/sessions" -name 'rollout-*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+                        | sort -rn | head -1 | cut -d' ' -f2-)" ;;
+        pi)    src="$(find "${AGENT_CONTAINER_HOME}/.pi" -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+                        | sort -rn | head -1 | cut -d' ' -f2-)" ;;
+        *)     return 0 ;;   # claude and opencode speak OTLP themselves
+    esac
+    [[ -n "${src}" ]] || return 0
+    [[ -r "${src}" ]] || return 0
+
+    # BOUNDED. A long session can leave thousands of lines and this runs while an
+    # operator waits for the container to exit; the tail is the part that says
+    # what the agent just did.
+    local max="${AGENT_CONTAINER_SESSION_EXPORT_MAX:-200}"
+    local payload
+    payload="$(tail -n "${max}" "${src}" 2>/dev/null | jq -cRs --arg agent "${agent}" \
+        --arg svc "${OTEL_SERVICE_NAME:-agent-container}" \
+        --arg env_name "${AGENT_CONTAINER_NAME:-unknown}" \
+        --arg run_id "${RUNS_ID:-}" \
+        --arg now "$(date +%s)000000000" '
+        split("\n") | map(select(length > 0)) as $lines
+        | {
+            resourceLogs: [ {
+              resource: { attributes: [
+                { key: "service.name",      value: { stringValue: $svc } },
+                { key: "service.namespace", value: { stringValue: "agent-container" } },
+                { key: "agent_container.environment", value: { stringValue: $env_name } },
+                { key: "agent_container.agent",       value: { stringValue: $agent } }
+              ] + (if ($run_id | length) > 0
+                   then [ { key: "agent_container.run_id", value: { stringValue: $run_id } } ]
+                   else [] end) },
+              scopeLogs: [ {
+                scope: { name: "agent-container/session" },
+                logRecords: ( $lines | map({
+                    timeUnixNano: $now,
+                    observedTimeUnixNano: $now,
+                    severityNumber: 9,
+                    severityText: "INFO",
+                    body: { stringValue: . },
+                    attributes: [
+                      { key: "event_name", value: { stringValue: "session.history" } },
+                      { key: "agent",      value: { stringValue: $agent } }
+                    ]
+                  }) )
+              } ]
+            } ]
+          }' 2>/dev/null)"
+    [[ -n "${payload}" ]] || return 0
+    n="$(printf '%s' "${payload}" | jq '.resourceLogs[0].scopeLogs[0].logRecords | length' 2>/dev/null || echo 0)"
+    [[ "${n}" -gt 0 ]] 2>/dev/null || return 0
+
+    # Fail-open and quiet, like every other export path here.
+    if printf '%s' "${payload}" | curl -sS -m "${OTLP_TIMEOUT:-10}" -X POST "${endpoint}" \
+        -H 'Content-Type: application/json' --data-binary @- > /dev/null 2>&1; then
+        log "exported ${n} ${agent} session record(s) (${agent} does not emit OTLP itself)"
+    fi
+    return 0
+}
+
 # Headless: run the agent's non-interactive form as the container's workload so
 # the CONTAINER exits with the agent's exit code (004 FR-002). The task (possibly
 # empty) is read from the injected file.
@@ -2340,6 +2427,10 @@ run_headless_agent() {
     # `|| rc=$?` and not a bare `wait`: under `set -e` a failing agent would end
     # this script immediately, before the exit trap could record WHY it failed.
     wait "${AGENT_PID}" || rc=$?
+    # AFTER the agent, BEFORE the exit: codex and pi emit no OTLP of their own,
+    # so their session record is shipped here. Never allowed to change `rc` —
+    # the container must still exit with the AGENT's status (004 FR-002).
+    ship_agent_session "${a}" || true
     exit "${rc}"
 }
 
