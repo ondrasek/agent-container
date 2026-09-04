@@ -1734,3 +1734,108 @@ def test_no_hint_hardcodes_docker_any_more(wiz):
         if "host add" in ln and "--docker-context" in ln and "def host_add_hint" not in ln
     ]
     assert offenders == [], "a hint still hardcodes --docker-context:\n" + "\n".join(offenders)
+
+
+# --- Feature 023: exposure levels and the two endpoint forms -----------------
+# These are the riskiest functions in the telemetry-stack feature and they are
+# pure, so they are proved here without deploying anything. Being wrong in
+# either produces a stack that looks healthy and receives nothing — export
+# fails open, so there is no error to notice.
+
+
+def test_a_container_endpoint_is_never_the_operators_loopback(wiz):
+    """THE SINGLE FAILURE THIS FEATURE EXISTS TO PREVENT.
+
+    Inside a container 127.0.0.1 is the container, so an endpoint carrying the
+    operator's loopback resolves to nothing an agent can reach. Export then
+    fails open: the run passes, the stack is empty, and it reads as "the agent
+    emitted nothing" rather than "nobody was listening".
+    """
+    for driver in ("docker", "podman"):
+        ep = wiz.stack_container_endpoint(4400, driver)
+        assert "127.0.0.1" not in ep, f"{driver}: container endpoint is a loopback: {ep}"
+        assert "localhost" not in ep, f"{driver}: container endpoint is localhost: {ep}"
+        assert ep.startswith("http://"), ep
+        assert ep.endswith("/v1/logs"), "the tool's own exporter POSTs to the signal path"
+
+
+def test_the_two_endpoint_forms_are_actually_different(wiz):
+    """Operator-facing and container-facing are DIFFERENT ADDRESSES.
+
+    A design with one address is simpler and wrong on every runtime where a
+    container does not share the operator's loopback, which is all of them.
+    """
+    for driver in ("docker", "podman"):
+        operator = wiz.stack_operator_url("localhost", 3300)
+        container = wiz.stack_container_endpoint(4400, driver)
+        assert operator != container
+        assert wiz.stack_container_host_address(driver) not in operator
+
+
+def test_container_host_address_is_runtime_specific(wiz):
+    """Measured, not assumed (research R1): under rootless podman a container
+    reaches its host at `host.containers.internal`, and NOT at its default
+    gateway, which routes past the VM entirely."""
+    assert wiz.stack_container_host_address("docker") == wiz.STACK_DOCKER_BRIDGE_GATEWAY
+    assert wiz.stack_container_host_address("podman") == "host.containers.internal"
+
+
+def test_default_exposure_is_reachable_from_containers(wiz):
+    """`host` is the DEFAULT rather than `loopback`, and it must actually serve
+    containers — otherwise the default configuration produces a stack no agent
+    can export to, which is the feature failing at rest."""
+    assert wiz.STACK_EXPOSURE_DEFAULT == wiz.STACK_EXPOSURE_HOST
+    for driver in ("docker", "podman"):
+        binds = wiz.stack_exposure_binds(wiz.STACK_EXPOSURE_HOST, driver)
+        reachable = "0.0.0.0" in binds or wiz.stack_container_host_address(driver) in binds
+        assert reachable, f"{driver}: default level does not serve containers: {binds}"
+
+
+def test_loopback_never_binds_a_routable_address(wiz):
+    """The narrow level must stay narrow on every runtime."""
+    for driver in ("docker", "podman"):
+        assert wiz.stack_exposure_binds("loopback", driver) == ["127.0.0.1"]
+
+
+def test_network_is_the_only_level_that_binds_everywhere_under_docker(wiz):
+    """Under docker the three levels are genuinely distinct, so `network` is a
+    real decision rather than a synonym for the default."""
+    loop = wiz.stack_exposure_binds("loopback", "docker")
+    host = wiz.stack_exposure_binds("host", "docker")
+    net = wiz.stack_exposure_binds("network", "docker")
+    assert net == ["0.0.0.0"]
+    assert "0.0.0.0" not in loop and "0.0.0.0" not in host
+    assert host != loop
+
+
+def test_host_level_under_podman_binds_wider_than_the_word_suggests(wiz):
+    """RECORDED BECAUSE IT IS SURPRISING, not because it is desirable.
+
+    Rootless podman has no stable per-host bridge address to bind, so `host` can
+    only serve containers by binding 0.0.0.0 — genuinely wider than the same
+    level under docker. This is exactly why FR-018b requires the RESOLVED
+    addresses to be reported: an operator choosing `host` here is publishing
+    further than the level name implies and has to be told, not left to infer
+    it from a word.
+    """
+    assert wiz.stack_exposure_binds("host", "podman") == ["0.0.0.0"]
+    assert wiz.stack_exposure_binds("host", "docker") != ["0.0.0.0"]
+
+
+def test_an_unknown_exposure_level_is_refused_by_name(wiz):
+    with pytest.raises(wiz.Fatal) as e:
+        wiz.stack_exposure_binds("public", "docker")
+    assert "public" in str(e.value)
+    for level in wiz.STACK_EXPOSURE_LEVELS:
+        assert level in str(e.value), "the refusal must name the valid choices"
+
+
+def test_the_egress_stanza_names_the_container_facing_host(wiz):
+    """Printed beside the endpoint ALWAYS (FR-011a): an enforcing environment
+    that does not declare the collector refuses the export and fails OPEN,
+    leaving no error anywhere to detect afterwards."""
+    for driver in ("docker", "podman"):
+        stanza = wiz.stack_egress_allow_entry(driver, 4400)
+        assert wiz.stack_container_host_address(driver) in stanza
+        assert "port: 4400" in stanza, "an explicit port selects the packet filter"
+        assert "127.0.0.1" not in stanza

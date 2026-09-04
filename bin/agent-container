@@ -107,6 +107,55 @@ CONTAINER_PREFIX = "agent-container-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
 
+# --- Feature 023: the THIRD kind of container -------------------------------
+# Agent environments and control planes are ROLES of one image this project
+# builds. A telemetry stack is neither: it runs a third-party image, holds no
+# credentials, runs no agent and no sshd. It is a KIND rather than a role, and it
+# is addressed by its own command group — `up`'s surface (agent, task, repo,
+# env-file, egress, credentials, tmux) is meaningless for a collector.
+KIND_AGENT = "agent"
+KIND_CONTROL_PLANE = ROLE_CONTROL_PLANE
+KIND_TELEMETRY_STACK = "telemetry-stack"
+KINDS = (KIND_AGENT, KIND_CONTROL_PLANE, KIND_TELEMETRY_STACK)
+
+# One prefix family, deliberately: `panic` and the inventory find what this tool
+# created by prefix, so a kind they cannot see is a hole in the kill switch
+# rather than a missing feature (FR-024).
+STACK_CONTAINER_PREFIX = f"{CONTAINER_PREFIX}stack-"
+
+# NAMED DEFAULTS (Constitution VIII). Each is overridable by the environment
+# variable of the same name prefixed AGENT_CONTAINER_; a reader must be able to
+# tell absent from defaulted from declared.
+STACK_IMAGE_DEFAULT = "docker.io/grafana/otel-lgtm:latest"
+# 180s covers pull + start + ingest-accepting as ONE outcome, because that is
+# what the operator is waiting for. Measured: warm start ~10s, cold pull 60-90s,
+# so a shorter budget fails honest first runs (research R2, FR-006a).
+STACK_READY_TIMEOUT = 180
+STACK_RETENTION_DAYS = 7
+STACK_RETENTION_SIZE = "10GB"
+# Port bases chosen to not overlap PORT_BASE (2200..2299), which agent
+# environments allocate their sshd port from.
+# The address a container reaches its host at under docker. A CONSTANT rather
+# than a probe: it is docker's documented default bridge gateway, and probing it
+# per deploy would make the endpoint the tool prints depend on a call that can
+# fail — at which point it would print something wrong rather than nothing.
+STACK_DOCKER_BRIDGE_GATEWAY = "172.17.0.1"
+STACK_UI_PORT_BASE = 3300
+STACK_OTLP_HTTP_PORT_BASE = 4400
+STACK_OTLP_GRPC_PORT_BASE = 4500
+STACK_PORT_RANGE = 100
+
+# Exposure is chosen from NAMED LEVELS rather than by writing an address, and a
+# level is an INTENT that resolves to different addresses per runtime (FR-018).
+STACK_EXPOSURE_LOOPBACK = "loopback"
+STACK_EXPOSURE_HOST = "host"
+STACK_EXPOSURE_NETWORK = "network"
+STACK_EXPOSURE_LEVELS = (STACK_EXPOSURE_LOOPBACK, STACK_EXPOSURE_HOST, STACK_EXPOSURE_NETWORK)
+# `host`, NOT `loopback`, is the default: a container cannot reach a service
+# bound only to the host's loopback on every runtime, and a stack agent
+# containers cannot reach is useless (FR-018a, research R1).
+STACK_EXPOSURE_DEFAULT = STACK_EXPOSURE_HOST
+
 
 # THE TOOL'S OWN THREE DIRECTORIES, resolved by one rule each.
 #
@@ -5976,6 +6025,139 @@ def provision_host(
 # path. Pure argv builders (no runtime needed) — the docker/podman asymmetry is
 # absorbed here: docker targets `--context`, podman targets `--connection`. An
 # 'existing-ssh' host is attach-only and rejects container operations.
+
+
+# --- Feature 023: exposure levels and the TWO endpoint forms ----------------
+# These two functions are the riskiest thing in the telemetry-stack feature, so
+# they are pure and they live here rather than inside `up`: they can be proved
+# without deploying anything, and being wrong in either produces a stack that
+# looks healthy and receives nothing.
+
+
+def stack_exposure_binds(level: str, driver: str) -> list[str]:
+    """The concrete addresses a level binds to, on this runtime.
+
+    A LEVEL IS AN INTENT AND AN ADDRESS IS AN EFFECT, and the two do not
+    correspond one-to-one:
+
+      loopback  the host only
+      host      the host AND containers on it   <- the default
+      network   anything that can route to the host
+
+    `host` is the default rather than `loopback` because a container CANNOT
+    reach a service bound only to the host's loopback — inside a container,
+    127.0.0.1 is the container. A stack that agent containers cannot reach is
+    useless, so the default has to bind more than loopback, and saying so is
+    what keeps that from being a silent widening (FR-018a, FR-018b).
+
+    Measured (research R1): under docker a container reaches the host at the
+    bridge gateway 172.17.0.1; under rootless podman it reaches it at the
+    address `host.containers.internal` resolves to, and NOT at its default
+    gateway, which routes past the VM entirely.
+
+    >>> stack_exposure_binds("loopback", "docker")
+    ['127.0.0.1']
+    >>> stack_exposure_binds("host", "docker")
+    ['127.0.0.1', '172.17.0.1']
+    >>> stack_exposure_binds("network", "docker")
+    ['0.0.0.0']
+    >>> stack_exposure_binds("host", "podman")
+    ['0.0.0.0']
+    """
+    if level not in STACK_EXPOSURE_LEVELS:
+        die(f"unknown exposure level {level!r}; choose one of {', '.join(STACK_EXPOSURE_LEVELS)}")
+    if level == STACK_EXPOSURE_LOOPBACK:
+        return ["127.0.0.1"]
+    if level == STACK_EXPOSURE_NETWORK:
+        # nosec B104 — binding every interface is the DECLARED MEANING of this
+        # level, not an oversight. The control is not "never emit 0.0.0.0"; it
+        # is that reaching this branch requires the operator to name `network`
+        # explicitly, that it is refused without -y on a non-TTY, and that the
+        # tool states what it publishes (an unauthenticated UI showing verbatim
+        # task text, and an ingest that accepts from anyone) before doing it —
+        # FR-019/FR-020. Silencing the finding without those would be the bug.
+        return ["0.0.0.0"]  # nosec B104
+    # `host`: loopback for the operator, plus whatever containers use.
+    #
+    # Under ROOTLESS PODMAN there is no stable per-host bridge address to bind
+    # — `host.containers.internal` resolves to an address owned by the VM's
+    # network, not to a docker0-style gateway on the host — so the only binding
+    # that reliably serves containers is 0.0.0.0. That is a REAL widening
+    # compared with docker, and it is why FR-018b requires the resolved
+    # addresses to be reported rather than inferred from the level name: an
+    # operator picking `host` on podman is publishing further than the word
+    # suggests, and must be told.
+    if driver == "podman":
+        # nosec B104 — and this one is worth reading twice, because it is the
+        # surprising case: `host` binds every interface under rootless podman
+        # while binding only loopback+bridge under docker. There is no stable
+        # per-host bridge address to bind to, so serving containers at all
+        # requires it. That is why FR-018b makes the tool REPORT the resolved
+        # addresses instead of letting the level name imply them — an operator
+        # choosing `host` here is publishing further than the word suggests.
+        return ["0.0.0.0"]  # nosec B104
+    return ["127.0.0.1", STACK_DOCKER_BRIDGE_GATEWAY]
+
+
+def stack_container_host_address(driver: str) -> str:
+    """The address an AGENT CONTAINER uses to reach its own host.
+
+    Never the operator's loopback: inside a container that is the container.
+
+    >>> stack_container_host_address("docker")
+    '172.17.0.1'
+    >>> stack_container_host_address("podman")
+    'host.containers.internal'
+    """
+    return "host.containers.internal" if driver == "podman" else STACK_DOCKER_BRIDGE_GATEWAY
+
+
+def stack_container_endpoint(port: int, driver: str) -> str:
+    """The `otlp_endpoint` value an AGENT CONTAINER exports to.
+
+    THE SIGNAL PATH IS PART OF IT, because that is what this tool's own curl
+    exporter POSTs to. The agents' SDKs are handed the BASE and append
+    `/v1/<signal>` themselves, which is why the entrypoint strips this suffix
+    back off before exporting OTEL_EXPORTER_OTLP_ENDPOINT (Feature 017).
+
+    >>> stack_container_endpoint(4400, "docker")
+    'http://172.17.0.1:4400/v1/logs'
+    >>> stack_container_endpoint(4400, "podman")
+    'http://host.containers.internal:4400/v1/logs'
+    """
+    return f"http://{stack_container_host_address(driver)}:{port}/v1/logs"
+
+
+def stack_operator_url(address: str, port: int) -> str:
+    """The address a HUMAN opens. Distinct from the container endpoint by
+    construction, and the distinction is the point.
+
+    >>> stack_operator_url("localhost", 3300)
+    'http://localhost:3300'
+    """
+    return f"http://{address}:{port}"
+
+
+def stack_egress_allow_entry(driver: str, port: int) -> str:
+    """The `egress.allow` stanza an enforcing environment needs to reach it.
+
+    Printed beside the endpoint, ALWAYS (FR-011a). Export is governed by a
+    Feature 012 declaration and fails OPEN, so an environment that enforces
+    egress and does not declare the collector produces a run that passes with
+    no telemetry and NO ERROR ANYWHERE — indistinguishable from an agent that
+    emitted nothing. It is printed unconditionally rather than when an
+    enforcing environment already exists, because the environment that needs it
+    may not have been written yet, and afterwards there is nothing to detect.
+
+    An explicit port selects the packet-filter surface, which is correct here:
+    the collector is plain HTTP that no TLS handshake names.
+    """
+    return (
+        "egress:\n"
+        "  allow:\n"
+        f"    - host: {stack_container_host_address(driver)}\n"
+        f"      port: {port}\n"
+    )
 
 
 def driver_runtime_argv(host: dict) -> list[str]:

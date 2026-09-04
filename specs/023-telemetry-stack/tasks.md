@@ -24,8 +24,8 @@ and docs, which are genuinely separate.
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Add named defaults as module constants in `bin/agent-container`: `STACK_IMAGE_DEFAULT`, `STACK_READY_TIMEOUT` (180), `STACK_RETENTION_DAYS`, `STACK_RETENTION_SIZE`, `STACK_UI_PORT_BASE`, `STACK_OTLP_HTTP_PORT_BASE`, `STACK_OTLP_GRPC_PORT_BASE`, each with a comment naming what it defaults and why (Constitution VIII)
-- [ ] T002 Add `KIND_TELEMETRY_STACK` and the kind vocabulary alongside `ROLE_AGENT`/`ROLE_CONTROL_PLANE` in `bin/agent-container`, plus `STACK_CONTAINER_PREFIX` derived from the existing prefix so `panic` and inventory reach it by the same rule (FR-001, FR-003)
+- [x] T001 Add named defaults as module constants in `bin/agent-container`: `STACK_IMAGE_DEFAULT`, `STACK_READY_TIMEOUT` (180), `STACK_RETENTION_DAYS`, `STACK_RETENTION_SIZE`, `STACK_UI_PORT_BASE`, `STACK_OTLP_HTTP_PORT_BASE`, `STACK_OTLP_GRPC_PORT_BASE`, each with a comment naming what it defaults and why (Constitution VIII)
+- [x] T002 Add `KIND_TELEMETRY_STACK` and the kind vocabulary alongside `ROLE_AGENT`/`ROLE_CONTROL_PLANE` in `bin/agent-container`, plus `STACK_CONTAINER_PREFIX` derived from the existing prefix so `panic` and inventory reach it by the same rule (FR-001, FR-003)
 - [ ] T003 [P] Record the environment-variable overrides for every T001 default in `docs/telemetry-stack.md` (new file, stub sections for now)
 
 ---
@@ -35,9 +35,9 @@ and docs, which are genuinely separate.
 **Blocking**: every user story depends on these. The two riskiest behaviours in the feature —
 endpoint resolution and exposure — are proved here as pure functions, before any container exists.
 
-- [ ] T004 Implement `stack_exposure_binds(level, driver)` in `bin/agent-container` returning the concrete bind addresses for `loopback` | `host` | `network`, per runtime (research R1, FR-018a); `host` MUST include the container-facing address, because a container cannot reach a service bound only to the host loopback
-- [ ] T005 Implement `stack_container_endpoint(stack, driver)` in `bin/agent-container` returning the address an AGENT CONTAINER exports to — bridge gateway under docker, `host.containers.internal` under podman — and `stack_operator_url(stack)` for the human-facing one (FR-013, research R1)
-- [ ] T006 [P] Unit-test exposure and endpoint resolution in `bin/tests/test_pure_logic.py`: every level × every driver, asserting `host` is reachable-from-containers, `loopback` is not routable, and that the container endpoint is NEVER an operator loopback address (the silent failure this feature exists to prevent)
+- [x] T004 Implement `stack_exposure_binds(level, driver)` in `bin/agent-container` returning the concrete bind addresses for `loopback` | `host` | `network`, per runtime (research R1, FR-018a); `host` MUST include the container-facing address, because a container cannot reach a service bound only to the host loopback
+- [x] T005 Implement `stack_container_endpoint(stack, driver)` in `bin/agent-container` returning the address an AGENT CONTAINER exports to — bridge gateway under docker, `host.containers.internal` under podman — and `stack_operator_url(stack)` for the human-facing one (FR-013, research R1)
+- [x] T006 [P] Unit-test exposure and endpoint resolution in `bin/tests/test_pure_logic.py`: every level × every driver, asserting `host` is reachable-from-containers, `loopback` is not routable, and that the container endpoint is NEVER an operator loopback address (the silent failure this feature exists to prevent)
 - [ ] T007 Implement `validate_stack_name(name, host)` in `bin/agent-container` refusing a name already held by an agent environment or control plane on that host, naming the kind that holds it (FR-009a)
 - [ ] T008 [P] Unit-test the name namespace in `bin/tests/test_pure_logic.py`: stack-vs-agent, agent-vs-stack, stack-vs-stack, and same name on DIFFERENT hosts (which must be allowed)
 - [ ] T009 Implement `stack_allocate_ports(name, host)` in `bin/agent-container` reusing the existing per-host port allocation so several stacks coexist (FR-009), and refusing with the conflict named when a port is unavailable (FR-010)
