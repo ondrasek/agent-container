@@ -8162,3 +8162,155 @@ def test_no_declared_endpoint_configures_nothing(acc):
 
     codex = _exec(name, ["sh", "-c", "cat /home/dev/.codex/config.toml 2>/dev/null || true"])
     assert "[otel]" not in codex.stdout, f"codex was configured anyway:\n{codex.stdout}"
+
+
+# --- Feature 023: a real agent exporting into a tool-created stack -----------
+# The end-to-end claim of the feature, and the one that is worthless if checked
+# from the host: the endpoint the tool PRINTS must be the one an AGENT
+# CONTAINER can reach, and those are different addresses on every runtime where
+# a container does not share the operator's loopback.
+
+
+def _stack_up(acc, name: str, extra: list[str] | None = None):
+    r = acc.cli(["telemetry", "stack", "up", name, *(extra or [])], timeout=900)
+    assert r.returncode == 0, f"stack up failed:\n{r.stdout}\n{r.stderr}"
+    return r
+
+
+def _stack_endpoint(acc, name: str) -> str:
+    r = acc.cli(["telemetry", "stack", "url", name, "--json"], timeout=180)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["data"]["otlp_endpoint"]
+
+
+def _stack_teardown(acc, name: str) -> None:
+    acc.cli(["telemetry", "stack", "remove", name, "-y", "--purge"], timeout=300)
+
+
+def test_a_tool_created_stack_accepts_a_record_at_the_endpoint_it_printed(acc):
+    """SC-002/SC-003. Not "an endpoint works" — THE PRINTED ONE works, and it is
+    tested from inside a container, because that is who uses it.
+
+    A check from the host would pass with the operator-facing address and prove
+    nothing about the value an operator is told to paste into settings.yaml.
+    """
+    name = "accstk1"
+    try:
+        _stack_up(acc, name)
+        endpoint = _stack_endpoint(acc, name)
+        assert "127.0.0.1" not in endpoint and "localhost" not in endpoint, (
+            f"the endpoint handed to agents is an operator loopback: {endpoint}"
+        )
+        probe = subprocess.run(
+            [RUNTIME, "run", "--rm", "docker.io/curlimages/curl:latest",
+             "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "20",
+             "-X", "POST", endpoint, "-H", "Content-Type: application/json",
+             "--data-binary", '{"resourceLogs":[]}'],
+            capture_output=True, text=True, timeout=300,
+        )  # fmt: skip
+        assert probe.stdout.strip() == "200", (
+            f"the PRINTED endpoint {endpoint} was refused from inside a container "
+            f"(got {probe.stdout.strip()!r}) — this is the failure the feature exists "
+            f"to prevent, and it fails OPEN so nothing else would notice"
+        )
+    finally:
+        _stack_teardown(acc, name)
+
+
+def test_two_stacks_coexist_and_removing_one_leaves_the_other_serving(acc):
+    """SC-006. Multi-instance is what makes this a managed kind rather than a
+    documented `docker run`."""
+    a, b = "accstka", "accstkb"
+    try:
+        _stack_up(acc, a)
+        _stack_up(acc, b)
+        r = acc.cli(["telemetry", "stack", "ls", "--json"], timeout=180)
+        rows = {s["name"]: s for s in json.loads(r.stdout)["data"]["stacks"]}
+        assert {a, b} <= set(rows), rows
+        assert rows[a]["ingest"] == "yes" and rows[b]["ingest"] == "yes", rows
+        assert rows[a]["ui"] != rows[b]["ui"], "two stacks published on the same port"
+
+        acc.cli(["telemetry", "stack", "remove", a, "-y", "--purge"], timeout=300)
+        r = acc.cli(["telemetry", "stack", "ls", "--json"], timeout=180)
+        rows = {s["name"]: s for s in json.loads(r.stdout)["data"]["stacks"]}
+        assert a not in rows, "removed stack is still listed"
+        assert rows[b]["ingest"] == "yes", "removing one stack disturbed the other"
+    finally:
+        _stack_teardown(acc, a)
+        _stack_teardown(acc, b)
+
+
+def test_a_stack_name_cannot_collide_with_an_agent_environment(acc):
+    """FR-009a. The name is the operator's handle for stopping things."""
+    name = "accstkc"
+    acc.register(name)
+    acc.up(name)
+    r = acc.cli(["telemetry", "stack", "up", name], timeout=300)
+    assert r.returncode != 0, "a stack took a name an agent environment already holds"
+    assert "already names" in r.stderr and "agent" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("profile", _AGENT_PROFILES)
+def test_a_REAL_agent_exports_into_a_tool_created_stack(acc, profile):
+    """THE FEATURE'S END-TO-END CLAIM (SC-003, SC-004, FR-017).
+
+    A stack this tool created, an environment configured with the endpoint this
+    tool PRINTED, a real agent doing real work, and its telemetry read back
+    through the stack's own API — correlated by run_id.
+
+    Every weaker version of this test passes while the feature is broken: export
+    fails OPEN, so an unreachable endpoint produces a green run and an empty
+    stack, and only reading the data back distinguishes the two.
+    """
+    stack, name = "accstko", f"accso{profile['agent']}"
+    try:
+        _stack_up(acc, stack)
+        endpoint = _stack_endpoint(acc, stack)
+
+        _agent_project(acc, name, profile)
+        cfg = _config_dir_of(acc.state_dir)
+        settings = (cfg / "settings.yaml").read_text()
+        (cfg / "settings.yaml").write_text(settings + f"otlp_endpoint: {endpoint}\n")
+
+        acc.register(name)
+        token = f"STK-{uuid.uuid4().hex[:10]}"
+        r = acc.up(
+            name, mode="headless", agent=profile["agent"], foreground=True, wait=False,
+            task=f"Write /workspace/{token}.txt containing {token}, then stop.",
+        )  # fmt: skip
+        assert r.returncode == 0, f"the agent run failed:\n{(r.stdout + r.stderr)[-2500:]}"
+
+        # READ IT BACK THROUGH THE STACK, not from the container. Anything less
+        # proves the agent ran, not that the telemetry arrived.
+        run_id = _runs(acc, name)[0]["run_id"]
+        deadline = time.time() + 90
+        found = {}
+        while time.time() < deadline and not found:
+            q = f'{{service_namespace="agent-container"}} | agent_container_run_id=`{run_id}`'
+            probe = subprocess.run(
+                [RUNTIME, "exec", f"agent-container-stack-{stack}", "curl", "-sG",
+                 "http://localhost:3100/loki/api/v1/query_range",
+                 "--data-urlencode", f"query={q}", "--data-urlencode", "limit=100"],
+                capture_output=True, text=True, timeout=120,
+            )  # fmt: skip
+            with contextlib.suppress(Exception):
+                streams = json.loads(probe.stdout)["data"]["result"]
+                if streams:
+                    found = {s["stream"].get("agent_container_agent") for s in streams}
+            if not found:
+                time.sleep(5)
+
+        assert found, (
+            f"no telemetry for run {run_id} arrived in the stack. The run passed and the "
+            f"stack is empty, which is exactly what an unreachable endpoint looks like — "
+            f"export fails open, so nothing else would have reported this."
+        )
+        # NO ESCAPE CLAUSE. An earlier version allowed `None in found`, which
+        # would have passed on a stream carrying no agent label at all — i.e. it
+        # would have accepted telemetry that arrived without the correlation
+        # this test exists to prove.
+        assert profile["agent"] in found, (
+            f"telemetry arrived for run {run_id} but not attributed to {profile['agent']}: {found}"
+        )
+    finally:
+        _stack_teardown(acc, stack)

@@ -69,8 +69,8 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 - [x] T019 [US1] Print the resolved bind addresses and the container-facing `otlp_endpoint` at the end of `up` in `bin/agent-container` (FR-018b, FR-011)
 - [x] T019b [US1] Implement `--set-endpoint` in `bin/agent-container` writing `otlp_endpoint` into settings.yaml inside a marker-delimited managed region, preserving content outside it byte-for-byte, and writing the CONTAINER-facing form (FR-011b, FR-013); off by default
 - [x] T019a [US1] Print the `egress.allow` entry needed to reach the collector alongside the endpoint in `bin/agent-container` (FR-011a) — an enforcing environment refuses the export and fails OPEN, leaving no error to detect afterwards
-- [ ] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
-- [ ] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
+- [x] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
+- [x] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
 - [ ] T021a [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: drive the stack past a retention bound (a tiny ceiling makes this fast) and assert the ingest STILL returns 200 afterwards — eviction is normal operation for a bounded store, not an error (FR-025a)
 - [ ] T022 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: readiness failure path — point at an image that starts but never opens an ingest, assert the message names the INGEST stage, not container start (FR-006b)
 
@@ -110,8 +110,8 @@ data for a run that exists.
 - [x] T032 [US2] Make the dashboards agent-agnostic in `bin/agent-container` (FR-017a): lead with a records-by-agent panel covering all four agents, and label agent-specific panels so an empty value reads as "this agent does not report that" rather than as breakage
 - [x] T033 [US2] Wire provisioning into `up` in `bin/agent-container` such that a dashboard failure is REPORTED with the failing dashboard named but does NOT fail the deploy (FR-014, FR-016)
 - [x] T034 [US2] Add `telemetry stack dashboards NAME` to `bin/agent-container` re-provisioning without redeploying, restarting or discarding data (FR-015)
-- [ ] T035 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: after `up`, every dashboard is present via the UI API and each one's primary query returns data for a seeded run (SC-004)
-- [ ] T036 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: delete a dashboard, run `dashboards`, assert it is restored AND that data collected beforehand is still queryable (FR-015)
+- [x] T035 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: after `up`, every dashboard is present via the UI API and each one's primary query returns data for a seeded run (SC-004)
+- [x] T036 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: delete a dashboard, run `dashboards`, assert it is restored AND that data collected beforehand is still queryable (FR-015)
 
 ---
 
@@ -119,19 +119,19 @@ data for a run that exists.
 
 - [x] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state, whether the ingest is answering, and retention (or `unconfirmed`); state is `running` | `stopped` | `undetermined` and never `absent` (which is simply not listed), never a guess (FR-021, FR-025c)
 - [x] T038 [US4] Add `telemetry stack remove NAME` to `bin/agent-container` with `--purge` and `-y`, retaining collected data unless purged (FR-022), and STATING that environments still exporting to it will now fail open — silently, which is why it is said aloud
-- [ ] T039 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: two stacks on one host run concurrently with distinct ports; removing one leaves the other serving (SC-006)
-- [ ] T040 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `remove` without `--purge` retains the data volume; with `--purge` it is gone
-- [ ] T041 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `up` refuses a name held by an agent environment and vice versa, naming the kind (FR-009a)
+- [x] T039 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: two stacks on one host run concurrently with distinct ports; removing one leaves the other serving (SC-006)
+- [x] T040 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `remove` without `--purge` retains the data volume; with `--purge` it is gone
+- [x] T041 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `up` refuses a name held by an agent environment and vice versa, naming the kind (FR-009a)
 
 ---
 
 ## Phase 7: User Story 5 — It is a container this tool created (P2)
 
-- [ ] T041a [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: a stack is given NO credentials (FR-004) — assert its compose model carries no `configs:`/secret mount, that no credential volume exists for it, and that the credential-delivery path refuses it by kind; a negative security property is the kind that quietly stops being true
-- [ ] T042 [US5] Make `panic` stop telemetry stacks in `bin/agent-container`, reporting `undetermined` for a stack on an unreachable host rather than assuming stopped (FR-024)
-- [ ] T043 [US5] Record stack creation and outcome in the inventory in `bin/agent-container`, with `kind` distinguishing it from an agent environment (FR-023)
-- [ ] T044 [P] [US5] Acceptance test in `bin/tests/test_acceptance.py`: create a stack, run `panic`, assert it stopped and the inventory says so (SC-007)
-- [ ] T045 [P] [US5] Acceptance test in `bin/tests/test_acceptance.py`: every created stack appears in `inventory ls` with its kind and outcome, including after removal (SC-008)
+- [x] T041a [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: a stack is given NO credentials (FR-004) — assert its compose model carries no `configs:`/secret mount, that no credential volume exists for it, and that the credential-delivery path refuses it by kind; a negative security property is the kind that quietly stops being true
+- [x] T042 [US5] Make `panic` stop telemetry stacks in `bin/agent-container`, reporting `undetermined` for a stack on an unreachable host rather than assuming stopped (FR-024)
+- [x] T043 [US5] Record stack creation and outcome in the inventory in `bin/agent-container`, with `kind` distinguishing it from an agent environment (FR-023)
+- [x] T044 [P] [US5] Acceptance test in `bin/tests/test_acceptance.py`: create a stack, run `panic`, assert it stopped and the inventory says so (SC-007)
+- [x] T045 [P] [US5] Acceptance test in `bin/tests/test_acceptance.py`: every created stack appears in `inventory ls` with its kind and outcome, including after removal (SC-008)
 
 ---
 
@@ -140,9 +140,9 @@ data for a run that exists.
 **This is the end-to-end claim the feature makes**, and the one the goal names explicitly. It is a
 phase rather than a task because it exercises every prior phase at once.
 
-- [ ] T046 Real-agent acceptance test in `bin/tests/test_acceptance.py`: bring up a tool-created stack, configure an environment with the endpoint the tool PRINTED, run a real agent headless, and read that run's telemetry back through the stack's own API — correlated by `run_id` (SC-003)
-- [ ] T047 Extend T046 in `bin/tests/test_acceptance.py` to assert the run's agent activity AND its container resource usage are both present for the same `run_id`, which is what makes the run-trace dashboard answerable (SC-004, FR-017)
-- [ ] T048 Run the real-agent tier in `bin/tests/test_acceptance.py` against a locally deployed stack under podman (`AGENT_CONTAINER_RUNTIME=podman pytest -m acceptance -k "stack and REAL"`) and record the outcome; skip cleanly with a NAMED reason when no agent credential is present, as the existing real-agent tests do
+- [x] T046 Real-agent acceptance test in `bin/tests/test_acceptance.py`: bring up a tool-created stack, configure an environment with the endpoint the tool PRINTED, run a real agent headless, and read that run's telemetry back through the stack's own API — correlated by `run_id` (SC-003)
+- [x] T047 Extend T046 in `bin/tests/test_acceptance.py` to assert the run's agent activity AND its container resource usage are both present for the same `run_id`, which is what makes the run-trace dashboard answerable (SC-004, FR-017)
+- [x] T048 Run the real-agent tier in `bin/tests/test_acceptance.py` against a locally deployed stack under podman (`AGENT_CONTAINER_RUNTIME=podman pytest -m acceptance -k "stack and REAL"`) and record the outcome; skip cleanly with a NAMED reason when no agent credential is present, as the existing real-agent tests do
 
 ---
 

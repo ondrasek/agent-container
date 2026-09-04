@@ -2697,7 +2697,9 @@ def kill_snapshot(host_rec: dict, entries: list[dict], form: str) -> dict[str, s
     verification — so two host queries per host, one of each.
     """
     return {
-        e["name"]: project_containers(host_rec, compose_project(e["name"]), form == "destroy")
+        e["name"]: project_containers(
+            host_rec, compose_project(e["name"], e.get("role", ROLE_AGENT)), form == "destroy"
+        )
         for e in entries
     }
 
@@ -2713,7 +2715,9 @@ def kill_verify(host_rec: dict, entries: list[dict], form: str) -> dict[str, set
                  running set would report success for one that is merely paused.
     """
     return {
-        e["name"]: project_containers(host_rec, compose_project(e["name"]), form == "destroy")
+        e["name"]: project_containers(
+            host_rec, compose_project(e["name"], e.get("role", ROLE_AGENT)), form == "destroy"
+        )
         for e in entries
     }
 
@@ -8190,11 +8194,23 @@ def driver_reachable_address(host: dict) -> str:
 # `file:` references. Regenerated from parameters on every up (derived artifact).
 
 
-def compose_project(name: str) -> str:
-    """
+def compose_project(name: str, role: str = ROLE_AGENT) -> str:
+    """The compose project label for a deployment.
+
+    ROLE-AWARE since Feature 023, and this is a KILL-SWITCH correctness issue
+    rather than a naming nicety. `panic` finds what to stop by this label, and a
+    telemetry stack's project is `agent-container-stack-<name>`. Defaulting to
+    the agent form for every entry meant `panic` looked for a project that does
+    not exist and reported the stack as having nothing to stop — a container the
+    kill switch cannot see is a hole in a safety property, not a missing feature.
+
     >>> compose_project("acme")
     'agent-container-acme'
+    >>> compose_project("obs", KIND_TELEMETRY_STACK)
+    'agent-container-stack-obs'
     """
+    if role == KIND_TELEMETRY_STACK:
+        return stack_container_name(name)
     return container_name(name)
 
 

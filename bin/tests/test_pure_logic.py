@@ -1915,3 +1915,32 @@ def test_the_kind_is_on_the_container_not_only_in_our_records(wiz):
         "obs", "img", wiz.stack_ports_for_name("obs"), ["127.0.0.1"], 7, "10GB"
     )
     assert m["services"]["stack"]["labels"]["agent-container.kind"] == wiz.KIND_TELEMETRY_STACK
+
+
+def test_the_kill_switch_can_find_a_telemetry_stack(wiz):
+    """A KILL-SWITCH CORRECTNESS ISSUE, not a naming nicety.
+
+    `panic` finds what to stop by the compose project label. A stack's project
+    is `agent-container-stack-<name>`, so defaulting every inventory entry to
+    the agent form meant panic looked for a project that does not exist and
+    reported the stack as having nothing to stop — a container the kill switch
+    cannot see is a hole in a safety property (FR-024).
+    """
+    assert wiz.compose_project("obs") == "agent-container-obs"
+    assert wiz.compose_project("obs", wiz.KIND_TELEMETRY_STACK) == "agent-container-stack-obs"
+    assert wiz.compose_project("obs", wiz.ROLE_AGENT) == wiz.container_name("obs")
+    # And the project a stack is actually deployed under must MATCH what panic
+    # will look for, or the two agree only by accident.
+    assert wiz.compose_project("obs", wiz.KIND_TELEMETRY_STACK) == wiz.stack_container_name("obs")
+
+
+def test_a_stack_is_recorded_with_its_kind(wiz):
+    """FR-023/FR-003: identifiable after the container, host and registry entry
+    are all gone. The inventory's existing `role` field carries it — that field
+    already exists to identify a STOPPED container, which is the same problem."""
+    e = wiz.build_inventory_entry(
+        "obs", "local", host_provisioned=False, role=wiz.KIND_TELEMETRY_STACK
+    )
+    assert e["role"] == wiz.KIND_TELEMETRY_STACK
+    assert e["role"] != wiz.ROLE_AGENT
+    assert e["outcome"] == "active"
