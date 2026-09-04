@@ -1339,7 +1339,13 @@ host_metrics_payload() {
 host_metrics_export_once() {
     local endpoint="$1" payload
     payload="$(host_metrics_payload)"
-    [[ -n "${payload}" ]] || return 0
+    # A jq COMPILE ERROR lands in ${payload} now that its stderr is captured, and
+    # posting that as a log body would be worse than exporting nothing. Checked
+    # by shape: the payload must be the JSON document we asked for.
+    case "${payload}" in
+        '{"resourceLogs"'*) ;;
+        *) log "WARNING: could not build the ${agent} session payload: ${payload:0:160}"; return 0 ;;
+    esac
     # FAIL-OPEN AND SILENT. This runs on a timer for the life of the container;
     # a collector that goes away must not produce a line of log per interval,
     # which would bury the entrypoint's real output. The run-record exporter
@@ -2316,7 +2322,12 @@ ship_agent_session() {
     case "${agent}" in
         codex) src="$(find "${codex_home}/sessions" -name 'rollout-*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
                         | sort -rn | head -1 | cut -d' ' -f2-)" ;;
-        pi)    src="$(find "${AGENT_CONTAINER_HOME}/.pi" -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+        # PI_CODING_AGENT_DIR, not ~/.pi: when any provider key is injected the
+        # entrypoint redirects pi to an EPHEMERAL home so the -pi volume is never
+        # written — which is exactly the configuration a real run uses, so
+        # searching ~/.pi found nothing every time.
+        pi)    src="$(find "${PI_CODING_AGENT_DIR:-${AGENT_CONTAINER_HOME}/.pi}" \
+                        -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
                         | sort -rn | head -1 | cut -d' ' -f2-)" ;;
         *)     return 0 ;;   # claude and opencode speak OTLP themselves
     esac
@@ -2336,14 +2347,23 @@ ship_agent_session() {
         split("\n") | map(select(length > 0)) as $lines
         | {
             resourceLogs: [ {
-              resource: { attributes: [
+              # PARENTHESISED. An object VALUE built with `+` is a syntax error
+              # without them — jq reports "May need parentheses around object key
+              # expression", four compile errors, and produces nothing. The
+              # function then returned early on an empty payload and said
+              # nothing, so the export looked like a silent no-op rather than a
+              # broken program. Only exposing the jq stderr found it.
+              # (No apostrophes in here: this comment lives INSIDE a bash
+              # single-quoted string, so one would end the quote and turn the
+              # rest of the jq program into shell syntax.)
+              resource: { attributes: ([
                 { key: "service.name",      value: { stringValue: $svc } },
                 { key: "service.namespace", value: { stringValue: "agent-container" } },
                 { key: "agent_container.environment", value: { stringValue: $env_name } },
                 { key: "agent_container.agent",       value: { stringValue: $agent } }
               ] + (if ($run_id | length) > 0
                    then [ { key: "agent_container.run_id", value: { stringValue: $run_id } } ]
-                   else [] end) },
+                   else [] end)) },
               scopeLogs: [ {
                 scope: { name: "agent-container/session" },
                 logRecords: ( $lines | map({
@@ -2359,7 +2379,7 @@ ship_agent_session() {
                   }) )
               } ]
             } ]
-          }' 2>/dev/null)"
+          }' 2>&1)"
     [[ -n "${payload}" ]] || return 0
     n="$(printf '%s' "${payload}" | jq '.resourceLogs[0].scopeLogs[0].logRecords | length' 2>/dev/null || echo 0)"
     [[ "${n}" -gt 0 ]] 2>/dev/null || return 0
