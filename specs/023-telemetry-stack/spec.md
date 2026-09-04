@@ -23,6 +23,16 @@ else; here it hands the operator a setting whose most likely outcome is a quiet 
 A third kind of container closes that: the tool that asks you to declare an endpoint can also give
 you one.
 
+## Clarifications
+
+### Session 2026-09-04
+
+- Q: Do telemetry stack names share one namespace with agent environments and control planes? → A: One shared namespace — a name identifies exactly one container this tool created, whatever its kind, and a collision is refused with the conflict named.
+- Q: What should `up` do when a stack of that name exists on the host but is STOPPED? → A: Start it, keeping its collected data, and report that it restarted an existing stack rather than created one.
+- Q: How should an operator widen exposure beyond the default? → A: Named exposure levels (`loopback` | `host` | `network`), with the tool stating the concrete address each level resolved to on that runtime, so the level never hides what actually bound.
+- Q: How long should `up` wait for the ingest to accept a record before failing? → A: One named default of 180 seconds covering pull, start and ingest readiness, overridable at the surface, and the failure must say which of the three it was still waiting on.
+- Q: What should bound the telemetry a stack retains? → A: Both a time window and a size ceiling, whichever is reached first, each a named default — time answers "how far back can I look", size protects the host regardless of fleet load.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stand up a place for telemetry to land (Priority: P1)
@@ -41,11 +51,14 @@ accepted afterwards and that the printed endpoint is the one that accepted it.
 
 1. **Given** a host with no telemetry stack, **When** the operator runs `telemetry stack up obs`,
    **Then** a stack container is running and the OTLP ingest accepts a record.
-2. **Given** a stack that has just come up, **When** the command finishes, **Then** it prints an
+2. **Given** a stack named `obs` that exists but is stopped, **When** the operator runs `up obs`,
+   **Then** it is started with its collected data intact and the command says it restarted an
+   existing stack rather than created one.
+3. **Given** a stack that has just come up, **When** the command finishes, **Then** it prints an
    `otlp_endpoint` value that, placed in `settings.yaml`, causes an environment's records to arrive.
-3. **Given** the stack image is not present on the host, **When** the operator runs `up`, **Then**
+4. **Given** the stack image is not present on the host, **When** the operator runs `up`, **Then**
    the image is pulled and the operator is told that a pull is happening, not left at a blank prompt.
-4. **Given** the container starts but the ingest never becomes ready, **When** the readiness budget
+5. **Given** the container starts but the ingest never becomes ready, **When** the 180-second budget
    expires, **Then** the command fails and says the ingest never accepted a record — not that the
    container failed to start, which would be false.
 
@@ -89,13 +102,16 @@ command said so.
 
 **Acceptance Scenarios**:
 
-1. **Given** no exposure is declared, **When** the stack comes up, **Then** it is reachable from the
-   host and from containers on it, and NOT from another machine.
-2. **Given** the operator widens exposure, **When** the stack comes up, **Then** the command states
-   plainly that the UI is unauthenticated and the ingest accepts from anyone who can reach it.
-3. **Given** a running stack, **When** the operator runs `telemetry stack url obs`, **Then** they get
-   the UI address, the `otlp_endpoint` value, and — when the UI is bound to loopback on a remote
-   host — the command that tunnels to it.
+1. **Given** no exposure level is declared, **When** the stack comes up, **Then** it is reachable
+   from the host and from containers on it, and NOT from another machine.
+2. **Given** the operator selects the `network` level, **When** the stack comes up, **Then** the
+   command states plainly that the UI is unauthenticated, shows verbatim task text, and that the
+   ingest accepts from anyone who can reach it.
+3. **Given** any exposure level, **When** the stack comes up, **Then** the command reports the
+   concrete addresses that level resolved to on this runtime.
+4. **Given** a running stack, **When** the operator runs `telemetry stack url obs`, **Then** they get
+   the UI address, the `otlp_endpoint` value, and — when the UI is not reachable from the
+   operator's machine — the command that makes it reachable.
 
 ---
 
@@ -152,6 +168,9 @@ inventory says so.
   starting a container that cannot bind and reporting success.
 - **A stack is asked for on a host that already has one under that name.** Treat as already-present
   and report it, rather than deploying a second copy over the first.
+- **The requested name already belongs to an agent environment or control plane on that host.**
+  Refuse, naming which kind holds it — the name is the operator's handle for stopping things,
+  and two kinds answering to one handle is worst at exactly the moment it matters.
 - **The UI answers but dashboard provisioning fails.** The stack is still useful; report which
   dashboards failed and keep the stack, rather than tearing down a working collector over its views.
 - **`url` is asked about a stack that is not running.** Report it as not running rather than printing
@@ -160,8 +179,10 @@ inventory says so.
   those exports begin failing open, so their telemetry stops silently.
 - **The host cannot pull the image** (no route, or an egress policy denies the registry). Fail with
   the pull named as the cause.
-- **Disk fills under retained data.** Out of scope to manage, but retention must be a named default
-  rather than an unbounded accident.
+- **Disk fills under retained data.** Bounded by both a time window and a size ceiling (FR-025);
+  reaching either evicts oldest-first and MUST NOT stop the stack accepting new records.
+- **A run the operator is looking for has been evicted.** Reported as beyond the retention window
+  or ceiling, not as an absence of telemetry — those are different facts with different fixes.
 
 ## Requirements *(mandatory)*
 
@@ -185,12 +206,25 @@ inventory says so.
 - **FR-006**: `up` MUST report success only once the OTLP ingest has ACCEPTED a record — container
   liveness is not readiness, and reporting otherwise sends the operator to configure an endpoint
   that will drop what it is sent.
-- **FR-007**: `up` MUST be idempotent: re-running against an existing stack of the same name MUST
-  report the existing one rather than creating a second.
+- **FR-006a**: The wait MUST be bounded by a NAMED default of 180 seconds, overridable at the
+  surface. It covers all three stages — image pull, container running, ingest accepting — because
+  the operator is waiting for one outcome, not three.
+- **FR-006b**: On expiry the tool MUST report WHICH stage it was still waiting on. "Timed out" is
+  three different problems with three different fixes — a slow registry, a container that will not
+  start, and a stack whose ingest never opens — and a message that cannot tell them apart sends
+  the operator to debug the wrong one.
+- **FR-007**: `up` MUST be idempotent and MUST distinguish the two states it can find. Against an
+  existing RUNNING stack of the same name it MUST report that one rather than creating a second.
+  Against an existing STOPPED one it MUST start it, retaining the data already collected, and
+  MUST say it restarted rather than created — a host reboot is the ordinary way a stack becomes
+  stopped, and recovering from it must not cost the trail the stack exists to hold.
 - **FR-008**: The image MUST be a named default at the surface and MUST be overridable, so an
   operator is never blocked by the tool's choice of stack.
 - **FR-009**: Several stacks MUST be able to run on one host simultaneously without colliding on
   name, published port or stored data.
+- **FR-009a**: A name MUST identify exactly one container this tool created on a host,
+  regardless of kind. Creating a stack whose name is already taken by an agent environment or a
+  control plane MUST be refused with the conflicting kind named, and the reverse MUST hold too.
 - **FR-010**: When a required port is unavailable, the tool MUST refuse and name the conflict.
 
 **Reaching one**
@@ -216,12 +250,21 @@ inventory says so.
 
 **Exposure**
 
-- **FR-018**: The default exposure MUST make the stack reachable from its host and from containers
+- **FR-018**: Exposure MUST be chosen from NAMED LEVELS rather than by writing an address:
+  `loopback` (the host only), `host` (the host and containers running on it — the DEFAULT), and
+  `network` (any machine that can route to the host).
+- **FR-018a**: The default level MUST make the stack reachable from its host and from containers
   on that host, and NOT from other machines.
-- **FR-019**: Widening exposure MUST be an explicit operator action, and the tool MUST state, at that
-  moment, that the UI is unauthenticated and the ingest accepts from anyone who can reach it.
-- **FR-020**: The tool MUST NOT publish the UI or the ingest on a routable address as a side effect
-  of any other choice.
+- **FR-018b**: A level is an intent, not an address, and the two differ per runtime: on some
+  runtimes a container CANNOT reach a service bound only to the host's loopback. The tool MUST
+  resolve each level to concrete addresses for the runtime in use, and MUST STATE the addresses it
+  resolved. A named level that silently binds something other than what the operator pictured is
+  the failure mode this naming introduces, and stating the result is what closes it.
+- **FR-019**: Selecting `network` MUST be an explicit operator action, and the tool MUST state, at
+  that moment, that the UI is unauthenticated, that it displays verbatim agent task text, and that
+  the ingest accepts records from anyone who can reach it.
+- **FR-020**: The tool MUST NOT publish the UI or the ingest beyond the `host` level as a side
+  effect of any other choice.
 
 **Lifecycle**
 
@@ -233,8 +276,15 @@ inventory says so.
   what became of it.
 - **FR-024**: The kill switch MUST stop telemetry stacks along with every other container the tool
   created; a stack on an unreachable host MUST be reported as undetermined rather than stopped.
-- **FR-025**: Retention of collected data MUST have a named default rather than being unbounded by
-  omission.
+- **FR-025**: Retention MUST be bounded by BOTH a time window and a size ceiling, whichever is
+  reached first, each a NAMED default and each overridable. Neither alone is sufficient: a time
+  window says how far back an operator can look but lets a busy fleet fill a disk, and a size
+  ceiling protects the host but makes "how far back" unanswerable and load-dependent.
+- **FR-025a**: When retention discards data the stack MUST remain usable — eviction is normal
+  operation for a bounded store, not an error, and MUST NOT stop the ingest accepting new records.
+- **FR-025b**: The effective retention MUST be reportable, so an operator asking why a run has
+  vanished gets an answer rather than assuming telemetry was never recorded — the same
+  absence-is-not-evidence rule the rest of the tool follows.
 
 ### Key Entities
 

@@ -31,6 +31,30 @@
 
 ## Notes
 
+**Re-validated after clarification (session 2026-09-04).** All 16 items still pass; no
+regressions. Five decisions were resolved and each tightened a requirement rather than
+adding one:
+
+- **Namespace** — FR-009a now makes a name identify exactly one container of any kind on a
+  host. The original FR-009 guarded only stack-vs-stack collision, which would have allowed
+  an agent environment and a stack to answer to the same handle: worst precisely when an
+  operator is trying to stop one of them.
+- **Restart semantics** — FR-007 previously said "report the existing one", conflating
+  running with stopped. A host reboot is the ordinary way a stack becomes stopped, and
+  recovery must not cost the data the stack exists to hold.
+- **Exposure** — chosen as NAMED LEVELS over an explicit bind address, against the
+  recommendation. The risk that trade introduces is that a level hides what actually bound,
+  and it is real: on some runtimes a container cannot reach a service bound to the host
+  loopback. FR-018b answers it by requiring the resolved addresses to be STATED, so the
+  abstraction stays inspectable.
+- **Readiness** — FR-006a names the 180s budget (Constitution VIII), and FR-006b requires
+  the failure to say WHICH stage expired. "Timed out" spans a slow registry, a container
+  that will not start, and an ingest that never opens: three fixes, one message.
+- **Retention** — both a window and a ceiling (FR-025), plus FR-025b requiring effective
+  retention to be reportable, so an evicted run reads as evicted rather than as telemetry
+  that was never recorded.
+
+
 Two iterations were needed; both findings are recorded because they were the
 substance of the review rather than tidying.
 
