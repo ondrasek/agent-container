@@ -1598,16 +1598,27 @@ PYEOF
         log "WARNING: could not register the opencode telemetry plugin; the run continues without it"
     fi
 
-    # 8. PI EXTENSION REGISTRATION. `pi install` would reach npm, which a
-    #    boundary need not permit, so the globally-installed package is linked
-    #    into pi's extension directory instead. Best-effort by design.
-    _pi_ext_dir="${AGENT_CONTAINER_HOME}/.pi/extensions"
+    # 8. PI EXTENSION REGISTRATION, through pi's OWN installer.
+    #
+    #    `pi install <source>` "installs the source AND ADDS IT TO SETTINGS" — pi
+    #    discovers extensions from `~/.pi/agent/settings.json`, not by scanning a
+    #    directory. An earlier version symlinked the package into
+    #    `~/.pi/extensions/` and pi ignored it completely: the extension was
+    #    present, configured, switched on by PI_OTEL_ENABLE, and emitted nothing.
+    #    Caught only by running a real pi agent and finding no `pi` service in
+    #    Loki while claude's events were arriving — configuration that looks
+    #    right and does nothing is exactly what an acceptance check is for.
+    #
+    #    A LOCAL PATH, not `npm:@desek/...`: the package is already baked, and the
+    #    npm form would fetch, which a boundary need not permit. Idempotent — pi
+    #    rewrites the entry rather than duplicating it.
     _pi_pkg="$(npm root -g 2>/dev/null)/@desek/pi-opentelemetry"
     if [[ -d "${_pi_pkg}" ]]; then
-        mkdir -p "${_pi_ext_dir}"
-        ln -sfn "${_pi_pkg}" "${_pi_ext_dir}/pi-opentelemetry" 2>/dev/null \
-            && log "pi telemetry extension linked (${_pi_ext_dir}/pi-opentelemetry)" \
-            || log "WARNING: could not link the pi telemetry extension; the run continues without it"
+        if pi install "${_pi_pkg}" > /dev/null 2>&1; then
+            log "pi telemetry extension installed (${_pi_pkg})"
+        else
+            log "WARNING: could not install the pi telemetry extension; the run continues without it"
+        fi
     fi
 
     # 9. THE BOX ITSELF. Agents report what they did; this reports what the
