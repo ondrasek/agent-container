@@ -1076,6 +1076,42 @@ def port_for_name(name: str) -> int:
     return PORT_BASE + (sum(ord(c) for c in name) % PORT_RANGE)
 
 
+def stack_ports_for_name(name: str) -> dict[str, int]:
+    """Deterministic ports for a stack, by the same rule agent environments use.
+
+    DETERMINISTIC RATHER THAN PROBED, deliberately: the same name yields the same
+    ports on every run, so `url` can answer without asking the runtime and a
+    redeploy does not silently move the endpoint an operator already pasted into
+    their settings. Collisions are detected at bind time and refused with the
+    conflict named (FR-010) — which is the honest order, because a port free at
+    probe time can be taken by the time compose binds it.
+
+    >>> stack_ports_for_name("obs") == {
+    ...     "ui": 3324, "otlp_http": 4424, "otlp_grpc": 4524}
+    True
+    """
+    off = sum(ord(c) for c in name) % STACK_PORT_RANGE
+    return {
+        "ui": STACK_UI_PORT_BASE + off,
+        "otlp_http": STACK_OTLP_HTTP_PORT_BASE + off,
+        "otlp_grpc": STACK_OTLP_GRPC_PORT_BASE + off,
+    }
+
+
+def stack_container_name(name: str) -> str:
+    """>>> stack_container_name("obs")
+    'agent-container-stack-obs'
+    """
+    return f"{STACK_CONTAINER_PREFIX}{name}"
+
+
+def stack_volume_name(name: str) -> str:
+    """>>> stack_volume_name("obs")
+    'agent-container-stack-obs-data'
+    """
+    return f"{STACK_CONTAINER_PREFIX}{name}-data"
+
+
 def name_to_key(name: str) -> str:
     """hosts.conf key prefix: hyphens -> underscores, uppercased.
 
@@ -6034,6 +6070,67 @@ def provision_host(
 # looks healthy and receives nothing.
 
 
+def build_stack_compose_model(
+    name: str,
+    image: str,
+    ports: dict,
+    binds: list[str],
+    retention_days: int,
+    retention_size: str,
+) -> dict:
+    """The compose document for a telemetry stack.
+
+    ONE SERVICE, no sidecar, no healthcheck. The healthcheck is deliberate: under
+    a rootless podman socket, healthchecks are systemd transient timers that
+    never fire, and this project has already lost twenty minutes per deploy to
+    exactly that. Readiness is probed by the tool instead, by an ACCEPTED record
+    (research R2).
+
+    NO `configs:` KEY, and that is load-bearing rather than incidental:
+    `configs: {file:}` is a daemon-side bind that does not cross a remote
+    context, so a stack deployed to a remote host would fail on the far side.
+    Everything the container needs travels as environment or as published ports.
+
+    The service is published on EVERY resolved bind address, which is how an
+    exposure LEVEL becomes an effect (FR-018b).
+    """
+    published = []
+    for addr in binds:
+        published.extend(
+            (
+                f"{addr}:{ports['ui']}:3000",
+                f"{addr}:{ports['otlp_http']}:4318",
+                f"{addr}:{ports['otlp_grpc']}:4317",
+            )
+        )
+    return {
+        "services": {
+            "stack": {
+                "image": image,
+                "container_name": stack_container_name(name),
+                "restart": "unless-stopped",
+                "ports": published,
+                "volumes": [f"{stack_volume_name(name)}:/data"],
+                "environment": {
+                    # Applied here AND read back after the deploy: a variable the
+                    # image does not recognise sets nothing, and the stack then
+                    # retains forever while looking configured (research R3).
+                    "GF_AUTH_ANONYMOUS_ENABLED": "true",
+                    "AGENT_CONTAINER_STACK_RETENTION_DAYS": str(retention_days),
+                    "AGENT_CONTAINER_STACK_RETENTION_SIZE": retention_size,
+                },
+                "labels": {
+                    # The kind, on the container itself, so a listing can tell
+                    # what something is WITHOUT inspecting its image (FR-003).
+                    "agent-container.kind": KIND_TELEMETRY_STACK,
+                    "agent-container.name": name,
+                },
+            }
+        },
+        "volumes": {stack_volume_name(name): {}},
+    }
+
+
 def stack_exposure_binds(level: str, driver: str) -> list[str]:
     """The concrete addresses a level binds to, on this runtime.
 
@@ -8752,6 +8849,53 @@ def host_ps_rows(host: dict, include_stopped: bool = False) -> list[tuple[str, s
 
 def host_container_names(host: dict, include_stopped: bool = False) -> set[str]:
     return {row[0] for row in host_ps_rows(host, include_stopped)}
+
+
+def stack_name_conflict(name: str, existing: set[str]) -> str | None:
+    """Which OTHER kind already answers to `name` on this host, if any.
+
+    ONE NAME, ONE CONTAINER, WHATEVER ITS KIND (FR-009a). The name is the
+    operator's handle for stopping things, and two kinds answering to one handle
+    is worst at exactly the moment it matters. Pure so the rule can be tested
+    without a runtime; the caller supplies the host's container names.
+
+    Returns the conflicting kind, or None.
+
+    >>> stack_name_conflict("obs", {"agent-container-obs"})
+    'agent'
+    >>> stack_name_conflict("obs", {"agent-container-stack-obs"})
+    'telemetry-stack'
+    >>> stack_name_conflict("obs", {"agent-container-other"}) is None
+    True
+    """
+    # ORDER MATTERS: the stack prefix EXTENDS the agent prefix, so
+    # `agent-container-stack-obs` also starts with `agent-container-`. Testing
+    # the agent form first would report every stack as an agent conflict.
+    if stack_container_name(name) in existing:
+        return KIND_TELEMETRY_STACK
+    if container_name(name) in existing:
+        return KIND_AGENT
+    return None
+
+
+def assert_stack_name_free(name: str, host: dict) -> None:
+    """Refuse a name another kind already holds, naming that kind (FR-009a)."""
+    try:
+        existing = host_container_names(host, include_stopped=True)
+    except Fatal, OSError, subprocess.SubprocessError:
+        # UNREACHABLE IS NOT EMPTY. We cannot prove the name is free, so we do
+        # not claim it is — but refusing every deploy on an unreadable host
+        # would be worse than a name collision the runtime will refuse anyway.
+        return
+    kind = stack_name_conflict(name, existing)
+    if kind == KIND_TELEMETRY_STACK:
+        return  # same kind: `up` handles this as already-present (FR-007)
+    if kind:
+        die(
+            f"'{name}' already names a {kind} on this host. A name identifies "
+            f"exactly one container this tool created, whatever its kind — pick "
+            f"another name, or remove the {kind} first."
+        )
 
 
 def assert_host_empty(host: dict) -> None:

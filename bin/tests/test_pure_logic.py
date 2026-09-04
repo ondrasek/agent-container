@@ -1839,3 +1839,79 @@ def test_the_egress_stanza_names_the_container_facing_host(wiz):
         assert wiz.stack_container_host_address(driver) in stanza
         assert "port: 4400" in stanza, "an explicit port selects the packet filter"
         assert "127.0.0.1" not in stanza
+
+
+def test_one_name_identifies_one_container_whatever_its_kind(wiz):
+    """FR-009a. The name is the operator's handle for stopping things, and two
+    kinds answering to one handle is worst exactly when it matters."""
+    assert wiz.stack_name_conflict("obs", {"agent-container-obs"}) == wiz.KIND_AGENT
+    assert wiz.stack_name_conflict("obs", {"agent-container-stack-obs"}) == wiz.KIND_TELEMETRY_STACK
+    assert wiz.stack_name_conflict("obs", {"agent-container-elsewhere"}) is None
+    assert wiz.stack_name_conflict("obs", set()) is None
+
+
+def test_the_stack_prefix_extends_the_agent_prefix_and_order_matters(wiz):
+    """A REGRESSION GUARD FOR A BUG THAT IS EASY TO WRITE.
+
+    `agent-container-stack-obs` also starts with `agent-container-`, so a
+    conflict check that tests the agent form first reports every stack as an
+    agent conflict — and `up` would then refuse to touch a stack it created.
+    """
+    assert wiz.stack_container_name("obs").startswith(wiz.CONTAINER_PREFIX)
+    assert (
+        wiz.stack_name_conflict("obs", {wiz.stack_container_name("obs")})
+        == wiz.KIND_TELEMETRY_STACK
+    ), "a stack must not be mistaken for an agent environment"
+
+
+def test_stack_ports_are_deterministic_and_do_not_collide_with_agent_ports(wiz):
+    """Deterministic so `url` can answer without asking the runtime, and so a
+    redeploy does not silently move an endpoint already pasted into settings."""
+    a, b = wiz.stack_ports_for_name("obs"), wiz.stack_ports_for_name("obs")
+    assert a == b
+    other = wiz.stack_ports_for_name("other")
+    assert a["ui"] != other["ui"], "different names get different ports (FR-009)"
+    for key, port in a.items():
+        assert not (wiz.PORT_BASE <= port < wiz.PORT_BASE + wiz.PORT_RANGE), (
+            f"{key}={port} lands in the agent sshd range and would collide"
+        )
+    assert len({*a.values()}) == 3, "the three published ports must differ"
+
+
+def test_the_stack_compose_model_carries_no_configs_key(wiz):
+    """LOAD-BEARING, not incidental. `configs: {file:}` is a daemon-side bind
+    that does not cross a remote context, so its presence would make every
+    remote deploy fail on the far side (FR-005)."""
+    m = wiz.build_stack_compose_model(
+        "obs", "img", wiz.stack_ports_for_name("obs"), ["127.0.0.1"], 7, "10GB"
+    )
+    assert "configs" not in m
+    assert "configs" not in m["services"]["stack"]
+
+
+def test_the_compose_model_publishes_on_every_resolved_bind(wiz):
+    """An exposure LEVEL becomes an EFFECT here: each resolved address gets its
+    own published port mapping (FR-018b)."""
+    ports = wiz.stack_ports_for_name("obs")
+    one = wiz.build_stack_compose_model("obs", "img", ports, ["127.0.0.1"], 7, "10GB")
+    two = wiz.build_stack_compose_model("obs", "img", ports, ["127.0.0.1", "172.17.0.1"], 7, "10GB")
+    assert len(two["services"]["stack"]["ports"]) == 2 * len(one["services"]["stack"]["ports"])
+    assert any(p.startswith("172.17.0.1:") for p in two["services"]["stack"]["ports"])
+
+
+def test_the_compose_model_declares_no_healthcheck(wiz):
+    """Under a ROOTLESS PODMAN socket, healthchecks are systemd transient timers
+    that never fire — this project has already lost twenty minutes per deploy to
+    that. Readiness is probed by the tool instead (research R2)."""
+    m = wiz.build_stack_compose_model(
+        "obs", "img", wiz.stack_ports_for_name("obs"), ["127.0.0.1"], 7, "10GB"
+    )
+    assert "healthcheck" not in m["services"]["stack"]
+
+
+def test_the_kind_is_on_the_container_not_only_in_our_records(wiz):
+    """FR-003: identifiable as a telemetry stack WITHOUT inspecting the image."""
+    m = wiz.build_stack_compose_model(
+        "obs", "img", wiz.stack_ports_for_name("obs"), ["127.0.0.1"], 7, "10GB"
+    )
+    assert m["services"]["stack"]["labels"]["agent-container.kind"] == wiz.KIND_TELEMETRY_STACK
