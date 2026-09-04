@@ -103,12 +103,12 @@ the consequence was stated.
 **Independent test**: after `up`, query the UI API for the dashboards and assert their queries return
 data for a run that exists.
 
-- [ ] T028 [US2] Add the dashboard definitions to `bin/agent-container` as data (fleet, run-trace, runs-and-activity), with a stable `uid` each so re-provisioning overwrites rather than duplicates (FR-015)
-- [ ] T029 [US2] Implement `stack_provision_dashboards(stack)` in `bin/agent-container` posting over the Grafana HTTP API with `overwrite` (research R4) — not a file mount, which does not cross a remote context
-- [ ] T030 [US2] Build the run-trace dashboard with a FREE-TEXT run selector seeded from a recent-runs panel in `bin/agent-container` — a query variable over the correlation attribute renders empty, because it is structured metadata rather than an indexed label, and every panel then filters on the empty string (research R5)
-- [ ] T031 [US2] Ensure metric panels filter only on DATA-POINT attributes in `bin/agent-container`; resource attributes other than `service.*` do not survive the OTLP→Prometheus conversion (research R6)
-- [ ] T032 [US2] Make the dashboards agent-agnostic in `bin/agent-container` (FR-017a): lead with a records-by-agent panel covering all four agents, and label agent-specific panels so an empty value reads as "this agent does not report that" rather than as breakage
-- [ ] T033 [US2] Wire provisioning into `up` in `bin/agent-container` such that a dashboard failure is REPORTED with the failing dashboard named but does NOT fail the deploy (FR-014, FR-016)
+- [x] T028 [US2] Add the dashboard definitions to `bin/agent-container` as data (fleet, run-trace, runs-and-activity), with a stable `uid` each so re-provisioning overwrites rather than duplicates (FR-015)
+- [x] T029 [US2] Implement `stack_provision_dashboards(stack)` in `bin/agent-container` posting over the Grafana HTTP API with `overwrite` (research R4) — not a file mount, which does not cross a remote context
+- [x] T030 [US2] Build the run-trace dashboard with a FREE-TEXT run selector seeded from a recent-runs panel in `bin/agent-container` — a query variable over the correlation attribute renders empty, because it is structured metadata rather than an indexed label, and every panel then filters on the empty string (research R5)
+- [x] T031 [US2] Ensure metric panels filter only on DATA-POINT attributes in `bin/agent-container`; resource attributes other than `service.*` do not survive the OTLP→Prometheus conversion (research R6)
+- [x] T032 [US2] Make the dashboards agent-agnostic in `bin/agent-container` (FR-017a): lead with a records-by-agent panel covering all four agents, and label agent-specific panels so an empty value reads as "this agent does not report that" rather than as breakage
+- [x] T033 [US2] Wire provisioning into `up` in `bin/agent-container` such that a dashboard failure is REPORTED with the failing dashboard named but does NOT fail the deploy (FR-014, FR-016)
 - [x] T034 [US2] Add `telemetry stack dashboards NAME` to `bin/agent-container` re-provisioning without redeploying, restarting or discarding data (FR-015)
 - [ ] T035 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: after `up`, every dashboard is present via the UI API and each one's primary query returns data for a seeded run (SC-004)
 - [ ] T036 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: delete a dashboard, run `dashboards`, assert it is restored AND that data collected beforehand is still queryable (FR-015)

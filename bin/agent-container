@@ -19289,9 +19289,174 @@ def stack_write_endpoint_setting(endpoint: str) -> Path:
     return path
 
 
-STACK_DASHBOARDS: list[dict] = []
-"""The tool's own dashboards. Filled in Phase 5 (T028-T032); the provisioner
-below works today so `up` does not depend on a function that does not exist."""
+# --- The tool's own dashboards (FR-014, FR-017, FR-017a) ---------------------
+# Data rather than files: they are versioned with the TOOL, so re-provisioning
+# brings an older stack up to the current tool's expectations, and nothing
+# tool-versioned lives on a stack-lifetime volume.
+#
+# TWO CONSTRAINTS FROM MEASUREMENT, both of which produced a broken dashboard
+# before they were understood (research R5, R6):
+#
+#   1. `{agent_container_run_id="X"}` MATCHES NOTHING. The attribute arrives as
+#      Loki STRUCTURED METADATA, not an indexed stream label, so it must be a
+#      filter AFTER a stream selector. For the same reason the run picker is a
+#      TEXTBOX: a query variable over that label renders empty, `$run_id`
+#      interpolates to "", every panel filters on the empty string, and the
+#      dashboard reads "No Data" while the data is sitting there.
+#
+#   2. Metric panels may filter only on DATA-POINT attributes. The
+#      OTLP->Prometheus conversion keeps `service.*` from the resource and drops
+#      the rest, so `agent` and `run_id` are usable only because Feature 017
+#      puts them on the point.
+#
+# AGENT-AGNOSTIC PANELS LEAD (FR-017a). Panels built on fields one agent happens
+# to emit render an empty screen for the others and read as breakage; the
+# agent-specific ones are labelled so a blank says "this agent does not report
+# that" rather than "this is broken".
+_STACK_RUN_SEL = '{service_namespace="agent-container"} | agent_container_run_id=`$run_id`'
+_LOKI_DS = {"type": "loki", "uid": "loki"}
+_PROM_DS = {"type": "prometheus", "uid": "prometheus"}
+_LOGS_OPTS = {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending"}
+
+
+def _stack_panel(
+    title, x, y, w, h, targets, ds, kind="timeseries", unit=None, opts=None, desc=None
+):
+    p = {
+        "title": title, "type": kind, "datasource": ds,
+        "gridPos": {"x": x, "y": y, "w": w, "h": h}, "targets": targets,
+        "fieldConfig": {"defaults": ({"unit": unit} if unit else {}), "overrides": []},
+    }  # fmt: skip
+    if opts:
+        p["options"] = opts
+    if desc:
+        p["description"] = desc
+    return p
+
+
+def _loki_q(expr, kind="range"):
+    return [{"expr": expr, "refId": "A", "datasource": _LOKI_DS, "queryType": kind}]
+
+
+def _prom_q(expr, legend="{{agent}}"):
+    return [{"expr": expr, "legendFormat": legend, "refId": "A", "datasource": _PROM_DS}]
+
+
+def _stack_dashboard_fleet() -> dict:
+    return {
+        "title": "Agent Containers — Fleet",
+        "uid": "agent-container-fleet",
+        "tags": ["agent-container"],
+        "timezone": "browser",
+        "time": {"from": "now-6h", "to": "now"},
+        "refresh": "30s",
+        "schemaVersion": 39,
+        "panels": [
+            _stack_panel("Records by agent", 0, 0, 12, 8,
+                _loki_q('sum by (agent_container_agent) (count_over_time('
+                        '{service_namespace="agent-container"} | agent_container_agent != `` [5m]))'),
+                _LOKI_DS,
+                desc="Every agent, whatever it emits. claude and opencode export their own OTLP; "
+                     "codex and pi arrive via their session transcripts."),
+            _stack_panel("Memory in use", 12, 0, 12, 8,
+                _prom_q("container_memory_usage_bytes", "{{environment}}"), _PROM_DS, unit="bytes"),
+            _stack_panel("CPU seconds/s", 0, 8, 12, 8,
+                _prom_q("rate(container_cpu_time_seconds_total[5m])", "{{environment}}"), _PROM_DS),
+            _stack_panel("Workspace used", 12, 8, 12, 8,
+                _prom_q("workspace_disk_used_bytes", "{{environment}}"), _PROM_DS, unit="bytes"),
+        ],
+    }  # fmt: skip
+
+
+def _stack_dashboard_run_trace() -> dict:
+    return {
+        "title": "Agent Containers — Run Trace (correlated)",
+        "uid": "agent-container-trace",
+        "tags": ["agent-container", "correlation"],
+        "timezone": "browser",
+        "time": {"from": "now-24h", "to": "now"},
+        "schemaVersion": 39,
+        "templating": {"list": [{
+            # TEXTBOX, not a query variable — see the module comment above.
+            "name": "run_id", "label": "run", "type": "textbox", "query": "",
+            "current": {"text": "", "value": ""}, "options": [],
+            "description": "Paste a run_id from the Recent runs panel.",
+        }]},  # fmt: skip
+        "panels": [
+            _stack_panel("① Recent runs — copy a run_id into the `run` box above", 0, 0, 24, 7,
+                _loki_q('{service_name="agent-container"}'), _LOKI_DS, kind="logs", opts=_LOGS_OPTS,
+                desc="One record per run, each carrying its run_id, agent and task."),
+            _stack_panel("② This run, by agent", 0, 7, 12, 7,
+                _loki_q(f"sum by (agent_container_agent) (count_over_time({_STACK_RUN_SEL} [5m]))"),
+                _LOKI_DS),
+            _stack_panel("② Records (this run)", 12, 7, 6, 7,
+                _loki_q(f"sum(count_over_time({_STACK_RUN_SEL} [$__range]))", "instant"),
+                _LOKI_DS, kind="stat"),
+            _stack_panel("Cost USD — claude only", 18, 7, 6, 7,
+                _loki_q(f"sum(max_over_time({_STACK_RUN_SEL} | unwrap cost_usd [$__range]))", "instant"),
+                _LOKI_DS, kind="stat", unit="currencyUSD",
+                desc="Only Claude Code reports a per-request cost; empty for other agents by design."),
+            _stack_panel("③ Container memory during the run", 0, 14, 12, 8,
+                _prom_q('container_memory_usage_bytes{run_id="$run_id"}'), _PROM_DS, unit="bytes",
+                desc="THE SAME RUN. A slow run and one wedged against its memory limit look "
+                     "identical in an agent's own telemetry."),
+            _stack_panel("③ Container CPU during the run", 12, 14, 12, 8,
+                _prom_q('rate(container_cpu_time_seconds_total{run_id="$run_id"}[2m])'), _PROM_DS),
+            _stack_panel("④ Everything this run emitted, in order", 0, 22, 24, 12,
+                _loki_q(_STACK_RUN_SEL), _LOKI_DS, kind="logs",
+                opts=_LOGS_OPTS | {"sortOrder": "Ascending"},
+                desc="Agent events and the tool's own record on one timeline, joined by run_id."),
+        ],
+    }  # fmt: skip
+
+
+def _stack_dashboard_host() -> dict:
+    return {
+        "title": "Agent Containers — Host",
+        "uid": "agent-container-host",
+        "tags": ["agent-container"],
+        "timezone": "browser",
+        "time": {"from": "now-6h", "to": "now"},
+        "schemaVersion": 39,
+        "panels": [
+            _stack_panel("Host systemd journal (not run-scoped)", 0, 0, 24, 9,
+                _loki_q('{service_name="lima-host"}'), _LOKI_DS, kind="logs", opts=_LOGS_OPTS,
+                desc="Shared across runs, so deliberately not filtered by run_id. Requires the "
+                     "host collector from contrib/telemetry."),
+            _stack_panel("Container processes", 0, 9, 12, 7,
+                _prom_q("container_processes_count_ratio", "{{environment}}"), _PROM_DS),
+            _stack_panel("Host load (1m)", 12, 9, 12, 7,
+                _prom_q("system_cpu_load_average_1m_ratio", "{{service_name}}"), _PROM_DS),
+        ],
+    }  # fmt: skip
+
+
+def stack_dashboard_set() -> list[dict]:
+    """Built on demand rather than at import: a module-level list would be one
+    more thing to keep in sync with the builders."""
+    return [_stack_dashboard_fleet(), _stack_dashboard_run_trace(), _stack_dashboard_host()]
+
+
+def stack_ui_ready(ui_port: int, budget: int = 60) -> bool:
+    """Wait for the UI's API, which is NOT ready when the ingest is.
+
+    THE SAME LESSON, ONE LAYER UP. `up` already waits for the OTLP ingest to
+    accept a record — and then provisioned dashboards immediately and every one
+    of them failed, because this image opens its ingest before its UI. Measured:
+    posting the identical payload by hand seconds later returned 200 for all
+    three. Two components, two readiness questions; assuming one answers for the
+    other is what produced a stack that came up "successfully" with no views.
+    """
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        r = query([
+            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "5",
+            f"http://localhost:{ui_port}/api/health",
+        ])  # fmt: skip
+        if r.returncode == 0 and r.stdout.strip() == "200":
+            return True
+        time.sleep(2)
+    return False
 
 
 def stack_provision_dashboards(name: str, ui_port: int) -> tuple[int, list[str]]:
@@ -19306,8 +19471,11 @@ def stack_provision_dashboards(name: str, ui_port: int) -> tuple[int, list[str]]
     working collector is worth more than its views, so the deploy survives and
     the failure is named (FR-016).
     """
+    if not stack_ui_ready(ui_port):
+        log(f"WARNING: the UI on port {ui_port} did not answer; dashboards not installed")
+        return 0, [d["title"] for d in stack_dashboard_set()]
     installed, failed = 0, []
-    for dash in STACK_DASHBOARDS:
+    for dash in stack_dashboard_set():
         body = json.dumps({"dashboard": dash, "overwrite": True, "folderId": 0})
         r = query([
             "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "20",
