@@ -6225,6 +6225,24 @@ def stack_container_endpoint(port: int, driver: str) -> str:
     return f"http://{stack_container_host_address(driver)}:{port}/v1/logs"
 
 
+def stack_operator_probe_endpoint(port: int) -> str:
+    """The ingest URL to probe FROM THE OPERATOR'S MACHINE.
+
+    NOT `stack_container_endpoint`, and getting this wrong is the feature's own
+    trap sprung on itself: the first implementation probed the container-facing
+    address, which under podman is `host.containers.internal` — a name that does
+    not resolve on the operator's host at all. The stack was serving correctly
+    on localhost the entire time and `up` failed after 180 seconds claiming the
+    ingest never accepted a record.
+
+    Two addresses, two consumers. This one is ours.
+
+    >>> stack_operator_probe_endpoint(4424)
+    'http://localhost:4424/v1/logs'
+    """
+    return f"http://localhost:{port}/v1/logs"
+
+
 def stack_operator_url(address: str, port: int) -> str:
     """The address a HUMAN opens. Distinct from the container endpoint by
     construction, and the distinction is the point.
@@ -19139,6 +19157,314 @@ telemetry_app = typer.Typer(
     ),
 )
 app.add_typer(telemetry_app, name="telemetry")
+
+
+# --- Feature 023: the `telemetry stack` subgroup -----------------------------
+# A subgroup of `telemetry` rather than a role on `up`, because `up`'s surface —
+# agent, task, repo, env-file, egress, credentials, tmux — is meaningless for a
+# collector, and because the endpoint you export TO belongs beside the commands
+# that export.
+
+stack_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "The THIRD kind of container this tool manages: a telemetry stack. It receives "
+        "what Feature 017 exports and displays it. Holds no credentials and runs no "
+        "agent, so its EXPOSURE is the security question that replaces them — an "
+        "unauthenticated UI showing verbatim task text must not be published by accident."
+    ),
+)
+telemetry_app.add_typer(stack_app, name="stack")
+
+
+def stack_ready_probe(endpoint: str, timeout: int = 5) -> bool:
+    """Has the OTLP ingest ACCEPTED a record?
+
+    LIVENESS IS NOT READINESS (FR-006, research R2). The container reports
+    `Up (starting)` for tens of seconds after the port is listening, and accepts
+    TCP before the receiver is wired — so a probe that checks either would send
+    the operator off to configure an endpoint that drops what it is sent.
+
+    An EMPTY payload is used deliberately: a ready receiver accepts it, it
+    creates no data, and it is therefore safe to repeat every second.
+    """
+    r = query(
+        [
+            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+            "-m", str(timeout), "-X", "POST", endpoint,
+            "-H", "Content-Type: application/json",
+            "--data-binary", '{"resourceLogs":[]}',
+        ]
+    )  # fmt: skip
+    return r.returncode == 0 and r.stdout.strip() == "200"
+
+
+def stack_wait_ready(endpoint: str, budget: int, container: str, host_rec: dict) -> None:
+    """Wait for the ingest, and on expiry say WHICH STAGE we were waiting on.
+
+    "Timed out" is three different problems with three different fixes — a slow
+    registry, a container that will not start, and an ingest that never opens —
+    and a message that cannot tell them apart sends the operator to debug the
+    wrong one (FR-006b).
+    """
+    deadline = time.monotonic() + budget
+    saw_container = False
+    while time.monotonic() < deadline:
+        if stack_ready_probe(endpoint):
+            return
+        if not saw_container:
+            with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
+                saw_container = container in host_container_names(host_rec, include_stopped=True)
+        time.sleep(2)
+    stage = (
+        "the ingest never accepted a record"
+        if saw_container
+        else ("the container never appeared — the image may still be pulling, or the pull failed")
+    )
+    die(
+        f"telemetry stack did not become ready within {budget}s: {stage}. "
+        f"Raise AGENT_CONTAINER_STACK_READY_TIMEOUT if the image is still downloading, "
+        f"or read the container's log for why it is not serving."
+    )
+
+
+def stack_report_endpoint(name: str, ports: dict, binds: list[str], driver: str) -> str:
+    """Print how to reach it, in both forms, plus the egress stanza.
+
+    THE TWO ADDRESSES ARE DIFFERENT and printing only one is the feature's
+    principal failure mode: on every runtime where a container does not share
+    the operator's loopback, the address a human opens and the address an agent
+    exports to diverge (FR-013).
+    """
+    endpoint = stack_container_endpoint(ports["otlp_http"], driver)
+    log(f"stack '{name}' bound on: {', '.join(binds)} (exposure resolved, FR-018b)")
+    log(f"  UI (yours):            {stack_operator_url('localhost', ports['ui'])}")
+    log(f"  otlp_endpoint (agents): {endpoint}")
+    log("")
+    log("  put this in settings.yaml so environments export into it:")
+    log(f"    otlp_endpoint: {endpoint}")
+    log("")
+    log("  and if an environment ENFORCES egress, it must also declare the collector —")
+    log("  export is governed by that declaration and FAILS OPEN, so an undeclared")
+    log("  collector yields a green run with no telemetry and no error anywhere:")
+    for line in stack_egress_allow_entry(driver, ports["otlp_http"]).rstrip("\n").splitlines():
+        log(f"    {line}")
+    return endpoint
+
+
+def stack_write_endpoint_setting(endpoint: str) -> Path:
+    """Write `otlp_endpoint` into settings.yaml inside a MANAGED REGION.
+
+    Same idiom as the container's `~/.ssh/config` block and its
+    `authorized_keys` region: everything outside the markers is preserved
+    byte-for-byte, and the region is REPLACED rather than appended to, so
+    running this twice does not leave two endpoints for the reader to choose
+    between (FR-011b).
+
+    Opt-in only. Creating a container must not edit the operator's
+    configuration as a side effect.
+    """
+    begin = "# >>> agent-container telemetry (managed) >>>"
+    end = "# <<< agent-container telemetry (managed) <<<"
+    path = CONFIG_DIR / "settings.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text() if path.is_file() else ""
+    kept, skip = [], False
+    for line in text.splitlines():
+        if line.strip() == begin:
+            skip = True
+            continue
+        if line.strip() == end:
+            skip = False
+            continue
+        if not skip:
+            kept.append(line)
+    body = "\n".join(kept).rstrip("\n")
+    block = f"{begin}\notlp_endpoint: {endpoint}\n{end}\n"
+    path.write_text((body + "\n\n" if body else "") + block)
+    return path
+
+
+STACK_DASHBOARDS: list[dict] = []
+"""The tool's own dashboards. Filled in Phase 5 (T028-T032); the provisioner
+below works today so `up` does not depend on a function that does not exist."""
+
+
+def stack_provision_dashboards(name: str, ui_port: int) -> tuple[int, list[str]]:
+    """Install the tool's dashboards over the UI's HTTP API.
+
+    THE API, NOT A FILE MOUNT. `configs: {file:}` is a daemon-side bind that
+    does not cross a remote context, and dashboards must work on a remote host;
+    `{content:}` would cross but would then require a REDEPLOY to re-provision,
+    which FR-015 forbids.
+
+    Returns (installed, failed_titles). NEVER raises for a dashboard failure: a
+    working collector is worth more than its views, so the deploy survives and
+    the failure is named (FR-016).
+    """
+    installed, failed = 0, []
+    for dash in STACK_DASHBOARDS:
+        body = json.dumps({"dashboard": dash, "overwrite": True, "folderId": 0})
+        r = query([
+            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "20",
+            "-X", "POST", f"http://localhost:{ui_port}/api/dashboards/db",
+            "-H", "Content-Type: application/json", "-d", body,
+        ])  # fmt: skip
+        if r.returncode == 0 and r.stdout.strip() == "200":
+            installed += 1
+        else:
+            failed.append(dash.get("title", dash.get("uid", "?")))
+    if installed:
+        log(f"installed {installed} dashboard(s) into '{name}'")
+    if failed:
+        log(
+            f"WARNING: could not install dashboard(s): {', '.join(failed)} — the stack is up regardless"
+        )
+    return installed, failed
+
+
+@stack_app.command("up")
+def stack_up(
+    name: str = typer.Argument(..., help="Stack short name."),
+    host: str | None = typer.Option(None, "--host", help="Host to deploy it on."),
+    image: str = typer.Option(STACK_IMAGE_DEFAULT, "--image", help="Stack image."),
+    exposure: str = typer.Option(
+        STACK_EXPOSURE_DEFAULT,
+        "--exposure",
+        help="loopback | host | network. Default 'host': the host AND its containers.",
+    ),
+    retention_days: int = typer.Option(
+        STACK_RETENTION_DAYS, "--retention-days", help="Retention window."
+    ),
+    retention_size: str = typer.Option(
+        STACK_RETENTION_SIZE, "--retention-size", help="Retention ceiling."
+    ),
+    set_endpoint: bool = typer.Option(
+        False, "--set-endpoint", help="Write otlp_endpoint into settings.yaml (managed region)."
+    ),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the exposure confirmation."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Create or start a telemetry stack, and report where to export into it.
+
+    Reports success ONLY once the ingest has ACCEPTED a record. Container
+    liveness is not readiness, and saying otherwise sends the operator off to
+    configure an endpoint that drops what it is sent (FR-006).
+    """
+    set_json_mode(as_json)
+    validate_name(name)
+    if exposure not in STACK_EXPOSURE_LEVELS:
+        die(f"unknown exposure level {exposure!r}; choose {', '.join(STACK_EXPOSURE_LEVELS)}")
+    host_name, host_rec = resolve_deploy_host(host)
+    driver = host_rec.get("driver") or detect_runtime()
+    cname = stack_container_name(name)
+    ports = stack_ports_for_name(name)
+    binds = stack_exposure_binds(exposure, driver)
+
+    # STATED BEFORE ANYTHING IS CREATED, and refused without consent on a
+    # non-TTY. `network` publishes an unauthenticated UI that displays verbatim
+    # agent task text, and an ingest that accepts records from anyone who can
+    # reach it. Printed rather than prompted: `up` is a path an agent may drive,
+    # and a prompt would be auto-answered, which reads as consent (FR-019).
+    if exposure == STACK_EXPOSURE_NETWORK:
+        log("")
+        log("  EXPOSURE: network — this publishes, to every machine that can route here:")
+        log("    * a Grafana UI with NO AUTHENTICATION")
+        log("    * which displays VERBATIM AGENT TASK TEXT (exported by default, Feature 017)")
+        log("    * and an OTLP ingest that ACCEPTS RECORDS FROM ANYONE who can reach it")
+        log("")
+        if not yes:
+            if not is_tty():
+                die("refusing --exposure network without -y/--yes on a non-TTY")
+            if not questionary.confirm("Publish it anyway?", default=False).ask():
+                die("aborted")
+
+    assert_stack_name_free(name, host_rec)
+
+    existing = set()
+    with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
+        existing = host_container_names(host_rec, include_stopped=True)
+    running = set()
+    with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
+        running = host_container_names(host_rec, include_stopped=False)
+
+    endpoint = stack_container_endpoint(ports["otlp_http"], driver)
+    probe = stack_operator_probe_endpoint(ports["otlp_http"])
+    if cname in running:
+        log(f"telemetry stack '{name}' is already running on {host_name}")
+        stack_report_endpoint(name, ports, binds, driver)
+        emit_action("telemetry-stack-up", name=name, host=host_name, created=False)
+        return
+
+    # EXISTS BUT STOPPED: start it and KEEP ITS DATA. A host reboot is the
+    # ordinary way a stack becomes stopped, and recovering from it must not cost
+    # the trail the stack exists to hold (FR-007).
+    restarted = cname in existing
+
+    model = build_stack_compose_model(name, image, ports, binds, retention_days, retention_size)
+    compose_path = write_compose_file(host_name, f"stack-{name}", model)
+    project = f"{STACK_CONTAINER_PREFIX}{name}"
+
+    log(f"{'restarting' if restarted else 'creating'} telemetry stack '{name}' on {host_name}")
+    if not restarted:
+        log(f"pulling {image} (this is the slow part on a first run)")
+    rc = run_child(driver_compose_argv(host_rec, project, compose_path, "up", "-d")).returncode
+    if rc != 0:
+        die(
+            f"could not start the telemetry stack (compose exited {rc}). If a port is "
+            f"already taken, pick another name or free {', '.join(str(p) for p in ports.values())}."
+        )
+
+    budget = int(os.environ.get("AGENT_CONTAINER_STACK_READY_TIMEOUT", STACK_READY_TIMEOUT))
+    log(f"waiting up to {budget}s for the ingest to ACCEPT a record (liveness is not readiness)")
+    stack_wait_ready(probe, budget, cname, host_rec)
+    log(f"telemetry stack '{name}' is {'restarted' if restarted else 'up'} and accepting records")
+
+    stack_apply_retention_report(name, host_rec, retention_days, retention_size)
+    stack_report_endpoint(name, ports, binds, driver)
+    if set_endpoint:
+        written = stack_write_endpoint_setting(endpoint)
+        log(
+            f"wrote otlp_endpoint into {written} (managed region; the rest of the file is untouched)"
+        )
+
+    with contextlib.suppress(Exception):
+        stack_provision_dashboards(name, ports["ui"])
+
+    if not restarted:
+        with contextlib.suppress(Exception):
+            write_inventory_entry(
+                build_inventory_entry(
+                    name, host_name, host_provisioned=False, role=KIND_TELEMETRY_STACK
+                )
+            )
+    emit_action("telemetry-stack-up", name=name, host=host_name, created=not restarted)
+
+
+def stack_apply_retention_report(name: str, host_rec: dict, days: int, size: str) -> None:
+    """Read the applied retention BACK, and say so when it cannot be confirmed.
+
+    Research R3: the variable names an image honours must be READ OFF THE IMAGE
+    rather than assumed, because a name it does not recognise sets nothing — and
+    the stack then retains forever while looking configured. So the value is
+    read back rather than trusted.
+
+    UNCONFIRMED IS REPORTED AS UNCONFIRMED, never as the value requested
+    (FR-025c). A number nobody verified is exactly how an unbounded store looks
+    bounded. The deploy is NOT failed over it: a collector that works beats no
+    collector, which is the same rule dashboard failure already follows.
+    """
+    cname = stack_container_name(name)
+    r = query(driver_runtime_argv(host_rec) + ["exec", cname, "env"])
+    seen = r.stdout if r.returncode == 0 else ""
+    if f"AGENT_CONTAINER_STACK_RETENTION_DAYS={days}" in seen:
+        log(f"retention: {days}d / {size} (confirmed)")
+        return
+    log(
+        f"WARNING: could not confirm retention on '{name}'. Asked for {days}d / {size}; "
+        f"the container did not report it back. The store may grow without bound — check "
+        f"the image's retention settings before leaving this stack running."
+    )
 
 
 @telemetry_app.command("collect")

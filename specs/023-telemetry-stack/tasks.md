@@ -43,7 +43,7 @@ endpoint resolution and exposure — are proved here as pure functions, before a
 - [x] T009 Implement `stack_allocate_ports(name, host)` in `bin/agent-container` reusing the existing per-host port allocation so several stacks coexist (FR-009), and refusing with the conflict named when a port is unavailable (FR-010)
 - [x] T010 Implement `build_stack_compose_model(stack, driver)` in `bin/agent-container` — one service, published ports from T009 bound per T004, a named data volume, retention environment from T001; NO `configs: {file:}` (does not cross a remote context)
 - [x] T011 [P] Test the stack compose model in `bin/tests/test_compose.py`: port bindings match the exposure level, the data volume is named per stack, no `configs:` key, and the model differs by driver only where T004 says it should
-- [ ] T012 Extend the inventory record with `kind` in `bin/agent-container` so a stack is distinguishable from an agent environment after the container is gone (FR-023)
+- [x] T012 Extend the inventory record with `kind` in `bin/agent-container` so a stack is distinguishable from an agent environment after the container is gone (FR-023)
 
 **Checkpoint**: exposure, endpoints, naming, ports and the compose model are all proved without
 deploying anything.
@@ -58,17 +58,17 @@ an agent container must use.
 **Independent test**: run `telemetry stack up` on a host with no stack; assert a record is accepted
 afterwards and that the PRINTED endpoint is the one that accepted it.
 
-- [ ] T013 [US1] Add the `telemetry stack` command group and `up` to `bin/agent-container` with the flags from `contracts/cli.md` (`--host`, `--image`, `--exposure`, `--ui-port`, `--otlp-port`, `-y/--yes`, `--json`) — its own group, never a role on `up` (FR-002, FR-008)
-- [ ] T014 [US1] Implement the image pull step in `bin/agent-container`, reporting that a pull is happening rather than leaving a blank prompt, and naming a pull failure as the cause (spec Edge Cases)
-- [ ] T015 [US1] Implement `stack_ingest_ready(endpoint)` in `bin/agent-container` probing readiness by POSTing an EMPTY OTLP payload and requiring HTTP 200 (research R2) — NOT the runtime healthcheck, which never fires under a rootless podman socket
-- [ ] T016 [US1] Wire the staged readiness wait into `up` in `bin/agent-container`: bounded by `STACK_READY_TIMEOUT`, and on expiry reporting WHICH stage — pull, start, or ingest — it was waiting on (FR-006a, FR-006b)
-- [ ] T017 [US1] Implement restart-if-stopped in `up` in `bin/agent-container`: running ⇒ report it; stopped ⇒ start it, keep its data, and say "restarted" not "created" (FR-007)
+- [x] T013 [US1] Add the `telemetry stack` command group and `up` to `bin/agent-container` with the flags from `contracts/cli.md` (`--host`, `--image`, `--exposure`, `--ui-port`, `--otlp-port`, `-y/--yes`, `--json`) — its own group, never a role on `up` (FR-002, FR-008)
+- [x] T014 [US1] Implement the image pull step in `bin/agent-container`, reporting that a pull is happening rather than leaving a blank prompt, and naming a pull failure as the cause (spec Edge Cases)
+- [x] T015 [US1] Implement `stack_ingest_ready(endpoint)` in `bin/agent-container` probing readiness by POSTing an EMPTY OTLP payload and requiring HTTP 200 (research R2) — NOT the runtime healthcheck, which never fires under a rootless podman socket
+- [x] T016 [US1] Wire the staged readiness wait into `up` in `bin/agent-container`: bounded by `STACK_READY_TIMEOUT`, and on expiry reporting WHICH stage — pull, start, or ingest — it was waiting on (FR-006a, FR-006b)
+- [x] T017 [US1] Implement restart-if-stopped in `up` in `bin/agent-container`: running ⇒ report it; stopped ⇒ start it, keep its data, and say "restarted" not "created" (FR-007)
 - [ ] T017a [US1] DISCOVER the image's retention settings before applying them: read the variable/config names off `${STACK_IMAGE_DEFAULT}` and record them in `specs/023-telemetry-stack/research.md` under R3 — research R3 states these must be read rather than assumed, because a wrong name sets nothing and the stack then retains forever while looking configured
-- [ ] T018 [US1] Apply retention on deploy in `bin/agent-container` (window and ceiling, T001) and ASSERT THE EFFECTIVE VALUE BACK rather than trusting the setting took (FR-025b, research R3)
-- [ ] T018a [US1] Handle unconfirmable retention in `bin/agent-container` (FR-025c): warn naming asked-for versus read-back, KEEP the stack, and report retention as `unconfirmed` thereafter rather than echoing the requested value
-- [ ] T019 [US1] Print the resolved bind addresses and the container-facing `otlp_endpoint` at the end of `up` in `bin/agent-container` (FR-018b, FR-011)
-- [ ] T019b [US1] Implement `--set-endpoint` in `bin/agent-container` writing `otlp_endpoint` into settings.yaml inside a marker-delimited managed region, preserving content outside it byte-for-byte, and writing the CONTAINER-facing form (FR-011b, FR-013); off by default
-- [ ] T019a [US1] Print the `egress.allow` entry needed to reach the collector alongside the endpoint in `bin/agent-container` (FR-011a) — an enforcing environment refuses the export and fails OPEN, leaving no error to detect afterwards
+- [x] T018 [US1] Apply retention on deploy in `bin/agent-container` (window and ceiling, T001) and ASSERT THE EFFECTIVE VALUE BACK rather than trusting the setting took (FR-025b, research R3)
+- [x] T018a [US1] Handle unconfirmable retention in `bin/agent-container` (FR-025c): warn naming asked-for versus read-back, KEEP the stack, and report retention as `unconfirmed` thereafter rather than echoing the requested value
+- [x] T019 [US1] Print the resolved bind addresses and the container-facing `otlp_endpoint` at the end of `up` in `bin/agent-container` (FR-018b, FR-011)
+- [x] T019b [US1] Implement `--set-endpoint` in `bin/agent-container` writing `otlp_endpoint` into settings.yaml inside a marker-delimited managed region, preserving content outside it byte-for-byte, and writing the CONTAINER-facing form (FR-011b, FR-013); off by default
+- [x] T019a [US1] Print the `egress.allow` entry needed to reach the collector alongside the endpoint in `bin/agent-container` (FR-011a) — an enforcing environment refuses the export and fails OPEN, leaving no error to detect afterwards
 - [ ] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
 - [ ] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
 - [ ] T021a [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: drive the stack past a retention bound (a tiny ceiling makes this fast) and assert the ingest STILL returns 200 afterwards — eviction is normal operation for a bounded store, not an error (FR-025a)
