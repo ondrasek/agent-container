@@ -17,6 +17,7 @@ Create or start a telemetry stack.
 | `--exposure` | `host` | `loopback` \| `host` \| `network` (FR-018). |
 | `--ui-port` | allocated | Override the UI port. |
 | `--otlp-port` | allocated | Override the OTLP/HTTP port. |
+| `--set-endpoint` | off | Write `otlp_endpoint` into settings.yaml in a managed region (FR-011b). |
 | `-y`, `--yes` | off | Required to proceed with `--exposure network` on a non-TTY. |
 | `--json` | off | Machine-readable envelope. |
 

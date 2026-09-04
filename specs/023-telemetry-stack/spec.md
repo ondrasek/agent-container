@@ -33,6 +33,12 @@ you one.
 - Q: How long should `up` wait for the ingest to accept a record before failing? → A: One named default of 180 seconds covering pull, start and ingest readiness, overridable at the surface, and the failure must say which of the three it was still waiting on.
 - Q: What should bound the telemetry a stack retains? → A: Both a time window and a size ceiling, whichever is reached first, each a named default — time answers "how far back can I look", size protects the host regardless of fleet load.
 
+### Session 2026-09-04 (second pass, post-plan)
+
+- Q: Should `up` also print the egress declaration needed to reach the collector? → A: Yes, always — alongside the endpoint, print the `egress.allow` entry, because an enforcing environment refuses the export and fails OPEN, which produces no error anywhere.
+- Q: What happens when retention is applied but the read-back cannot confirm it? → A: Warn loudly and keep the stack — name what was asked for and what came back, report retention as `unconfirmed` thereafter, and do not tear down a working collector over its settings.
+- Q: May `up` write `otlp_endpoint` into settings.yaml, or only print it? → A: Opt-in only — `--set-endpoint` writes it inside a marker-delimited managed region, preserving everything outside byte-for-byte; printing stays the default.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Stand up a place for telemetry to land (Priority: P1)
@@ -177,10 +183,17 @@ inventory says so.
   an address that answers nothing.
 - **Removal while environments are still exporting to it.** Permitted, and the consequence stated:
   those exports begin failing open, so their telemetry stops silently.
+- **An environment enforcing egress is pointed at the collector without declaring it.** The
+  boundary refuses the export and it fails open: no error, no telemetry, and a green run.
+  Pre-empted by printing the declaration beside the endpoint (FR-011a) rather than detected
+  afterwards, because there is nothing to detect — the failure leaves no trace.
 - **The host cannot pull the image** (no route, or an egress policy denies the registry). Fail with
   the pull named as the cause.
 - **Disk fills under retained data.** Bounded by both a time window and a size ceiling (FR-025);
   reaching either evicts oldest-first and MUST NOT stop the stack accepting new records.
+- **Retention cannot be read back.** The stack is kept and the operator is warned that the store
+  may grow without bound (FR-025c); the reported value becomes `unconfirmed`, never the
+  requested one — an unverified number that looks verified is worse than an admitted unknown.
 - **A run the operator is looking for has been evicted.** Reported as beyond the retention window
   or ceiling, not as an absence of telemetry — those are different facts with different fixes.
 
@@ -231,6 +244,18 @@ inventory says so.
 
 - **FR-011**: The tool MUST report, for a running stack, the UI address and the exact endpoint value
   an operator puts in configuration to export into it.
+- **FR-011a**: The tool MUST also report the egress declaration required to reach the collector
+  from an environment that enforces egress. Export is governed by that declaration and FAILS
+  OPEN, so an undeclared collector yields a run that passes with no telemetry and no error —
+  indistinguishable from an agent that emitted nothing. Printed unconditionally rather than only
+  when an enforcing environment already exists, because the environment that needs it may not
+  have been written yet.
+- **FR-011b**: The tool MUST be able, ON EXPLICIT REQUEST ONLY, to write the endpoint into the
+  operator's settings, inside a marker-delimited managed region that preserves everything outside
+  it byte-for-byte — the idiom already used for the container's `~/.ssh/config` block and its
+  `authorized_keys` region. It MUST NOT do so by default: creating a container must not edit the
+  operator's configuration as a side effect. The value written MUST be the container-facing form
+  (FR-013), which is the one a paste is most likely to get wrong.
 - **FR-012**: When the UI is not reachable from the operator's machine, the tool MUST provide the
   command that makes it reachable.
 - **FR-013**: The reported endpoint MUST be the address usable BY AN AGENT CONTAINER, which is not
@@ -285,6 +310,12 @@ inventory says so.
 - **FR-025b**: The effective retention MUST be reportable, so an operator asking why a run has
   vanished gets an answer rather than assuming telemetry was never recorded — the same
   absence-is-not-evidence rule the rest of the tool follows.
+- **FR-025c**: When retention is applied but cannot be CONFIRMED, the tool MUST warn, naming both
+  what it asked for and what came back, and MUST keep the stack. Thereafter it MUST report the
+  retention as `unconfirmed` rather than echoing the value it requested — reporting a number
+  nobody verified is how a store that grows without bound looks bounded. The deploy is not failed
+  over it: a collector that works is more useful than no collector, and the same rule already
+  governs dashboard failure (FR-016).
 
 ### Key Entities
 
@@ -303,8 +334,8 @@ inventory says so.
 ### Measurable Outcomes
 
 - **SC-001**: An operator with no observability backend can go from nothing to telemetry visible in
-  a UI with a single command plus one configuration line, in under five minutes on a first run
-  including image download.
+  a UI with a single command plus one configuration line — or a single command alone when the
+  endpoint is written on request — in under five minutes on a first run including image download.
 - **SC-002**: A stack reported as up accepts a telemetry record 100% of the time, measured by
   sending one immediately after the command returns.
 - **SC-003**: The endpoint value the tool prints works verbatim: an environment configured with it,

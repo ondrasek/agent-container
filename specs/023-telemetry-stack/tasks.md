@@ -64,7 +64,10 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 - [ ] T016 [US1] Wire the staged readiness wait into `up` in `bin/agent-container`: bounded by `STACK_READY_TIMEOUT`, and on expiry reporting WHICH stage — pull, start, or ingest — it was waiting on (FR-006a, FR-006b)
 - [ ] T017 [US1] Implement restart-if-stopped in `up` in `bin/agent-container`: running ⇒ report it; stopped ⇒ start it, keep its data, and say "restarted" not "created" (FR-007)
 - [ ] T018 [US1] Apply retention on deploy in `bin/agent-container` (window and ceiling, T001) and ASSERT THE EFFECTIVE VALUE BACK rather than trusting the setting took (FR-025b, research R3)
+- [ ] T018a [US1] Handle unconfirmable retention in `bin/agent-container` (FR-025c): warn naming asked-for versus read-back, KEEP the stack, and report retention as `unconfirmed` thereafter rather than echoing the requested value
 - [ ] T019 [US1] Print the resolved bind addresses and the container-facing `otlp_endpoint` at the end of `up` in `bin/agent-container` (FR-018b, FR-011)
+- [ ] T019b [US1] Implement `--set-endpoint` in `bin/agent-container` writing `otlp_endpoint` into settings.yaml inside a marker-delimited managed region, preserving content outside it byte-for-byte, and writing the CONTAINER-facing form (FR-011b, FR-013); off by default
+- [ ] T019a [US1] Print the `egress.allow` entry needed to reach the collector alongside the endpoint in `bin/agent-container` (FR-011a) — an enforcing environment refuses the export and fails OPEN, leaving no error to detect afterwards
 - [ ] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
 - [ ] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
 - [ ] T022 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: readiness failure path — point at an image that starts but never opens an ingest, assert the message names the INGEST stage, not container start (FR-006b)
@@ -84,6 +87,7 @@ the consequence was stated.
 - [ ] T024 [US3] Implement the `network` warning text in `bin/agent-container` stating that the UI is unauthenticated, displays VERBATIM AGENT TASK TEXT, and that the ingest accepts records from anyone who can reach it (FR-019) — the task-text clause is the one an operator will not otherwise expect
 - [ ] T025 [US3] Add `telemetry stack url NAME` to `bin/agent-container` printing the UI address, the `otlp_endpoint` line, and — when the UI is not reachable from the operator's machine — the command that makes it reachable (FR-011, FR-012); not running ⇒ say so rather than print a dead address
 - [ ] T026 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: default exposure is reachable from a container on the host and NOT bound to a routable address; `--exposure network` binds routably and emitted the warning (SC-005)
+- [ ] T026a [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--set-endpoint` writes only inside its markers — content outside is byte-identical afterwards — and re-running replaces the region rather than appending a second one (FR-011b)
 - [ ] T027 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `url` output is machine-checkable — the `otlp_endpoint` it prints accepts a record, and the printed bind addresses match what the runtime reports
 
 ---
@@ -109,7 +113,7 @@ data for a run that exists.
 
 ## Phase 6: User Story 4 — Run several, and get rid of them (P2)
 
-- [ ] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state and whether the ingest is answering; state is `running` | `stopped` | `undetermined`, never a guess (FR-021)
+- [ ] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state, whether the ingest is answering, and retention (or `unconfirmed`); state is `running` | `stopped` | `undetermined`, never a guess (FR-021, FR-025c)
 - [ ] T038 [US4] Add `telemetry stack remove NAME` to `bin/agent-container` with `--purge` and `-y`, retaining collected data unless purged (FR-022), and STATING that environments still exporting to it will now fail open — silently, which is why it is said aloud
 - [ ] T039 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: two stacks on one host run concurrently with distinct ports; removing one leaves the other serving (SC-006)
 - [ ] T040 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `remove` without `--purge` retains the data volume; with `--purge` it is gone

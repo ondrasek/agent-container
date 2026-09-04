@@ -31,6 +31,31 @@
 
 ## Notes
 
+**Second clarification pass (post-plan, 2026-09-04).** Still 16/16; no regressions. Three
+gaps that were invisible until the design existed:
+
+- **The collector behind an egress boundary** (FR-011a). Export is governed by a 012
+  declaration and fails OPEN, so pointing an enforcing environment at an undeclared
+  collector yields a green run with no telemetry and no error. This is not hypothetical —
+  it happened in this repository during Feature 017 work and cost a whole test run's
+  telemetry. `up` now prints the `egress.allow` entry beside the endpoint, unconditionally,
+  because the environment that needs it may not have been written yet.
+- **Retention that cannot be confirmed** (FR-025c). FR-025b required effective retention to
+  be reportable and the spec never said what happens when the read-back fails. Warn and
+  keep: a working collector beats no collector, and the reported value becomes
+  `unconfirmed` rather than the requested one — a number nobody verified is how an
+  unbounded store looks bounded.
+- **Whether the tool writes the operator's config** (FR-011b). Opt-in only, in a
+  marker-delimited managed region, using the idiom already proven for `~/.ssh/config` and
+  `authorized_keys`. Creating a container must not edit the operator's configuration as a
+  side effect, but the paste step is exactly where the two-address distinction gets copied
+  wrong, so the affordance exists behind a flag.
+
+**Not asked, because scanning answered it**: whether FR-012's tunnel command is
+implementable for a remote host. The tool already derives an address from an `ssh://`
+context (`address_from_context`), so it is.
+
+
 **Re-validated after clarification (session 2026-09-04).** All 16 items still pass; no
 regressions. Five decisions were resolved and each tightened a requirement rather than
 adding one:
