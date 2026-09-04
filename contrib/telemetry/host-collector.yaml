@@ -1,0 +1,40 @@
+# Host-level signals the agent containers cannot produce themselves: the VM's
+# systemd journal and its machine-wide resource usage. Kept OUTSIDE the product
+# — agent-container stays "protocol only, never a backend package" — and run as
+# an ordinary collector next to the stack it feeds.
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    root_path: /hostfs
+    scrapers:
+      cpu: {}
+      memory: {}
+      load: {}
+      filesystem: {}
+      network: {}
+      processes: {}
+
+processors:
+  batch: {}
+  resource:
+    attributes:
+      - key: service.name
+        value: lima-host
+        action: upsert
+      - key: service.namespace
+        value: agent-container
+        action: upsert
+      - key: host.role
+        value: container-host
+        action: upsert
+
+exporters:
+  otlphttp:
+    endpoint: http://192.168.5.15:4318
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [resource, batch]
+      exporters: [otlphttp]
