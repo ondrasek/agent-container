@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.54.0 (2026-09-04)
+
+### Bug Fixes
+
+- **telemetry**: Register the pi extension through pi's own installer
+  ([`f2336e7`](https://github.com/ondrasek/agent-container/commit/f2336e73ada3b7ca93bd6b2b7e693b92fda6551f))
+
+- **telemetry**: The codex block was invalid, and read-only config broke codex
+  ([`50659c1`](https://github.com/ondrasek/agent-container/commit/50659c114b2aeaf580a1104d0cde223834136204))
+
+
 ## v0.53.0 (2026-09-03)
 
 ### Features
