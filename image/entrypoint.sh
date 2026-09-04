@@ -1522,26 +1522,43 @@ text = re.sub(
 )
 if text and not text.endswith("\n"):
     text += "\n"
+# THE EXPORTER IS A TABLE KEYED BY ITS VARIANT, never also a string. Writing
+# both `exporter = "otlp-http"` AND `[otel.exporter.otlp-http]` is what the
+# vendor docs read like, and codex refuses the file outright:
+#   `cannot extend value of type string with a dotted key`
+# — so an environment with telemetry enabled could not start codex AT ALL. The
+# block had been shipping in that shape; it was invisible until a real codex run,
+# because writing the config "succeeded" every time.
+# AN INLINE TABLE, because `exporter` is a TAGGED ENUM: the key names the
+# variant and its value carries that variant's settings. Two wrong shapes were
+# shipped before this one, and each failed differently —
+#   `exporter = "otlp-http"` beside `[otel.exporter.otlp-http]` makes codex
+#     REFUSE the file ("cannot extend value of type string with a dotted key"),
+#     so codex could not start at all with telemetry enabled;
+#   the sub-tables alone parse fine and silently leave the exporter on its
+#     default (statsig), so codex starts, runs, and exports NOTHING.
+# The second is the more dangerous of the two: it looks configured.
 block = f"""{begin}
 [otel]
 environment = "{env_name}"
-exporter = "otlp-http"
-metrics_exporter = "otlp-http"
 log_user_prompt = false
-
-[otel.exporter.otlp-http]
-endpoint = "{base}"
-protocol = "binary"
-
-[otel.trace_exporter.otlp-http]
-endpoint = "{base}"
-protocol = "binary"
-
-[otel.metrics_exporter.otlp-http]
-endpoint = "{base}"
-protocol = "binary"
+exporter = {{ otlp-http = {{ endpoint = "{base}", protocol = "binary" }} }}
+trace_exporter = {{ otlp-http = {{ endpoint = "{base}", protocol = "binary" }} }}
+metrics_exporter = {{ otlp-http = {{ endpoint = "{base}", protocol = "binary" }} }}
 {end}
 """
+# NOT WRITABLE IS A REAL CASE, not an exception to leak. `config.toml` may be
+# canonical config the OPERATOR delivered, and delivered config is mounted
+# read-only — so this raised `PermissionError: [Errno 13]` as a Python traceback
+# in the entrypoint log, which reads as a tool crash rather than what it is:
+# codex telemetry cannot be configured for an environment whose codex config the
+# operator supplied. Say exactly that, and leave their file untouched.
+if os.path.exists(path) and not os.access(path, os.W_OK):
+    raise SystemExit(
+        "codex config.toml is not writable (delivered canonical config is "
+        "read-only); codex telemetry not configured. Add an [otel] section to "
+        "the delivered config to export from codex."
+    )
 with open(path, "w") as fh:
     fh.write(text + block)
 PYEOF
@@ -1550,7 +1567,7 @@ PYEOF
     else
         # NEVER FATAL. Telemetry configuration failing must not stop a run — the
         # same fail-open rule the tool's own exporter follows.
-        log "WARNING: could not configure codex telemetry; the run continues without it"
+        log "WARNING: could not configure codex telemetry (see above); the run continues without it"
     fi
 
     # 7. OPENCODE PLUGIN REGISTRATION. The package is baked; this only names it,
@@ -1958,6 +1975,17 @@ except tomllib.TOMLDecodeError:
     raise SystemExit(0)
 if str((data.get("projects") or {}).get(ws, {}).get("trust_level", "")).strip():
     raise SystemExit(0)  # already answered, by the operator or a previous boot
+# DELIVERED CONFIG IS READ-ONLY, and this is where that bites hardest: without
+# a trust entry codex refuses to run at all ("Not inside a trusted directory"),
+# so a canonical `<name>.config/codex/config.toml` made codex UNUSABLE in
+# headless mode — and the cause surfaced only as a PermissionError traceback
+# from this script. Name it, and say what the operator has to put in their file.
+if cfg.exists() and not os.access(cfg, os.W_OK):
+    raise SystemExit(
+        f'codex config.toml is read-only (delivered canonical config), so '
+        f'workspace trust cannot be seeded and codex will refuse to run. Add '
+        f'this to the delivered file:\n[projects."{ws}"]\ntrust_level = "trusted"'
+    )
 sep = "" if text.endswith("\n") or not text else "\n"
 with cfg.open("a") as fh:
     fh.write(f'{sep}\n[projects."{ws}"]\ntrust_level = "trusted"\n')
