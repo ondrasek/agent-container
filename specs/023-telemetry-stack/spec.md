@@ -272,6 +272,10 @@ inventory says so.
   the failing dashboards named.
 - **FR-017**: Dashboards MUST present agent activity correlated with the container resource usage
   recorded during the same run.
+- **FR-017a**: Dashboards MUST be legible for EVERY supported agent, not only the most
+  talkative. Panels built on fields one agent happens to emit render an empty screen for the
+  others and read as breakage rather than as "this agent does not report that", so
+  agent-agnostic views MUST lead and agent-specific panels MUST be labelled as such.
 
 **Exposure**
 
@@ -294,7 +298,8 @@ inventory says so.
 **Lifecycle**
 
 - **FR-021**: The tool MUST list telemetry stacks with their host, address, and whether the ingest is
-  currently answering.
+  currently answering. A stack in the `absent` state is one that does not exist, so it is not
+  listed — the listing reports `running`, `stopped` or `undetermined`, never `absent`.
 - **FR-022**: Removal MUST stop and delete the container, and MUST retain collected data unless the
   operator asks for it to be discarded.
 - **FR-023**: Every telemetry stack the tool creates MUST be recorded in the inventory, including

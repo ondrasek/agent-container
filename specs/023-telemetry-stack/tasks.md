@@ -25,7 +25,7 @@ and docs, which are genuinely separate.
 ## Phase 1: Setup (Shared Infrastructure)
 
 - [ ] T001 Add named defaults as module constants in `bin/agent-container`: `STACK_IMAGE_DEFAULT`, `STACK_READY_TIMEOUT` (180), `STACK_RETENTION_DAYS`, `STACK_RETENTION_SIZE`, `STACK_UI_PORT_BASE`, `STACK_OTLP_HTTP_PORT_BASE`, `STACK_OTLP_GRPC_PORT_BASE`, each with a comment naming what it defaults and why (Constitution VIII)
-- [ ] T002 Add `KIND_TELEMETRY_STACK` and the kind vocabulary alongside `ROLE_AGENT`/`ROLE_CONTROL_PLANE` in `bin/agent-container`, plus `STACK_CONTAINER_PREFIX` derived from the existing prefix so `panic` and inventory reach it by the same rule
+- [ ] T002 Add `KIND_TELEMETRY_STACK` and the kind vocabulary alongside `ROLE_AGENT`/`ROLE_CONTROL_PLANE` in `bin/agent-container`, plus `STACK_CONTAINER_PREFIX` derived from the existing prefix so `panic` and inventory reach it by the same rule (FR-001, FR-003)
 - [ ] T003 [P] Record the environment-variable overrides for every T001 default in `docs/telemetry-stack.md` (new file, stub sections for now)
 
 ---
@@ -35,7 +35,7 @@ and docs, which are genuinely separate.
 **Blocking**: every user story depends on these. The two riskiest behaviours in the feature —
 endpoint resolution and exposure — are proved here as pure functions, before any container exists.
 
-- [ ] T004 Implement `stack_exposure_binds(level, driver)` in `bin/agent-container` returning the concrete bind addresses for `loopback` | `host` | `network`, per runtime (research R1); `host` MUST include the container-facing address, because a container cannot reach a service bound only to the host loopback
+- [ ] T004 Implement `stack_exposure_binds(level, driver)` in `bin/agent-container` returning the concrete bind addresses for `loopback` | `host` | `network`, per runtime (research R1, FR-018a); `host` MUST include the container-facing address, because a container cannot reach a service bound only to the host loopback
 - [ ] T005 Implement `stack_container_endpoint(stack, driver)` in `bin/agent-container` returning the address an AGENT CONTAINER exports to — bridge gateway under docker, `host.containers.internal` under podman — and `stack_operator_url(stack)` for the human-facing one (FR-013, research R1)
 - [ ] T006 [P] Unit-test exposure and endpoint resolution in `bin/tests/test_pure_logic.py`: every level × every driver, asserting `host` is reachable-from-containers, `loopback` is not routable, and that the container endpoint is NEVER an operator loopback address (the silent failure this feature exists to prevent)
 - [ ] T007 Implement `validate_stack_name(name, host)` in `bin/agent-container` refusing a name already held by an agent environment or control plane on that host, naming the kind that holds it (FR-009a)
@@ -58,11 +58,12 @@ an agent container must use.
 **Independent test**: run `telemetry stack up` on a host with no stack; assert a record is accepted
 afterwards and that the PRINTED endpoint is the one that accepted it.
 
-- [ ] T013 [US1] Add the `telemetry stack` command group and `up` to `bin/agent-container` with the flags from `contracts/cli.md` (`--host`, `--image`, `--exposure`, `--ui-port`, `--otlp-port`, `-y/--yes`, `--json`)
+- [ ] T013 [US1] Add the `telemetry stack` command group and `up` to `bin/agent-container` with the flags from `contracts/cli.md` (`--host`, `--image`, `--exposure`, `--ui-port`, `--otlp-port`, `-y/--yes`, `--json`) — its own group, never a role on `up` (FR-002, FR-008)
 - [ ] T014 [US1] Implement the image pull step in `bin/agent-container`, reporting that a pull is happening rather than leaving a blank prompt, and naming a pull failure as the cause (spec Edge Cases)
 - [ ] T015 [US1] Implement `stack_ingest_ready(endpoint)` in `bin/agent-container` probing readiness by POSTing an EMPTY OTLP payload and requiring HTTP 200 (research R2) — NOT the runtime healthcheck, which never fires under a rootless podman socket
 - [ ] T016 [US1] Wire the staged readiness wait into `up` in `bin/agent-container`: bounded by `STACK_READY_TIMEOUT`, and on expiry reporting WHICH stage — pull, start, or ingest — it was waiting on (FR-006a, FR-006b)
 - [ ] T017 [US1] Implement restart-if-stopped in `up` in `bin/agent-container`: running ⇒ report it; stopped ⇒ start it, keep its data, and say "restarted" not "created" (FR-007)
+- [ ] T017a [US1] DISCOVER the image's retention settings before applying them: read the variable/config names off `${STACK_IMAGE_DEFAULT}` and record them in `specs/023-telemetry-stack/research.md` under R3 — research R3 states these must be read rather than assumed, because a wrong name sets nothing and the stack then retains forever while looking configured
 - [ ] T018 [US1] Apply retention on deploy in `bin/agent-container` (window and ceiling, T001) and ASSERT THE EFFECTIVE VALUE BACK rather than trusting the setting took (FR-025b, research R3)
 - [ ] T018a [US1] Handle unconfirmable retention in `bin/agent-container` (FR-025c): warn naming asked-for versus read-back, KEEP the stack, and report retention as `unconfirmed` thereafter rather than echoing the requested value
 - [ ] T019 [US1] Print the resolved bind addresses and the container-facing `otlp_endpoint` at the end of `up` in `bin/agent-container` (FR-018b, FR-011)
@@ -70,6 +71,7 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 - [ ] T019a [US1] Print the `egress.allow` entry needed to reach the collector alongside the endpoint in `bin/agent-container` (FR-011a) — an enforcing environment refuses the export and fails OPEN, leaving no error to detect afterwards
 - [ ] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
 - [ ] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
+- [ ] T021a [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: drive the stack past a retention bound (a tiny ceiling makes this fast) and assert the ingest STILL returns 200 afterwards — eviction is normal operation for a bounded store, not an error (FR-025a)
 - [ ] T022 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: readiness failure path — point at an image that starts but never opens an ingest, assert the message names the INGEST stage, not container start (FR-006b)
 
 **Checkpoint**: MVP. A stack exists and receives telemetry.
@@ -88,6 +90,8 @@ the consequence was stated.
 - [ ] T025 [US3] Add `telemetry stack url NAME` to `bin/agent-container` printing the UI address, the `otlp_endpoint` line, and — when the UI is not reachable from the operator's machine — the command that makes it reachable (FR-011, FR-012); not running ⇒ say so rather than print a dead address
 - [ ] T026 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: default exposure is reachable from a container on the host and NOT bound to a routable address; `--exposure network` binds routably and emitted the warning (SC-005)
 - [ ] T026a [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--set-endpoint` writes only inside its markers — content outside is byte-identical afterwards — and re-running replaces the region rather than appending a second one (FR-011b)
+- [ ] T026b [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--image` overrides the default and the stack still reaches readiness (FR-008) — the flag exists so an operator is never blocked by our choice of image, which is a promise rather than a property until something exercises it
+- [ ] T026c [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: exposure is not widened as a SIDE EFFECT — vary `--ui-port`, `--otlp-port` and `--image` and assert the bind addresses are unchanged from the default level (FR-020)
 - [ ] T027 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `url` output is machine-checkable — the `otlp_endpoint` it prints accepts a record, and the printed bind addresses match what the runtime reports
 
 ---
@@ -103,8 +107,8 @@ data for a run that exists.
 - [ ] T029 [US2] Implement `stack_provision_dashboards(stack)` in `bin/agent-container` posting over the Grafana HTTP API with `overwrite` (research R4) — not a file mount, which does not cross a remote context
 - [ ] T030 [US2] Build the run-trace dashboard with a FREE-TEXT run selector seeded from a recent-runs panel in `bin/agent-container` — a query variable over the correlation attribute renders empty, because it is structured metadata rather than an indexed label, and every panel then filters on the empty string (research R5)
 - [ ] T031 [US2] Ensure metric panels filter only on DATA-POINT attributes in `bin/agent-container`; resource attributes other than `service.*` do not survive the OTLP→Prometheus conversion (research R6)
-- [ ] T032 [US2] Make the dashboards agent-agnostic in `bin/agent-container`: lead with a records-by-agent panel covering all four agents, and label agent-specific panels so an empty value reads as "this agent does not report that" rather than as breakage
-- [ ] T033 [US2] Wire provisioning into `up` in `bin/agent-container` such that a dashboard failure is REPORTED with the failing dashboard named but does NOT fail the deploy (FR-016)
+- [ ] T032 [US2] Make the dashboards agent-agnostic in `bin/agent-container` (FR-017a): lead with a records-by-agent panel covering all four agents, and label agent-specific panels so an empty value reads as "this agent does not report that" rather than as breakage
+- [ ] T033 [US2] Wire provisioning into `up` in `bin/agent-container` such that a dashboard failure is REPORTED with the failing dashboard named but does NOT fail the deploy (FR-014, FR-016)
 - [ ] T034 [US2] Add `telemetry stack dashboards NAME` to `bin/agent-container` re-provisioning without redeploying, restarting or discarding data (FR-015)
 - [ ] T035 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: after `up`, every dashboard is present via the UI API and each one's primary query returns data for a seeded run (SC-004)
 - [ ] T036 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: delete a dashboard, run `dashboards`, assert it is restored AND that data collected beforehand is still queryable (FR-015)
@@ -113,7 +117,7 @@ data for a run that exists.
 
 ## Phase 6: User Story 4 — Run several, and get rid of them (P2)
 
-- [ ] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state, whether the ingest is answering, and retention (or `unconfirmed`); state is `running` | `stopped` | `undetermined`, never a guess (FR-021, FR-025c)
+- [ ] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state, whether the ingest is answering, and retention (or `unconfirmed`); state is `running` | `stopped` | `undetermined` and never `absent` (which is simply not listed), never a guess (FR-021, FR-025c)
 - [ ] T038 [US4] Add `telemetry stack remove NAME` to `bin/agent-container` with `--purge` and `-y`, retaining collected data unless purged (FR-022), and STATING that environments still exporting to it will now fail open — silently, which is why it is said aloud
 - [ ] T039 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: two stacks on one host run concurrently with distinct ports; removing one leaves the other serving (SC-006)
 - [ ] T040 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `remove` without `--purge` retains the data volume; with `--purge` it is gone
@@ -123,6 +127,7 @@ data for a run that exists.
 
 ## Phase 7: User Story 5 — It is a container this tool created (P2)
 
+- [ ] T041a [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: a stack is given NO credentials (FR-004) — assert its compose model carries no `configs:`/secret mount, that no credential volume exists for it, and that the credential-delivery path refuses it by kind; a negative security property is the kind that quietly stops being true
 - [ ] T042 [US5] Make `panic` stop telemetry stacks in `bin/agent-container`, reporting `undetermined` for a stack on an unreachable host rather than assuming stopped (FR-024)
 - [ ] T043 [US5] Record stack creation and outcome in the inventory in `bin/agent-container`, with `kind` distinguishing it from an agent environment (FR-023)
 - [ ] T044 [P] [US5] Acceptance test in `bin/tests/test_acceptance.py`: create a stack, run `panic`, assert it stopped and the inventory says so (SC-007)
@@ -138,6 +143,20 @@ phase rather than a task because it exercises every prior phase at once.
 - [ ] T046 Real-agent acceptance test in `bin/tests/test_acceptance.py`: bring up a tool-created stack, configure an environment with the endpoint the tool PRINTED, run a real agent headless, and read that run's telemetry back through the stack's own API — correlated by `run_id` (SC-003)
 - [ ] T047 Extend T046 in `bin/tests/test_acceptance.py` to assert the run's agent activity AND its container resource usage are both present for the same `run_id`, which is what makes the run-trace dashboard answerable (SC-004, FR-017)
 - [ ] T048 Run the real-agent tier in `bin/tests/test_acceptance.py` against a locally deployed stack under podman (`AGENT_CONTAINER_RUNTIME=podman pytest -m acceptance -k "stack and REAL"`) and record the outcome; skip cleanly with a NAMED reason when no agent credential is present, as the existing real-agent tests do
+
+---
+
+## Phase 8b: Remote host (FR-005)
+
+**Why its own phase**: FR-005 makes deployment to a REMOTE host a stated capability, and remote is
+where three separate mechanisms behave differently from local — `configs: {file:}` does not cross a
+daemon boundary, the operator-facing address is not reachable without a tunnel, and the
+container-facing endpoint is resolved on the far side. Every acceptance task before this one is
+implicitly local, so without this phase the capability ships unverified.
+
+- [ ] T048a Acceptance test in `bin/tests/test_acceptance.py`: `telemetry stack up` against a REMOTE host reaches readiness, and the compose sent across carries no `configs: {file:}` (which is a daemon-side bind and would fail there) (FR-005)
+- [ ] T048b Acceptance test in `bin/tests/test_acceptance.py`: on a remote stack, `url` reports the tunnel command derived from the host's `ssh://` context (`address_from_context`), and the `otlp_endpoint` it prints is resolved for the REMOTE runtime rather than the operator's (FR-012, FR-013)
+- [ ] T048c Acceptance test in `bin/tests/test_acceptance.py`: `ls` and `remove` operate on a remote stack, and a stack on an UNREACHABLE host reports `undetermined` rather than `stopped` (FR-021, FR-024)
 
 ---
 
@@ -165,7 +184,8 @@ Phase 1 Setup
           │      ├─> Phase 5 US2  (P1)  — needs a running stack
           │      └─> Phase 6 US4  (P2)  — needs up
           ├─> Phase 7 US5  (P2)  — needs the kind and inventory
-          └─> Phase 8 Real-agent  — needs US1 + US2
+          ├─> Phase 8 Real-agent  — needs US1 + US2
+          └─> Phase 8b Remote host — needs US1 + US4; cuts across every command
                  └─> Phase 9 Polish
 ```
 
