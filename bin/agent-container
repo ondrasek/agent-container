@@ -8909,8 +8909,12 @@ def assert_stack_name_free(name: str, host: dict) -> None:
     if kind == KIND_TELEMETRY_STACK:
         return  # same kind: `up` handles this as already-present (FR-007)
     if kind:
+        # "an agent" / "a control-plane": the article is chosen rather than
+        # hardcoded, because this string is what an operator reads at the moment
+        # they are being refused, and sloppy there reads as sloppy everywhere.
+        article = "an" if kind[0] in "aeiou" else "a"
         die(
-            f"'{name}' already names a {kind} on this host. A name identifies "
+            f"'{name}' already names {article} {kind} on this host. A name identifies "
             f"exactly one container this tool created, whatever its kind — pick "
             f"another name, or remove the {kind} first."
         )
@@ -19465,6 +19469,187 @@ def stack_apply_retention_report(name: str, host_rec: dict, days: int, size: str
         f"the container did not report it back. The store may grow without bound — check "
         f"the image's retention settings before leaving this stack running."
     )
+
+
+@stack_app.command("url")
+def stack_url(
+    name: str = typer.Argument(..., help="Stack short name."),
+    host: str | None = typer.Option(None, "--host", help="Host it runs on."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """How to reach it: the UI, the endpoint agents export to, and — when the UI
+    is not reachable from here — the command that makes it so."""
+    set_json_mode(as_json)
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    driver = host_rec.get("driver") or detect_runtime()
+    cname = stack_container_name(name)
+    ports = stack_ports_for_name(name)
+
+    running = None
+    with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
+        running = cname in host_container_names(host_rec, include_stopped=False)
+    if running is False:
+        # NOT RUNNING IS SAID, not papered over with an address that answers
+        # nothing — the operator would otherwise debug a URL rather than a stack.
+        die(
+            f"telemetry stack '{name}' is not running on {host_name} (start it: telemetry stack up {name})"
+        )
+    if running is None:
+        log(
+            f"WARNING: could not reach {host_name} to confirm '{name}' is running; the addresses below are what it WOULD use"
+        )
+
+    endpoint = stack_container_endpoint(ports["otlp_http"], driver)
+    if as_json:
+        emit_json({
+            "name": name, "host": host_name,
+            "ui": stack_operator_url("localhost", ports["ui"]),
+            "otlp_endpoint": endpoint,
+            "egress_allow": stack_egress_allow_entry(driver, ports["otlp_http"]),
+        })  # fmt: skip
+        return
+    stack_report_endpoint(name, ports, stack_exposure_binds(STACK_EXPOSURE_DEFAULT, driver), driver)
+
+    # THE TUNNEL, when the UI is not reachable from here. A remote host is
+    # reached through an ssh:// context, so the address is already known —
+    # `address_from_context` exists for exactly this (FR-012).
+    ctx = host_rec.get("context") or ""
+    if ctx.startswith("ssh://"):
+        addr = address_from_context(ctx)
+        user = ctx.split("//", 1)[1].split("@")[0] if "@" in ctx else "root"
+        log("")
+        log(f"  the UI is bound on {host_name}, not here — tunnel to it with:")
+        log(f"    ssh -N -L {ports['ui']}:127.0.0.1:{ports['ui']} {user}@{addr}")
+
+
+@stack_app.command("ls")
+def stack_ls(
+    host: str | None = typer.Option(None, "--host", help="Only this host."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """List telemetry stacks: where they are, whether they run, and whether the
+    ingest is actually answering."""
+    set_json_mode(as_json)
+    reg = load_registry()
+    names = [host] if host else list(registry_hosts(reg)) or [None]
+    rows = []
+    for hname in names:
+        try:
+            resolved_name, host_rec = resolve_deploy_host(hname)
+        except Fatal:
+            continue
+        driver = host_rec.get("driver") or detect_runtime()
+        try:
+            present = host_container_names(host_rec, include_stopped=True)
+            live = host_container_names(host_rec, include_stopped=False)
+        except Fatal, OSError, subprocess.SubprocessError:
+            # UNREACHABLE IS NOT ABSENT (Feature 014's rule). We cannot see the
+            # host, so we do not claim its stacks are stopped — or that it has
+            # none, which would be the same lie in a quieter form.
+            rows.append({"name": "?", "host": resolved_name, "state": "undetermined",
+                         "ui": "-", "ingest": "-"})  # fmt: skip
+            continue
+        for cn in sorted(present):
+            if not cn.startswith(STACK_CONTAINER_PREFIX):
+                continue
+            sname = cn.removeprefix(STACK_CONTAINER_PREFIX)
+            ports = stack_ports_for_name(sname)
+            state = "running" if cn in live else "stopped"
+            answering = "-"
+            if state == "running":
+                answering = (
+                    "yes"
+                    if stack_ready_probe(
+                        stack_operator_probe_endpoint(ports["otlp_http"]), timeout=3
+                    )
+                    else "NO"
+                )
+            rows.append({
+                "name": sname, "host": resolved_name, "state": state,
+                "ui": stack_operator_url("localhost", ports["ui"]),
+                "ingest": answering,
+                "otlp_endpoint": stack_container_endpoint(ports["otlp_http"], driver),
+            })  # fmt: skip
+    if as_json:
+        emit_json({"stacks": rows})
+        return
+    if not rows:
+        log("no telemetry stacks")
+        return
+    log(f"{'NAME':<14}{'HOST':<14}{'STATE':<14}{'INGEST':<8}UI")
+    for r in rows:
+        log(f"{r['name']:<14}{r['host']:<14}{r['state']:<14}{r['ingest']:<8}{r['ui']}")
+
+
+@stack_app.command("remove")
+@stack_app.command("rm", hidden=True)
+def stack_remove(
+    name: str = typer.Argument(..., help="Stack short name."),
+    host: str | None = typer.Option(None, "--host", help="Host it runs on."),
+    purge: bool = typer.Option(False, "--purge", help="Also discard collected telemetry."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the confirmation."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Stop and delete a telemetry stack. Spelled out because it is destructive.
+
+    The collected data is RETAINED unless --purge: a stack is cheap to recreate
+    and its trail is not.
+    """
+    set_json_mode(as_json)
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    cname = stack_container_name(name)
+    if not yes:
+        if not is_tty():
+            die("refusing destructive 'remove' without -y/--yes on a non-TTY")
+        if not questionary.confirm(f"Remove telemetry stack '{name}'?", default=False).ask():
+            die("aborted")
+
+    project = f"{STACK_CONTAINER_PREFIX}{name}"
+    compose_path = compose_file_path(host_name, f"stack-{name}")
+    args = ["down"] + (["-v"] if purge else [])
+    if compose_path.is_file():
+        run_child(driver_compose_argv(host_rec, project, compose_path, *args))
+    else:
+        run_child(driver_runtime_argv(host_rec) + ["rm", "-f", cname])
+    log(f"removed telemetry stack '{name}' from {host_name}")
+    log(
+        f"collected telemetry {'DISCARDED' if purge else 'retained on its volume'}"
+        + ("" if purge else f" ({stack_volume_name(name)}) — use --purge to discard it")
+    )
+    # SAID OUT LOUD, because the consequence is otherwise invisible: export
+    # fails open, so anything still pointed here stops being recorded WITHOUT
+    # an error appearing anywhere.
+    log(
+        "any environment still exporting to this stack now fails open — its telemetry "
+        "stops silently, with no error in the run or the record"
+    )
+    with contextlib.suppress(Exception):
+        set_inventory_outcome(name, host_name, "destroyed")
+    emit_action("telemetry-stack-remove", name=name, host=host_name, purged=purge)
+
+
+@stack_app.command("dashboards")
+def stack_dashboards(
+    name: str = typer.Argument(..., help="Stack short name."),
+    host: str | None = typer.Option(None, "--host", help="Host it runs on."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Re-install the tool's dashboards. Does not redeploy, restart, or discard
+    anything already collected (FR-015)."""
+    set_json_mode(as_json)
+    validate_name(name)
+    host_name, host_rec = resolve_deploy_host(host)
+    cname = stack_container_name(name)
+    with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
+        if cname not in host_container_names(host_rec, include_stopped=False):
+            die(f"telemetry stack '{name}' is not running on {host_name}")
+    ports = stack_ports_for_name(name)
+    installed, failed = stack_provision_dashboards(name, ports["ui"])
+    if not installed and not failed:
+        log("no dashboards are defined in this build")
+    emit_action("telemetry-stack-dashboards", name=name, host=host_name, installed=installed)
 
 
 @telemetry_app.command("collect")

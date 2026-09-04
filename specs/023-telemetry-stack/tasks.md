@@ -85,9 +85,9 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 **Independent test**: default exposure ⇒ unreachable from another machine; `network` ⇒ reachable and
 the consequence was stated.
 
-- [ ] T023 [US3] Implement `--exposure` handling in `up` in `bin/agent-container`: default `host`, and `network` refused without `-y` on a non-TTY (FR-018, FR-019)
-- [ ] T024 [US3] Implement the `network` warning text in `bin/agent-container` stating that the UI is unauthenticated, displays VERBATIM AGENT TASK TEXT, and that the ingest accepts records from anyone who can reach it (FR-019) — the task-text clause is the one an operator will not otherwise expect
-- [ ] T025 [US3] Add `telemetry stack url NAME` to `bin/agent-container` printing the UI address, the `otlp_endpoint` line, and — when the UI is not reachable from the operator's machine — the command that makes it reachable (FR-011, FR-012); not running ⇒ say so rather than print a dead address
+- [x] T023 [US3] Implement `--exposure` handling in `up` in `bin/agent-container`: default `host`, and `network` refused without `-y` on a non-TTY (FR-018, FR-019)
+- [x] T024 [US3] Implement the `network` warning text in `bin/agent-container` stating that the UI is unauthenticated, displays VERBATIM AGENT TASK TEXT, and that the ingest accepts records from anyone who can reach it (FR-019) — the task-text clause is the one an operator will not otherwise expect
+- [x] T025 [US3] Add `telemetry stack url NAME` to `bin/agent-container` printing the UI address, the `otlp_endpoint` line, and — when the UI is not reachable from the operator's machine — the command that makes it reachable (FR-011, FR-012); not running ⇒ say so rather than print a dead address
 - [ ] T026 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: default exposure is reachable from a container on the host and NOT bound to a routable address; `--exposure network` binds routably and emitted the warning (SC-005)
 - [ ] T026a [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--set-endpoint` writes only inside its markers — content outside is byte-identical afterwards — and re-running replaces the region rather than appending a second one (FR-011b)
 - [ ] T026b [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--image` overrides the default and the stack still reaches readiness (FR-008) — the flag exists so an operator is never blocked by our choice of image, which is a promise rather than a property until something exercises it
@@ -109,7 +109,7 @@ data for a run that exists.
 - [ ] T031 [US2] Ensure metric panels filter only on DATA-POINT attributes in `bin/agent-container`; resource attributes other than `service.*` do not survive the OTLP→Prometheus conversion (research R6)
 - [ ] T032 [US2] Make the dashboards agent-agnostic in `bin/agent-container` (FR-017a): lead with a records-by-agent panel covering all four agents, and label agent-specific panels so an empty value reads as "this agent does not report that" rather than as breakage
 - [ ] T033 [US2] Wire provisioning into `up` in `bin/agent-container` such that a dashboard failure is REPORTED with the failing dashboard named but does NOT fail the deploy (FR-014, FR-016)
-- [ ] T034 [US2] Add `telemetry stack dashboards NAME` to `bin/agent-container` re-provisioning without redeploying, restarting or discarding data (FR-015)
+- [x] T034 [US2] Add `telemetry stack dashboards NAME` to `bin/agent-container` re-provisioning without redeploying, restarting or discarding data (FR-015)
 - [ ] T035 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: after `up`, every dashboard is present via the UI API and each one's primary query returns data for a seeded run (SC-004)
 - [ ] T036 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: delete a dashboard, run `dashboards`, assert it is restored AND that data collected beforehand is still queryable (FR-015)
 
@@ -117,8 +117,8 @@ data for a run that exists.
 
 ## Phase 6: User Story 4 — Run several, and get rid of them (P2)
 
-- [ ] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state, whether the ingest is answering, and retention (or `unconfirmed`); state is `running` | `stopped` | `undetermined` and never `absent` (which is simply not listed), never a guess (FR-021, FR-025c)
-- [ ] T038 [US4] Add `telemetry stack remove NAME` to `bin/agent-container` with `--purge` and `-y`, retaining collected data unless purged (FR-022), and STATING that environments still exporting to it will now fail open — silently, which is why it is said aloud
+- [x] T037 [US4] Add `telemetry stack ls` to `bin/agent-container` showing name, host, state, whether the ingest is answering, and retention (or `unconfirmed`); state is `running` | `stopped` | `undetermined` and never `absent` (which is simply not listed), never a guess (FR-021, FR-025c)
+- [x] T038 [US4] Add `telemetry stack remove NAME` to `bin/agent-container` with `--purge` and `-y`, retaining collected data unless purged (FR-022), and STATING that environments still exporting to it will now fail open — silently, which is why it is said aloud
 - [ ] T039 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: two stacks on one host run concurrently with distinct ports; removing one leaves the other serving (SC-006)
 - [ ] T040 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `remove` without `--purge` retains the data volume; with `--purge` it is gone
 - [ ] T041 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: `up` refuses a name held by an agent environment and vice versa, naming the kind (FR-009a)
