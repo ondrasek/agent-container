@@ -6230,6 +6230,11 @@ def stack_container_endpoint(port: int, driver: str) -> str:
 
 
 def stack_operator_probe_endpoint(port: int) -> str:
+    """RETAINED BUT NOT USED FOR READINESS. Kept because it is the correct
+    address for an operator's own curl against a LOCAL stack, and because the
+    docstring below records why readiness stopped using it: it is right locally
+    and points at the operator's laptop for a remote host.
+    """
     """The ingest URL to probe FROM THE OPERATOR'S MACHINE.
 
     NOT `stack_container_endpoint`, and getting this wrong is the feature's own
@@ -6245,6 +6250,31 @@ def stack_operator_probe_endpoint(port: int) -> str:
     'http://localhost:4424/v1/logs'
     """
     return f"http://localhost:{port}/v1/logs"
+
+
+def stack_host_ssh_target(host_rec: dict) -> str | None:
+    """The `user@host` an operator can tunnel through, or None for a local host.
+
+    The context NAME is not the answer — a docker context called `ac-rem` says
+    nothing about where it points — so the endpoint is read from the runtime
+    itself. `address_from_context` handles the case where the stored context IS
+    an ssh:// URL; this covers the commoner one where it is a named context
+    backed by SSH.
+    """
+    # NOT gated on `host_is_local`: that reads the stored ADDRESS, and
+    # registering a host by context NAME records `localhost`, because a name
+    # carries no address to derive one from — so a genuinely remote host looks
+    # local by that test. Whether the runtime endpoint is ssh:// is the fact
+    # that actually decides it, and a local context simply has none.
+    ctx = host_rec.get("context") or ""
+    endpoint = ctx if ctx.startswith("ssh://") else ""
+    if not endpoint and ctx and host_rec.get("driver") == "docker":
+        r = query(["docker", "context", "inspect", ctx, "--format", "{{.Endpoints.docker.Host}}"])
+        if r.returncode == 0:
+            endpoint = r.stdout.strip()
+    if not endpoint.startswith("ssh://"):
+        return None
+    return endpoint.removeprefix("ssh://").split("/")[0]
 
 
 def stack_operator_url(address: str, port: int) -> str:
@@ -19197,6 +19227,32 @@ stack_app = typer.Typer(
 telemetry_app.add_typer(stack_app, name="stack")
 
 
+def stack_ready_probe_in_container(host_rec: dict, cname: str, port: int) -> bool:
+    """Has the ingest accepted a record? Asked FROM INSIDE the container.
+
+    THE ONLY FORM THAT WORKS ON BOTH A LOCAL AND A REMOTE HOST. Probing
+    `localhost:<port>` from the operator's machine is right for a local deploy
+    and points at the OPERATOR'S OWN LAPTOP for a remote one — measured: the
+    remote stack answered 200 from inside while the probe got 000, and `up`
+    failed after 180 seconds insisting the ingest had never accepted a record.
+    That is the two-address problem this feature exists to prevent, met for the
+    third time in a third disguise.
+
+    Going through the runtime sidesteps addressing entirely: whatever context
+    reaches the daemon reaches the container.
+    """
+    r = query(
+        driver_runtime_argv(host_rec)
+        + [
+            "exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+            "-m", "5", "-X", "POST", f"http://localhost:{port}/v1/logs",
+            "-H", "Content-Type: application/json",
+            "--data-binary", '{"resourceLogs":[]}',
+        ]
+    )  # fmt: skip
+    return r.returncode == 0 and r.stdout.strip() == "200"
+
+
 def stack_ready_probe(endpoint: str, timeout: int = 5) -> bool:
     """Has the OTLP ingest ACCEPTED a record?
 
@@ -19219,7 +19275,7 @@ def stack_ready_probe(endpoint: str, timeout: int = 5) -> bool:
     return r.returncode == 0 and r.stdout.strip() == "200"
 
 
-def stack_wait_ready(endpoint: str, budget: int, container: str, host_rec: dict) -> None:
+def stack_wait_ready(port: int, budget: int, container: str, host_rec: dict) -> None:
     """Wait for the ingest, and on expiry say WHICH STAGE we were waiting on.
 
     "Timed out" is three different problems with three different fixes — a slow
@@ -19230,7 +19286,7 @@ def stack_wait_ready(endpoint: str, budget: int, container: str, host_rec: dict)
     deadline = time.monotonic() + budget
     saw_container = False
     while time.monotonic() < deadline:
-        if stack_ready_probe(endpoint):
+        if stack_ready_probe_in_container(host_rec, container, port):
             return
         if not saw_container:
             with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
@@ -19248,7 +19304,9 @@ def stack_wait_ready(endpoint: str, budget: int, container: str, host_rec: dict)
     )
 
 
-def stack_report_endpoint(name: str, ports: dict, binds: list[str], driver: str) -> str:
+def stack_report_endpoint(
+    name: str, ports: dict, binds: list[str], driver: str, host_rec: dict | None = None
+) -> str:
     """Print how to reach it, in both forms, plus the egress stanza.
 
     THE TWO ADDRESSES ARE DIFFERENT and printing only one is the feature's
@@ -19258,7 +19316,20 @@ def stack_report_endpoint(name: str, ports: dict, binds: list[str], driver: str)
     """
     endpoint = stack_container_endpoint(ports["otlp_http"], driver)
     log(f"stack '{name}' bound on: {', '.join(binds)} (exposure resolved, FR-018b)")
-    log(f"  UI (yours):            {stack_operator_url('localhost', ports['ui'])}")
+    # THE UI ADDRESS IS ALSO TWO ADDRESSES. For a REMOTE stack `localhost` is the
+    # operator's own machine, where nothing is bound — printing it sends them to
+    # debug a URL that was never going to answer. Measured on a real remote host:
+    # the stack was serving and `http://localhost:<port>` refused, because it was
+    # never the right address.
+    ssh_target = stack_host_ssh_target(host_rec) if host_rec else None
+    if ssh_target:
+        log("  UI:                     not reachable from here — it is bound on the host")
+        log(
+            f"    tunnel:               ssh -N -L {ports['ui']}:127.0.0.1:{ports['ui']} {ssh_target}"
+        )
+        log(f"    then open:            {stack_operator_url('localhost', ports['ui'])}")
+    else:
+        log(f"  UI (yours):            {stack_operator_url('localhost', ports['ui'])}")
     log(f"  otlp_endpoint (agents): {endpoint}")
     log("")
     log("  put this in settings.yaml so environments export into it:")
@@ -19453,7 +19524,7 @@ def stack_dashboard_set() -> list[dict]:
     return [_stack_dashboard_fleet(), _stack_dashboard_run_trace(), _stack_dashboard_host()]
 
 
-def stack_ui_ready(ui_port: int, budget: int = 60) -> bool:
+def stack_ui_ready(host_rec: dict, cname: str, budget: int = 60) -> bool:
     """Wait for the UI's API, which is NOT ready when the ingest is.
 
     THE SAME LESSON, ONE LAYER UP. `up` already waits for the OTLP ingest to
@@ -19465,17 +19536,20 @@ def stack_ui_ready(ui_port: int, budget: int = 60) -> bool:
     """
     deadline = time.monotonic() + budget
     while time.monotonic() < deadline:
-        r = query([
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "5",
-            f"http://localhost:{ui_port}/api/health",
-        ])  # fmt: skip
+        r = query(
+            driver_runtime_argv(host_rec)
+            + [
+                "exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "-m", "5", "http://localhost:3000/api/health",
+            ]
+        )  # fmt: skip
         if r.returncode == 0 and r.stdout.strip() == "200":
             return True
         time.sleep(2)
     return False
 
 
-def stack_provision_dashboards(name: str, ui_port: int) -> tuple[int, list[str]]:
+def stack_provision_dashboards(name: str, host_rec: dict, cname: str) -> tuple[int, list[str]]:
     """Install the tool's dashboards over the UI's HTTP API.
 
     THE API, NOT A FILE MOUNT. `configs: {file:}` is a daemon-side bind that
@@ -19487,17 +19561,20 @@ def stack_provision_dashboards(name: str, ui_port: int) -> tuple[int, list[str]]
     working collector is worth more than its views, so the deploy survives and
     the failure is named (FR-016).
     """
-    if not stack_ui_ready(ui_port):
-        log(f"WARNING: the UI on port {ui_port} did not answer; dashboards not installed")
+    if not stack_ui_ready(host_rec, cname):
+        log(f"WARNING: the UI of '{name}' did not answer; dashboards not installed")
         return 0, [d["title"] for d in stack_dashboard_set()]
     installed, failed = 0, []
     for dash in stack_dashboard_set():
         body = json.dumps({"dashboard": dash, "overwrite": True, "folderId": 0})
-        r = query([
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "20",
-            "-X", "POST", f"http://localhost:{ui_port}/api/dashboards/db",
-            "-H", "Content-Type: application/json", "-d", body,
-        ])  # fmt: skip
+        r = query(
+            driver_runtime_argv(host_rec)
+            + [
+                "exec", "-i", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "-m", "20", "-X", "POST", "http://localhost:3000/api/dashboards/db",
+                "-H", "Content-Type: application/json", "-d", body,
+            ]
+        )  # fmt: skip
         if r.returncode == 0 and r.stdout.strip() == "200":
             installed += 1
         else:
@@ -19577,10 +19654,9 @@ def stack_up(
         running = host_container_names(host_rec, include_stopped=False)
 
     endpoint = stack_container_endpoint(ports["otlp_http"], driver)
-    probe = stack_operator_probe_endpoint(ports["otlp_http"])
     if cname in running:
         log(f"telemetry stack '{name}' is already running on {host_name}")
-        stack_report_endpoint(name, ports, binds, driver)
+        stack_report_endpoint(name, ports, binds, driver, host_rec)
         emit_action("telemetry-stack-up", name=name, host=host_name, created=False)
         return
 
@@ -19605,11 +19681,11 @@ def stack_up(
 
     budget = int(os.environ.get("AGENT_CONTAINER_STACK_READY_TIMEOUT", STACK_READY_TIMEOUT))
     log(f"waiting up to {budget}s for the ingest to ACCEPT a record (liveness is not readiness)")
-    stack_wait_ready(probe, budget, cname, host_rec)
+    stack_wait_ready(4318, budget, cname, host_rec)
     log(f"telemetry stack '{name}' is {'restarted' if restarted else 'up'} and accepting records")
 
     stack_apply_retention_report(name, host_rec, retention_days, retention_size)
-    stack_report_endpoint(name, ports, binds, driver)
+    stack_report_endpoint(name, ports, binds, driver, host_rec)
     if set_endpoint:
         written = stack_write_endpoint_setting(endpoint)
         log(
@@ -19617,7 +19693,7 @@ def stack_up(
         )
 
     with contextlib.suppress(Exception):
-        stack_provision_dashboards(name, ports["ui"])
+        stack_provision_dashboards(name, host_rec, cname)
 
     if not restarted:
         with contextlib.suppress(Exception):
@@ -19693,18 +19769,13 @@ def stack_url(
             "egress_allow": stack_egress_allow_entry(driver, ports["otlp_http"]),
         })  # fmt: skip
         return
-    stack_report_endpoint(name, ports, stack_exposure_binds(STACK_EXPOSURE_DEFAULT, driver), driver)
+    stack_report_endpoint(
+        name, ports, stack_exposure_binds(STACK_EXPOSURE_DEFAULT, driver), driver, host_rec
+    )
 
     # THE TUNNEL, when the UI is not reachable from here. A remote host is
     # reached through an ssh:// context, so the address is already known —
     # `address_from_context` exists for exactly this (FR-012).
-    ctx = host_rec.get("context") or ""
-    if ctx.startswith("ssh://"):
-        addr = address_from_context(ctx)
-        user = ctx.split("//", 1)[1].split("@")[0] if "@" in ctx else "root"
-        log("")
-        log(f"  the UI is bound on {host_name}, not here — tunnel to it with:")
-        log(f"    ssh -N -L {ports['ui']}:127.0.0.1:{ports['ui']} {user}@{addr}")
 
 
 @stack_app.command("ls")
@@ -19742,13 +19813,7 @@ def stack_ls(
             state = "running" if cn in live else "stopped"
             answering = "-"
             if state == "running":
-                answering = (
-                    "yes"
-                    if stack_ready_probe(
-                        stack_operator_probe_endpoint(ports["otlp_http"]), timeout=3
-                    )
-                    else "NO"
-                )
+                answering = "yes" if stack_ready_probe_in_container(host_rec, cn, 4318) else "NO"
             rows.append({
                 "name": sname, "host": resolved_name, "state": state,
                 "ui": stack_operator_url("localhost", ports["ui"]),
@@ -19829,8 +19894,7 @@ def stack_dashboards(
     with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
         if cname not in host_container_names(host_rec, include_stopped=False):
             die(f"telemetry stack '{name}' is not running on {host_name}")
-    ports = stack_ports_for_name(name)
-    installed, failed = stack_provision_dashboards(name, ports["ui"])
+    installed, failed = stack_provision_dashboards(name, host_rec, cname)
     if not installed and not failed:
         log("no dashboards are defined in this build")
     emit_action("telemetry-stack-dashboards", name=name, host=host_name, installed=installed)

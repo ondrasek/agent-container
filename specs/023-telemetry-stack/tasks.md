@@ -72,7 +72,7 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 - [x] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
 - [x] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
 - [ ] T021a [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: drive the stack past a retention bound (a tiny ceiling makes this fast) and assert the ingest STILL returns 200 afterwards — eviction is normal operation for a bounded store, not an error (FR-025a)
-- [ ] T022 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: readiness failure path — point at an image that starts but never opens an ingest, assert the message names the INGEST stage, not container start (FR-006b)
+- [x] T022 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: readiness failure path — point at an image that starts but never opens an ingest, assert the message names the INGEST stage, not container start (FR-006b)
 
 **Checkpoint**: MVP. A stack exists and receives telemetry.
 
@@ -88,11 +88,11 @@ the consequence was stated.
 - [x] T023 [US3] Implement `--exposure` handling in `up` in `bin/agent-container`: default `host`, and `network` refused without `-y` on a non-TTY (FR-018, FR-019)
 - [x] T024 [US3] Implement the `network` warning text in `bin/agent-container` stating that the UI is unauthenticated, displays VERBATIM AGENT TASK TEXT, and that the ingest accepts records from anyone who can reach it (FR-019) — the task-text clause is the one an operator will not otherwise expect
 - [x] T025 [US3] Add `telemetry stack url NAME` to `bin/agent-container` printing the UI address, the `otlp_endpoint` line, and — when the UI is not reachable from the operator's machine — the command that makes it reachable (FR-011, FR-012); not running ⇒ say so rather than print a dead address
-- [ ] T026 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: default exposure is reachable from a container on the host and NOT bound to a routable address; `--exposure network` binds routably and emitted the warning (SC-005)
-- [ ] T026a [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--set-endpoint` writes only inside its markers — content outside is byte-identical afterwards — and re-running replaces the region rather than appending a second one (FR-011b)
-- [ ] T026b [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--image` overrides the default and the stack still reaches readiness (FR-008) — the flag exists so an operator is never blocked by our choice of image, which is a promise rather than a property until something exercises it
-- [ ] T026c [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: exposure is not widened as a SIDE EFFECT — vary `--ui-port`, `--otlp-port` and `--image` and assert the bind addresses are unchanged from the default level (FR-020)
-- [ ] T027 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `url` output is machine-checkable — the `otlp_endpoint` it prints accepts a record, and the printed bind addresses match what the runtime reports
+- [x] T026 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: default exposure is reachable from a container on the host and NOT bound to a routable address; `--exposure network` binds routably and emitted the warning (SC-005)
+- [x] T026a [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--set-endpoint` writes only inside its markers — content outside is byte-identical afterwards — and re-running replaces the region rather than appending a second one (FR-011b)
+- [x] T026b [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `--image` overrides the default and the stack still reaches readiness (FR-008) — the flag exists so an operator is never blocked by our choice of image, which is a promise rather than a property until something exercises it
+- [x] T026c [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: exposure is not widened as a SIDE EFFECT — vary `--ui-port`, `--otlp-port` and `--image` and assert the bind addresses are unchanged from the default level (FR-020)
+- [x] T027 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: `url` output is machine-checkable — the `otlp_endpoint` it prints accepts a record, and the printed bind addresses match what the runtime reports
 
 ---
 
@@ -154,9 +154,9 @@ daemon boundary, the operator-facing address is not reachable without a tunnel, 
 container-facing endpoint is resolved on the far side. Every acceptance task before this one is
 implicitly local, so without this phase the capability ships unverified.
 
-- [ ] T048a Acceptance test in `bin/tests/test_acceptance.py`: `telemetry stack up` against a REMOTE host reaches readiness, and the compose sent across carries no `configs: {file:}` (which is a daemon-side bind and would fail there) (FR-005)
-- [ ] T048b Acceptance test in `bin/tests/test_acceptance.py`: on a remote stack, `url` reports the tunnel command derived from the host's `ssh://` context (`address_from_context`), and the `otlp_endpoint` it prints is resolved for the REMOTE runtime rather than the operator's (FR-012, FR-013)
-- [ ] T048c Acceptance test in `bin/tests/test_acceptance.py`: `ls` and `remove` operate on a remote stack, and a stack on an UNREACHABLE host reports `undetermined` rather than `stopped` (FR-021, FR-024)
+- [x] T048a Acceptance test in `bin/tests/test_acceptance.py`: `telemetry stack up` against a REMOTE host reaches readiness, and the compose sent across carries no `configs: {file:}` (which is a daemon-side bind and would fail there) (FR-005)
+- [x] T048b Acceptance test in `bin/tests/test_acceptance.py`: on a remote stack, `url` reports the tunnel command derived from the host's `ssh://` context (`address_from_context`), and the `otlp_endpoint` it prints is resolved for the REMOTE runtime rather than the operator's (FR-012, FR-013)
+- [x] T048c Acceptance test in `bin/tests/test_acceptance.py`: `ls` and `remove` operate on a remote stack, and a stack on an UNREACHABLE host reports `undetermined` rather than `stopped` (FR-021, FR-024)
 
 ---
 
