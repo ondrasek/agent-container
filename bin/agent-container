@@ -140,6 +140,11 @@ STACK_RETENTION_SIZE = "10GB"
 # per deploy would make the endpoint the tool prints depend on a call that can
 # fail — at which point it would print something wrong rather than nothing.
 STACK_DOCKER_BRIDGE_GATEWAY = "172.17.0.1"
+# NAMED ONCE so the three places that must express "every interface" say it in
+# words rather than repeating a literal that reads as an oversight. Reaching a
+# bind on this address is always the result of a DECLARED level or a MEASURED
+# constraint, never a default nobody chose — see stack_exposure_binds.
+STACK_BIND_ALL_INTERFACES = "0.0.0.0"  # nosec B104
 STACK_UI_PORT_BASE = 3300
 STACK_OTLP_HTTP_PORT_BASE = 4400
 STACK_OTLP_GRPC_PORT_BASE = 4500
@@ -6116,12 +6121,25 @@ def build_stack_compose_model(
                 "ports": published,
                 "volumes": [f"{stack_volume_name(name)}:/data"],
                 "environment": {
-                    # Applied here AND read back after the deploy: a variable the
-                    # image does not recognise sets nothing, and the stack then
-                    # retains forever while looking configured (research R3).
                     "GF_AUTH_ANONYMOUS_ENABLED": "true",
-                    "AGENT_CONTAINER_STACK_RETENTION_DAYS": str(retention_days),
-                    "AGENT_CONTAINER_STACK_RETENTION_SIZE": retention_size,
+                    # THE IMAGE'S OWN SEAM, not a name of our invention. Each
+                    # bundled component takes `<NAME>_EXTRA_ARGS` and appends it
+                    # to that component's command line, so retention is set on
+                    # the process that enforces it.
+                    #
+                    # An earlier version invented `AGENT_CONTAINER_STACK_RETENTION_*`
+                    # and set that instead. Nothing read it, so the stack ran on
+                    # Prometheus's 15-day default with an unlimited size ceiling
+                    # while the tool reported the values it had been asked for —
+                    # the exact "looks configured, retains forever" failure
+                    # research R3 was written to prevent (FR-025).
+                    "PROMETHEUS_EXTRA_ARGS": (
+                        f"--storage.tsdb.retention.time={retention_days}d "
+                        f"--storage.tsdb.retention.size={retention_size}"
+                    ),
+                    # Metrics dominate the disk here, so Prometheus is where the
+                    # ceiling matters; Loki and Tempo keep the image defaults
+                    # rather than have this tool guess at their config shapes.
                 },
                 "labels": {
                     # The kind, on the container itself, so a listing can tell
@@ -6135,7 +6153,7 @@ def build_stack_compose_model(
     }
 
 
-def stack_exposure_binds(level: str, driver: str) -> list[str]:
+def stack_exposure_binds(level: str, driver: str, bind_address: str | None = None) -> list[str]:
     """The concrete addresses a level binds to, on this runtime.
 
     A LEVEL IS AN INTENT AND AN ADDRESS IS AN EFFECT, and the two do not
@@ -6164,6 +6182,16 @@ def stack_exposure_binds(level: str, driver: str) -> list[str]:
     ['0.0.0.0']
     >>> stack_exposure_binds("host", "podman")
     ['0.0.0.0']
+
+    `bind_address` is what the caller OBSERVED on the target host, and it wins
+    over the constant. The constant is the rootful-docker answer and is kept
+    only as the value for callers that have not measured; see
+    `stack_resolve_addressing` for why measuring matters.
+
+    >>> stack_exposure_binds("host", "docker", "10.0.0.1")
+    ['127.0.0.1', '10.0.0.1']
+    >>> stack_exposure_binds("host", "docker", "0.0.0.0")
+    ['0.0.0.0']
     """
     if level not in STACK_EXPOSURE_LEVELS:
         die(f"unknown exposure level {level!r}; choose one of {', '.join(STACK_EXPOSURE_LEVELS)}")
@@ -6191,29 +6219,48 @@ def stack_exposure_binds(level: str, driver: str) -> list[str]:
     if driver == "podman":
         # nosec B104 — and this one is worth reading twice, because it is the
         # surprising case: `host` binds every interface under rootless podman
-        # while binding only loopback+bridge under docker. There is no stable
-        # per-host bridge address to bind to, so serving containers at all
-        # requires it. That is why FR-018b makes the tool REPORT the resolved
-        # addresses instead of letting the level name imply them — an operator
-        # choosing `host` here is publishing further than the word suggests.
+        # while binding only loopback+bridge under ROOTFUL docker. There is no
+        # stable per-host bridge address to bind to, so serving containers at
+        # all requires it. That is why FR-018b makes the tool REPORT the
+        # resolved addresses instead of letting the level name imply them — an
+        # operator choosing `host` here is publishing further than the word
+        # suggests.
         return ["0.0.0.0"]  # nosec B104
-    return ["127.0.0.1", STACK_DOCKER_BRIDGE_GATEWAY]
+    addr = bind_address or STACK_DOCKER_BRIDGE_GATEWAY
+    if addr == STACK_BIND_ALL_INTERFACES:
+        # nosec B104 — ROOTLESS DOCKER lands here, and it is a widening the
+        # caller measured rather than assumed: under rootless docker published
+        # ports are bound by RootlessKit in the host's own namespace, where the
+        # bridge gateway is not an assignable address at all. Binding it fails
+        # outright, so the only publish that serves containers is this one.
+        return ["0.0.0.0"]  # nosec B104
+    return ["127.0.0.1", addr]
 
 
-def stack_container_host_address(driver: str) -> str:
+def stack_container_host_address(driver: str, host_address: str | None = None) -> str:
     """The address an AGENT CONTAINER uses to reach its own host.
 
     Never the operator's loopback: inside a container that is the container.
+
+    `host_address` is the OBSERVED answer and wins. The driver-derived values
+    below are what a caller gets for not looking, and one of them was measured
+    wrong: `172.17.0.1` is right for rootful docker and is neither bindable nor
+    reachable under ROOTLESS docker, where a container reaching the host must
+    use the host's own routable address.
 
     >>> stack_container_host_address("docker")
     '172.17.0.1'
     >>> stack_container_host_address("podman")
     'host.containers.internal'
+    >>> stack_container_host_address("docker", "192.168.5.15")
+    '192.168.5.15'
     """
+    if host_address:
+        return host_address
     return "host.containers.internal" if driver == "podman" else STACK_DOCKER_BRIDGE_GATEWAY
 
 
-def stack_container_endpoint(port: int, driver: str) -> str:
+def stack_container_endpoint(port: int, driver: str, host_address: str | None = None) -> str:
     """The `otlp_endpoint` value an AGENT CONTAINER exports to.
 
     THE SIGNAL PATH IS PART OF IT, because that is what this tool's own curl
@@ -6225,8 +6272,10 @@ def stack_container_endpoint(port: int, driver: str) -> str:
     'http://172.17.0.1:4400/v1/logs'
     >>> stack_container_endpoint(4400, "podman")
     'http://host.containers.internal:4400/v1/logs'
+    >>> stack_container_endpoint(4400, "docker", "192.168.5.15")
+    'http://192.168.5.15:4400/v1/logs'
     """
-    return f"http://{stack_container_host_address(driver)}:{port}/v1/logs"
+    return f"http://{stack_container_host_address(driver, host_address)}:{port}/v1/logs"
 
 
 def stack_operator_probe_endpoint(port: int) -> str:
@@ -6287,7 +6336,7 @@ def stack_operator_url(address: str, port: int) -> str:
     return f"http://{address}:{port}"
 
 
-def stack_egress_allow_entry(driver: str, port: int) -> str:
+def stack_egress_allow_entry(driver: str, port: int, host_address: str | None = None) -> str:
     """The `egress.allow` stanza an enforcing environment needs to reach it.
 
     Printed beside the endpoint, ALWAYS (FR-011a). Export is governed by a
@@ -6304,7 +6353,7 @@ def stack_egress_allow_entry(driver: str, port: int) -> str:
     return (
         "egress:\n"
         "  allow:\n"
-        f"    - host: {stack_container_host_address(driver)}\n"
+        f"    - host: {stack_container_host_address(driver, host_address)}\n"
         f"      port: {port}\n"
     )
 
@@ -19305,7 +19354,13 @@ def stack_wait_ready(port: int, budget: int, container: str, host_rec: dict) -> 
 
 
 def stack_report_endpoint(
-    name: str, ports: dict, binds: list[str], driver: str, host_rec: dict | None = None
+    name: str,
+    ports: dict,
+    binds: list[str],
+    driver: str,
+    host_rec: dict | None = None,
+    host_address: str | None = None,
+    how: str | None = None,
 ) -> str:
     """Print how to reach it, in both forms, plus the egress stanza.
 
@@ -19314,8 +19369,16 @@ def stack_report_endpoint(
     the operator's loopback, the address a human opens and the address an agent
     exports to diverge (FR-013).
     """
-    endpoint = stack_container_endpoint(ports["otlp_http"], driver)
+    endpoint = stack_container_endpoint(ports["otlp_http"], driver, host_address)
     log(f"stack '{name}' bound on: {', '.join(binds)} (exposure resolved, FR-018b)")
+    if how:
+        # WHERE THE CONTAINER-FACING ADDRESS CAME FROM, not just what it is. The
+        # same level and the same driver yield different addresses on rootful and
+        # rootless docker, and an operator debugging silence needs to know which
+        # of those the tool observed rather than re-deriving it.
+        log(
+            f"  containers reach the host at: {stack_container_host_address(driver, host_address)}  ({how})"
+        )
     # THE UI ADDRESS IS ALSO TWO ADDRESSES. For a REMOTE stack `localhost` is the
     # operator's own machine, where nothing is bound — printing it sends them to
     # debug a URL that was never going to answer. Measured on a real remote host:
@@ -19338,7 +19401,9 @@ def stack_report_endpoint(
     log("  and if an environment ENFORCES egress, it must also declare the collector —")
     log("  export is governed by that declaration and FAILS OPEN, so an undeclared")
     log("  collector yields a green run with no telemetry and no error anywhere:")
-    for line in stack_egress_allow_entry(driver, ports["otlp_http"]).rstrip("\n").splitlines():
+    for line in (
+        stack_egress_allow_entry(driver, ports["otlp_http"], host_address).rstrip("\n").splitlines()
+    ):
         log(f"    {line}")
     return endpoint
 
@@ -19624,7 +19689,10 @@ def stack_up(
     driver = host_rec.get("driver") or detect_runtime()
     cname = stack_container_name(name)
     ports = stack_ports_for_name(name)
-    binds = stack_exposure_binds(exposure, driver)
+    # MEASURED BEFORE ANYTHING IS PUBLISHED. The bind address and the address a
+    # container uses are both properties of THIS host, not of the driver's name.
+    addressing = stack_resolve_addressing(host_rec, driver, image)
+    binds = stack_exposure_binds(exposure, driver, addressing["bind"] or STACK_BIND_ALL_INTERFACES)
 
     # STATED BEFORE ANYTHING IS CREATED, and refused without consent on a
     # non-TTY. `network` publishes an unauthenticated UI that displays verbatim
@@ -19653,7 +19721,7 @@ def stack_up(
     with contextlib.suppress(Fatal, OSError, subprocess.SubprocessError):
         running = host_container_names(host_rec, include_stopped=False)
 
-    endpoint = stack_container_endpoint(ports["otlp_http"], driver)
+    endpoint = stack_container_endpoint(ports["otlp_http"], driver, addressing["container"])
     if cname in running:
         log(f"telemetry stack '{name}' is already running on {host_name}")
         # RETENTION REPORTED HERE TOO. FR-025b requires the effective retention to
@@ -19661,7 +19729,9 @@ def stack_up(
         # why a run has vanished is asking about a stack that is already running,
         # which is exactly the path that used to stay silent.
         stack_apply_retention_report(name, host_rec, retention_days, retention_size)
-        stack_report_endpoint(name, ports, binds, driver, host_rec)
+        stack_report_endpoint(
+            name, ports, binds, driver, host_rec, addressing["container"], addressing["how"]
+        )
         emit_action("telemetry-stack-up", name=name, host=host_name, created=False)
         return
 
@@ -19690,7 +19760,9 @@ def stack_up(
     log(f"telemetry stack '{name}' is {'restarted' if restarted else 'up'} and accepting records")
 
     stack_apply_retention_report(name, host_rec, retention_days, retention_size)
-    stack_report_endpoint(name, ports, binds, driver, host_rec)
+    stack_report_endpoint(
+        name, ports, binds, driver, host_rec, addressing["container"], addressing["how"]
+    )
     if set_endpoint:
         written = stack_write_endpoint_setting(endpoint)
         log(
@@ -19710,13 +19782,142 @@ def stack_up(
     emit_action("telemetry-stack-up", name=name, host=host_name, created=not restarted)
 
 
+_STACK_ADDRESSING_CACHE: dict[str, dict] = {}
+
+
+def stack_addressing_cached(host_rec: dict, driver: str) -> str | None:
+    """The container-facing address if it is ALREADY known for this host.
+
+    `ls` walks every host and every stack; resolving by observation there would
+    run a throwaway container per row. A listing that is slow is a listing that
+    is not run, so this returns the cached observation or None — and None makes
+    the caller fall back to the driver default, which `url` will correct.
+    """
+    return _STACK_ADDRESSING_CACHE.get(f"{host_rec.get('name', 'local')}:{driver}", {}).get(
+        "container"
+    )
+
+
+def stack_resolve_addressing(host_rec: dict, driver: str, image: str) -> dict:
+    """OBSERVE how this host publishes and how its containers reach it.
+
+    THE CONSTANT WAS WRONG AND FAILED LOUDLY, WHICH WAS LUCK. `172.17.0.1` is
+    the docker bridge gateway and Feature 023's research measured it on a
+    ROOTFUL docker host, then wrote it down as "docker". Under ROOTLESS docker
+    it is neither bindable nor reachable:
+
+      * publishing on it fails outright — RootlessKit binds published ports in
+        the host's own network namespace, where that address does not exist
+        ("cannot assign requested address"), and the resulting error names a
+        port collision, which sends the reader hunting the wrong thing;
+      * a container cannot reach the host at it either — measured, connection
+        refused — so had the bind succeeded, export would have failed OPEN and
+        the stack would have looked up while receiving nothing. That is the
+        exact failure this feature exists to prevent, committed by the feature.
+
+    So the address is measured per host, not derived from the driver's name:
+
+      podman            `host.containers.internal`, bind 0.0.0.0 (R1, unchanged)
+      docker, rootful   the `bridge` network's own gateway, read from the daemon
+      docker, rootless  the host's routable address, read from the host netns
+
+    Returns `{"bind": str|None, "container": str, "how": str}`; `bind` is None
+    when only 0.0.0.0 serves containers. `how` is carried so the surface can
+    SAY which of these it observed (FR-018b) rather than leaving an operator to
+    infer it from a level name.
+    """
+    key = f"{host_rec.get('name', 'local')}:{driver}"
+    if key in _STACK_ADDRESSING_CACHE:
+        return _STACK_ADDRESSING_CACHE[key]
+    argv = driver_runtime_argv(host_rec)
+    if driver == "podman":
+        out = {"bind": None, "container": "host.containers.internal", "how": "podman host alias"}
+    elif "name=rootless" in query(argv + ["info", "--format", "{{json .SecurityOptions}}"]).stdout:
+        # Rootless: published ports live in the host netns, so the address that
+        # works is the host's own routable one. Read from the host namespace
+        # rather than guessed — /proc/net/fib_trie lists local addresses and is
+        # present in any Linux image, which the stack image is.
+        r = query(argv + ["run", "--rm", "--network", "host", image, "cat", "/proc/net/fib_trie"])
+        addrs = _local_addresses_from_fib_trie(r.stdout)
+        out = {
+            "bind": None,  # measured: binding the routable address fails too
+            "container": addrs[0] if addrs else STACK_DOCKER_BRIDGE_GATEWAY,
+            "how": "rootless docker: host routable address"
+            if addrs
+            else "rootless docker: UNRESOLVED",
+        }
+    else:
+        gw = query(
+            argv
+            + ["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"]
+        ).stdout.strip()  # fmt: skip
+        out = {
+            "bind": gw or STACK_DOCKER_BRIDGE_GATEWAY,
+            "container": gw or STACK_DOCKER_BRIDGE_GATEWAY,
+            "how": "docker bridge gateway" if gw else "docker bridge gateway (assumed)",
+        }
+    _STACK_ADDRESSING_CACHE[key] = out
+    return out
+
+
+def _local_addresses_from_fib_trie(text: str) -> list[str]:
+    """Routable IPv4 addresses of the host, from `/proc/net/fib_trie`.
+
+    Local addresses are the ones whose following line says `/32 host LOCAL`.
+    Loopback is dropped: it is exactly the address a container must NOT be told
+    to use, since inside a container it is the container.
+
+    >>> lines = ["|-- 127.0.0.1", "/32 host LOCAL", "|-- 192.168.5.15", "/32 host LOCAL"]
+    >>> _local_addresses_from_fib_trie(chr(10).join(lines))
+    ['192.168.5.15']
+    """
+    found, lines = [], text.splitlines()
+    for i, line in enumerate(lines[:-1]):
+        m = re.search(r"\|--\s+(\d+\.\d+\.\d+\.\d+)\s*$", line)
+        if m and "host LOCAL" in lines[i + 1] and not m.group(1).startswith("127."):
+            if m.group(1) not in found:
+                found.append(m.group(1))
+    return found
+
+
+def _retention_hours(v: str) -> float | None:
+    """A Prometheus duration in hours, or None if it is not one.
+
+    NEEDED BECAUSE PROMETHEUS NORMALISES WHAT IT IS GIVEN: ask for `7d` and it
+    reports `1w`. String equality then says the setting did not take, which is
+    the same false report as before with the sign flipped — and a tool that
+    cries wolf about its own correct configuration teaches operators to ignore
+    it.
+    """
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|s|m|h|d|w|y)", (v or "").strip())
+    if not m:
+        return None
+    n, unit = float(m.group(1)), m.group(2)
+    return (
+        n
+        * {"ms": 1 / 3600000, "s": 1 / 3600, "m": 1 / 60, "h": 1, "d": 24, "w": 168, "y": 8760}[
+            unit
+        ]
+    )
+
+
+def _retention_bytes(v: str) -> float | None:
+    """A size in bytes. `10GB` and `10GiB` are the SAME value to Prometheus,
+    which parses binary multiples and prints them with binary names."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([KMGT]?)i?B?", (v or "").strip(), re.IGNORECASE)
+    if not m:
+        return None
+    n, unit = float(m.group(1)), m.group(2).upper()
+    return n * {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}[unit]
+
+
 def stack_effective_retention(host_rec: dict, cname: str) -> tuple[str | None, str | None]:
     """What retention the stack is ACTUALLY running with, read from the runtime.
 
-    Asked of the component that enforces it, not of our own configuration. The
-    first version compared the env var this tool sets against the env of the
-    container this tool set it on — a circular check that confirms the variable
-    was delivered and says NOTHING about whether anything honours it.
+    Asked of the component that enforces it, not of our own configuration. An
+    earlier version compared the env var this tool sets against the env of the
+    container this tool set it on — a circular check that confirms delivery and
+    says nothing about whether anything reads it.
     """
     r = query(
         driver_runtime_argv(host_rec)
@@ -19732,35 +19933,33 @@ def stack_effective_retention(host_rec: dict, cname: str) -> tuple[str | None, s
 
 
 def stack_apply_retention_report(name: str, host_rec: dict, days: int, size: str) -> None:
-    """Report the retention actually in force, and say so when it is not ours.
+    """Report the retention actually in force, comparing it to what was asked.
 
-    MEASURED, AND THE MEASUREMENT CHANGED THE FEATURE (research R3, FR-025c).
-    The default stack image exposes NO retention setting: its Prometheus is
-    launched with `--storage.tsdb.path` and nothing else, so it runs on its own
-    15-day default with an unlimited size ceiling, and the values this tool is
-    asked for are simply not applied.
-
-    That is exactly the case R3 predicted — a setting that looks applied and
-    is not — so the honest report is the effective value read back from
-    Prometheus plus a plain statement that the request did not take. Echoing the
-    requested numbers here would be how an unbounded store looks bounded.
+    Read back from the component that ENFORCES it, and compared by VALUE rather
+    than by string: Prometheus normalises `7d` to `1w` and `10GB` to `10GiB`, so
+    a textual comparison reports a correct configuration as failed (FR-025b,
+    FR-025c).
     """
-    eff_time, eff_size = stack_effective_retention(host_rec, cname := stack_container_name(name))
+    eff_time, eff_size = stack_effective_retention(host_rec, stack_container_name(name))
     if eff_time is None:
         log(
             f"WARNING: could not confirm retention on '{name}' (asked for {days}d / {size}). "
             f"The store may grow without bound; treat its retention as UNCONFIRMED."
         )
         return
-    eff_size_h = "unlimited" if eff_size in ("0B", "0", None) else eff_size
-    if eff_time == f"{days}d" and eff_size_h != "unlimited":
-        log(f"retention: {eff_time} / {eff_size_h} (confirmed)")
+    want_h, got_h = _retention_hours(f"{days}d"), _retention_hours(eff_time)
+    want_b, got_b = _retention_bytes(size), _retention_bytes(eff_size or "")
+    time_ok = want_h is not None and got_h is not None and abs(want_h - got_h) < 0.5
+    size_ok = want_b is not None and got_b is not None and abs(want_b - got_b) < 1024
+    if time_ok and size_ok:
+        log(f"retention: {eff_time} / {eff_size} (confirmed against the running Prometheus)")
         return
+    unbounded = eff_size in ("0B", "0", "", None)
     log(
-        f"retention: {eff_time} / {eff_size_h} — NOT the {days}d / {size} requested. "
-        f"This image exposes no retention setting, so it runs on its own defaults; "
-        f"the request was not applied. Reported as effective rather than as asked for, "
-        f"because a number nobody verified is how an unbounded store looks bounded."
+        f"WARNING: retention on '{name}' is {eff_time} / "
+        f"{'UNLIMITED' if unbounded else eff_size}, not the {days}d / {size} requested. "
+        f"Reported as effective rather than as asked for, because a number nobody verified "
+        f"is how an unbounded store looks bounded."
     )
 
 
@@ -19793,17 +19992,31 @@ def stack_url(
             f"WARNING: could not reach {host_name} to confirm '{name}' is running; the addresses below are what it WOULD use"
         )
 
-    endpoint = stack_container_endpoint(ports["otlp_http"], driver)
+    # RE-OBSERVED, not remembered. `url` is what an operator pastes into
+    # settings.yaml, so an address that was true at `up` and is not true now is
+    # worse than no answer: export fails open and the stack looks up.
+    addressing = stack_resolve_addressing(host_rec, driver, STACK_IMAGE_DEFAULT)
+    endpoint = stack_container_endpoint(ports["otlp_http"], driver, addressing["container"])
     if as_json:
         emit_json({
             "name": name, "host": host_name,
             "ui": stack_operator_url("localhost", ports["ui"]),
             "otlp_endpoint": endpoint,
-            "egress_allow": stack_egress_allow_entry(driver, ports["otlp_http"]),
+            "egress_allow": stack_egress_allow_entry(
+                driver, ports["otlp_http"], addressing["container"]
+            ),
         })  # fmt: skip
         return
     stack_report_endpoint(
-        name, ports, stack_exposure_binds(STACK_EXPOSURE_DEFAULT, driver), driver, host_rec
+        name,
+        ports,
+        stack_exposure_binds(
+            STACK_EXPOSURE_DEFAULT, driver, addressing["bind"] or STACK_BIND_ALL_INTERFACES
+        ),
+        driver,
+        host_rec,
+        addressing["container"],
+        addressing["how"],
     )
 
     # THE TUNNEL, when the UI is not reachable from here. A remote host is
@@ -19851,7 +20064,9 @@ def stack_ls(
                 "name": sname, "host": resolved_name, "state": state,
                 "ui": stack_operator_url("localhost", ports["ui"]),
                 "ingest": answering,
-                "otlp_endpoint": stack_container_endpoint(ports["otlp_http"], driver),
+                "otlp_endpoint": stack_container_endpoint(
+                    ports["otlp_http"], driver, stack_addressing_cached(host_rec, driver)
+                ),
             })  # fmt: skip
     if as_json:
         emit_json({"stacks": rows})

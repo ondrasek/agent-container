@@ -1780,6 +1780,52 @@ def test_container_host_address_is_runtime_specific(wiz):
     assert wiz.stack_container_host_address("podman") == "host.containers.internal"
 
 
+def test_an_observed_address_beats_the_drivers_default(wiz):
+    """AND THE DEFAULT WAS MEASURED WRONG ON A REAL RUNTIME, which is why the
+    override exists rather than being tidiness.
+
+    `172.17.0.1` is the docker bridge gateway on a ROOTFUL daemon. Under
+    rootless docker it is neither bindable (RootlessKit publishes in the host
+    netns, where the address does not exist) nor reachable from a container
+    (measured: connection refused). A tool that derived it from the string
+    "docker" would publish nothing and hand out an endpoint that fails open.
+    """
+    for driver in ("docker", "podman"):
+        assert wiz.stack_container_host_address(driver, "192.168.5.15") == "192.168.5.15"
+        assert wiz.stack_container_endpoint(4400, driver, "192.168.5.15") == (
+            "http://192.168.5.15:4400/v1/logs"
+        )
+        assert "192.168.5.15" in wiz.stack_egress_allow_entry(driver, 4400, "192.168.5.15")
+
+
+def test_rootless_docker_publishes_on_every_interface_and_says_so(wiz):
+    """The bind list must be able to express "only 0.0.0.0 works here".
+
+    Under rootless docker a bind on the bridge gateway FAILS, and the daemon
+    reports it as a port collision — which sends the reader hunting a conflict
+    that does not exist. The resolver hands 0.0.0.0 down explicitly so the
+    widening is a stated effect rather than a silent fallback.
+    """
+    assert wiz.stack_exposure_binds("host", "docker", "0.0.0.0") == ["0.0.0.0"]
+    assert wiz.stack_exposure_binds("host", "docker", "10.0.0.1") == ["127.0.0.1", "10.0.0.1"]
+    # The narrow level stays narrow no matter what was observed.
+    assert wiz.stack_exposure_binds("loopback", "docker", "0.0.0.0") == ["127.0.0.1"]
+
+
+def test_host_addresses_are_read_from_the_host_namespace_not_guessed(wiz):
+    """`/proc/net/fib_trie` is how the routable address is learned, and loopback
+    is excluded on purpose: it is precisely the address a container must never
+    be handed, since inside a container it is the container."""
+    sample = (
+        "Main:\n  +-- 0.0.0.0/0 3 0 5\n     |-- 127.0.0.1\n        /32 host LOCAL\n"
+        "     |-- 192.168.5.15\n        /32 host LOCAL\n     |-- 192.168.5.255\n"
+        "        /32 link BROADCAST\n"
+    )
+    assert wiz._local_addresses_from_fib_trie(sample) == ["192.168.5.15"]
+    # Nothing parseable yields nothing — never a plausible-looking guess.
+    assert wiz._local_addresses_from_fib_trie("") == []
+
+
 def test_default_exposure_is_reachable_from_containers(wiz):
     """`host` is the DEFAULT rather than `loopback`, and it must actually serve
     containers — otherwise the default configuration produces a stack no agent
@@ -1788,6 +1834,11 @@ def test_default_exposure_is_reachable_from_containers(wiz):
     for driver in ("docker", "podman"):
         binds = wiz.stack_exposure_binds(wiz.STACK_EXPOSURE_HOST, driver)
         reachable = "0.0.0.0" in binds or wiz.stack_container_host_address(driver) in binds
+        assert reachable, f"{driver}: default level does not serve containers: {binds}"
+        # And with an observed address, the same must hold — a measurement that
+        # produced an unreachable default would be worse than the assumption.
+        obs = wiz.stack_exposure_binds(wiz.STACK_EXPOSURE_HOST, driver, "10.1.2.3")
+        reachable = "0.0.0.0" in obs or "10.1.2.3" in obs
         assert reachable, f"{driver}: default level does not serve containers: {binds}"
 
 
@@ -1819,6 +1870,7 @@ def test_host_level_under_podman_binds_wider_than_the_word_suggests(wiz):
     it from a word.
     """
     assert wiz.stack_exposure_binds("host", "podman") == ["0.0.0.0"]
+    # Rootful docker, the case the constant was measured on.
     assert wiz.stack_exposure_binds("host", "docker") != ["0.0.0.0"]
 
 
@@ -1944,3 +1996,27 @@ def test_a_stack_is_recorded_with_its_kind(wiz):
     assert e["role"] == wiz.KIND_TELEMETRY_STACK
     assert e["role"] != wiz.ROLE_AGENT
     assert e["outcome"] == "active"
+
+
+def test_retention_is_compared_by_value_not_by_string(wiz):
+    """Prometheus normalises what it is given: ask for 7d and it reports 1w;
+    ask for 10GB and it reports 10GiB. A string comparison then declares a
+    correctly applied setting 'not applied' — the same false report as the
+    circular check it replaced, with the sign flipped.
+    """
+    h, b = wiz._retention_hours, wiz._retention_bytes
+    assert h("7d") == h("1w") == h("168h") == 168
+    assert b("10GB") == b("10GiB") == 10 * 1024**3
+    # And a genuine mismatch still reads as one: 15d is Prometheus's default,
+    # which is exactly what an ignored argument looks like.
+    assert h("15d") != h("7d")
+    assert b("0B") == 0
+
+
+def test_unparseable_retention_is_not_silently_treated_as_a_match(wiz):
+    """None, not a guess. A value we cannot parse is a value we cannot confirm,
+    and confirming it anyway is how an unbounded store looks bounded."""
+    for junk in ("", "forever", "1 fortnight", None):
+        assert wiz._retention_hours(junk) is None
+    for junk in ("", "lots", None):
+        assert wiz._retention_bytes(junk) is None

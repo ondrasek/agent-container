@@ -14,8 +14,28 @@ the address the operator uses.
 
 | Runtime | Operator uses | Container uses |
 |---|---|---|
-| docker (Linux host) | `127.0.0.1:4318` | `172.17.0.1:4318` (bridge gateway) |
+| docker, ROOTFUL | `127.0.0.1:4318` | `172.17.0.1:4318` (bridge gateway) |
+| docker, ROOTLESS | `127.0.0.1:4318` | the host's own routable address, e.g. `192.168.5.15:4318` |
 | podman rootless (Lima) | `127.0.0.1:4318` (Lima forwards) | `host.containers.internal` → `192.168.5.15:4318` |
+
+**The rootless-docker row was added after this table shipped, and its absence was a
+bug in the implementation, not merely in the table.** The first version wrote the
+rootful answer down as "docker" — one row for a driver with two behaviours — and the
+code derived the address from the driver's *name*. Under rootless docker that address:
+
+* **cannot be bound.** RootlessKit publishes ports in the host's own network namespace,
+  where `172.17.0.1` does not exist. The daemon reports this as
+  `failed to bind host port 127.0.0.1:<p>: address already in use` — a *port collision*,
+  naming the wrong address and sending the reader hunting a conflict that is not there.
+* **cannot be reached** from a container either (measured: connection refused). So had
+  the bind succeeded, export would have failed OPEN and the stack would have looked up
+  while receiving nothing — the exact failure R1 exists to prevent, committed by the code
+  written from R1.
+
+The address is therefore **observed per host** (`stack_resolve_addressing`), never derived
+from the driver: rootful docker is asked for its `bridge` gateway; rootless docker is asked
+for the host's routable address via `/proc/net/fib_trie` in the host namespace; podman keeps
+`host.containers.internal`, which was measured and still holds.
 
 **Rationale**: Measured. From a container under rootless podman, `host.containers.internal:4318`
 answered `200`; the container's default gateway `10.0.2.2` did **not** — that address routes to the
@@ -52,33 +72,43 @@ container stuck in `Created`). Depending on it here would reintroduce a known de
 
 ## R3: Retention controls in the chosen image
 
-**Decision (revised after measurement)**: REPORT the retention actually in force, read from the
-component that enforces it. Do not claim to configure what the image does not expose.
+**Decision**: Configure retention through the image's own `PROMETHEUS_EXTRA_ARGS` seam, then
+REPORT the value read back from the component that enforces it — comparing by VALUE, not by string.
 
-The original decision — "configure retention through the environment variables the image exposes"
-— assumed such variables exist. They do not. It is recorded here rather than quietly replaced,
-because the assumption is the interesting part: it is exactly what this section warned against.
+This section was wrong twice, in opposite directions, and both errors are kept because the pattern
+is the finding: **a check that cannot fail is not a check, and neither is a check that cannot pass.**
 
-**MEASURED, and the answer was the bad one.** The default image exposes **no
-retention setting at all**: `run-prometheus.sh` launches with `--storage.tsdb.path` and nothing
-else, and there is no environment indirection for retention anywhere in its startup scripts. A
-running stack reports `storage.tsdb.retention.time = 15d` (Prometheus's own default) and
-`storage.tsdb.retention.size = 0B` (unlimited).
+**First error — the circular confirmation.** The initial implementation compared the environment
+variable the tool sets against the environment of the container the tool set it on, and printed
+"confirmed". That proves *delivery* and says nothing about *effect*. Replaced by reading Prometheus's
+own `/api/v1/status/flags`.
 
-So the values this tool is asked for **are not applied**, and the first implementation reported them
-as "confirmed" — because it compared the env var the tool sets against the env of the container the
-tool set it on. That check is circular: it proves the variable was delivered and says nothing about
-whether anything reads it. This is precisely the failure this section predicted, committed by the
-code written to avoid it.
+**Second error — this section's own research.** Having read back `retention.time = 15d` and
+`retention.size = 0B`, I concluded the image "exposes no retention setting at all". That conclusion
+came from grepping `run-all.sh` alone. It is FALSE. Every component in the image reads an
+`EXTRA_ARGS` seam from its own launcher script:
 
-The implementation now reads the EFFECTIVE retention from Prometheus's own flags API and reports
-that, stating plainly when it differs from what was requested. An operator gets a true number and a
-clear statement that the request did not take, rather than a false confirmation (FR-025b, FR-025c).
+```
+run-prometheus.sh  → PROMETHEUS_EXTRA_ARGS     run-loki.sh       → LOKI_EXTRA_ARGS
+run-tempo.sh       → TEMPO_EXTRA_ARGS          run-pyroscope.sh  → PYROSCOPE_EXTRA_ARGS
+run-otelcol.sh     → OTELCOL_EXTRA_ARGS
+```
 
-**Consequence for the spec**: FR-025's "bounded by both a window and a ceiling" is NOT satisfied by
-the default image. Honouring it would mean overriding the image's Prometheus and Loki configuration,
-which is a file-delivery problem across a remote context — a separate change, deliberately not
-smuggled in here.
+each splitting the variable with `read -ra` and appending it to the process's argv. Setting
+`PROMETHEUS_EXTRA_ARGS=--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=10GB` applies
+retention, verified by reading the flags API back: `1w / 10GiB`.
+
+**Which produced the third error, briefly.** Prometheus NORMALISES what it is given — `7d` is
+reported as `1w`, `10GB` as `10GiB` — so the string comparison then declared a correctly applied
+setting "not applied". Same false report as the first error with the sign flipped, and worse in one
+respect: a tool that cries wolf about its own correct configuration teaches operators to ignore it.
+The comparison is now by value (`_retention_hours`, `_retention_bytes`).
+
+**Consequence for the spec**: FR-025 ("bounded by both a window and a ceiling") is satisfied for
+**Prometheus**. Loki, Tempo and Pyroscope still run on the image's defaults; their `*_EXTRA_ARGS`
+seams exist and take config-file overrides rather than simple flags, which is a separate change,
+deliberately not smuggled in here. FR-025b/FR-025c hold regardless: what is reported is what was
+read back, and a failed read-back reports `unconfirmed` rather than the requested value.
 
 **Alternatives considered**: leaving retention to the operator. Rejected by FR-025; an unbounded
 store on a developer laptop is a disk-full incident waiting to happen, and it fails silently.

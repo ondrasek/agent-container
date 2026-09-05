@@ -32,12 +32,21 @@ runtime where a container does not share your loopback.
 UI:                     not reachable from here — it is bound on the host
   tunnel:               ssh -N -L 3338:127.0.0.1:3338 root@203.0.113.7
   then open:            http://localhost:3338
-otlp_endpoint (agents): http://172.17.0.1:4438/v1/logs
+otlp_endpoint (agents): http://172.17.0.1:4438/v1/logs   # OBSERVED per host, not fixed
 ```
 
-Inside a container, `127.0.0.1` is the container. Under docker an agent reaches its host at the
-bridge gateway; under rootless podman at `host.containers.internal`. `up` and `url` print the right
-one for the runtime — **paste the `otlp_endpoint` line, not the UI line**.
+Inside a container, `127.0.0.1` is the container. The address that *does* work is a property of the
+host, not of the runtime's name, so the tool **measures it** and prints where it came from:
+
+| Host | Containers reach it at | Learned by |
+|---|---|---|
+| docker, rootful | the `bridge` network gateway (`172.17.0.1` by default) | asking the daemon |
+| docker, rootless | the host's own routable address | reading the host network namespace |
+| podman, rootless | `host.containers.internal` | the runtime provides it |
+
+Deriving this from the driver name instead was a real defect: under **rootless docker** the bridge
+gateway can neither be bound (published ports live in the host namespace, where that address does
+not exist) nor reached from a container. **Paste the `otlp_endpoint` line, not the UI line.**
 
 ## Exposure
 

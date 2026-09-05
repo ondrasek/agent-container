@@ -8321,10 +8321,10 @@ def test_a_stack_reports_the_retention_actually_in_force(acc):
 
     The first implementation compared the env var the tool sets against the env
     of the container the tool set it on, and printed "confirmed". That proves
-    delivery and nothing about effect — the default image exposes no retention
-    setting at all, so the requested values were never applied while the tool
-    said they were. What is asserted here is that the reported value comes from
-    the component that ENFORCES retention.
+    delivery and nothing about effect. What is asserted here is that the
+    reported value comes from the component that ENFORCES retention, AND that
+    the request actually took: Prometheus's own default is 15d, so a stack still
+    reporting 15d means the tool's retention argument never reached it.
     """
     name = "accstkr"
     try:
@@ -8334,11 +8334,24 @@ def test_a_stack_reports_the_retention_actually_in_force(acc):
              "http://localhost:9090/api/v1/status/flags"],
             capture_output=True, text=True, timeout=180,
         )  # fmt: skip
-        effective = json.loads(flags.stdout)["data"]["storage.tsdb.retention.time"]
+        data = json.loads(flags.stdout)["data"]
+        effective = data["storage.tsdb.retention.time"]
         r = acc.cli(["telemetry", "stack", "up", name], timeout=600)
         assert effective in r.stdout + r.stderr, (
             f"the tool reports a retention the runtime does not have: runtime says "
             f"{effective!r}\n{(r.stdout + r.stderr)[-800:]}"
+        )
+        # The request TOOK, not merely that we echo whatever we found. 15d/0B is
+        # Prometheus's own default and is exactly what an ignored argument looks
+        # like — which is how this went unnoticed the first time.
+        assert effective != "15d", "retention argument did not reach Prometheus (still its default)"
+        assert data["storage.tsdb.retention.size"] not in ("0B", "0"), (
+            "size ceiling did not reach Prometheus (still unlimited)"
+        )
+        # Reported by VALUE: Prometheus normalises 7d to 1w, so a string compare
+        # would call a correct configuration a failure.
+        assert "confirmed" in r.stdout + r.stderr, (
+            f"applied retention reported as unapplied\n{(r.stdout + r.stderr)[-800:]}"
         )
     finally:
         _stack_teardown(acc, name)
