@@ -8314,3 +8314,61 @@ def test_a_REAL_agent_exports_into_a_tool_created_stack(acc, profile):
         )
     finally:
         _stack_teardown(acc, stack)
+
+
+def test_a_stack_reports_the_retention_actually_in_force(acc):
+    """FR-025b/FR-025c, and a guard against the circular check this replaced.
+
+    The first implementation compared the env var the tool sets against the env
+    of the container the tool set it on, and printed "confirmed". That proves
+    delivery and nothing about effect — the default image exposes no retention
+    setting at all, so the requested values were never applied while the tool
+    said they were. What is asserted here is that the reported value comes from
+    the component that ENFORCES retention.
+    """
+    name = "accstkr"
+    try:
+        _stack_up(acc, name)
+        flags = subprocess.run(
+            [RUNTIME, "exec", f"agent-container-stack-{name}", "curl", "-s", "-m", "10",
+             "http://localhost:9090/api/v1/status/flags"],
+            capture_output=True, text=True, timeout=180,
+        )  # fmt: skip
+        effective = json.loads(flags.stdout)["data"]["storage.tsdb.retention.time"]
+        r = acc.cli(["telemetry", "stack", "up", name], timeout=600)
+        assert effective in r.stdout + r.stderr, (
+            f"the tool reports a retention the runtime does not have: runtime says "
+            f"{effective!r}\n{(r.stdout + r.stderr)[-800:]}"
+        )
+    finally:
+        _stack_teardown(acc, name)
+
+
+def test_eviction_does_not_stop_the_ingest(acc):
+    """FR-025a: reaching a retention bound is normal operation for a bounded
+    store, not an error. Only shows up after a stack has run a while, which is
+    why it is asserted rather than assumed."""
+    name = "accstke"
+    try:
+        _stack_up(acc, name)
+        for _ in range(200):
+            subprocess.run(
+                [RUNTIME, "exec", f"agent-container-stack-{name}", "curl", "-s", "-o", "/dev/null",
+                 "-m", "5", "-X", "POST", "http://localhost:4318/v1/logs",
+                 "-H", "Content-Type: application/json", "--data-binary",
+                 '{"resourceLogs":[{"resource":{"attributes":[]},"scopeLogs":[{"logRecords":['
+                 '{"body":{"stringValue":"filler"},"timeUnixNano":"1788000000000000000"}]}]}]}'],
+                capture_output=True, text=True, timeout=60,
+            )  # fmt: skip
+        probe = subprocess.run(
+            [RUNTIME, "exec", f"agent-container-stack-{name}", "curl", "-s", "-o", "/dev/null",
+             "-w", "%{http_code}", "-m", "10", "-X", "POST",
+             "http://localhost:4318/v1/logs", "-H", "Content-Type: application/json",
+             "--data-binary", '{"resourceLogs":[]}'],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        assert probe.stdout.strip() == "200", (
+            f"the ingest stopped accepting after sustained writes (got {probe.stdout.strip()!r})"
+        )
+    finally:
+        _stack_teardown(acc, name)

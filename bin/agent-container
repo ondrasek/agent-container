@@ -19656,6 +19656,11 @@ def stack_up(
     endpoint = stack_container_endpoint(ports["otlp_http"], driver)
     if cname in running:
         log(f"telemetry stack '{name}' is already running on {host_name}")
+        # RETENTION REPORTED HERE TOO. FR-025b requires the effective retention to
+        # be REPORTABLE, not merely reported once at creation — an operator asking
+        # why a run has vanished is asking about a stack that is already running,
+        # which is exactly the path that used to stay silent.
+        stack_apply_retention_report(name, host_rec, retention_days, retention_size)
         stack_report_endpoint(name, ports, binds, driver, host_rec)
         emit_action("telemetry-stack-up", name=name, host=host_name, created=False)
         return
@@ -19705,29 +19710,57 @@ def stack_up(
     emit_action("telemetry-stack-up", name=name, host=host_name, created=not restarted)
 
 
-def stack_apply_retention_report(name: str, host_rec: dict, days: int, size: str) -> None:
-    """Read the applied retention BACK, and say so when it cannot be confirmed.
+def stack_effective_retention(host_rec: dict, cname: str) -> tuple[str | None, str | None]:
+    """What retention the stack is ACTUALLY running with, read from the runtime.
 
-    Research R3: the variable names an image honours must be READ OFF THE IMAGE
-    rather than assumed, because a name it does not recognise sets nothing — and
-    the stack then retains forever while looking configured. So the value is
-    read back rather than trusted.
-
-    UNCONFIRMED IS REPORTED AS UNCONFIRMED, never as the value requested
-    (FR-025c). A number nobody verified is exactly how an unbounded store looks
-    bounded. The deploy is NOT failed over it: a collector that works beats no
-    collector, which is the same rule dashboard failure already follows.
+    Asked of the component that enforces it, not of our own configuration. The
+    first version compared the env var this tool sets against the env of the
+    container this tool set it on — a circular check that confirms the variable
+    was delivered and says NOTHING about whether anything honours it.
     """
-    cname = stack_container_name(name)
-    r = query(driver_runtime_argv(host_rec) + ["exec", cname, "env"])
-    seen = r.stdout if r.returncode == 0 else ""
-    if f"AGENT_CONTAINER_STACK_RETENTION_DAYS={days}" in seen:
-        log(f"retention: {days}d / {size} (confirmed)")
+    r = query(
+        driver_runtime_argv(host_rec)
+        + ["exec", cname, "curl", "-s", "-m", "5", "http://localhost:9090/api/v1/status/flags"]
+    )  # fmt: skip
+    if r.returncode != 0:
+        return None, None
+    try:
+        flags = json.loads(r.stdout)["data"]
+    except ValueError, KeyError:
+        return None, None
+    return flags.get("storage.tsdb.retention.time"), flags.get("storage.tsdb.retention.size")
+
+
+def stack_apply_retention_report(name: str, host_rec: dict, days: int, size: str) -> None:
+    """Report the retention actually in force, and say so when it is not ours.
+
+    MEASURED, AND THE MEASUREMENT CHANGED THE FEATURE (research R3, FR-025c).
+    The default stack image exposes NO retention setting: its Prometheus is
+    launched with `--storage.tsdb.path` and nothing else, so it runs on its own
+    15-day default with an unlimited size ceiling, and the values this tool is
+    asked for are simply not applied.
+
+    That is exactly the case R3 predicted — a setting that looks applied and
+    is not — so the honest report is the effective value read back from
+    Prometheus plus a plain statement that the request did not take. Echoing the
+    requested numbers here would be how an unbounded store looks bounded.
+    """
+    eff_time, eff_size = stack_effective_retention(host_rec, cname := stack_container_name(name))
+    if eff_time is None:
+        log(
+            f"WARNING: could not confirm retention on '{name}' (asked for {days}d / {size}). "
+            f"The store may grow without bound; treat its retention as UNCONFIRMED."
+        )
+        return
+    eff_size_h = "unlimited" if eff_size in ("0B", "0", None) else eff_size
+    if eff_time == f"{days}d" and eff_size_h != "unlimited":
+        log(f"retention: {eff_time} / {eff_size_h} (confirmed)")
         return
     log(
-        f"WARNING: could not confirm retention on '{name}'. Asked for {days}d / {size}; "
-        f"the container did not report it back. The store may grow without bound — check "
-        f"the image's retention settings before leaving this stack running."
+        f"retention: {eff_time} / {eff_size_h} — NOT the {days}d / {size} requested. "
+        f"This image exposes no retention setting, so it runs on its own defaults; "
+        f"the request was not applied. Reported as effective rather than as asked for, "
+        f"because a number nobody verified is how an unbounded store looks bounded."
     )
 
 

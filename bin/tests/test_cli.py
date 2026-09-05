@@ -336,9 +336,18 @@ def _short_flag_offenders(wiz) -> list[str]:
     """Every (command, param) whose option declares a short flag but no long one."""
     import inspect
 
-    commands = list(wiz.app.registered_commands)
-    for g in wiz.app.registered_groups:  # a sub-app's own commands count too
-        commands += list(g.typer_instance.registered_commands)
+    # RECURSIVE since Feature 023. The walk went one level deep — app, then each
+    # group's own commands — which stopped covering the moment a group was nested
+    # inside another (`telemetry stack`). A convention guard that silently skips
+    # a subtree is worse than none, because it reports compliance it never
+    # checked.
+    def _walk(app):
+        found = list(app.registered_commands)
+        for g in app.registered_groups:
+            found += _walk(g.typer_instance)
+        return found
+
+    commands = _walk(wiz.app)
 
     offenders: list[str] = []
     for cmd in commands:
@@ -647,3 +656,72 @@ def test_the_two_statements_are_actually_different(wiz):
     assert wiz.egress_strength_statement("claude") != wiz.egress_strength_statement(
         "claude", transparent=True
     )
+
+
+# --- Feature 023: the telemetry stack command surface ------------------------
+# Asserted by INTROSPECTION rather than by scraping rendered help. rich wraps to
+# the terminal width, so a substring search against help text measures the
+# renderer as much as the CLI — and a search loose enough to survive wrapping
+# would also pass with the flag absent.
+
+
+def _stack_command(wiz, verb):
+    for cmd in wiz.stack_app.registered_commands:
+        if cmd.name == verb:
+            return cmd
+    raise AssertionError(f"`telemetry stack {verb}` is not registered")
+
+
+def _flags(cmd) -> set[str]:
+    out = set()
+    import inspect
+
+    for param in inspect.signature(cmd.callback).parameters.values():
+        default = param.default
+        for attr in ("param_decls", "_param_decls"):
+            decls = getattr(default, attr, None)
+            if decls:
+                out.update(d for d in decls if str(d).startswith("-"))
+    return out
+
+
+def test_the_telemetry_stack_group_exists_with_its_verbs(wiz):
+    """The group-verb rule this repo enforces: `ls` reads, destructive verbs are
+    spelled out."""
+    names = {c.name for c in wiz.stack_app.registered_commands}
+    assert {"up", "ls", "url", "dashboards", "remove"} <= names, names
+
+
+def test_stack_up_offers_every_flag_the_contract_names(wiz):
+    flags = _flags(_stack_command(wiz, "up"))
+    for flag in (
+        "--host", "--image", "--exposure", "--retention-days",
+        "--retention-size", "--set-endpoint", "--yes", "--json",
+    ):  # fmt: skip
+        assert flag in flags, f"{flag} missing from `stack up`: {sorted(flags)}"
+
+
+def test_destructive_stack_verbs_require_consent(wiz):
+    """`remove` is destructive; `up` carries -y too, because `--exposure network`
+    publishes an unauthenticated UI."""
+    rm = _flags(_stack_command(wiz, "remove"))
+    assert {"--yes", "--purge"} <= rm, sorted(rm)
+    assert "--yes" in _flags(_stack_command(wiz, "up"))
+
+
+def test_verbose_reaches_the_new_group(wiz):
+    """`-v` is INJECTED across the whole click tree at `cli()` time rather than
+    declared per command, so it will not appear in a callback signature — a new
+    group is exactly where that injection could silently stop covering."""
+    import subprocess
+
+    r = subprocess.run(
+        ["./bin/agent-container", "telemetry", "stack", "ls", "--help"],
+        capture_output=True, text=True, env={**os.environ, "COLUMNS": "200"}, timeout=300,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    # ANSI STRIPPED FIRST. rich interleaves colour codes INSIDE the flag name, so
+    # a raw substring search reports the flag missing from output that plainly
+    # contains it — which is a test that fails on a working CLI.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
+    assert "--verbose" in plain, "the -v injection does not reach `telemetry stack`"

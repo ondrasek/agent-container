@@ -52,19 +52,33 @@ container stuck in `Created`). Depending on it here would reintroduce a known de
 
 ## R3: Retention controls in the chosen image
 
-**Decision**: Configure retention through the environment variables the image exposes, and treat the
-window and the ceiling as two separate named settings (FR-025).
+**Decision (revised after measurement)**: REPORT the retention actually in force, read from the
+component that enforces it. Do not claim to configure what the image does not expose.
 
-**Rationale**: `grafana/otel-lgtm` bundles Prometheus, Loki and Tempo, each with its own retention
-mechanism; the image accepts per-component configuration through mounted config and environment.
-Because the spec requires BOTH a window and a ceiling, and the components express these differently,
-the plan treats "apply retention" as one task with per-component sub-steps rather than assuming a
-single knob exists.
+The original decision — "configure retention through the environment variables the image exposes"
+— assumed such variables exist. They do not. It is recorded here rather than quietly replaced,
+because the assumption is the interesting part: it is exactly what this section warned against.
 
-**Open for implementation**: exact variable names must be read off the image at build time rather
-than assumed. This is the one place where guessing would produce a stack that silently retains
-forever — so the task that applies retention MUST assert the effective value back (FR-025b) rather
-than trusting that setting it worked.
+**MEASURED, and the answer was the bad one.** The default image exposes **no
+retention setting at all**: `run-prometheus.sh` launches with `--storage.tsdb.path` and nothing
+else, and there is no environment indirection for retention anywhere in its startup scripts. A
+running stack reports `storage.tsdb.retention.time = 15d` (Prometheus's own default) and
+`storage.tsdb.retention.size = 0B` (unlimited).
+
+So the values this tool is asked for **are not applied**, and the first implementation reported them
+as "confirmed" — because it compared the env var the tool sets against the env of the container the
+tool set it on. That check is circular: it proves the variable was delivered and says nothing about
+whether anything reads it. This is precisely the failure this section predicted, committed by the
+code written to avoid it.
+
+The implementation now reads the EFFECTIVE retention from Prometheus's own flags API and reports
+that, stating plainly when it differs from what was requested. An operator gets a true number and a
+clear statement that the request did not take, rather than a false confirmation (FR-025b, FR-025c).
+
+**Consequence for the spec**: FR-025's "bounded by both a window and a ceiling" is NOT satisfied by
+the default image. Honouring it would mean overriding the image's Prometheus and Loki configuration,
+which is a file-delivery problem across a remote context — a separate change, deliberately not
+smuggled in here.
 
 **Alternatives considered**: leaving retention to the operator. Rejected by FR-025; an unbounded
 store on a developer laptop is a disk-full incident waiting to happen, and it fails silently.

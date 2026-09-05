@@ -285,6 +285,15 @@ _agent_container() {
             fi
             __agent_container_add_names __agent_container_names       # local + remote hosts.conf
             ;;
+        stack)
+            # `telemetry stack <verb>`: read verbs short, destructive spelled out.
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--host --image --exposure --retention-days --retention-size --set-endpoint --purge -y --yes --json -v --verbose" -- "${cur}") )
+                return 0
+            fi
+            COMPREPLY=( $(compgen -W "up ls url dashboards remove" -- "${cur}") )
+            return 0
+            ;;
         logs)
             if [[ "${prev}" == "--host" ]]; then
                 return 0
@@ -315,7 +324,7 @@ _agent_container() {
             # `rejected` are terminal, and a flag to override that would
             # duplicate records at the collector or repeat a refusal.
             if [[ ${COMP_CWORD} -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "collect retry reconcile" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "stack collect retry reconcile" -- "${cur}") )
                 return 0
             fi
             if [[ "${cur}" == -* ]]; then

@@ -429,6 +429,13 @@ asks what happened. It also needs no resident exporter.
 gap, and never blocks the work. Under enforced egress, silence here would yield an empty collector
 that reads like a quiet system — the most misleading outcome an audit trail can have.
 
+## Where to send it
+
+This document is about how a record is exported. For somewhere to export TO — a collector and a UI
+this tool can create and manage as a third kind of container — see
+[`telemetry-stack.md`](telemetry-stack.md). Declaring an endpoint that nothing answers on is the
+silent case: export fails open, so the run passes and the trail is empty.
+
 ## Declaring an endpoint
 
 `settings.yaml`, at either config level, **project winning** — the tool's existing two-level

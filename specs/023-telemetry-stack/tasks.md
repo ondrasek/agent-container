@@ -26,7 +26,7 @@ and docs, which are genuinely separate.
 
 - [x] T001 Add named defaults as module constants in `bin/agent-container`: `STACK_IMAGE_DEFAULT`, `STACK_READY_TIMEOUT` (180), `STACK_RETENTION_DAYS`, `STACK_RETENTION_SIZE`, `STACK_UI_PORT_BASE`, `STACK_OTLP_HTTP_PORT_BASE`, `STACK_OTLP_GRPC_PORT_BASE`, each with a comment naming what it defaults and why (Constitution VIII)
 - [x] T002 Add `KIND_TELEMETRY_STACK` and the kind vocabulary alongside `ROLE_AGENT`/`ROLE_CONTROL_PLANE` in `bin/agent-container`, plus `STACK_CONTAINER_PREFIX` derived from the existing prefix so `panic` and inventory reach it by the same rule (FR-001, FR-003)
-- [ ] T003 [P] Record the environment-variable overrides for every T001 default in `docs/telemetry-stack.md` (new file, stub sections for now)
+- [x] T003 [P] Record the environment-variable overrides for every T001 default in `docs/telemetry-stack.md` (new file, stub sections for now)
 
 ---
 
@@ -63,7 +63,7 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 - [x] T015 [US1] Implement `stack_ingest_ready(endpoint)` in `bin/agent-container` probing readiness by POSTing an EMPTY OTLP payload and requiring HTTP 200 (research R2) — NOT the runtime healthcheck, which never fires under a rootless podman socket
 - [x] T016 [US1] Wire the staged readiness wait into `up` in `bin/agent-container`: bounded by `STACK_READY_TIMEOUT`, and on expiry reporting WHICH stage — pull, start, or ingest — it was waiting on (FR-006a, FR-006b)
 - [x] T017 [US1] Implement restart-if-stopped in `up` in `bin/agent-container`: running ⇒ report it; stopped ⇒ start it, keep its data, and say "restarted" not "created" (FR-007)
-- [ ] T017a [US1] DISCOVER the image's retention settings before applying them: read the variable/config names off `${STACK_IMAGE_DEFAULT}` and record them in `specs/023-telemetry-stack/research.md` under R3 — research R3 states these must be read rather than assumed, because a wrong name sets nothing and the stack then retains forever while looking configured
+- [x] T017a [US1] DISCOVER the image's retention settings before applying them: read the variable/config names off `${STACK_IMAGE_DEFAULT}` and record them in `specs/023-telemetry-stack/research.md` under R3 — research R3 states these must be read rather than assumed, because a wrong name sets nothing and the stack then retains forever while looking configured
 - [x] T018 [US1] Apply retention on deploy in `bin/agent-container` (window and ceiling, T001) and ASSERT THE EFFECTIVE VALUE BACK rather than trusting the setting took (FR-025b, research R3)
 - [x] T018a [US1] Handle unconfirmable retention in `bin/agent-container` (FR-025c): warn naming asked-for versus read-back, KEEP the stack, and report retention as `unconfirmed` thereafter rather than echoing the requested value
 - [x] T019 [US1] Print the resolved bind addresses and the container-facing `otlp_endpoint` at the end of `up` in `bin/agent-container` (FR-018b, FR-011)
@@ -71,7 +71,7 @@ afterwards and that the PRINTED endpoint is the one that accepted it.
 - [x] T019a [US1] Print the `egress.allow` entry needed to reach the collector alongside the endpoint in `bin/agent-container` (FR-011a) — an enforcing environment refuses the export and fails OPEN, leaving no error to detect afterwards
 - [x] T020 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` on a clean host, then POST a record to the PRINTED endpoint and assert 200 — the endpoint is tested verbatim, not merely "an endpoint" (SC-002, SC-003)
 - [x] T021 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: `up` twice ⇒ second reports the existing stack and creates nothing; stop the container out of band, `up` again ⇒ restarted with data intact (FR-007)
-- [ ] T021a [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: drive the stack past a retention bound (a tiny ceiling makes this fast) and assert the ingest STILL returns 200 afterwards — eviction is normal operation for a bounded store, not an error (FR-025a)
+- [x] T021a [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: drive the stack past a retention bound (a tiny ceiling makes this fast) and assert the ingest STILL returns 200 afterwards — eviction is normal operation for a bounded store, not an error (FR-025a)
 - [x] T022 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: readiness failure path — point at an image that starts but never opens an ingest, assert the message names the INGEST stage, not container start (FR-006b)
 
 **Checkpoint**: MVP. A stack exists and receives telemetry.
@@ -162,15 +162,15 @@ implicitly local, so without this phase the capability ships unverified.
 
 ## Phase 9: Polish & Cross-Cutting Concerns
 
-- [ ] T049 [P] Add the `telemetry stack` verbs and every flag to `completions/agent-container.bash`
-- [ ] T050 [P] Mirror the same verbs and flags in `completions/agent-container.zsh`
-- [ ] T051 [P] Extend `bin/tests/test_completions.sh` with parity checks for the new verbs
-- [ ] T052 [P] Add CLI surface tests in `bin/tests/test_cli.py`: group exists, `ls` reads and `remove` is spelled out, every short flag has a long form, `-v` works on each subcommand
-- [ ] T053 [P] Write `docs/telemetry-stack.md`: the third kind, the two endpoint forms, exposure levels and what each binds, retention, and the relationship to Feature 017
-- [ ] T054 [P] Add a pointer from `docs/observability.md` to the stack — 017 says how to export, this says where to
-- [ ] T055 Reconcile the 023 row in `docs/threat-model.md` from ⬜ to ✅, answering the three questions the expectation raised: what the default actually binds, whether the task-text consequence is stated at widening time, and whether an unauthenticated ingest as a WRITE surface is mitigated by anything other than exposure
-- [ ] T056 Add one line to `CLAUDE.md` under Decisions naming the third kind and the two-endpoint rule; prune first — the file has a 2000-token budget
-- [ ] T057 Run `scripts/quality-gate.sh` and the acceptance tier on BOTH runtimes, reading the exit code unpiped
+- [x] T049 [P] Add the `telemetry stack` verbs and every flag to `completions/agent-container.bash`
+- [x] T050 [P] Mirror the same verbs and flags in `completions/agent-container.zsh`
+- [x] T051 [P] Extend `bin/tests/test_completions.sh` with parity checks for the new verbs
+- [x] T052 [P] Add CLI surface tests in `bin/tests/test_cli.py`: group exists, `ls` reads and `remove` is spelled out, every short flag has a long form, `-v` works on each subcommand
+- [x] T053 [P] Write `docs/telemetry-stack.md`: the third kind, the two endpoint forms, exposure levels and what each binds, retention, and the relationship to Feature 017
+- [x] T054 [P] Add a pointer from `docs/observability.md` to the stack — 017 says how to export, this says where to
+- [x] T055 Reconcile the 023 row in `docs/threat-model.md` from ⬜ to ✅, answering the three questions the expectation raised: what the default actually binds, whether the task-text consequence is stated at widening time, and whether an unauthenticated ingest as a WRITE surface is mitigated by anything other than exposure
+- [x] T056 Add one line to `CLAUDE.md` under Decisions naming the third kind and the two-endpoint rule; prune first — the file has a 2000-token budget
+- [x] T057 Run `scripts/quality-gate.sh` and the acceptance tier on BOTH runtimes, reading the exit code unpiped
 
 ---
 

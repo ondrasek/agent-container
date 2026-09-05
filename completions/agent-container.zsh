@@ -266,9 +266,23 @@ _agent-container() {
                         '--json[Machine-readable envelope]' \
                         '*:container:__agent_container_names'
                     ;;
+                stack)
+                    # `telemetry stack <verb>` — the third container kind.
+                    _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
+                        '1:command:(up ls url dashboards remove)' \
+                        '--host[Host it runs on]:host:' \
+                        '--image[Stack image]:image:' \
+                        '--exposure[loopback | host | network]:exposure:(loopback host network)' \
+                        '--retention-days[Retention window]:days:' \
+                        '--retention-size[Retention ceiling]:size:' \
+                        '--set-endpoint[Write otlp_endpoint into settings.yaml]' \
+                        '--purge[Also discard collected telemetry]' \
+                        '(-y --yes)'{-y,--yes}'[Skip the confirmation]' \
+                        '--json[Machine-readable envelope]'
+                    ;;
                 telemetry)
                     _arguments '(-v --verbose)'{-v,--verbose}'[Verbose diagnostics on stderr]' \
-                        '1:command:(collect retry reconcile)' \
+                        '1:command:(stack collect retry reconcile)' \
                         '*--host[Host to act on]:host:' \
                         '*--name[Environment to act on]:container:__agent_container_names' \
                         '--since[Window lower bound]:since:' \

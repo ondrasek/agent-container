@@ -42,39 +42,39 @@ re-summarise them here.
 
 - **Egress enforcement is packet-level and says so.** Default-deny in a netns shared with the **egress
   sidecar**, which alone holds `NET_ADMIN`; squid **splices, never bumps**. A declaration governs
-  **all** egress; the strength claim is tested for **absence** of overclaim.
+  **all** egress.
 - **Both SSH identities are CAPTURED, never supplied — only public halves leave.** Host key pinned per
   deploy: **mismatch ⇒ refuse, never prompt**; absent ⇒ warn + ask (no tty ⇒ refuse) — a pin must
-  **predate** what it checks. The agent key sits at the **conventional** `~/.ssh/id_ed25519`, so
-  nothing wires it; the `~/.ssh/config` **block** is write-once. `--purge`/`ssh-key rotate` is the
-  revocation boundary. A first SSH clone-on-start can't clone — exit **3**, worded to forbid the
-  teardown it invites.
+  **predate** what it checks. The agent key sits at the **conventional** `~/.ssh/id_ed25519`; the
+  `~/.ssh/config` **block** is write-once. `--purge`/`ssh-key rotate` is the revocation boundary.
 - **The admit set is DECLARED; the region is REWRITTEN (020).** `authorized_keys` both levels, project
   **replaces** user; resolve+validate at the SURFACE. The container replaces a sentinel region each boot,
   preserving all outside it — a union can't revoke. Same idiom as `~/.ssh/config`, **opposite** rule;
   markers by **prefix**. No access the tool can't withdraw. **Projected AND observed**; stopped ⇒
   `undetermined`.
-- **The inventory remembers what we CREATED; `panic` acts on it.** Verifies by **observation**;
+- **The inventory remembers what we CREATED; `panic` acts on it** — by **observation**;
   **unreachable ⇒ `undetermined`, never `stopped`**; an **unverified destroy writes no outcome**.
 - **Observability is TWO LEGS, ONE PAYLOAD** (017). Local trail unconditional; export is `curl`,
-  **write-time**, **fail-open**, **zero** deps — protocol only, **never** a backend package.
-  `accepted` = *this endpoint accepted this record*, nothing more; **2xx is not acceptance**;
-  `rejected`≠`failed`. `task` exports by default, excluded **by name never pattern**, `run_id` always.
-  `collect` **names what it missed**; reconcile's window is the last **reconcile**.
+  **write-time**, **fail-open**, **zero** deps — protocol only, **never** a backend package. **2xx is
+  not acceptance**; `rejected`≠`failed`. `task` exports by default, excluded **by name never pattern**.
 - **A control plane is an ordinary environment holding a standing key** (017). Second image, **no
   agents** but it DOES need a runtime client. Passphrase in-container, printed **once**, **no
-  recovery**; the authorised key **is** the boundary, `revoke` the only narrowing. `panic` from inside
-  **excludes itself and says so**. Role **inheritable**, provenance **persisted**.
+  recovery**; the authorised key **is** the boundary. `panic` from inside **excludes itself**.
 - **Every substantive merge to `main` is a release.** python-semantic-release bumps from Conventional
   Commits (`feat`→minor, `fix`→patch, **breaking→minor pre-1.0**) — so a breaking change must SAY so in
   the body; the version won't.
+
+- **A telemetry stack is a THIRD KIND** (023) — its own group, not a role on `up`. No credentials,
+  no sshd; **exposure replaces them** (`host` default; `network` states it publishes an unauthed UI
+  showing **task text**). **TWO ADDRESSES** — operator's ≠ container's, per runtime; probe
+  **through the runtime**, never the operator's loopback. Readiness = an **accepted record**.
 
 ### Where the detail lives
 
 All under `docs/`, by feature: `layout.md` 011 · `orchestration.md` 001,002 · `credentials.md`
 003,008,019 · `execution.md` 004,010,019 · `shell-integration.md` 005,018 · `agent-as-code.md`
 006,008 · `agent-interface.md` 009 · `egress.md` 012 · `doctor.md` 013 · `inventory.md` 014 ·
-`observability.md` 016,017 · `control-plane.md` 017 · specs/007 (wizard) · `threat-model.md`
+`observability.md` 016,017 · `control-plane.md` 017 · `telemetry-stack.md` 023 · specs/007 (wizard) · `threat-model.md`
 (**reconcile every feature** — Constitution).
 
 ## Architecture — keep these layers separate
