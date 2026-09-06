@@ -8128,11 +8128,26 @@ def test_one_declared_endpoint_configures_every_emitter(acc):
             keys = {a["key"] for a in dps[0].get("attributes", [])}
             assert {"environment", "agent"} <= keys, f"{m['name']} lost its attributes: {keys}"
 
-    # pi's extension is linked from the globally-installed package: `pi install`
-    # would reach npm, which a boundary need not permit.
-    pi = _exec(name, ["sh", "-c",
-                      "readlink -f /home/dev/.pi/extensions/pi-opentelemetry || echo MISSING"])  # fmt: skip
-    assert "pi-opentelemetry" in pi.stdout and "MISSING" not in pi.stdout, pi.stdout
+    # PI READS ITS SETTINGS, NOT A DIRECTORY — and this assertion used to check
+    # the wrong one. It asserted a symlink at ~/.pi/extensions/pi-opentelemetry,
+    # which is precisely the mechanism the entrypoint ABANDONED: pi discovers
+    # extensions from `<agent dir>/settings.json` and ignored anything dropped
+    # into a directory, so the extension was present, configured, enabled, and
+    # emitted nothing. The old check therefore pinned the broken shape — it
+    # would have gone red on the fix and green on the bug.
+    #
+    # The agent dir moves when a provider key is injected as a credential
+    # (PI_CODING_AGENT_DIR is redirected off the volume), so both are accepted.
+    pi = _exec(name, ["sh", "-lc",
+                      'cat "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json" 2>/dev/null '
+                      '|| echo MISSING'])  # fmt: skip
+    assert "MISSING" not in pi.stdout, (
+        f"pi has no settings file, so nothing was registered: {pi.stdout}"
+    )
+    registered = json.loads(pi.stdout).get("packages") or []
+    assert any("pi-opentelemetry" in str(pkg) for pkg in registered), (
+        f"the pi telemetry extension is not registered where pi looks for it: {registered}"
+    )
 
 
 def test_no_declared_endpoint_configures_nothing(acc):
