@@ -2020,3 +2020,26 @@ def test_unparseable_retention_is_not_silently_treated_as_a_match(wiz):
         assert wiz._retention_hours(junk) is None
     for junk in ("", "lots", None):
         assert wiz._retention_bytes(junk) is None
+
+
+def test_the_stack_volume_carries_the_name_the_tool_computes(wiz):
+    """COMPOSE PREFIXES A DECLARED VOLUME WITH THE PROJECT unless the volume
+    names itself, which gave the stack's data volume a name this tool never
+    computes. `remove` then reported "retained on its volume (<computed>)" —
+    naming a volume that does not exist, so an operator following the message
+    found nothing to act on, and the purge fallback deleted nothing by that name.
+
+    Asserted on the compose model rather than on a live volume, because the
+    defect is in what is DECLARED.
+    """
+    model = wiz.build_stack_compose_model(
+        "obs", wiz.STACK_IMAGE_DEFAULT, wiz.stack_ports_for_name("obs"), ["127.0.0.1"],
+        wiz.STACK_RETENTION_DAYS, wiz.STACK_RETENTION_SIZE,
+    )  # fmt: skip
+    declared = wiz.stack_volume_name("obs")
+    assert model["volumes"][declared].get("name") == declared, (
+        "the volume must name itself, or compose prefixes it and the tool's own "
+        f"name becomes wrong: {model['volumes']}"
+    )
+    # And the service must mount the same one it declares.
+    assert any(v.startswith(f"{declared}:") for v in model["services"]["stack"]["volumes"])

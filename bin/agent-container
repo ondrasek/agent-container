@@ -6149,7 +6149,13 @@ def build_stack_compose_model(
                 },
             }
         },
-        "volumes": {stack_volume_name(name): {}},
+        # NAMED EXPLICITLY so `stack_volume_name` is the TRUTH and not a guess.
+        # Compose otherwise prefixes a declared volume with the project, giving
+        # the volume a name this tool never computes — so `remove` printed
+        # "retained on its volume (agent-container-stack-x-data)" naming a
+        # volume that does not exist, and an operator following that message
+        # found nothing to act on. Observed on a real leftover volume.
+        "volumes": {stack_volume_name(name): {"name": stack_volume_name(name)}},
     }
 
 
@@ -20106,15 +20112,30 @@ def stack_remove(
     project = f"{STACK_CONTAINER_PREFIX}{name}"
     compose_path = compose_file_path(host_name, f"stack-{name}")
     args = ["down"] + (["-v"] if purge else [])
+    discarded = purge
     if compose_path.is_file():
         run_child(driver_compose_argv(host_rec, project, compose_path, *args))
     else:
+        # NO COMPOSE FILE, so there is no `down -v` to do the volume with it.
+        # This branch used to remove only the container and then report the data
+        # as DISCARDED — a claim about deletion that no deletion backed. The
+        # volume is removed here explicitly, and if that fails the report says
+        # so rather than asserting an outcome nobody verified.
         run_child(driver_runtime_argv(host_rec) + ["rm", "-f", cname])
+        if purge:
+            r = query(driver_runtime_argv(host_rec) + ["volume", "rm", stack_volume_name(name)])
+            discarded = r.returncode == 0
     log(f"removed telemetry stack '{name}' from {host_name}")
-    log(
-        f"collected telemetry {'DISCARDED' if purge else 'retained on its volume'}"
-        + ("" if purge else f" ({stack_volume_name(name)}) — use --purge to discard it")
-    )
+    if purge and not discarded:
+        log(
+            f"WARNING: could not delete {stack_volume_name(name)} — the collected telemetry "
+            f"is STILL ON DISK. Remove it by hand, or treat this stack's data as retained."
+        )
+    else:
+        log(
+            f"collected telemetry {'DISCARDED' if purge else 'retained on its volume'}"
+            + ("" if purge else f" ({stack_volume_name(name)}) — use --purge to discard it")
+        )
     # SAID OUT LOUD, because the consequence is otherwise invisible: export
     # fails open, so anything still pointed here stops being recorded WITHOUT
     # an error appearing anywhere.
