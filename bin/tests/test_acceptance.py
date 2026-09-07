@@ -7299,34 +7299,89 @@ def test_a_REAL_agent_reaches_its_api_THROUGH_the_egress_boundary(acc, profile):
     _assert_pipeline_on_github(f"egress-{profile['agent']}", token, branch, pat, combined)
 
 
+_GH_API = "https://api.github.com/repos/ondrasek/agent-container-test-repository"
+
+
+def _github_api(path_qs: str, pat: str, *, budget: float = 45.0) -> tuple[int, str]:
+    """(status, body) from the test repository's API, RETRIED while it is unusable.
+
+    ABSENCE AND UNREACHABILITY ARE DIFFERENT ANSWERS, and conflating them made
+    these tests accuse the agent of work it had actually done. Both readers
+    below used to swallow every failure into "empty" — a rate-limit reply, a
+    transient 5xx, or the brief lag between a push landing and the API serving
+    it all became "nothing was pushed", which is the one message that sends a
+    reader to debug the agent instead of the forge.
+
+    Retried only on statuses that mean "ask again". A 404 is returned
+    immediately: the forge answered, and the answer was no.
+    """
+    deadline = time.monotonic() + budget
+    status, body = 0, ""
+    while True:
+        r = subprocess.run(
+            ["curl", "-s", "-w", "\n%{http_code}", "-H", f"Authorization: Bearer {pat}",
+             "-H", "Accept: application/vnd.github+json", f"{_GH_API}/{path_qs}"],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        body, _, tail = r.stdout.rpartition("\n")
+        status = int(tail.strip()) if tail.strip().isdigit() else 0
+        if status == 200 or status == 404:
+            return status, body
+        if time.monotonic() >= deadline:
+            return status, body
+        time.sleep(5)
+
+
 def _github_file(path: str, ref: str, pat: str) -> str | None:
-    """A file's CONTENT from GitHub, or None. Read from the forge, not the container."""
-    r = subprocess.run(
-        ["curl", "-s", "-H", f"Authorization: Bearer {pat}",
-         "-H", "Accept: application/vnd.github+json",
-         f"https://api.github.com/repos/ondrasek/agent-container-test-repository/"
-         f"contents/{path}?ref={ref}"],
-        capture_output=True, text=True, timeout=120,
-    )  # fmt: skip
-    try:
-        d = json.loads(r.stdout)
-        return base64.b64decode(d["content"]).decode()
-    except Exception:
+    """A file's CONTENT from GitHub, or None. Read from the forge, not the container.
+
+    None means the FORGE SAID NO. An API we could not read raises instead, so
+    the failure names the forge rather than implying the agent wrote nothing.
+    """
+    status, body = _github_api(f"contents/{path}?ref={ref}", pat)
+    if status == 404:
         return None
-
-
-def _github_commits(branch: str, pat: str) -> list[str]:
-    """Commit messages on `branch`, newest first."""
-    r = subprocess.run(
-        ["curl", "-s", "-H", f"Authorization: Bearer {pat}",
-         f"https://api.github.com/repos/ondrasek/agent-container-test-repository/"
-         f"commits?sha={branch}&per_page=20"],
-        capture_output=True, text=True, timeout=120,
-    )  # fmt: skip
+    assert status == 200, (
+        f"could not read {path}@{ref} from GitHub (HTTP {status}) — this is the FORGE "
+        f"failing, not the agent:\n{body[:400]}"
+    )
     try:
-        return [c["commit"]["message"] for c in json.loads(r.stdout)]
-    except Exception:
-        return []
+        return base64.b64decode(json.loads(body)["content"]).decode()
+    except (ValueError, KeyError, TypeError) as e:
+        raise AssertionError(
+            f"GitHub answered 200 for {path}@{ref} with a body this test cannot read "
+            f"({e}):\n{body[:400]}"
+        ) from e
+
+
+def _github_commits(branch: str, pat: str, *, expect: int = 0) -> list[str]:
+    """Commit messages on `branch`, newest first.
+
+    `expect` is how many are needed; while fewer are visible the read is
+    retried, because a push is not instantly served by the API and the previous
+    version reported that lag as "nothing was pushed". An empty list therefore
+    means the branch is genuinely absent, not that we looked too early.
+    """
+    deadline = time.monotonic() + 45.0
+    while True:
+        status, body = _github_api(f"commits?sha={branch}&per_page=20", pat)
+        if status == 404:
+            msgs: list[str] = []
+        else:
+            assert status == 200, (
+                f"could not read commits on {branch} from GitHub (HTTP {status}) — the FORGE "
+                f"failed, which is not evidence about the agent:\n{body[:400]}"
+            )
+            try:
+                msgs = [c["commit"]["message"] for c in json.loads(body)]
+            except (ValueError, KeyError, TypeError) as e:
+                raise AssertionError(
+                    f"GitHub answered 200 for commits on {branch} with an unreadable "
+                    f"body ({e}):\n{body[:400]}"
+                ) from e
+        if len(msgs) >= expect or time.monotonic() >= deadline:
+            return msgs
+        time.sleep(5)
 
 
 def _pipeline_task(agent: str, token: str, branch: str) -> str:
@@ -7366,7 +7421,7 @@ def _assert_pipeline_on_github(agent: str, token: str, branch: str, pat: str, ct
     processed the data from one that wrote a plausible-looking file.
     """
     d = f"data/{agent}-{token}"
-    msgs = _github_commits(branch, pat)
+    msgs = _github_commits(branch, pat, expect=3)
     assert msgs, f"branch {branch} is not on GitHub — nothing was pushed:\n{ctx[-1500:]}"
     mine = [m for m in msgs if token in m]
     assert len(mine) >= 3, (
@@ -7580,7 +7635,7 @@ def _run_in_throwaway(
 
 def _assert_avl_on_github(agent: str, token: str, branch: str, pat: str, ctx: str) -> None:
     d = f"avl/{agent}-{token}"
-    msgs = _github_commits(branch, pat)
+    msgs = _github_commits(branch, pat, expect=3)
     assert msgs, f"branch {branch} is not on GitHub — nothing was pushed:\n{ctx[-1500:]}"
     mine = [m for m in msgs if token in m]
     assert len(mine) >= 3, f"expected three commits on {branch}, found {len(mine)}: {mine}"
