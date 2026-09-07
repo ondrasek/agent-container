@@ -19308,6 +19308,106 @@ def stack_ready_probe_in_container(host_rec: dict, cname: str, port: int) -> boo
     return r.returncode == 0 and r.stdout.strip() == "200"
 
 
+STACK_STORED = "stored"
+STACK_ACCEPTED_NOT_STORED = "accepted-not-stored"
+STACK_NOT_ACCEPTING = "not-accepting"
+# A NAMESPACE OF ITS OWN so the probe's own records never appear in the
+# dashboards, which select on `agent-container`. A health check that pollutes
+# what it checks is a health check nobody leaves switched on.
+STACK_PROBE_NAMESPACE = "agent-container-probe"
+STACK_LOKI_PORT = 3100
+
+
+def stack_storage_probe(host_rec: dict, cname: str, port: int, settle: int = 8) -> str:
+    """Does a record SURVIVE, not merely get accepted?
+
+    THE 200 IS NOT THE ANSWER, AND BELIEVING IT WAS COST A WHOLE DEBUGGING
+    SESSION. Measured on a host whose disk reached 97%: Loki's ingester had
+    entered shutdown, `/ready` still answered 200, the OTLP endpoint still
+    answered 200 to every POST, and `ls` still printed `ingest: yes` — while
+    every record was discarded. The collector's own counters told the true
+    story (51 accepted, an exporter queue climbing, nothing sent).
+
+    That failure is INDISTINGUISHABLE from an unreachable endpoint, which is
+    the bug this whole feature exists to catch: export fails open, so both look
+    like a green run and an empty stack. The empty-payload probe cannot tell
+    them apart, because an empty payload is accepted by a receiver that stores
+    nothing — it creates no data, which is exactly why it is safe to repeat and
+    exactly why it proves too little.
+
+    So: post a REAL record carrying a unique marker, then ask the store whether
+    it can find it. Three answers, because there are three states worth
+    distinguishing and a boolean can only carry two.
+    """
+    marker = f"acprobe-{secrets.token_hex(6)}"
+    payload = json.dumps({
+        "resourceLogs": [{
+            "resource": {"attributes": [
+                {"key": "service.namespace", "value": {"stringValue": STACK_PROBE_NAMESPACE}},
+                {"key": "service.name", "value": {"stringValue": "health"}},
+            ]},
+            "scopeLogs": [{"logRecords": [{
+                "timeUnixNano": str(time.time_ns()),
+                "body": {"stringValue": marker},
+            }]}],
+        }]
+    })  # fmt: skip
+    post = query(
+        driver_runtime_argv(host_rec)
+        + [
+            "exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+            "-m", "5", "-X", "POST", f"http://localhost:{port}/v1/logs",
+            "-H", "Content-Type: application/json", "--data-binary", payload,
+        ]
+    )  # fmt: skip
+    if post.returncode != 0 or post.stdout.strip() != "200":
+        return STACK_NOT_ACCEPTING
+    # THE STREAM SELECTOR COMES FIRST (research R5): the marker is matched by a
+    # line filter, never inside the selector, because a resource attribute
+    # arrives as structured metadata and a selector over one matches nothing.
+    q = f'{{service_namespace="{STACK_PROBE_NAMESPACE}"}} |= `{marker}`'
+    deadline = time.monotonic() + settle
+    while time.monotonic() < deadline:
+        r = query(
+            driver_runtime_argv(host_rec)
+            + [
+                "exec", cname, "curl", "-sG", "-m", "5",
+                f"http://localhost:{STACK_LOKI_PORT}/loki/api/v1/query_range",
+                "--data-urlencode", f"query={q}", "--data-urlencode", "limit=1",
+            ]
+        )  # fmt: skip
+        if r.returncode == 0:
+            with contextlib.suppress(ValueError, KeyError, TypeError):
+                if json.loads(r.stdout)["data"]["result"]:
+                    return STACK_STORED
+        time.sleep(1)
+    return STACK_ACCEPTED_NOT_STORED
+
+
+def stack_storage_warning(name: str, verdict: str) -> None:
+    """Say what a non-`stored` verdict MEANS, since nothing else will.
+
+    Export fails open: an environment pointed at a stack in this state records
+    nothing and reports success. No run, no record and no log anywhere carries
+    the fact, so if this line does not say it, the operator learns it by
+    finding an empty dashboard days later.
+    """
+    if verdict == STACK_STORED:
+        return
+    if verdict == STACK_ACCEPTED_NOT_STORED:
+        log(
+            f"WARNING: '{name}' ACCEPTS records and does not STORE them — a probe record was "
+            f"answered 200 and could not be read back. Its store is refusing writes; a full "
+            f"disk does exactly this, and its OTLP endpoint answers 200 throughout. Anything "
+            f"exporting here loses telemetry SILENTLY, because export fails open."
+        )
+    else:
+        log(
+            f"WARNING: '{name}' is not accepting records. Anything exporting here loses "
+            f"telemetry silently — export fails open, so no run will report it."
+        )
+
+
 def stack_ready_probe(endpoint: str, timeout: int = 5) -> bool:
     """Has the OTLP ingest ACCEPTED a record?
 
@@ -19735,6 +19835,12 @@ def stack_up(
         # why a run has vanished is asking about a stack that is already running,
         # which is exactly the path that used to stay silent.
         stack_apply_retention_report(name, host_rec, retention_days, retention_size)
+        # AND STORAGE HEALTH, for the same reason and on the same path. This is
+        # the branch an operator hits when asking "why is my telemetry missing"
+        # about a stack that is up — and a stack that ACCEPTS without STORING
+        # answers 200 to everything, so without this the command that was run
+        # to diagnose the problem would have confirmed the stack was fine.
+        stack_storage_warning(name, stack_storage_probe(host_rec, cname, 4318))
         stack_report_endpoint(
             name, ports, binds, driver, host_rec, addressing["container"], addressing["how"]
         )
@@ -19763,7 +19869,25 @@ def stack_up(
     budget = int(os.environ.get("AGENT_CONTAINER_STACK_READY_TIMEOUT", STACK_READY_TIMEOUT))
     log(f"waiting up to {budget}s for the ingest to ACCEPT a record (liveness is not readiness)")
     stack_wait_ready(4318, budget, cname, host_rec)
-    log(f"telemetry stack '{name}' is {'restarted' if restarted else 'up'} and accepting records")
+    # READINESS SAYS THE RECEIVER IS WIRED; THIS SAYS RECORDS SURVIVE. Two
+    # different claims, and only the second is what an operator is about to
+    # rely on. The wait loop keeps its empty payload because it repeats every
+    # second and must create no data; this runs ONCE, with a real record, and
+    # is the only thing that can distinguish a working stack from one whose
+    # store is refusing writes while answering 200.
+    verdict = stack_storage_probe(host_rec, cname, 4318)
+    if verdict == STACK_STORED:
+        log(
+            f"telemetry stack '{name}' is {'restarted' if restarted else 'up'}; "
+            f"a probe record was written AND READ BACK"
+        )
+    else:
+        log(f"telemetry stack '{name}' is {'restarted' if restarted else 'up'} and answering")
+        stack_storage_warning(name, verdict)
+        # NOT FATAL, and that is a decision rather than an omission: the stack
+        # exists, its UI serves, and its store may recover once whatever is
+        # refusing writes is fixed. Killing the deploy would delete the one
+        # thing an operator can now inspect. What must not happen is silence.
 
     stack_apply_retention_report(name, host_rec, retention_days, retention_size)
     stack_report_endpoint(
@@ -20065,7 +20189,15 @@ def stack_ls(
             state = "running" if cn in live else "stopped"
             answering = "-"
             if state == "running":
-                answering = "yes" if stack_ready_probe_in_container(host_rec, cn, 4318) else "NO"
+                # ACCEPTED IS NOT STORED. `yes` used to mean "the endpoint
+                # answered 200", which a stack whose store is refusing writes
+                # does all day — so a listing reported a healthy ingest while
+                # every record was discarded (measured on a full disk).
+                answering = {
+                    STACK_STORED: "yes",
+                    STACK_ACCEPTED_NOT_STORED: "DEGRADED",
+                    STACK_NOT_ACCEPTING: "NO",
+                }[stack_storage_probe(host_rec, cn, 4318, settle=4)]
             rows.append({
                 "name": sname, "host": resolved_name, "state": state,
                 "ui": stack_operator_url("localhost", ports["ui"]),
@@ -20080,9 +20212,17 @@ def stack_ls(
     if not rows:
         log("no telemetry stacks")
         return
-    log(f"{'NAME':<14}{'HOST':<14}{'STATE':<14}{'INGEST':<8}UI")
+    log(f"{'NAME':<14}{'HOST':<14}{'STATE':<14}{'INGEST':<10}UI")
     for r in rows:
-        log(f"{r['name']:<14}{r['host']:<14}{r['state']:<14}{r['ingest']:<8}{r['ui']}")
+        log(f"{r['name']:<14}{r['host']:<14}{r['state']:<14}{r['ingest']:<10}{r['ui']}")
+    # A COLUMN IS NOT AN EXPLANATION. `DEGRADED` in a table is easy to read as
+    # cosmetic; what it means is that anything exporting there is losing
+    # telemetry with no error anywhere, so it is spelled out.
+    for r in rows:
+        if r["ingest"] == "DEGRADED":
+            stack_storage_warning(r["name"], STACK_ACCEPTED_NOT_STORED)
+        elif r["ingest"] == "NO":
+            stack_storage_warning(r["name"], STACK_NOT_ACCEPTING)
 
 
 @stack_app.command("remove")

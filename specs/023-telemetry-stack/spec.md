@@ -189,6 +189,10 @@ inventory says so.
   afterwards, because there is nothing to detect — the failure leaves no trace.
 - **The host cannot pull the image** (no route, or an egress policy denies the registry). Fail with
   the pull named as the cause.
+- **Store refuses writes while the endpoint still answers.** A full disk does exactly this, and it
+  is indistinguishable from an unreachable collector: both yield a green run and an empty stack
+  (FR-026). Detected by writing a record and reading it back, reported as degraded with the
+  consequence stated, and not treated as a failed deploy (FR-026a, FR-026c).
 - **Disk fills under retained data.** Bounded by both a time window and a size ceiling (FR-025);
   reaching either evicts oldest-first and MUST NOT stop the stack accepting new records.
 - **Retention cannot be read back.** The stack is kept and the operator is warned that the store
@@ -310,6 +314,21 @@ inventory says so.
   reached first, each a NAMED default and each overridable. Neither alone is sufficient: a time
   window says how far back an operator can look but lets a busy fleet fill a disk, and a size
   ceiling protects the host but makes "how far back" unanswerable and load-dependent.
+- **FR-026**: Ingest health MUST distinguish ACCEPTED from STORED. A stack whose store is refusing
+  writes answers every OTLP request with success, so a check that reads only the response code
+  reports such a stack as healthy while every record is discarded. `up` and `ls` MUST therefore
+  determine health by writing a record and reading it back, and MUST report three states —
+  storing, accepting-but-not-storing, and not-accepting — because a boolean cannot carry the middle
+  one and the middle one is the dangerous one.
+- **FR-026a**: A stack that accepts without storing MUST be reported with its CONSEQUENCE stated:
+  anything exporting to it loses telemetry silently, since export fails open and no run, record or
+  log carries the fact. A state name alone reads as cosmetic.
+- **FR-026b**: The health probe MUST NOT pollute what it measures — its own records MUST be
+  distinguishable from agent telemetry and MUST NOT appear in the tool's dashboards. A check that
+  contaminates the data is a check an operator switches off.
+- **FR-026c**: Accepting-but-not-storing MUST NOT fail a deploy. The stack exists, its UI serves,
+  and its store may recover once whatever refuses writes is fixed; removing the one artefact an
+  operator can inspect helps nobody. What MUST NOT happen is silence.
 - **FR-025a**: When retention discards data the stack MUST remain usable — eviction is normal
   operation for a bounded store, not an error, and MUST NOT stop the ingest accepting new records.
 - **FR-025b**: The effective retention MUST be reportable, so an operator asking why a run has
@@ -341,8 +360,11 @@ inventory says so.
 - **SC-001**: An operator with no observability backend can go from nothing to telemetry visible in
   a UI with a single command plus one configuration line — or a single command alone when the
   endpoint is written on request — in under five minutes on a first run including image download.
-- **SC-002**: A stack reported as up accepts a telemetry record 100% of the time, measured by
-  sending one immediately after the command returns.
+- **SC-002**: A stack reported as up STORES a telemetry record 100% of the time, measured by
+  sending one immediately after the command returns and reading it back out of the store. Accepting
+  it is not sufficient: a stack whose store refuses writes accepts everything and keeps nothing.
+- **SC-002a**: A stack that accepts records and discards them is reported as degraded, not as
+  healthy — verified by breaking the store while the endpoint still answers success.
 - **SC-003**: The endpoint value the tool prints works verbatim: an environment configured with it,
   and no other change, produces records visible in the stack.
 - **SC-004**: A freshly created stack answers "what did this run do" for an existing run without the

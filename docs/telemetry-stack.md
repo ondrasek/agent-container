@@ -48,6 +48,29 @@ Deriving this from the driver name instead was a real defect: under **rootless d
 gateway can neither be bound (published ports live in the host namespace, where that address does
 not exist) nor reached from a container. **Paste the `otlp_endpoint` line, not the UI line.**
 
+## Ingest health: accepted is not stored
+
+`INGEST` has three values, because there are three states and the middle one is the dangerous one.
+
+| Value | Meaning |
+|---|---|
+| `yes` | a probe record was written **and read back out of the store** |
+| `DEGRADED` | the endpoint answers success and the record **cannot be read back** |
+| `NO` | the endpoint is not accepting |
+
+`DEGRADED` is the state worth understanding. A store that is refusing writes — a **full disk** does
+exactly this — answers every OTLP request with success, so a check that reads only the response code
+calls it healthy. Measured: at 97% disk, Loki's ingester had shut down, `/ready` returned 200, the
+OTLP endpoint returned 200 for every record, and every record was discarded.
+
+That is **indistinguishable from an unreachable collector**, which is the failure this whole feature
+exists to prevent: export fails open, so both produce a green run and an empty stack, and nothing in
+the run, the record or the log says so. Hence a real record and a read-back rather than a status
+code. The probe writes into its own service namespace, so it never shows up in the dashboards.
+
+Degraded does **not** fail a deploy — the stack exists, its UI serves, and the store may recover
+once whatever is refusing writes is fixed. It is reported loudly instead.
+
 ## Exposure
 
 Chosen from named levels; the tool reports the addresses each one **resolved to**, because a level
@@ -72,8 +95,8 @@ anyone who can reach it.
 
 | Command | Notes |
 |---|---|
-| `telemetry stack up NAME` | Creates, or starts a stopped one keeping its data. Reports success only once the ingest **accepted a record** — container liveness is not readiness. |
-| `telemetry stack ls` | `running` / `stopped` / `undetermined`. An unreachable host is never reported as stopped. |
+| `telemetry stack up NAME` | Creates, or starts a stopped one keeping its data. Reports success only once a probe record has been **written and read back** — container liveness is not readiness, and acceptance is not storage. |
+| `telemetry stack ls` | `running` / `stopped` / `undetermined`. An unreachable host is never reported as stopped. The INGEST column is `yes` / `DEGRADED` / `NO` — see below. |
 | `telemetry stack url NAME` | Both addresses, plus the tunnel command when the UI is not reachable from here. |
 | `telemetry stack dashboards NAME` | Re-installs the tool's dashboards without redeploying or discarding data. |
 | `telemetry stack remove NAME` | Retains collected telemetry unless `--purge`. Says that anything still exporting now fails open. |

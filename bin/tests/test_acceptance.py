@@ -8400,3 +8400,64 @@ def test_eviction_does_not_stop_the_ingest(acc):
         )
     finally:
         _stack_teardown(acc, name)
+
+
+def test_a_stack_that_accepts_without_storing_is_reported_as_degraded(acc):
+    """THE FALSE GREEN THIS PROBE EXISTS TO KILL.
+
+    Measured on a host whose disk reached 97%: Loki's ingester had entered
+    shutdown, `/ready` answered 200, the OTLP endpoint answered 200 to every
+    POST, and `ls` printed `ingest: yes` — while every record was discarded.
+    That state is INDISTINGUISHABLE from an unreachable endpoint, which is the
+    bug this whole feature exists to catch, and export fails open so neither
+    produces an error anywhere.
+
+    The empty-payload readiness probe cannot see it: an empty payload is
+    accepted by a receiver that stores nothing. So the store is broken here on
+    purpose, and what is asserted is that the tool CHANGES ITS ANSWER — a probe
+    that reports the same thing in both states is the defect, not the fix.
+    """
+    name = "accstkd"
+    cname = f"agent-container-stack-{name}"
+    try:
+        _stack_up(acc, name)
+        healthy = acc.cli(["telemetry", "stack", "ls"], timeout=300)
+        # stdout+stderr: the tool logs to stderr, and asserting on stdout alone
+        # made this fail against a stack that was reporting correctly.
+        healthy_out = healthy.stdout + healthy.stderr
+        assert "yes" in healthy_out, f"a working stack must read as storing:\n{healthy_out}"
+
+        # Kill the log store, leaving the OTLP receiver up. /proc rather than
+        # pkill: the image has no procps.
+        subprocess.run(
+            [RUNTIME, "exec", cname, "sh", "-c",
+             'for d in /proc/[0-9]*; do grep -qa loki "$d/cmdline" 2>/dev/null && '
+             'kill -9 "$(basename $d)" 2>/dev/null; done; exit 0'],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        time.sleep(3)
+
+        # THE PRECONDITION THAT MAKES THIS TEST MEAN ANYTHING. If the endpoint
+        # stopped answering, the old boolean probe would have caught it too and
+        # this proves nothing new.
+        still = subprocess.run(
+            [RUNTIME, "exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "-m", "10", "-X", "POST", "http://localhost:4318/v1/logs",
+             "-H", "Content-Type: application/json", "--data-binary", '{"resourceLogs":[]}'],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        assert still.stdout.strip() == "200", (
+            f"the endpoint stopped answering, so this no longer tests the SILENT case "
+            f"(got {still.stdout.strip()!r})"
+        )
+
+        degraded = acc.cli(["telemetry", "stack", "ls"], timeout=300)
+        out = degraded.stdout + degraded.stderr
+        assert "DEGRADED" in out, (
+            f"a stack that accepts and discards is still reported as healthy:\n{out[-1200:]}"
+        )
+        # And the column is explained, because DEGRADED in a table reads as
+        # cosmetic while what it means is silent telemetry loss.
+        assert "does not STORE" in out, f"the state is reported but not explained:\n{out[-1200:]}"
+    finally:
+        _stack_teardown(acc, name)
