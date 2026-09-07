@@ -2,6 +2,79 @@
 
 <!-- version list -->
 
+## v0.55.0 (2026-09-06)
+
+### Bug Fixes
+
+- **telemetry**: Codex and pi session export now actually fires
+  ([`15650e7`](https://github.com/ondrasek/agent-container/commit/15650e75ee0e6a27c54878ae84b24259a151249a))
+
+- **telemetry-stack**: Name the data volume, and stop claiming an unbacked discard
+  ([`87e015f`](https://github.com/ondrasek/agent-container/commit/87e015f1e5a75b9d157f17c904dd2a6115558af0))
+
+- **telemetry-stack**: Observe the host address; compare retention by value
+  ([`51a89e5`](https://github.com/ondrasek/agent-container/commit/51a89e50dcaf1242bb9b0bbe73b29f190ae48271))
+
+- **telemetry-stack**: Remote hosts, where three things were wrong
+  ([`ee6e270`](https://github.com/ondrasek/agent-container/commit/ee6e27021a9a6e7c8c8e8142f5ee27c9b995e906))
+
+### Chores
+
+- Sync uv.lock to the released version
+  ([`c6808ee`](https://github.com/ondrasek/agent-container/commit/c6808ee3870a2d8992a612871f07cfd5c9a25c3c))
+
+### Documentation
+
+- **023**: Clarify namespace, restart, exposure, readiness and retention
+  ([`197f911`](https://github.com/ondrasek/agent-container/commit/197f9112605fb164e9001809ea6f697f130ce83b))
+
+- **023**: Close the analyze findings before implementing
+  ([`1e168a2`](https://github.com/ondrasek/agent-container/commit/1e168a22bd99aed04cde89c44346096d663f7da1))
+
+- **023**: Decompose the telemetry stack into 57 tasks
+  ([`ea8aae1`](https://github.com/ondrasek/agent-container/commit/ea8aae175e0d546c24fa5826e6167e9253cce9c6))
+
+- **023**: Plan the telemetry stack container
+  ([`ba24413`](https://github.com/ondrasek/agent-container/commit/ba24413f676394932c62d081372d6aceabbf51d7))
+
+- **023**: Second clarify pass — egress, retention, and writing config
+  ([`c3bb76e`](https://github.com/ondrasek/agent-container/commit/c3bb76eb7611c01aaba0a5a7f27be1cb47926d44))
+
+- **023**: Specify the telemetry stack container
+  ([`67bf64e`](https://github.com/ondrasek/agent-container/commit/67bf64e25f4cc3e539b223813152b53b16c6f40b))
+
+### Features
+
+- **telemetry**: Ship codex/pi session transcripts (UNVERIFIED end-to-end)
+  ([`d4d1a94`](https://github.com/ondrasek/agent-container/commit/d4d1a949550876662d81f65fbc0115f37227cec0))
+
+- **telemetry-stack**: `up` — readiness, restart, retention, both addresses
+  ([`9ef4dc9`](https://github.com/ondrasek/agent-container/commit/9ef4dc963624501a54f40f9604d86a027d86b8b1))
+
+- **telemetry-stack**: Naming, ports and the compose model
+  ([`aa4848d`](https://github.com/ondrasek/agent-container/commit/aa4848d935a58427e93cd28aededa27f341a81e1))
+
+- **telemetry-stack**: Polish, and a retention claim that was false
+  ([`cef6db5`](https://github.com/ondrasek/agent-container/commit/cef6db5726969d61bc0bd6e3f00a6fae8e7ff48e))
+
+- **telemetry-stack**: Real-agent validation passes, and panic can see stacks
+  ([`61e120c`](https://github.com/ondrasek/agent-container/commit/61e120c23b5a36e630053e252d544fb6941a8cd3))
+
+- **telemetry-stack**: The dashboards, and a second readiness question
+  ([`90f7f1e`](https://github.com/ondrasek/agent-container/commit/90f7f1eee3845617021b3a8aadb4b51a72193b3d))
+
+- **telemetry-stack**: The kind, its named defaults, and the two addresses
+  ([`19f74cf`](https://github.com/ondrasek/agent-container/commit/19f74cfaa80077891e5acd12752e2c2190e32d9c))
+
+- **telemetry-stack**: Url, ls, remove, dashboards
+  ([`ecf9824`](https://github.com/ondrasek/agent-container/commit/ecf98240dc3c94f6ff4c545abe3cd8b2345081be))
+
+### Testing
+
+- **telemetry**: Assert the pi extension where pi actually looks for it
+  ([`49c0331`](https://github.com/ondrasek/agent-container/commit/49c03312b0d44f61667f2282ecada466de3a9efc))
+
+
 ## v0.54.0 (2026-09-04)
 
 ### Bug Fixes
