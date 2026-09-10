@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.56.0 (2026-09-10)
+
+### Testing
+
+- **forge**: Tell "the forge said no" apart from "we could not ask"
+  ([`58e9b81`](https://github.com/ondrasek/agent-container/commit/58e9b81d38d45eca2eb580b749fb5ecfcf793148))
+
+- **telemetry-stack**: Break the store deterministically, and prove it broke
+  ([`b0e46ad`](https://github.com/ondrasek/agent-container/commit/b0e46ad3dc89bae3c3c28679641bcc4c93657f9d))
+
+
 ## v0.55.0 (2026-09-06)
 
 ### Bug Fixes
