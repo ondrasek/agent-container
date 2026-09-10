@@ -8484,12 +8484,34 @@ def test_a_stack_that_accepts_without_storing_is_reported_as_degraded(acc):
 
         # Kill the log store, leaving the OTLP receiver up. /proc rather than
         # pkill: the image has no procps.
-        subprocess.run(
+        #
+        # THE PATTERN IS BRACKETED AND THE PATH IS FULL, and both halves of
+        # that were paid for. A bare `loki` matches THE SCANNING SHELL'S OWN
+        # cmdline, so the loop SIGKILLED ITSELF (exit 137) partway through, and
+        # whether it reached the store before doing so depended on the order of
+        # `/proc/[0-9]*` — which is STRING order, not numeric: a store at pid
+        # 11 dies first when the shell is pid 342, and is never reached when
+        # the shell is pid 1053, because "1053" sorts before "11". So the break
+        # took on docker and silently missed on podman, and the test then
+        # blamed the tool for the state its own setup had failed to create.
+        # A bare `loki` also matches grafana's `gpx_grafana-loki-datasource`
+        # plugin, which grafana RESPAWNS — noise in a step that must break
+        # exactly one thing. `lok[i]/loki` matches the store's argv and matches
+        # nothing that carries the pattern itself, so the scan cannot kill its
+        # own shell; collecting first and killing after removes the ordering
+        # question outright.
+        broke = subprocess.run(
             [RUNTIME, "exec", cname, "sh", "-c",
-             'for d in /proc/[0-9]*; do grep -qa loki "$d/cmdline" 2>/dev/null && '
-             'kill -9 "$(basename $d)" 2>/dev/null; done; exit 0'],
+             'pids=""; for d in /proc/[0-9]*; do grep -qa "lok[i]/loki" "$d/cmdline" '
+             '2>/dev/null && pids="$pids $(basename $d)"; done; printf %s "$pids"; '
+             '[ -n "$pids" ] && kill -9 $pids 2>/dev/null; exit 0'],
             capture_output=True, text=True, timeout=120,
         )  # fmt: skip
+        assert broke.returncode == 0 and broke.stdout.strip(), (
+            f"the store was never found, so nothing below tests anything "
+            f"(rc={broke.returncode}, matched={broke.stdout.strip()!r}, "
+            f"stderr={broke.stderr.strip()!r})"
+        )
         time.sleep(3)
 
         # THE PRECONDITION THAT MAKES THIS TEST MEAN ANYTHING. If the endpoint
@@ -8504,6 +8526,23 @@ def test_a_stack_that_accepts_without_storing_is_reported_as_degraded(acc):
         assert still.stdout.strip() == "200", (
             f"the endpoint stopped answering, so this no longer tests the SILENT case "
             f"(got {still.stdout.strip()!r})"
+        )
+
+        # THE OTHER HALF OF THAT PRECONDITION, and the half whose absence let
+        # this test report a product bug it had not demonstrated. `accepts` was
+        # checked; `and discards` was assumed. A kill that missed leaves a
+        # perfectly healthy stack, the tool then answers `yes` CORRECTLY, and
+        # the failure reads as "the read-back probe cannot see a discard" —
+        # which is exactly how it read on podman. Assert the store is down, so
+        # a broken break fails as a broken break.
+        store = subprocess.run(
+            [RUNTIME, "exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "-m", "5", "http://localhost:3100/ready"],
+            capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        assert store.stdout.strip() != "200", (
+            f"the log store is still answering, so the stack is not in the "
+            f"accepts-but-discards state asserted below (got {store.stdout.strip()!r})"
         )
 
         degraded = acc.cli(["telemetry", "stack", "ls"], timeout=300)
