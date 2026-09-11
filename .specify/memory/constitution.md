@@ -1,205 +1,30 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 2.4.1 → 2.5.0   (MINOR)
+Version change: 2.5.0 → 2.6.0   (MINOR)
 
-- **Principle IX gained a PERSISTENCE clause.** Additive; the delivery rule is
-  unchanged. It previously forbade writing a secret "anywhere that outlives the
-  container's need for it", which read as a ban on persistence and was implemented that
-  way. The objection that settles it is operational: a container whose credentials died
-  with it cannot survive a reboot, a daemon restart, or a restart policy, because
-  nothing is present to re-deliver them — it waits for a delivery nobody sends and
-  comes up unable to work.
-- The clause pairs persistence with RECONCILIATION and forbids separating them: storage
-  that outlives the declaration lets the system hold a credential its configuration
-  says is gone, which is the `authorized_keys` union defect one layer down. Storage is
-  therefore per-secret and named, and the tool must expose withdrawal itself, because a
-  runtime cannot remove storage a running container holds.
-- Feature 003's FR-012 is superseded by FR-012a. What FR-012 actually protected — no
-  tool-injected secret on a per-AGENT volume, where it would mix with an operator's own
-  stored authorization — is preserved and now stated on its own.
-
-Version change: 2.4.0 → 2.4.1   (PATCH)
-
-- **Principle IX's MECHANISM corrected.** Its substance is unchanged; the channel it
-  named was wrong in a way that mattered. It said "over an authenticated, encrypted
-  channel to that container" and the first implementation read that as the container
-  RUNTIME's channel — which is SSH only when the operator's context happens to be
-  `ssh://`. A `tcp://` context would carry credential plaintext in the clear, and the
-  tool can only CHECK that channel, never provide it. The tell was having to add a
-  refusal for insecure endpoints: a guard against your own transport is a sign you
-  picked the wrong one.
-- Now: over the CONTAINER'S OWN sshd, which is why sshd runs in every mode. The
-  daemon never sees the value. Authentication is an operator-DECLARED identity
-  (`delivery_identity`) that the key collection authorises; the tool MUST NOT mint a
-  private key, since that is a standing credential granting entry to every
-  environment it deploys. Undeclared ⇒ refuse, never a weaker fallback.
-
-Version change: 2.3.0 → 2.4.0   (MINOR)
-
-- **Added Principle IX — Secrets Travel to the Container, Not Through Its
-  Description.** MINOR: a new principle, additive; Principle III is unchanged and
-  now cross-references IX as its application to one recurring question.
-- Ratified after a wrong turn that came within one commit of shipping, and the
-  sequence matters more than the conclusion. Feature 020 MEASURED that a compose
-  `configs: {file:}` entry is a bind resolved DAEMON-side, so it cannot reach a
-  daemon that does not share the operator's filesystem. Correct finding. The repair
-  chosen was to inline the material instead — which fixed reachability by writing
-  every credential, API keys included, into the file that describes the deployment:
-  kept as its record, parsed by several code paths, read long after the credential
-  was needed.
-- Each step looked like an improvement on the last, and the change even TIGHTENED
-  the mode (0600, replacing per-credential 0644 staged copies), which made it read
-  as a security gain. It was a functional bug traded for a durable exposure.
-- The error was treating credential delivery as a property of the DESCRIPTION. A
-  deployment description is a plan: written before anything exists, kept afterwards,
-  and read by whatever wants to know what was deployed. The container is a running
-  peer with its own generated key pair and its own authenticated channel — which
-  needs no daemon-visible file, and so answers the very problem that started this.
-- Consequence: secrets are pushed to the running container over SSH. Public material
-  (authorised keys, host fingerprints, non-secret config) may still ride the
-  description, because it is public. The inlining change was REVERTED, not shipped;
-  the `file:` defect for 003's injected credentials therefore remains open and is
-  recorded in `specs/020-key-collection/research.md` and the threat model rather
-  than being closed the wrong way.
-
-Version change: 2.2.0 → 2.3.0   (MINOR)
-
-- **Added Principle VIII — Defaults Belong at the Surface.** MINOR: a new
-  principle, additive, with no existing principle redefined or removed.
-- Ratified after a measured defect rather than on principle: `driver_reachable_address`
-  defaulted an absent host address to `localhost`, so `host_is_local` reported
-  True for a remote docker context, `gather_rows` classified it as a local alias,
-  and an unreachable host was never queried nor reported — the exact failure
-  SC-002 (Feature 017) exists to prevent, produced by a default nobody downstream
-  could see.
-- Consequences already applied: defaulting moved to registration and to the
-  registry-read boundary; `export_task_text` and `control_plane_hosts` report
-  `None` for undeclared so the surface can say which case an operator is in;
-  `DEFAULT_SSH_USER`, `DEFAULT_ATTACH_ADDRESS` and `EGRESS_ENFORCEMENT_DEFAULT`
-  name what were bare literals — the last of these appeared at five separate
-  decision sites, and the fifth was found by the new guard rather than by audit.
-
-Version change: 2.1.0 → 2.2.0   (MINOR)
-Bump rationale: Added a Development Workflow clause requiring
-  `docs/threat-model.md` to be reconciled with every feature that alters a trust
-  boundary, a credential path, or the network surface — MINOR under this file's
-  own rule (materially expanding guidance, no principle removed or redefined).
-  Placed in Development Workflow rather than as a principle: it is a cadence
-  obligation on how changes land, not a new invariant about what the system is.
-  The threat model itself is a docs artifact and ships in the wheel; the
-  requirement that it record UNMITIGATED risk is the load-bearing half, since a
-  document listing only successes is marketing. Prior reports retained below.
-
-Version change: 2.0.0 → 2.1.0   (MINOR)
-Bump rationale: Added Principle VII "Continuous Deployment" — a new principle
-  (MINOR). `main` is always releasable and every substantive change is released
-  automatically (strict semver: what users receive ships; docs/chores/internal
-  churn cut no release); releasing is never a manual act. Broad/invariant
-  altitude — the mechanism (python-semantic-release, workflow_run gate, OIDC
-  PyPI publishing) lives in CLAUDE.md + README, not the principle. Intro triad
-  extended to "...spec-driven, and continuously delivered." Prior 2.0.0 report
-  retained below.
-
-Version change: 1.1.0 → 2.0.0   (MAJOR)
-Bump rationale: Principle I was REDEFINED (a MAJOR event): "Ephemerality &
-  Commit-Push Discipline" → "Ephemerality". The principle was raised to the
-  invariant altitude and stripped of all technology-specific mechanism (SCM /
-  git / commit-push / named volumes), stating the broad rule instead: a
-  container is a disposable holder of short-lived working copies, no correctness
-  may rest on in-container persistence, durable state is externalized
-  continuously in small increments, and the system actively supports
-  ephemeralization. The commit-and-push mechanism now lives only in lower-
-  altitude guidance (Development Workflow section, CLAUDE.md).
-
-Amendments in 2.0.0 (altitude-raising pass — principles restated as broad,
-technology-agnostic invariants; concrete mechanism relocated to CLAUDE.md):
-  Principle I REDEFINED & RENAMED — "Ephemerality & Commit-Push Discipline" →
-  "Ephemerality". Broadened to a technology-agnostic invariant; the git
-  commit-push mechanism is no longer part of the principle text.
-  Principle II REDEFINED & RENAMED — "Rootless by Construction, Build-Time
-  Dependencies" → "Least Privilege, Immutable Runtime". Broadened from the
-  rootless/no-sudo/no-runtime-apt/Podman mechanism to the underlying invariant
-  (least privilege + a runtime fixed at build and immutable thereafter). The
-  concrete rootless/build-time-deps mechanism lives in CLAUDE.md.
-  Principle III REDEFINED & RENAMED — "Secrets Injected at Runtime — Never
-  Baked, Never on Argv" → "Least Exposure". Broadened from a secrets-only rule
-  to the general dual of Principle II: whatever the system reveals (data,
-  secrets, network surface, identity) is exposed no more widely than needed, in
-  scope and reach. The secret-specific mechanism (no baking, no argv, runtime
-  injection, host-scoped grants) lives in docs/credentials.md and CLAUDE.md.
-  Principle IV REDEFINED & RENAMED — "Parallel-Safe by Construction, One Source
-  of Truth" → "Deterministic Identity". Broadened to the invariant: per-instance
-  identity derives deterministically from one identifier, has one authoritative
-  definition, and is a stable contract. The concrete on-disk contract (the
-  agent-container-<name> name, the 2200 + ASCII-sum-mod-100 port formula, the
-  seven volume suffixes, the XDG state/config paths, completion mirroring) is now
-  mechanism in CLAUDE.md — so the specific port hash can be improved without a
-  constitutional amendment, only a migration path.
-  Principle V REDEFINED & RENAMED — "Hermetic, Contract-Pinned Testing &
-  Real-Build Verification" → "Durable Spec, Disposable Code". Reframed from a
-  testing-mechanism principle to a spec-driven stance: the spec is the artifact
-  of record, code is disposable and re-derived (never patched), and verification
-  is inverted-pyramid, validation/acceptance-first. NOTE: directional — it runs
-  ahead of the current bottom-heavy, implementation-coupled test suite (argv
-  pins, doctests); adopting it implies migrating tests toward spec-level
-  validation and updating CLAUDE.md's testing guidance over time.
-  Principle VI REDEFINED & RENAMED — "Idiomatic Python on uv" → "Least
-  Dependencies". Reframed from a Python/uv style-and-tooling spec to a broad
-  invariant (rely on the fewest packages and least coupling; every dependency
-  must earn its place), completing the Least Privilege / Least Exposure / Least
-  Dependencies trilogy and resolving the conflict with V (code named as
-  disposable must not be locked to a language/toolchain). The packaging/tooling
-  specifics (single-file PEP 723, Typer/questionary/rich, wheel↔pyproject sync,
-  non-editable install, platform-aware runtime) already live in CLAUDE.md's
-  Decisions/Packaging sections; the finer code conventions dropped from old VI
-  (Fatal-not-sys.exit, layer separation, doctests, stderr/stdout split, argv-not-
-  shell) are implementation practice visible in the code and MAY be ported to
-  CLAUDE.md as guidance if desired.
-
-Amendments carried from 1.1.0:
-  #1 Accuracy fix — the intro agent list wrongly named "opencode". Ground
-     truth (Dockerfile Layer 3, lines 51-57) installs exactly three agent CLIs:
-     Claude Code, Codex, pi-coding-agent. "opencode" removed; not installed.
-  #2 Principle IV — added a stable identity contract MUST clause: the
-     name/port/volume/XDG on-disk identifiers MUST NOT change the value
-     computed for an existing name without a versioned migration path, and any
-     change MUST be mirrored in the shell completions. Prevents silently
-     orphaning running containers (unmanageable by their own tooling, identity
-     shifted under a connected operator).
-  #3 New Core Principle VI "Idiomatic Python on uv" — promoted from the
-     "Platform & Interface Constraints" bullet of the same name; that bullet's
-     substance was moved into Principle VI to avoid duplication; the platform-
-     default and non-editable-PyPI-install facts are preserved in the new
-     principle.
-
-Principles (post-amendment):
-  I.   Ephemerality                                          (redefined 2.0.0)
-  II.  Least Privilege, Immutable Runtime                     (redefined 2.0.0)
-  III. Least Exposure                                        (redefined 2.0.0)
-  IV.  Deterministic Identity                                (redefined 2.0.0)
-  V.   Durable Spec, Disposable Code                         (redefined 2.0.0)
-  VI.  Least Dependencies                                    (redefined 2.0.0)
-
-Sections:
-  "Platform & Interface Constraints"     (kept — genuine scope decisions:
-                                          editor-agnostic SSH+tmux, single operator)
-  "Development Workflow & Quality Gates" (TRIMMED to constitutional policy —
-                                          "verify before trust" (reconciled with
-                                          the reframed Principle V) and "spec and
-                                          docs track behavior". Concrete mechanics
-                                          — CI suite composition, uv build,
-                                          Trusted Publishing, commit-push cadence —
-                                          relocated to CLAUDE.md.)
-
-Templates reviewed:
-  ✅ .specify/templates/plan-template.md — "Constitution Check" gate is
-     generic ("Gates determined based on constitution file"); no hardcoded
-     principle names, so it remains aligned. No edit required.
-  ✅ .specify/templates/spec-template.md — no constitution references; aligned.
-  ✅ .specify/templates/tasks-template.md — no constitution references; aligned.
-  ✅ CLAUDE.md — hard constraints + decisions already encode these principles,
-     including the uv/PyPI packaging facts now formalized in Principle VI.
+- **Principle X. Surgical Change — ADDED.** Governs the SCOPE OF A DIFF: every changed
+  line traces to the request that prompted it; adjacent code, comments and formatting
+  are left as found; pre-existing dead code is reported rather than removed; a change
+  cleans up only the orphans it created itself.
+- The principle is written about the diff, NOT about regeneration, because Principle V
+  makes code a disposable rendering that a re-derivation may legitimately replace
+  wholesale. What it forbids is the unrequested edit riding along with a requested one.
+- **The load-bearing-comments invariant is now written down.** It was real practice and
+  recorded nowhere: the comments in `bin/agent-container` and `bin/tests/*` are the only
+  account of failures found by MEASUREMENT, so brevity is not an improvement to them.
+- Adopted after installing the Karpathy coding guidelines as a plugin skill. Only the
+  surgical-change rule was additive: simplicity and speculative generality are already
+  Principle VI plus Governance ("Unjustified complexity is rejected"), and success
+  criteria are already "Verify before trust" plus Principle V. Those are REFERENCED
+  here, deliberately not restated — a duplicated rule drifts from its original.
+  ✅ .specify/templates/plan-template.md — Constitution Check is generic ("[Gates
+     determined based on constitution file]"); no principle enumeration to update.
+  ✅ .specify/templates/spec-template.md, tasks-template.md, checklist-template.md —
+     no constitution references; aligned.
+  ✅ CLAUDE.md — pointer added under "Conventions for future work", paid for by pruning
+     a parenthetical that duplicated the `_acc_base()` docstring; measured with a
+     tokenizer to stay under the file's own 2000-token cap.
 
 Deferred TODOs: none.
 -->
@@ -395,6 +220,59 @@ is both the more secure answer and the more portable one, and the two are not in
 tension here: the same property that keeps the secret out of the plan is what lets it
 reach a daemon that shares nothing.
 
+### X. Surgical Change
+
+A change is scoped by its request. When code is edited in place, every changed line
+MUST trace to the request that prompted it. Adjacent code, comments, formatting and
+naming MUST be left as found: no opportunistic reformatting, no refactoring of what is
+not broken, no restyling toward a convention the file does not already hold. Existing
+style wins over the author's preference, including when the author would have chosen
+otherwise. Pre-existing dead code MUST be reported, not deleted — its removal is a
+change of its own and belongs to a request that asks for it. The orphans a change
+creates itself — imports, variables and helpers it has just made unused — MUST be
+removed by that same change, because those are its own mess.
+
+This governs the DIFF, not regeneration. Principle V makes code a disposable rendering
+of the spec, and a re-derivation MAY legitimately replace a whole module; what is
+forbidden is the unrequested edit that rides along with a requested one.
+
+Inline comments in this repository are LOAD-BEARING HISTORY, not commentary. They record
+failures found by MEASUREMENT and the reasoning that produced the current shape: why a
+health probe reads a record back instead of trusting a 200, why a process scan must
+exclude its own shell, which of two addresses a two-address bug was measured at. They
+MUST NOT be shortened, summarised, or removed for brevity or simplicity. A comment
+changes only when the behaviour it describes changes, and then it changes to describe
+the new behaviour — never to say less.
+
+Assumptions MUST be surfaced rather than silently chosen: where a request admits more
+than one reading, the reading taken is named; where a simpler approach exists, it is
+offered; where something is genuinely unclear, it is asked before it is guessed.
+Simplicity and speculative generality are governed by Principle VI and by Governance's
+rejection of unjustified complexity; success criteria are governed by "Verify before
+trust" under Development Workflow & Quality Gates. This principle references them and
+does not restate them.
+
+**Rationale:** an unrequested edit is unreviewable. A reviewer reading a diff cannot
+distinguish the change that was asked for from the one that was volunteered, and the
+volunteered one arrives with no request, no rationale and no test — so it is trusted
+by default precisely because nobody knew to doubt it. Scope discipline is what keeps a
+diff readable as an argument for itself.
+
+The comments clause is the same lesson pointed at this codebase's actual record. The
+fix for an ingest health probe that reported a discarding stack as healthy is four
+lines of shell beneath sixteen lines explaining which process-ID ordering made the
+break take under one container runtime and silently miss under the other. Delete the
+explanation as clutter and the next reader re-derives the defect from scratch, or
+reintroduces it — the code is short, but the reason it is THAT code is not recoverable
+from reading it.
+
+What is mechanically checkable about simplicity is already ENFORCED and needs no
+principle: `scripts/quality-gate.sh` runs a complexity ceiling (`xenon --max-absolute
+B --max-modules A --max-average A`), dead-code detection (`vulture`), simplification
+(`refurb`) and lint (`ruff`) on every change, in the same script CI runs. What remains
+for a principle is exactly the part tooling cannot check — whether a line that passes
+every gate should have been written at all.
+
 ## Platform & Interface Constraints
 
 - **Editor-agnostic, SSH + tmux only.** The canonical attach path is
@@ -447,4 +325,4 @@ Constitution Check / Complexity Tracking). Unjustified complexity is rejected.
 Runtime, day-to-day development guidance lives in **CLAUDE.md**, which MUST stay
 consistent with this constitution.
 
-**Version**: 2.5.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-08-24
+**Version**: 2.6.0 | **Ratified**: 2026-07-06 | **Last Amended**: 2026-09-11

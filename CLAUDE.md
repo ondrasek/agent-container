@@ -90,12 +90,13 @@ Never bake host-specific orchestration into the image.
 
 - **Commit-and-push** is a property of the agent config, not git hooks (bypassable).
 
-- **Quality gate — one script, two uses.** `scripts/quality-gate.sh`; Stop hook and CI run the *same*
-  script. It **excludes** the CI-authoritative acceptance tier (`pytest -m acceptance bin/tests`; on
-  macOS+Lima the work dir must be Lima-shared). **Read its exit code unpiped.** **Never edit the tree
-  while that tier runs** — it re-reads the CLI per invocation.
+- **Quality gate.** `scripts/quality-gate.sh` — Stop hook and CI run the **same** script. It
+  **excludes** the CI-authoritative acceptance tier (`pytest -m acceptance bin/tests`).
+  **Read its exit code unpiped.** **Never edit the tree while that tier runs** — it re-reads the CLI
+  per invocation.
 - **Run the full suite, not only your new tests** — a changed contract is exactly when a pre-existing
   test still pins the old shape.
+- **Surgical change (Constitution X)** — diffs trace to the request; **comments are load-bearing.**
 - **Conventional Commits are mandatory** — the CD pipeline reads them; a local `commit-msg` hook,
   a CI job and a `main` ruleset enforce it (`--no-verify` bypasses only the hook).
 - **CLI surface, test-enforced.** Short flags need a long form (`-y`/`--yes`). `-v`/`--verbose` works
