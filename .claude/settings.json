@@ -1,7 +1,4 @@
 {
-  "enabledPlugins": {
-    "blueprint@cc-plugins": true
-  },
   "hooks": {
     "Stop": [
       {
@@ -14,5 +11,17 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "blueprint@cc-plugins": true,
+    "andrej-karpathy-skills@karpathy-skills": true
+  },
+  "extraKnownMarketplaces": {
+    "karpathy-skills": {
+      "source": {
+        "source": "github",
+        "repo": "forrestchang/andrej-karpathy-skills"
+      }
+    }
   }
 }
