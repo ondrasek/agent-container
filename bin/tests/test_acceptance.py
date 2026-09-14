@@ -4334,15 +4334,29 @@ def test_the_inventory_holds_no_free_text_field(acc):
         # constructor closes and the writer then widens.
         "role",
         "provenance",
+        # Feature 024 added four, and this test is why that had to be done
+        # carefully: three of them are OPERATOR-INFLUENCED, which is precisely how
+        # a store whose no-free-text property is structural stops being one.
+        "watched_scope",
+        "channel",
+        "declared_sender",
+        "authority",
         "notes",
     }
-    # And the two new fields are CLOSED VOCABULARIES, checked on a real deploy.
-    # That is the substance of FR-010 here: `provenance` embeds a name, and an
-    # earlier version of `deploy_provenance` read it straight from an env var —
-    # so the field set stayed closed while its CONTENTS became operator-supplied
-    # free text. A set-of-keys assertion cannot see that.
-    assert entry["role"] in ("agent", "control-plane")
+    # And the new fields are CLOSED VOCABULARIES or VALIDATED SHAPES, checked on a
+    # real deploy. That is the substance of FR-010 here: `provenance` embeds a
+    # name, and an earlier version of `deploy_provenance` read it straight from an
+    # env var — so the field set stayed closed while its CONTENTS became
+    # operator-supplied free text. A set-of-keys assertion cannot see that.
+    assert entry["role"] in ("agent", "control-plane", "interpreter")
     assert entry["provenance"] == "operator" or entry["provenance"].startswith("control-plane:")
+    # An agent environment is not an interpreter, so these are ABSENT rather than
+    # empty — "does not apply" and "nothing declared" are different facts, and a
+    # reader that cannot tell them apart is the Constitution VIII failure.
+    for interpreter_only in ("watched_scope", "channel", "declared_sender", "authority"):
+        assert entry[interpreter_only] is None, (
+            f"{interpreter_only} is populated on an agent environment, where it has no meaning"
+        )
 
 
 def test_the_inventory_provenance_cannot_be_made_free_text(acc):
