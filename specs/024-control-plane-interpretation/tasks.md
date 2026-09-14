@@ -184,16 +184,16 @@ the output lines are present and in order; destroy the container; assert they ar
 **Independent test**: deploy an interpreter, fail a headless run, assert a message arrives naming
 environment, run id and outcome with a reading grounded in that run's log.
 
-- [ ] T019 [US1] Implement the notification policy over the trail in `bin/agent-container`: the
+- [X] T019 [US1] Implement the notification policy over the trail in `bin/agent-container`: the
       FR-015 notifiable set, quiet on success-that-pushed (FR-015a), stall reported as a **duration
       and last output** rather than a verdict (FR-015b), one notification per state change.
-- [ ] T020 [US1] **(FR-012)** Implement the `interpretation` signal writer per data-model.md, including
+- [X] T020 [US1] **(FR-012)** Implement the `interpretation` signal writer per data-model.md, including
       `evidence[]` with its three kinds — and `absence` as a first-class kind, without which "no
       output since 14:02" cannot be sourced at all.
-- [ ] T021 [US1] Implement evidence binding in `bin/agent-container`: every claim resolves to a
+- [X] T021 [US1] Implement evidence binding in `bin/agent-container`: every claim resolves to a
       record field, a log span or an absence, and an unsourceable claim is labelled `inferred`
       (FR-011a).
-- [ ] T022 [US1] Implement input-health precedence (FR-013): stack unreachable, ingest `DEGRADED`,
+- [X] T022 [US1] Implement input-health precedence (FR-013): stack unreachable, ingest `DEGRADED`,
       host unreachable or log absent is stated **before** any claim about agents. Never infer
       activity or inactivity from missing data.
 - [ ] T023 [US1] **(FR-012b)** Implement the `notification` bookkeeping signal keyed on the **event**, not the
@@ -215,7 +215,7 @@ environment, run id and outcome with a reading grounded in that run's log.
 - [X] T028 [US1] Add the reachability guard to `bin/tests/test_guards_can_fail.py`, proving it
       **fails** when a mutating call is introduced. A guard nobody has seen fail is a guard nobody
       knows works.
-- [ ] T029 [P] [US1] Unit-test the policy in `bin/tests/test_pure_logic.py`: quiet on success,
+- [X] T029 [P] [US1] Unit-test the policy in `bin/tests/test_pure_logic.py`: quiet on success,
       stall wording carries duration and last output, one notification per state change.
 - [ ] T030 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: failed run notified within
       budget with grounded reading (SC-001, SC-002); successful run produces no interruption.
@@ -236,7 +236,7 @@ right environment and run and cites the identifiers it used.
 - [ ] T032 [US3] **(FR-024)** Implement `conversations.history` polling in `image/interpret-bridge.py` at the
       T002 interval — HTTPS only, **not Socket Mode**, which would require a WebSocket client and
       therefore a dependency (research R1).
-- [ ] T033 [US3] Implement declared-sender admission in `image/interpret-bridge.py`: no default
+- [X] T033 [US3] Implement declared-sender admission in `image/interpret-bridge.py`: no default
       admits anyone; a message from any other sender gets **no reply** and a recorded refusal
       carrying the sender's channel identity (FR-023, SC-007).
 - [ ] T034 [US3] Implement grounded replies in `image/interpret-bridge.py`: every claim names the
@@ -259,10 +259,10 @@ right environment and run and cites the identifiers it used.
 **Independent test**: an agent prints supervisor-addressed instructions; nothing changes, and the
 notification quotes them as content.
 
-- [ ] T038 [US5] Implement observed-directive handling in `bin/agent-container`: instruction-shaped
+- [X] T038 [US5] Implement observed-directive handling in `bin/agent-container`: instruction-shaped
       text in agent output is reported as `observed_directives`, quoted as content, and **never**
       alters assessment, policy or any action (FR-014).
-- [ ] T039 [US5] Implement contradiction reporting (FR-011b): record and log disagreements are
+- [X] T039 [US5] Implement contradiction reporting (FR-011b): record and log disagreements are
       stated as disagreements, with the record as the authority for what happened and the log as the
       authority for what the agent said. Never resolved by adopting the agent's account.
 - [ ] T040 [US5] Implement the act-refusal path in `image/interpret-bridge.py`: decline, name the

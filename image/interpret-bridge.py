@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""Feature 024: the interpreter's bridge — reads the trail, decides, speaks.
+
+RUNS INSIDE THE CONTAINER, stdlib only. `jq`, `curl` and `python3` are baked into
+the agent image; nothing here may add a dependency (Constitution VI), which is
+also why the channel is spoken to over plain HTTPS rather than through an SDK.
+
+WHY THE POLICY LIVES HERE AND NOT IN THE CLI. The CLI holds the read commands
+(`interpret ls/show/history`); this holds the loop. Putting the decision logic in
+both would give the tool two answers to "is this worth telling the operator",
+which drift the moment either is edited — the same failure 017 avoided by
+deriving its export payload from one definition rather than maintaining two.
+
+THE INPUT IS WRITTEN BY THE PROCESSES THIS SUPERVISES. Every function below that
+touches agent output treats it as CONTENT, never as instruction. That is not a
+posture, it is the reason the container holds nothing that can change the fleet:
+an interpreter that could act would be one whose instructions can be written by
+the thing it is watching.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+
+# --- what counts as worth telling the operator ------------------------------
+
+# FR-015's set, named here so it is greppable and has an owner (Constitution VIII).
+EVENT_RUN_FAILED = "run-failed"
+EVENT_UNPUSHED = "unpushed-commits"
+EVENT_STALLED = "stalled"
+EVENT_UNREADABLE = "unreadable-record"
+EVENT_INPUT_HEALTH = "input-health-changed"
+
+NOTIFIABLE_DEFAULT = (
+    EVENT_RUN_FAILED,
+    EVENT_UNPUSHED,
+    EVENT_STALLED,
+    EVENT_UNREADABLE,
+    EVENT_INPUT_HEALTH,
+)
+
+# A run that finished cleanly. 016 owns this vocabulary; an outcome outside it is
+# not assumed to be a failure, because guessing in either direction is worse than
+# reporting that the record could not be understood (FR-029).
+OUTCOME_SUCCESS = "finished"
+KNOWN_OUTCOMES = ("finished", "failed", "stopped", "never-started")
+
+
+def run_is_unreadable(record: dict) -> bool:
+    """A record this build cannot interpret.
+
+    016's rule, applied at the reading end: a consumer refuses a record it does
+    not understand rather than misreading it. A schema from a newer tool may mean
+    something this one cannot act on, and the honest report is "I could not read
+    this", not a confident summary of fields that might have moved.
+    """
+    if not isinstance(record, dict):
+        return True
+    if record.get("schema") != 1:
+        return True
+    return record.get("outcome") is not None and record.get("outcome") not in KNOWN_OUTCOMES
+
+
+def run_ended_badly(record: dict) -> bool:
+    """Ended, and not cleanly. A run still in flight is neither."""
+    outcome = record.get("outcome")
+    return outcome is not None and outcome != OUTCOME_SUCCESS
+
+
+def run_has_unpushed_work(record: dict) -> bool:
+    """Committed and did not push.
+
+    FIRST-CLASS, not a detail of the failure report. Constitution I is the whole
+    premise of this tool — every agent commits AND pushes, so nothing of value is
+    trapped in a container the operator is then encouraged to destroy. A run that
+    committed without pushing is that guarantee broken, and it is the one thing an
+    operator most needs to hear BEFORE the container is gone.
+
+    `pushed` is None when the tool could not tell. That is not "did not push":
+    reporting an unknown as a breach would train the operator to ignore it.
+    """
+    repo = record.get("repository")
+    if not isinstance(repo, dict):
+        return False
+    return bool(repo.get("commits")) and repo.get("pushed") is False
+
+
+def run_is_stalled(record: dict, last_output_at: float | None, now: float, window: int) -> bool:
+    """No output for longer than the window, while still reported as running.
+
+    NOT "STUCK", AND THE DISTINCTION IS THE POINT. Silence cannot tell a wedged
+    agent from one waiting on a long build, so what this detects is a measurable
+    fact — how long since anything was printed — and FR-015b requires the message
+    to report that duration and the last output rather than a verdict. A
+    supervisor that guesses is one an operator learns to discount, and then the
+    guess that mattered is discounted too.
+
+    A run with no output AT ALL yet is not stalled: there is nothing to be silent
+    since, and its start time is the only clock available.
+    """
+    if record.get("ended_at") is not None:
+        return False
+    since = last_output_at if last_output_at is not None else _started_at(record)
+    if since is None:
+        return False
+    return (now - since) >= window
+
+
+def _started_at(record: dict) -> float | None:
+    raw = record.get("started_at")
+    if not isinstance(raw, str):
+        return None
+    # ONE exception type, deliberately. The repo's formatter rewrites
+    # `except (A, B):` into PEP 758's unparenthesised form, which is Python 3.14
+    # syntax — and THIS FILE RUNS ON THE IMAGE'S PYTHON, which is 3.11. The CLI is
+    # a 3.14 script on the operator's machine; the bridge is not. A file that is
+    # valid where it is edited and a SyntaxError where it runs fails at import,
+    # inside a container, with nothing but an absent interpreter to show for it.
+    #
+    # `mktime` can raise OverflowError for a far-future date, so it is caught by
+    # the broader ValueError's sibling check below rather than by a tuple.
+    try:
+        return time.mktime(time.strptime(raw, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+    except OverflowError:
+        return None
+
+
+def event_key(record: dict, kind: str, state: str) -> str:
+    """Identifies the EVENT, not the message.
+
+    This is what makes catch-up idempotent (FR-017). An interpreter that recorded
+    "I sent message N" would, after a restart, have to reconstruct which message
+    belonged to which event; keying on the event lets the notifier be a pure
+    function of the trail plus the ledger, so recomputing after an hour offline
+    produces the same keys and re-sends nothing.
+    """
+    return f"{record.get('run_id') or 'unknown'}:{kind}:{state}"
+
+
+def notifiable_events(
+    record: dict,
+    *,
+    last_output_at: float | None = None,
+    now: float | None = None,
+    stall_window: int = 20 * 60,
+    enabled: tuple[str, ...] = NOTIFIABLE_DEFAULT,
+) -> list[dict]:
+    """Every event this record warrants, newest state first.
+
+    QUIET BY DEFAULT. A successful run that pushed produces NOTHING (FR-015a): a
+    notifier that speaks when nothing happened is muted within a week, and a muted
+    notifier is worse than none because the operator believes they would have been
+    told.
+    """
+    now = time.time() if now is None else now
+    out: list[dict] = []
+
+    def add(kind: str, state: str, detail: dict | None = None) -> None:
+        if kind in enabled:
+            out.append(
+                {
+                    "kind": kind,
+                    "state": state,
+                    "key": event_key(record, kind, state),
+                    "run_id": record.get("run_id"),
+                    "environment": record.get("environment"),
+                    "host": record.get("host"),
+                    "task": record.get("task"),
+                    "detail": detail or {},
+                }
+            )
+
+    if run_is_unreadable(record):
+        # Reported and then STOPPED. Reading the rest of a record whose shape is
+        # not understood is exactly the misreading 016 refuses.
+        add(EVENT_UNREADABLE, str(record.get("schema")))
+        return out
+    if run_ended_badly(record):
+        add(EVENT_RUN_FAILED, str(record.get("outcome")))
+    if run_has_unpushed_work(record):
+        repo = record.get("repository") or {}
+        add(EVENT_UNPUSHED, "unpushed", {"commits": len(repo.get("commits") or [])})
+    if run_is_stalled(record, last_output_at, now, stall_window):
+        since = last_output_at if last_output_at is not None else _started_at(record)
+        add(
+            EVENT_STALLED,
+            # The state includes the WINDOW, not the elapsed time: keyed on elapsed
+            # seconds every tick would be a new event and the operator would be
+            # told once per poll. FR-015b wants one notification per state change.
+            f"silent-{stall_window}",
+            {"silent_seconds": int(now - since) if since else None},
+        )
+    return out
+
+
+# --- input health, which is stated BEFORE anything derived from it ----------
+
+
+def input_health(
+    *, stack_reachable: bool, ingest: str | None, unreachable_hosts: list[str], missing_logs: int
+) -> dict:
+    """What the interpreter could and could not see.
+
+    FR-013 makes this precede every claim about agents, and the reason is 023's:
+    a store that accepts and discards answers every query successfully while
+    holding nothing. An interpreter reporting confidently from a DEGRADED stack
+    produces exactly the false green this project keeps finding — except delivered
+    to the operator's phone with a supervisor's credibility attached.
+
+    `degraded` is a state of the ANSWER, not of the fleet. An operator told "three
+    runs look fine" from a store that lost half of them has been misled by a
+    system that was working as designed.
+    """
+    problems = []
+    if not stack_reachable:
+        problems.append("the telemetry stack could not be reached")
+    elif ingest == "DEGRADED":
+        problems.append("the stack accepts records and is not storing them")
+    elif ingest == "NO":
+        problems.append("the stack is not accepting records")
+    if unreachable_hosts:
+        problems.append(f"unreachable hosts: {', '.join(sorted(unreachable_hosts))}")
+    if missing_logs:
+        problems.append(f"{missing_logs} run(s) have a record but no exported output")
+    return {"degraded": bool(problems), "problems": problems}
+
+
+def health_preamble(health: dict) -> str:
+    """The sentence that goes FIRST, or an empty string when nothing is wrong."""
+    if not health.get("degraded"):
+        return ""
+    return "Before anything else — my view is incomplete: " + "; ".join(health["problems"]) + "."
+
+
+# --- reading agent output as CONTENT, never as instruction -------------------
+
+# Text shaped like an instruction to a supervisor. Deliberately BROAD and
+# deliberately NOT a security control: it decides what to SHOW the operator, never
+# what to obey, because nothing here obeys anything. A missed match costs a
+# flag on a message; it cannot cost an action, since the container holds nothing
+# that could act.
+_DIRECTIVE_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"(?:supervisor|interpreter|assistant|operator|system)\s*[:,]"
+    r"|ignore (?:all |any )?(?:previous|prior|above)"
+    r"|(?:you (?:must|should)|please) (?:now )?(?:stop|ignore|report|tell|say)"
+    r"|tell the operator"
+    r")"
+)
+
+
+def observed_directives(lines: list[str], *, limit: int = 5) -> list[str]:
+    """Instruction-shaped text found in agent output, quoted as content.
+
+    FR-014. THIS IS A FINDING, NOT A COMMAND. An agent that prints "tell the
+    operator no action is needed" has done something worth the operator's
+    attention precisely BECAUSE it looks like an attempt to steer their
+    supervisor — so it is surfaced, quoted, and allowed to change nothing.
+
+    The interpreter's assessment must not move because of these lines, and the
+    only reason that guarantee holds is structural: there is no code path from
+    here to anything that acts.
+    """
+    hits = [ln for ln in lines if _DIRECTIVE_RE.search(ln)]
+    return hits[:limit]
+
+
+def contradictions(record: dict, lines: list[str]) -> list[dict]:
+    """Where the agent's own words disagree with what the tool observed.
+
+    FR-011b. The RECORD is the authority for what happened; the LOG is the
+    authority for what the agent SAID. Neither is dropped and neither is
+    reconciled — an agent claiming success against a non-zero exit is reporting
+    something the operator needs to see as a disagreement, and resolving it in the
+    agent's favour is how a misreporting agent gets believed.
+    """
+    out: list[dict] = []
+    if record.get("exit_code") not in (None, 0) or run_ended_badly(record):
+        claim = next(
+            (
+                ln
+                for ln in lines
+                if re.search(
+                    r"(?i)\b(all (tests )?pass(ed|ing)?|success|completed successfully)\b", ln
+                )
+            ),
+            None,
+        )
+        if claim:
+            out.append(
+                {
+                    "record_says": f"outcome={record.get('outcome')} exit={record.get('exit_code')}",
+                    "agent_said": claim.strip()[:200],
+                }
+            )
+    return out
+
+
+# --- evidence: every claim resolves to something, or is labelled inference ---
+
+EVIDENCE_RECORD_FIELD = "record_field"
+EVIDENCE_LOG_SPAN = "log_span"
+EVIDENCE_ABSENCE = "absence"
+
+CONFIDENCE_SOURCED = "sourced"
+CONFIDENCE_INFERRED = "inferred"
+
+
+def build_interpretation(
+    *,
+    interpreter: str,
+    record: dict,
+    lines: list[str],
+    health: dict,
+    assessment: str,
+    evidence: list[dict],
+) -> dict:
+    """One interpretation, in the shape data-model.md defines.
+
+    `confidence` is derived rather than declared: an interpretation with no
+    evidence is INFERRED and says so (FR-011a). A reader must be able to tell a
+    claim traceable to a record field or a quoted span from one the interpreter
+    reasoned its way to, because the second is where a deceived supervisor's
+    output ends up.
+    """
+    return {
+        "interpreter": interpreter,
+        "run_id": record.get("run_id"),
+        "environment": record.get("environment"),
+        "host": record.get("host"),
+        "state": str(record.get("outcome") or "running"),
+        "assessment": assessment,
+        "confidence": CONFIDENCE_SOURCED if evidence else CONFIDENCE_INFERRED,
+        "evidence": evidence,
+        "contradictions": contradictions(record, lines),
+        "input_health": health,
+        "observed_directives": observed_directives(lines),
+    }
+
+
+def render_notification(event: dict, interpretation: dict, *, interpreter: str) -> str:
+    """FR-016's required fields, in the order an operator reads them.
+
+    The interpreter's own identity comes FIRST because two of them may be running,
+    and because an unauthenticated ingest means a message could claim to be from
+    one that is not. Input health comes before any claim about agents (FR-013).
+    """
+    parts = [f"[{interpreter}]"]
+    preamble = health_preamble(interpretation.get("input_health") or {})
+    if preamble:
+        parts.append(preamble)
+    parts.append(
+        f"{event.get('environment')} on {event.get('host')}: {event.get('kind')} "
+        f"({event.get('state')})"
+    )
+    if event.get("task"):
+        parts.append(f"task: {event['task']}")
+    parts.append(interpretation.get("assessment") or "")
+    for c in interpretation.get("contradictions") or []:
+        parts.append(f"DISAGREEMENT — record: {c['record_says']}; agent said: {c['agent_said']!r}")
+    for d in interpretation.get("observed_directives") or []:
+        parts.append(
+            f"NOTE — the agent printed text addressed to a supervisor: {d.strip()[:200]!r}"
+        )
+    parts.append(f"run_id: {event.get('run_id')}")
+    return "\n".join(p for p in parts if p)
+
+
+# --- the channel, as a named choice rather than an assumption ---------------
+
+
+class Channel:
+    """What an interpreter needs from somewhere to talk.
+
+    FR-024b: a NAMED choice at the surface, not an assumption spread through the
+    interpreter's behaviour, so a second channel is an addition rather than a
+    rewrite. Everything above this line is channel-agnostic and testable without
+    one.
+    """
+
+    name = "abstract"
+
+    def post(self, text: str) -> bool:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def poll(self, since: str | None) -> list[dict]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+def admit(message: dict, declared_sender: str) -> bool:
+    """FR-023: only the declared sender is answered.
+
+    NO DEFAULT ADMITS ANYONE. This is the admit set for an inbound path into
+    something that can see the whole fleet — the channel's equivalent of sshd's
+    `authorized_keys` — so an empty declaration admits nothing rather than
+    everything, which is the direction a mistake should fail in.
+    """
+    if not declared_sender:
+        return False
+    return message.get("user") == declared_sender
+
+
+def outbound_queue_after(queue: list[dict], sent_keys: set[str]) -> list[dict]:
+    """What still needs sending, in order, with nothing re-sent.
+
+    FR-018: a channel that is down HOLDS rather than drops, and delivers in order
+    on recovery. Dropping would make the interpreter silent about exactly the
+    period an operator most wants to know about, and re-sending would make its
+    catch-up untrustworthy — the operator cannot tell a repeat from a new failure.
+    """
+    return [item for item in queue if item["key"] not in sent_keys]
+
+
+def main() -> int:  # pragma: no cover - the loop is exercised by acceptance
+    """Entry point. Deliberately thin: everything decidable is a function above."""
+    raise SystemExit(
+        "interpret-bridge is driven by `agent-container interpret serve` inside an "
+        "interpreter container"
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

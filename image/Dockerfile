@@ -305,6 +305,20 @@ RUN chmod 0755 /usr/local/bin/agent-container-receive-secret; \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
+# Feature 024. The interpreter's decision logic, BAKED rather than delivered —
+# "bake every system dep at build" (CLAUDE.md), and a script pushed in at deploy
+# would be one more thing that can differ between a container and the image it
+# claims to be. stdlib only: `python3` is already installed above and nothing
+# here adds a dependency (Constitution VI).
+#
+# Present in EVERY agent image, not only interpreters. It is inert without the
+# role — a module of functions with no entry point that does anything — and a
+# conditional COPY would make "what is in this image" a property you reconstruct
+# from a build invocation, which is exactly what 017 refused when it chose a
+# second image over a build arg.
+COPY interpret-bridge.py /usr/local/lib/agent-container/interpret-bridge.py
+RUN chmod 0644 /usr/local/lib/agent-container/interpret-bridge.py
+
 EXPOSE 2222
 
 USER dev

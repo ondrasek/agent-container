@@ -29,4 +29,6 @@
 
 !Dockerfile
 !entrypoint.sh
+# Feature 024: the interpreter's decision logic, baked beside the entrypoint.
+!interpret-bridge.py
 !receive-secret.sh
