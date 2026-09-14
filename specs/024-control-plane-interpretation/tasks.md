@@ -15,6 +15,33 @@ change ("Verify before trust"), the acceptance tier is the authoritative validat
 of this feature's requirements (FR-020, FR-020a) are **absences**, which cannot be demonstrated any
 other way.
 
+## Implementation status (2026-09-14)
+
+**19 of 72 tasks complete.** What is built is built to the bar — gate green, acceptance verified
+under docker, documented — rather than stubbed. What is not built is not started.
+
+| Phase | State |
+|---|---|
+| 1 — Setup | **complete** (T001–T004) |
+| 3 — US2, log export | **complete** (T011–T018a). The MVP: verified end to end under docker, including that the output survives `down --purge`. Documented in `docs/observability.md`. |
+| 7 — US4, container invariants | **partial**: role, pre-deploy statement, admit-set refusals, `interpret ls`/`show`, inventory fields, kill-switch coverage (T027, T028, T042, T043, T044, T049). `interpret history` and `serve` are not built. |
+| 9 — Polish | **partial**: `docs/observability.md` done (T057); the threat-model row exists as an expectation row, unreconciled. |
+| 2, 4, 5, 6, 8 | **not started** |
+
+**What remains is the interpreter itself.** Everything shipped so far is the role, its refusals, its
+security property and its input (the log stream). The bridge that reads the trail, forms an
+interpretation, notifies over Slack and answers questions — Phases 2, 4, 5, 6 and 8 — does not exist.
+
+**Two things the next session should know before starting it:**
+
+1. **Phases 4, 5 and 6 cannot be fully verified in a dev environment.** They need a real Slack custom
+   app, a bot token and a workspace. The API contract is pinned in `contracts/signals.md` and can be
+   built against a stub, but "it works" is not demonstrable without those.
+2. **Three defects in the shipped log exporter were found by the ACCEPTANCE tier, not by review or
+   unit tests** (a `local` in a subshell, a missing `jq -c` that failed a prefix guard, and a missing
+   final flush). All three were silent, because export is fail-open. Build the acceptance test for a
+   phase before trusting its unit tests.
+
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: parallelisable — different files, no dependency on an incomplete task
