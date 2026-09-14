@@ -94,11 +94,11 @@ These are not reminders, they are acceptance conditions. A task that violates on
 **Purpose**: the shared signal writer, the stack read path, and the watermark. Unblocks US1, US3,
 US5 and US6; US2 needs only the writer; US4 needs only the role.
 
-- [ ] T005 Implement the OTLP signal envelope helper in `bin/agent-container`, deriving resource
+- [X] T005 Implement the OTLP signal envelope helper in `bin/agent-container`, deriving resource
       attributes from the **existing** 017 attribution definition rather than a second list — two
       lists agree today and drift invisibly. Emits the shared attribute block in
       contracts/signals.md Part 1.
-- [ ] T006 [P] Contract-test the envelope in `bin/tests/test_run_records.py` (or the nearest
+- [X] T006 [P] Contract-test the envelope in `bin/tests/test_run_records.py` (or the nearest
       existing payload test module): `run_id` present on every payload; attribute set closed per
       signal; an undeclared attribute produces a warning at read time, as 016 warns for unknown
       record fields. **(FR-010)** Include the guard that log export does not change what a record
@@ -307,13 +307,13 @@ notification quotes them as content.
       contracts/cli.md, each with `--json`. `history` is FR-012a — "what did you tell me about run
       X, and why".
 - [X] T046 [US4] **(FR-025)** Implement `interpret serve`, refusing to run outside an interpreter container.
-- [ ] T047 [US4] **(FR-027)** Implement self-exclusion from its own notifications: its runs are
+- [X] T047 [US4] **(FR-027)** Implement self-exclusion from its own notifications: its runs are
       recorded like any environment's but never notified about, or every message becomes an event
       becomes a message.
 - [ ] T047a [P] [US4] **(FR-028)** Assert the other half: the interpreter's own runs **do** produce
       records and logs, attributed to it, so what it read, concluded and sent is itself part of the
       trail. Exclusion from notification must not become exclusion from the record.
-- [ ] T048 [US4] Implement version-skew handling per 017's rule (FR-029): semver precedence,
+- [X] T048 [US4] Implement version-skew handling per 017's rule (FR-029): semver precedence,
       advisory when newer, refusal naming the remedy when the trail is newer, and a record whose
       schema it does not understand **refused rather than misread**, reported as a finding.
 - [X] T049 [P] [US4] Extend the kill switch in `bin/agent-container` to cover interpreters (FR-030),
@@ -326,7 +326,7 @@ notification quotes them as content.
 - [ ] T050b [P] [US4] **(SC-013, FR-024a)** Assert the task-text/log exposure statement is emitted
       **before anything is created** — the ordering is the whole criterion, since a consequence
       disclosed after the fact was not disclosed.
-- [ ] T051 [P] [US4] Extend `doctor` to report whether stack, channel binding and declared sender
+- [X] T051 [P] [US4] Extend `doctor` to report whether stack, channel binding and declared sender
       **resolve**, staying inside 013's read-only guarantee — check that the token is declared,
       never retrieve it.
 
@@ -350,14 +350,14 @@ notification quotes them as content.
 Not a follow-up. The constitution requires spec, docs and threat model to be updated **in the same
 change** as the behaviour; stale docs are defects.
 
-- [ ] T056 Write `docs/interpretation.md`: what an interpreter is, how it differs from a 017 control
+- [X] T056 Write `docs/interpretation.md`: what an interpreter is, how it differs from a 017 control
       plane, what it holds, what it cannot do and why that is structural, the Slack setup including
       the **custom-app requirement** and the rate-limit cliff a distributed app falls off.
 - [X] T057 [P] Update `docs/observability.md`: the agent output stream is now a third payload class;
       `export_agent_logs` and its exposure; the per-run cap and truncation marker.
-- [ ] T058 [P] Update `docs/control-plane.md` to distinguish the two roles, so an operator choosing
+- [X] T058 [P] Update `docs/control-plane.md` to distinguish the two roles, so an operator choosing
       between them is not left inferring it.
-- [ ] T059 Reconcile `docs/threat-model.md` and flip the 024 maintenance row from ⬜ to ✅. The
+- [X] T059 Reconcile `docs/threat-model.md` and flip the 024 maintenance row from ⬜ to ✅. The
       **expectation row already exists** — `test_threat_model_names_every_feature` demanded it the
       moment the spec directory appeared, which is the guard working as designed. Reconciling means
       answering the questions that row raises against what was actually built, in the style of the
@@ -367,7 +367,7 @@ change** as the behaviour; stale docs are defects.
       the operator's trust domain** into a Slack workspace (T15 widened); forged interpretations on
       an unauthenticated ingest as an accepted limit with exposure as the only control; and the
       authority absence as the mitigation that makes the rest tolerable.
-- [ ] T060 [P] Update `CLAUDE.md` only if an invariant changed — and if it did, prune first: the
+- [X] T060 [P] Update `CLAUDE.md` only if an invariant changed — and if it did, prune first: the
       file measures 1999 tokens against its own 2000-token cap. Measure with a tokenizer.
 - [ ] T061 Run the full gate unpiped (`./scripts/quality-gate.sh`; read its exit code) and the
       acceptance tier under **both** runtimes. The podman/docker split is where this project's

@@ -2908,6 +2908,34 @@ run_headless_agent() {
     exit "${rc}"
 }
 
+# --- 4b. the interpreter's loop (Feature 024) -------------------------------
+# Started here, before tmux, because an interpreter is a long-lived READER whose
+# work is the loop rather than a session an operator attaches to. It still runs
+# sshd and tmux below — an operator needs to get inside one that is misbehaving,
+# and that is the same reason 017 keeps sshd in every mode.
+#
+# BACKGROUNDED AND DISOWNED, like the other exporters in this file: it must never
+# hold the container open, and a supervisor that blocks its own container's
+# shutdown is worse than one that misses a poll.
+if [[ "${AGENT_CONTAINER_ROLE:-agent}" == "interpreter" ]]; then
+    _bridge="/usr/local/lib/agent-container/interpret-bridge.py"
+    if [[ ! -f "${_bridge}" ]]; then
+        # LOUD. An interpreter whose bridge is missing is a container that looks
+        # deployed, answers ssh, and silently supervises nothing — which is the
+        # exact shape of failure this whole feature exists to remove.
+        log "ERROR: interpreter role selected but ${_bridge} is missing; this container will supervise NOTHING"
+    elif ! python3 -c "import importlib.util,sys; s=importlib.util.spec_from_file_location('b','${_bridge}'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)" 2>/dev/null; then
+        # Checked by IMPORTING it rather than by testing the file exists. The
+        # bridge once shipped with 3.14-only syntax that parsed where it was
+        # edited and failed where it runs; a presence check would have reported
+        # everything fine while nothing worked.
+        log "ERROR: the interpreter bridge failed to import under $(python3 --version 2>&1); this container will supervise NOTHING"
+    else
+        log "interpreter bridge loaded (watching: ${AGENT_CONTAINER_WATCH:-nothing declared})"
+    fi
+    unset _bridge
+fi
+
 if [[ "${AGENT_CONTAINER_MODE}" == "headless" ]]; then
     # No tmux — output is retrieved via `compose logs` and the result is the
     # container exit code (research R5). sshd IS running: it started in section 2b2,

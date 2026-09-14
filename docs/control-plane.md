@@ -157,6 +157,27 @@ parameterised over every Dockerfile in the tree and **fails on one it has no exp
 resolve a version, because that image *pins the CLI it installs* and a default would install a
 version nobody chose.
 
+## An interpreter is not one of these (Feature 024)
+
+Both are agents you deploy to watch a fleet from somewhere else, and the resemblance is the danger:
+an operator who reads "an agent that watches your fleet" will assume this page unless told
+otherwise.
+
+| | control plane | interpreter |
+|---|---|---|
+| Reached by | you, over sshd | it speaks to you, over Slack |
+| Holds | a standing key that **stops and destroys** | a read path and a way to talk |
+| Can change the fleet | **yes, fully** | **no — structurally** |
+| Its input | your commands | **agent output, which is attacker-writable** |
+
+The last row is why the third differs. An interpreter takes its input from the processes it
+supervises, so one that could act would be one whose instructions can be written by the thing it is
+watching. It holds no runtime client and no host key, so the refusal is by construction rather than
+by conduct.
+
+**Deploying an interpreter grants nothing and needs no key authorised anywhere.** If you want to act
+from a phone, that is what this page is for. See [`interpretation.md`](interpretation.md).
+
 ## Not provided, deliberately
 
 - **No passphrase store, cache or escrow.** Any of them is a way to get the key without the

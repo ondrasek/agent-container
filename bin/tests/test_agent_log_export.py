@@ -615,3 +615,20 @@ def test_no_shape_guard_failure_branch_uses_an_UNBOUND_variable():
                 f"{fn}'s failure branch interpolates ${{agent}}, which is unbound "
                 f"there — under set -u that aborts the exporter it was meant to warn about"
             )
+
+
+def test_the_interpreter_bridge_is_verified_by_IMPORT_not_by_presence():
+    """The bridge once shipped with 3.14-only syntax that parsed where it was
+    edited and was a SyntaxError where it runs. A presence check would have
+    reported everything fine while the container supervised nothing.
+
+    And a missing or unimportable bridge must be LOUD: an interpreter that looks
+    deployed, answers ssh and silently supervises nothing is the exact failure
+    this feature exists to remove.
+    """
+    src = _ENTRYPOINT.read_text()
+    i = src.index('if [[ "${AGENT_CONTAINER_ROLE:-agent}" == "interpreter" ]]; then')
+    block = src[i : i + 2000]
+    assert "importlib.util" in block, "the bridge is checked by existence rather than by import"
+    assert block.count("ERROR:") >= 2, "a broken bridge does not report loudly"
+    assert "supervise NOTHING" in block

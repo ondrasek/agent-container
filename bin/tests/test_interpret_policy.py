@@ -666,3 +666,66 @@ def test_the_watermark_does_NOT_advance_on_an_unsettled_pass(b):
 
 def test_the_watermark_holds_when_nothing_was_consumed(b):
     assert b.advance_watermark("50", [], settled=True) == "50"
+
+
+# --- writing back, self-exclusion, version skew -----------------------------
+
+
+def test_the_signal_envelope_matches_what_the_entrypoint_builds(b):
+    """A second shape would make a consumer's query depend on which producer sent
+    it, and this feature's premise is that records, logs, interpretations and
+    bookkeeping are readable together by run id."""
+    doc = b.otlp_document(
+        {"signal": "interpretation", "interpreter": "watcher", "assessment": "fine"},
+        environment="demo",
+        run_id="r1",
+    )
+    attrs = {
+        a["key"]: a["value"]["stringValue"]
+        for a in doc["resourceLogs"][0]["resource"]["attributes"]
+    }
+    assert attrs["service.namespace"] == "agent-container"
+    assert attrs["agent_container.signal"] == "interpretation"
+    assert attrs["agent_container.interpreter"] == "watcher"
+    assert attrs["agent_container.run_id"] == "r1"
+    body = doc["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["body"]["stringValue"]
+    assert json.loads(body)["assessment"] == "fine"
+
+
+def test_a_signal_without_a_run_id_OMITS_it_rather_than_sending_empty(b):
+    """An empty run id joins unrelated runs under one key — a confident wrong
+    answer instead of an obvious gap."""
+    doc = b.otlp_document({"signal": "notification"}, environment="demo", run_id=None)
+    keys = {a["key"] for a in doc["resourceLogs"][0]["resource"]["attributes"]}
+    assert "agent_container.run_id" not in keys
+
+
+def test_an_interpreter_does_NOT_notify_about_itself(b):
+    """FR-027. Without this, every message it sends becomes an event it observes,
+    which becomes a message — a supervisor reporting on itself reporting."""
+    assert b.self_excluded("watcher", "watcher") is True
+    assert b.self_excluded("demo", "watcher") is False
+
+
+@pytest.mark.parametrize(
+    ("mine", "theirs", "expected"),
+    [
+        ("0.57.0", "0.57.0", "ok"),
+        ("0.58.0", "0.57.0", "advisory"),
+        ("0.57.0", "0.58.0", "refuse"),
+        ("1.0.0", "0.99.0", "advisory"),
+        ("nonsense", "0.57.0", "unknown"),
+        ("0.57.0", "", "unknown"),
+    ],
+)
+def test_version_skew_follows_017s_rule(b, mine, theirs, expected):
+    """Precedence, never equality. A trail NEWER than the reader is refused with
+    the remedy named, because reading a shape this build does not know is the
+    misreading 016 forbids. `major_on_zero = false` here, so pre-1.0 a MINOR bump
+    is the breaking channel — 0.57 → 0.58 must refuse, and does."""
+    assert b.version_skew(mine, theirs) == expected
+
+
+def test_an_unreadable_version_is_never_assumed_COMPATIBLE(b):
+    """Assuming is exactly what produces a confident wrong summary."""
+    assert b.version_skew("", "") == b.SKEW_UNKNOWN

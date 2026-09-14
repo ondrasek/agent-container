@@ -3736,6 +3736,45 @@ def doctor_check_credential(cred: dict, env_name: str) -> Check:
     )
 
 
+def doctor_check_interpreter(entry: dict) -> Check:
+    """Whether an interpreter's BINDING resolves — declared, not exercised.
+
+    STAYS INSIDE 013's GUARANTEE, which is the whole reason this is worth writing
+    carefully. `doctor` is read-only BY COMPOSITION: a test walks its call graph
+    and asserts it reaches no writer, and it deliberately never RETRIEVES a
+    credential, because resolving one IS the prompt — an approval-gated item
+    raises a system dialog, and a diagnostic that makes an operator approve a
+    secret access is one they will not run twice.
+
+    So this checks that the binding is DECLARED and well-formed: a stack, a
+    conversation, a sender. It does not post, does not poll, and does not read the
+    token. `interpret test-channel` is where an operator goes to exercise it.
+    """
+    cid = f"interpreter:{entry.get('name')}"
+    missing = [field for field in ("stack", "channel", "declared_sender") if not entry.get(field)]
+    if missing:
+        return doctor_fail(
+            cid,
+            "blocking",
+            observed=f"binding incomplete: {', '.join(missing)} not recorded",
+            remedy=f"redeploy it: agent-container up {entry.get('name')} --role interpreter ...",
+            entity=str(entry.get("name")),
+            scope="host",
+        )
+    if entry.get("authority") not in INTERPRETER_AUTHORITIES:
+        # An authority outside the vocabulary is either a newer tool's entry or a
+        # hand-edited one, and both are reasons to look rather than to assume.
+        return doctor_fail(
+            cid,
+            "advisory",
+            observed=f"unrecognised authority {entry.get('authority')!r}",
+            remedy="check which version wrote this inventory entry",
+            entity=str(entry.get("name")),
+            scope="host",
+        )
+    return doctor_ok(cid, "blocking", scope="host")
+
+
 def doctor_check_host(host_name: str, host_rec: dict) -> Check:
     """Is this host reachable? Bounded, and `unknown` when it cannot answer.
 
@@ -3961,6 +4000,10 @@ def doctor_collect(name: str | None, host: str | None) -> tuple[str, list[Check]
             # Every host individually — one unreachable host must not suppress the
             # others, and must never be silently absent (C10/C12, SC-005).
             checks.append(doctor_check_host(hname, hrec))
+    # Feature 024: every interpreter's binding, read from the inventory. Nothing
+    # is posted, polled or resolved — see doctor_check_interpreter.
+    for _entry in interpreter_entries():
+        checks.append(doctor_check_interpreter(_entry))
 
     if root is None:
         return scope, checks

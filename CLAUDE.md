@@ -71,10 +71,11 @@ re-summarise them here.
 
 ### Where the detail lives
 
-All under `docs/`, by feature: `layout.md` 011 · `orchestration.md` 001,002 · `credentials.md`
-003,008,019 · `execution.md` 004,010,019 · `shell-integration.md` 005,018 · `agent-as-code.md`
-006,008 · `agent-interface.md` 009 · `egress.md` 012 · `doctor.md` 013 · `inventory.md` 014 ·
-`observability.md` 016,017 · `control-plane.md` 017 · `telemetry-stack.md` 023 · specs/007 (wizard) · `threat-model.md`
+All under `docs/`, `.md` implied: `layout` 011 · `orchestration` 001,002 · `credentials`
+003,008,019 · `execution` 004,010,019 · `shell-integration` 005,018 · `agent-as-code` 006,008 ·
+`agent-interface` 009 · `egress` 012 · `doctor` 013 · `inventory` 014 · `observability` 016,017 ·
+`control-plane` 017 · `telemetry-stack` 023 · `interpretation` 024 · specs/007 (wizard) ·
+`threat-model`
 (**reconcile every feature** — Constitution).
 
 ## Architecture — keep these layers separate

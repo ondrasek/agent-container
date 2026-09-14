@@ -736,6 +736,93 @@ def advance_watermark(previous: str, consumed: list[dict], settled: bool) -> str
     return max(str(c.get("at") or "") for c in consumed) or previous
 
 
+# --- writing back: interpretations and bookkeeping ---------------------------
+
+
+def otlp_document(signal: dict, *, environment: str, run_id: str | None) -> dict:
+    """One OTLP/HTTP JSON logs document carrying one of our signals.
+
+    THE SAME ENVELOPE THE ENTRYPOINT BUILDS, deliberately. A second shape would
+    make a consumer's query depend on which producer sent it, and this feature's
+    whole premise is that records, logs, interpretations and bookkeeping can be
+    read together by run id.
+    """
+    attrs = [
+        {"key": "service.namespace", "value": {"stringValue": "agent-container"}},
+        {"key": "agent_container.signal", "value": {"stringValue": str(signal.get("signal"))}},
+        {
+            "key": "agent_container.interpreter",
+            "value": {"stringValue": str(signal.get("interpreter") or "")},
+        },
+        {"key": "agent_container.environment", "value": {"stringValue": environment}},
+    ]
+    if run_id:
+        attrs.append({"key": "agent_container.run_id", "value": {"stringValue": run_id}})
+    return {
+        "resourceLogs": [
+            {
+                "resource": {"attributes": attrs},
+                "scopeLogs": [
+                    {
+                        "logRecords": [
+                            {
+                                "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                "body": {"stringValue": json.dumps(signal, sort_keys=True)},
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def self_excluded(signal_environment: str, interpreter: str) -> bool:
+    """Whether this is the interpreter's OWN activity.
+
+    FR-027. Without this, every message it sends becomes an event it observes,
+    which becomes a message — a supervisor that reports on itself reporting. Its
+    runs are still RECORDED like any environment's (FR-028); what is excluded is
+    notifying about them, and those are different things.
+    """
+    return signal_environment == interpreter
+
+
+# --- version skew ------------------------------------------------------------
+
+SKEW_OK = "ok"
+SKEW_ADVISORY = "advisory"
+SKEW_REFUSE = "refuse"
+SKEW_UNKNOWN = "unknown"
+
+
+def _semver(raw: str) -> tuple[int, int, int] | None:
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", str(raw or ""))
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def version_skew(interpreter_version: str, trail_version: str) -> str:
+    """017's rule, applied to a reader instead of a manager.
+
+    Compared by PRECEDENCE, never equality. An interpreter NEWER than the trail
+    is the normal state after an upgrade and is advisory; a trail newer than the
+    interpreter is REFUSED with the remedy named, because reading a shape this
+    build does not know is the misreading 016 spends a section forbidding. An
+    unreadable version is `unknown` — never assumed compatible, since assuming is
+    exactly what produces a confident wrong summary.
+    """
+    mine, theirs = _semver(interpreter_version), _semver(trail_version)
+    if mine is None or theirs is None:
+        return SKEW_UNKNOWN
+    if mine == theirs:
+        return SKEW_OK
+    if mine > theirs:
+        return SKEW_ADVISORY
+    # `major_on_zero = false` in this project, so pre-1.0 a MINOR bump is the
+    # breaking channel — 0.31 → 0.32 is exactly the case this must catch.
+    return SKEW_REFUSE
+
+
 def main() -> int:  # pragma: no cover - the loop is exercised by acceptance
     """Entry point. Deliberately thin: everything decidable is a function above."""
     raise SystemExit(
