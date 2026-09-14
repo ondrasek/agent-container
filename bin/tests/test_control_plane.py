@@ -2312,3 +2312,81 @@ def test_the_two_export_switches_are_INDEPENDENT(wiz, tmp_path, monkeypatch):
                      project="export_task_text: false\nexport_agent_logs: true\n")  # fmt: skip
     assert wiz.export_task_text(proj) is False
     assert wiz.export_agent_logs(proj) is True
+
+
+# --- Feature 024: the interpreter's pre-deploy statement ---------------------
+
+
+def test_the_interpreter_statement_LEADS_with_what_it_cannot_do(wiz, capsys):
+    """An operator reading "an agent that watches your fleet" will assume the 017
+    shape unless told otherwise, so the order is inverted on purpose: a control
+    plane's headline is what it CAN do, an interpreter's is what it cannot."""
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "C0123456789")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    # By POSITION, not by line shape: `log()` prefixes every line and rich may
+    # wrap, so what is asserted is the order the operator reads them in.
+    assert "CANNOT change anything" in out
+    assert "structural, not a setting" in out
+    assert out.index("CANNOT change anything") < out.index("it READS the trail")
+    assert out.index("CANNOT change anything") < out.index("TASK TEXT")
+
+
+def test_the_interpreter_statement_names_the_TRUST_DOMAIN_crossing(wiz, capsys):
+    """SC-013. Every exposure this feature's ancestors created stayed on the
+    operator's own infrastructure, bounded by a level they chose. This one leaves
+    it entirely, and no exposure level reaches a SaaS account — so the statement
+    has to say that in as many words rather than summarising it as "sends to
+    Slack", which reads as a delivery detail rather than a disclosure."""
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "C0123456789")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    assert "TASK TEXT" in out and "OUTPUT" in out
+    assert "workspace administrators" in out
+    assert "leaves your own infrastructure" in out
+    assert "C0123456789" in out
+
+
+def test_the_interpreter_statement_describes_the_token_as_VOICE(wiz, capsys):
+    """FR-006. Every other credential this tool delivers buys ACCESS to something.
+    This one buys the ability to speak as the operator's own supervisor, which is
+    a different blast radius and has to be described as one."""
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "C1")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    assert "grants no access, it grants VOICE" in out
+    assert wiz.INTERPRETER_CHANNEL_TOKEN_VAR in out
+
+
+def test_the_interpreter_statement_names_the_CUSTOM_APP_requirement(wiz, capsys):
+    """The rate-limit cliff is undiagnosable from inside: a distributed app gets
+    1 request/minute against a custom app's 50+, so the interpreter would answer
+    minutes late and nothing in this tool could tell that from a quiet fleet."""
+    wiz.state_interpreter_consequences("watcher", [], "C1")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    assert "CUSTOM app" in out
+    assert "1 request" in out
+
+
+def test_an_interpreter_with_no_scope_SAYS_SO(wiz, capsys):
+    """Absence is not a default (Constitution VIII). An interpreter watching
+    nothing is a container that will sit there interpreting nothing, and the
+    operator should learn that here rather than from a silent channel."""
+    wiz.state_interpreter_consequences("watcher", [], "C1")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    assert "no scope declared" in out
+
+
+def test_an_interpreter_REFUSES_headless(wiz):
+    """It is a long-lived reader; a headless run ends when its agent does."""
+    with pytest.raises(wiz.Fatal, match="long-lived reader"):
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, mode="headless").validate()
+
+
+def test_an_interpreter_ACCEPTS_every_supported_agent(wiz):
+    """FR-003: none is privileged by the design. Unlike a control plane, which has
+    no agent installed at all, an interpreter IS an agent."""
+    for agent in wiz.AGENTS:
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, agent=agent).validate()

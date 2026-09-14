@@ -10806,6 +10806,25 @@ INJECT_DELIVERED_SENTINEL = f"{SECRETS_DIR}/sentinel/value"
 # itself a certain way; a name-prefix rule would silently misclassify it as public.
 SECRET_INJECT_DIRS = (INJECT_APIKEY_DIR + "/", INJECT_ENV_DIR + "/")
 
+# Feature 024. The interpreter's channel credential, named here so the refusal
+# below and the documentation name the same thing.
+#
+# IT IS AN ORDINARY DECLARED CREDENTIAL, and that is deliberate rather than
+# lazy. Constitution IX already routes anything landing under SECRET_INJECT_DIRS
+# to `deliver_secrets` — into the running container, over ITS OWN sshd, never
+# through the compose model and never on argv. Inventing a second delivery path
+# for this one token would mean a second thing to get right, a second thing to
+# audit, and a second place for a secret to end up in a file that outlives the
+# need for it.
+#
+# WHAT MAKES IT UNUSUAL IS NOT HOW IT TRAVELS BUT WHAT IT GRANTS. Every other
+# credential this tool delivers buys ACCESS to something — a forge, a model API.
+# This one buys VOICE: whoever holds it can send messages the operator will read
+# as coming from their own supervisor, including "the fleet is fine". That is a
+# different blast radius from the rest and is described as such wherever the tool
+# enumerates what an environment holds.
+INTERPRETER_CHANNEL_TOKEN_VAR = "SLACK_BOT_TOKEN"
+
 
 def is_secret_target(target: str) -> bool:
     """Whether an injected target holds SECRET material (Constitution IX)."""
@@ -11325,6 +11344,18 @@ class ExecSpec:
         # value in this role and is never read; refusing a NON-default value is
         # the distinction — refusing the default too would reject every ordinary
         # `up --role control-plane`.
+        # Feature 024. An interpreter IS an agent — it runs one, from the same
+        # list, on the same image — so unlike a control plane it refuses nothing
+        # about the agent surface. What it does refuse is the shape that would
+        # make it something else: it is a long-lived reader, and a headless run
+        # that exits when its agent finishes is not that.
+        if self.role == ROLE_INTERPRETER and self.mode != "interactive":
+            die(
+                f"--mode {self.mode} is not available for --role {ROLE_INTERPRETER}: an "
+                f"interpreter is a long-lived reader of the fleet's trail, and a headless "
+                f"run ends when its agent does",
+                remedy=f"deploy it with --role {ROLE_INTERPRETER} and no --mode",
+            )
         if self.role == ROLE_CONTROL_PLANE:
             if self.mode != "interactive":
                 die(
@@ -12235,6 +12266,59 @@ def report_control_plane_scope(name: str, hosts: list[str] | None) -> list[str]:
             tail,
         ]
     return [f"{name}: declared scope ({len(hosts)} host(s)): {', '.join(hosts)}", tail]
+
+
+def state_interpreter_consequences(name: str, scope: list[str], conversation: str) -> None:
+    """Feature 024 FR-021/FR-024a/SC-012/SC-013 — said BEFORE the deploy.
+
+    Same shape and the same reason as the control-plane statement below, with the
+    order deliberately inverted: a control plane's headline is what it CAN DO, and
+    an interpreter's is what it CANNOT, because an operator reading "an agent that
+    watches your fleet" will assume the 017 shape unless told otherwise.
+
+    THE THIRD PARAGRAPH IS THE ONE THAT MATTERS and the one no other statement in
+    this tool has had to make. Every prior exposure this feature's ancestors
+    created stayed inside the operator's own infrastructure: 016 wrote task text to
+    a 0600 file on their disk, 023 put it behind an unauthenticated UI on their own
+    host, bounded by an exposure level they chose. This sends task text AND
+    everything the agent printed OUT of the operator's trust domain entirely, into
+    a workspace somebody else administers and whose retention policy somebody else
+    sets. No exposure level reaches that, because the boundary is a SaaS account.
+    So it is stated in full rather than summarised — an operator who is going to
+    regret this should meet it here, before the container exists.
+
+    Printed, not prompted: `up` is a path an agent may drive, and a prompt there is
+    auto-answered, which reads as consent (017's rule).
+    """
+    log(f"deploying {name} as an INTERPRETER — read this before it starts:")
+    log(
+        "  1. it CANNOT change anything. It cannot stop, start, redeploy, destroy, "
+        "task or reconfigure any environment, and it cannot deploy another "
+        "container. This is structural, not a setting: no container runtime client "
+        "is installed and it holds no host key, so there is nothing for it to act "
+        "through even if a log it reads tells it to"
+    )
+    log(
+        f"  2. it READS the trail of: {', '.join(scope) if scope else 'nothing — no scope declared'}"
+        + ("" if scope else " (declare --watch, or it will have nothing to interpret)")
+    )
+    log(
+        f"  3. it SENDS your agents' TASK TEXT and their OUTPUT to Slack conversation "
+        f"{conversation}. Everyone who can read that conversation, and your workspace "
+        f"administrators, will see them, under your workspace's retention policy. "
+        f"This leaves your own infrastructure — no exposure setting reaches it"
+    )
+    log(
+        f"  4. it holds a Slack bot token ({INTERPRETER_CHANNEL_TOKEN_VAR}). Whoever "
+        f"holds that can speak to you AS this interpreter — it grants no access, it "
+        f"grants VOICE, which includes telling you the fleet is fine"
+    )
+    log(
+        "  5. the Slack app must be a CUSTOM app in your own workspace. A "
+        "commercially distributed non-Marketplace app is rate-limited to 1 request "
+        "per minute where a custom one gets 50+, and the interpreter would answer "
+        "minutes late for a reason nothing here can detect"
+    )
 
 
 def state_control_plane_consequences(name: str, hosts: list[str] | None) -> None:
