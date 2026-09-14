@@ -1728,9 +1728,22 @@ host_metrics_export_once() {
     # A jq COMPILE ERROR lands in ${payload} now that its stderr is captured, and
     # posting that as a log body would be worse than exporting nothing. Checked
     # by shape: the payload must be the JSON document we asked for.
+    # `resourceMetrics`, which is what host_metrics_payload actually builds. This
+    # read `resourceLogs` — copied from the record exporter, whose payload IS a
+    # logs document — so EVERY sample took the failure branch below.
+    #
+    # And that branch interpolated `${agent}`, which is not a local here and not a
+    # global anywhere: under `set -u` inside the disowned subshell that is an
+    # unbound-variable abort, so the sampler died on its FIRST TICK and has never
+    # produced a second sample. Reproduced before fixing.
+    #
+    # Nothing reported it because this exporter is deliberately silent (see
+    # below), the subshell's output is discarded, and a host-metrics panel that
+    # stays empty reads as a host with nothing to say. The same silent shape the
+    # agent-log exporter had, one function away, found by reviewing that one.
     case "${payload}" in
-        '{"resourceLogs"'*) ;;
-        *) log "WARNING: could not build the ${agent} session payload: ${payload:0:160}"; return 0 ;;
+        '{"resourceMetrics"'*) ;;
+        *) log "WARNING: could not build the host metrics payload: ${payload:0:160}"; return 0 ;;
     esac
     # FAIL-OPEN AND SILENT. This runs on a timer for the life of the container;
     # a collector that goes away must not produce a line of log per interval,

@@ -562,3 +562,47 @@ def test_the_cap_notice_is_not_swallowed_by_the_subshell_redirect():
     block = src[src.index("agent_log_export_start() {") : src.index("host_metrics_export_once() {")]
     assert ") > /dev/null &" in block
     assert ") > /dev/null 2>&1 &" not in block, "stderr is discarded, taking the cap notice with it"
+
+
+def test_every_payload_SHAPE_GUARD_matches_what_its_builder_produces():
+    """A guard whose literal does not match its builder rejects everything.
+
+    `host_metrics_export_once` checked for `{"resourceLogs"` while
+    `host_metrics_payload` builds `{"resourceMetrics"` — copied from the record
+    exporter, whose payload really is a logs document. Every sample therefore took
+    the failure branch, which interpolated an `${agent}` that is neither local
+    there nor global anywhere: under `set -u` in a disowned subshell that is an
+    abort, so the host-metrics sampler died on its first tick and has never
+    produced a second sample.
+
+    Nothing reported it: the exporter is deliberately silent, its subshell's
+    output is discarded, and an empty host-metrics panel reads as a quiet host.
+    This pairs each guard with its builder so the next copy-paste is caught.
+    """
+    for fn, expected in (
+        ("agent_log_export_once", '{"resourceLogs"'),
+        ("host_metrics_export_once", '{"resourceMetrics"'),
+    ):
+        block = _extract(fn)
+        assert f"'{expected}'*)" in block, (
+            f"{fn}'s shape guard does not match the document its builder produces; "
+            f"expected the literal {expected!r}"
+        )
+
+
+def test_no_shape_guard_failure_branch_uses_an_UNBOUND_variable():
+    """The second half of the same bug, and the half that turned a rejected
+    payload into a dead exporter.
+
+    These run under `set -u` inside disowned subshells, so an undefined name in
+    the branch that reports a problem kills the thing that was reporting it.
+    """
+    for fn in ("agent_log_export_once", "host_metrics_export_once"):
+        block = _extract(fn)
+        branch = [ln for ln in block.splitlines() if "could not build" in ln]
+        assert branch, f"{fn} has no shape-guard failure branch"
+        for ln in branch:
+            assert "${agent}" not in ln, (
+                f"{fn}'s failure branch interpolates ${{agent}}, which is unbound "
+                f"there — under set -u that aborts the exporter it was meant to warn about"
+            )
