@@ -198,13 +198,13 @@ environment, run id and outcome with a reading grounded in that run's log.
       activity or inactivity from missing data.
 - [ ] T023 [US1] **(FR-012b)** Implement the `notification` bookkeeping signal keyed on the **event**, not the
       message (data-model.md) — this is what makes catch-up idempotent after a restart.
-- [ ] T024 [US1] **(FR-016)** Implement the Slack write path (`chat.postMessage`) in
+- [X] T024 [US1] **(FR-016)** Implement the Slack write path (`chat.postMessage`) in
       `image/interpret-bridge.py`, stdlib only, with the FR-016 required fields in every message
       including the interpreter's own identity.
-- [ ] T025 [US1] Implement hold-and-deliver on channel failure in `image/interpret-bridge.py`:
+- [X] T025 [US1] Implement hold-and-deliver on channel failure in `image/interpret-bridge.py`:
       held in order, delivered on recovery marked delayed, `429` honouring `Retry-After`, and **no
       effect on any agent in the fleet** under any channel condition (FR-018).
-- [ ] T026 [US1] Implement catch-up after absence (FR-017): notification derived from the trail and
+- [X] T026 [US1] Implement catch-up after absence (FR-017): notification derived from the trail and
       the ledger, not from having witnessed events, so a stopped or rebooted interpreter reports
       what it missed, marked late, without duplicates.
 - [X] T027 [US1] **Write the FR-020a reachability guard now, with this phase, not after it.** In
@@ -217,9 +217,9 @@ environment, run id and outcome with a reading grounded in that run's log.
       knows works.
 - [X] T029 [P] [US1] Unit-test the policy in `bin/tests/test_pure_logic.py`: quiet on success,
       stall wording carries duration and last output, one notification per state change.
-- [ ] T030 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: failed run notified within
+- [X] T030 [P] [US1] Acceptance test in `bin/tests/test_acceptance.py`: failed run notified within
       budget with grounded reading (SC-001, SC-002); successful run produces no interruption.
-- [ ] T031 [P] [US1] Acceptance test: interpreter stopped across three events and a host reboot
+- [X] T031 [P] [US1] Acceptance test: interpreter stopped across three events and a host reboot
       reports all three on return, marked late, no duplicates (SC-008).
 
 **Checkpoint**: the feature's headline capability works.
@@ -233,20 +233,20 @@ environment, run id and outcome with a reading grounded in that run's log.
 **Independent test**: with two runs on different hosts, ask about one; the reply identifies the
 right environment and run and cites the identifiers it used.
 
-- [ ] T032 [US3] **(FR-024)** Implement `conversations.history` polling in `image/interpret-bridge.py` at the
+- [X] T032 [US3] **(FR-024)** Implement `conversations.history` polling in `image/interpret-bridge.py` at the
       T002 interval — HTTPS only, **not Socket Mode**, which would require a WebSocket client and
       therefore a dependency (research R1).
 - [X] T033 [US3] Implement declared-sender admission in `image/interpret-bridge.py`: no default
       admits anyone; a message from any other sender gets **no reply** and a recorded refusal
       carrying the sender's channel identity (FR-023, SC-007).
-- [ ] T034 [US3] Implement grounded replies in `image/interpret-bridge.py`: every claim names the
+- [X] T034 [US3] Implement grounded replies in `image/interpret-bridge.py`: every claim names the
       run it came from; what could not be seen is stated rather than filled in (FR-011a, FR-013).
-- [ ] T035 [US3] Implement unreachable-host reporting in replies: `undetermined`, never `absent` or
+- [X] T035 [US3] Implement unreachable-host reporting in replies: `undetermined`, never `absent` or
       `stopped` (Feature 014's rule, which a summarising reader is otherwise tempted to smooth over).
 - [ ] T036 [US3] Implement `interpret test-channel NAME` in `bin/agent-container` per
       contracts/cli.md: post, read back, report the admitted sender identity — runnable before
       trusting the binding overnight.
-- [ ] T037 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: question answered within a
+- [X] T037 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: question answered within a
       minute naming the correct run, elapsed time, commits and pushes (SC-010); undeclared sender
       gets silence plus a recorded refusal (SC-007).
 
@@ -265,10 +265,10 @@ notification quotes them as content.
 - [X] T039 [US5] Implement contradiction reporting (FR-011b): record and log disagreements are
       stated as disagreements, with the record as the authority for what happened and the log as the
       authority for what the agent said. Never resolved by adopting the agent's account.
-- [ ] T040 [US5] Implement the act-refusal path in `image/interpret-bridge.py`: decline, name the
+- [X] T040 [US5] Implement the act-refusal path in `image/interpret-bridge.py`: decline, name the
       path that can do it, record the request, attempt nothing indirect, and never report having
       done what it did not do (FR-022).
-- [ ] T041 [P] [US5] Adversarial acceptance tests in `bin/tests/test_acceptance.py` carrying SC-005:
+- [X] T041 [P] [US5] Adversarial acceptance tests in `bin/tests/test_acceptance.py` carrying SC-005:
       injected supervisor instructions change nothing and are quoted as content; a log claim
       contradicting the record is reported as a contradiction, not repeated.
 - [X] T042 [P] [US5] Structural test asserting the **absence** of authority (SC-004a), in the style

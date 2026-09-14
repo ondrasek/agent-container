@@ -20,6 +20,7 @@ the thing it is watching.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -412,6 +413,212 @@ def outbound_queue_after(queue: list[dict], sent_keys: set[str]) -> list[dict]:
     catch-up untrustworthy — the operator cannot tell a repeat from a new failure.
     """
     return [item for item in queue if item["key"] not in sent_keys]
+
+
+# --- Slack, spoken to over plain HTTPS ---------------------------------------
+
+SLACK_API = "https://slack.com/api"
+# Bounded so a wedged channel cannot become a wedged interpreter. Short, because
+# nothing here is worth waiting on: a missed poll is retried in seconds.
+SLACK_TIMEOUT = 15
+
+
+class SlackChannel(Channel):
+    """The first supported channel. HTTPS polling, NOT Socket Mode.
+
+    Socket Mode obtains a WebSocket from `apps.connections.open` and then speaks
+    WebSocket — and Python has no stdlib WebSocket client, so choosing it would
+    make a third-party dependency UNAVOIDABLE in a project whose one dependency is
+    PyYAML (Constitution VI). Polling the Web API has the identical property that
+    made Socket Mode attractive — the container opens every connection, nothing
+    listens, no inbound port exists — at no dependency cost.
+
+    THE APP MUST BE A CUSTOM APP in the operator's own workspace.
+    `conversations.history` allows 50+ requests/minute for one of those and 1/min
+    for a commercially distributed non-Marketplace app. At the 15s default this
+    makes 4/min: an eighth of the allowance we support, four times over the one we
+    do not. That is named in the deploy statement because the failure is otherwise
+    undiagnosable — a distributed app answers minutes late and nothing in this tool
+    can tell that from a quiet fleet.
+    """
+
+    name = "slack"
+
+    def __init__(self, token: str, conversation: str, *, opener=None) -> None:
+        self._token = token
+        self._conversation = conversation
+        # Injected so tests drive the real request-shaping code without a network.
+        # The alternative — mocking the whole channel — would leave exactly the
+        # layer that talks to Slack untested, which is the layer most likely to be
+        # wrong.
+        self._open = opener or self._urlopen
+
+    @staticmethod
+    def _urlopen(req):  # pragma: no cover - the network edge itself
+        import urllib.request
+
+        return urllib.request.urlopen(req, timeout=SLACK_TIMEOUT)
+
+    def _call(self, method: str, params: dict, *, post: bool) -> dict:
+        import urllib.parse
+        import urllib.request
+
+        url = f"{SLACK_API}/{method}"
+        headers = {"Authorization": f"Bearer {self._token}"}
+        if post:
+            body = json.dumps(params).encode()
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            req = urllib.request.Request(url, data=body, headers=headers)
+        else:
+            req = urllib.request.Request(f"{url}?{urllib.parse.urlencode(params)}", headers=headers)
+        try:
+            with self._open(req) as resp:
+                payload = json.loads(resp.read().decode())
+        except Exception as e:  # noqa: BLE001 - fail-open by design, see below
+            # FAIL-OPEN, ALWAYS. A channel that is down must never affect any agent
+            # in the fleet (FR-018) — the interpreter holds its messages and says
+            # so later. An exception escaping here would end the loop, which is the
+            # one outcome a supervisor may not have.
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return (
+            payload if isinstance(payload, dict) else {"ok": False, "error": "non-object response"}
+        )
+
+    def post(self, text: str) -> bool:
+        r = self._call("chat.postMessage", {"channel": self._conversation, "text": text}, post=True)
+        return bool(r.get("ok"))
+
+    def poll(self, since: str | None) -> list[dict]:
+        params = {"channel": self._conversation, "limit": 50}
+        if since:
+            params["oldest"] = since
+        r = self._call("conversations.history", params, post=False)
+        if not r.get("ok"):
+            return []
+        msgs = [m for m in (r.get("messages") or []) if isinstance(m, dict)]
+        # Slack returns newest-first; the operator asked in the order they asked.
+        msgs.sort(key=lambda m: str(m.get("ts") or ""))
+        return msgs
+
+    def identity(self) -> dict:
+        """`auth.test` — what `interpret test-channel` reports.
+
+        Proves the token works and names who the interpreter would appear as,
+        BEFORE an operator trusts it to run overnight.
+        """
+        return self._call("auth.test", {}, post=False)
+
+
+class RecordingChannel(Channel):
+    """A channel that records instead of sending.
+
+    Not a mock of the interpreter — a real Channel, so every decision above it
+    runs unchanged. What it removes is the network, which is the one part that
+    cannot be exercised without a workspace and a token.
+    """
+
+    name = "recording"
+
+    def __init__(self, inbox: list[dict] | None = None) -> None:
+        self.sent: list[str] = []
+        self.inbox = inbox or []
+        self.reachable = True
+
+    def post(self, text: str) -> bool:
+        if not self.reachable:
+            return False
+        self.sent.append(text)
+        return True
+
+    def poll(self, since: str | None) -> list[dict]:
+        return list(self.inbox)
+
+
+# --- the loop ----------------------------------------------------------------
+
+
+def deliver(channel: Channel, queue: list[dict], ledger: set[str]) -> tuple[list[dict], list[str]]:
+    """Send what has not been sent, stop at the first failure, keep the rest.
+
+    IN ORDER, AND NOTHING DROPPED (FR-018). Stopping at the first failure rather
+    than skipping past it is what keeps the order meaningful: an operator reading
+    a delayed batch must be able to trust that nothing is missing from the middle
+    of it.
+    """
+    still: list[dict] = []
+    delivered: list[str] = []
+    failed = False
+    for item in outbound_queue_after(queue, ledger):
+        if failed or not channel.post(item["text"]):
+            failed = True
+            still.append(item)
+            continue
+        delivered.append(item["key"])
+    return still, delivered
+
+
+def answer(question: str, facts: dict) -> str:
+    """A grounded reply to an operator's question.
+
+    EVERY CLAIM NAMES THE RUN IT CAME FROM (FR-011a), and what could not be seen
+    is stated rather than filled in. The interpreter is not asked to be clever
+    here — it is asked not to invent, because an answer that reads confidently
+    about a fleet it could not see is worse than no answer at all.
+    """
+    lines = []
+    preamble = health_preamble(facts.get("input_health") or {})
+    if preamble:
+        lines.append(preamble)
+    runs = facts.get("runs") or []
+    if not runs:
+        lines.append("I have no runs in view for that.")
+    for r in runs:
+        lines.append(
+            f"{r.get('environment')} on {r.get('host')}: {r.get('state')}"
+            f"{' — ' + r['assessment'] if r.get('assessment') else ''} "
+            f"(run_id: {r.get('run_id')})"
+        )
+    return "\n".join(lines)
+
+
+REFUSAL = (
+    "I cannot change anything — I hold no credential that could, and no container "
+    "runtime client is installed here. Run it from your own machine, or from a "
+    "control plane: {command}"
+)
+
+_ACTION_RE = re.compile(
+    r"(?i)\b(stop|start|restart|redeploy|destroy|kill|purge|remove|delete|task|deploy|run)\b"
+)
+
+
+def is_action_request(text: str) -> bool:
+    """Whether an operator is asking it to DO something rather than say something.
+
+    Answered with a refusal that names the path that can (FR-022). The refusal is
+    not what makes it safe — the absence of any credential is — but an operator
+    who asks and gets silence learns nothing, and one who gets a vague "I can't"
+    learns less than one who is told where to go.
+    """
+    return bool(_ACTION_RE.search(text or ""))
+
+
+def handle_message(
+    message: dict, *, declared_sender: str, facts: dict
+) -> tuple[str | None, dict | None]:
+    """(reply, refusal_record). A `None` reply means: say nothing at all.
+
+    SILENCE IS THE CORRECT ANSWER TO AN UNDECLARED SENDER (FR-023). Replying
+    "you are not authorised" confirms to a stranger that something is listening
+    and tells them what; the refusal is recorded for the operator instead, which
+    is who it is evidence for.
+    """
+    text = str(message.get("text") or "")
+    if not admit(message, declared_sender):
+        return None, {"refused": message.get("user"), "text": text[:200]}
+    if is_action_request(text):
+        return REFUSAL.format(command="agent-container <command>"), None
+    return answer(text, facts), None
 
 
 def main() -> int:  # pragma: no cover - the loop is exercised by acceptance

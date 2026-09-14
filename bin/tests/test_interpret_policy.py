@@ -11,6 +11,7 @@ property, it is the reason the container holds nothing that can act.
 """
 
 import importlib.util
+import json
 import re
 import time
 from pathlib import Path
@@ -360,7 +361,231 @@ def test_the_bridge_imports_nothing_outside_the_STDLIB():
     inside a container, again with nothing but an absent interpreter to show."""
     src = _BRIDGE.read_text()
     imported = set(re.findall(r"^\s*(?:import|from)\s+([a-zA-Z_][\w.]*)", src, re.M))
-    allowed = {"__future__", "json", "re", "time", "urllib", "urllib.request", "os", "sys"}
+    allowed = {
+        "__future__",
+        "json",
+        "re",
+        "time",
+        "urllib",
+        "urllib.parse",
+        "urllib.request",
+        "os",
+        "sys",
+    }
     assert imported <= allowed, (
         f"non-stdlib or unvetted imports in the bridge: {imported - allowed}"
     )
+
+
+# --- the Slack edge: shaped correctly, and fail-open ------------------------
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._b = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _slack(b, payload, *, capture=None):
+    """A SlackChannel whose only stub is the network call itself.
+
+    Everything that shapes the request — URL, auth header, method, encoding — is
+    the shipped code. Mocking the whole channel would leave exactly the layer that
+    talks to Slack untested, which is the layer most likely to be wrong.
+    """
+
+    def opener(req):
+        if capture is not None:
+            capture.append(req)
+        return _FakeResp(payload)
+
+    return b.SlackChannel("xoxb-test", "C0123456789", opener=opener)
+
+
+def test_posting_uses_the_bot_token_and_the_bound_conversation(b):
+    seen = []
+    ch = _slack(b, {"ok": True}, capture=seen)
+    assert ch.post("hello") is True
+    req = seen[0]
+    assert req.full_url == "https://slack.com/api/chat.postMessage"
+    assert req.headers["Authorization"] == "Bearer xoxb-test"
+    body = json.loads(req.data.decode())
+    assert body == {"channel": "C0123456789", "text": "hello"}
+
+
+def test_polling_is_a_GET_with_no_inbound_path_anywhere(b):
+    """FR-024: the container opens every connection. Socket Mode would need a
+    WebSocket client and therefore a dependency; the Events API would need a
+    public inbound URL. Neither is acceptable, so this is plain HTTPS."""
+    seen = []
+    ch = _slack(b, {"ok": True, "messages": [{"ts": "2", "text": "b"}, {"ts": "1", "text": "a"}]},
+                capture=seen)  # fmt: skip
+    msgs = ch.poll(since="1")
+    assert seen[0].get_method() == "GET"
+    assert "conversations.history" in seen[0].full_url
+    assert "oldest=1" in seen[0].full_url
+    # Slack answers newest-first; the operator asked in the order they asked.
+    assert [m["text"] for m in msgs] == ["a", "b"]
+
+
+def test_a_slack_failure_is_FAIL_OPEN_and_never_raises(b):
+    """FR-018's second sentence is the load-bearing one: a channel that is down
+    must not affect any agent in the fleet. An exception escaping here would end
+    the loop, which is the one outcome a supervisor may not have."""
+
+    def boom(req):
+        raise OSError("network is unreachable")
+
+    ch = b.SlackChannel("t", "C1", opener=boom)
+    assert ch.post("anything") is False
+    assert ch.poll(None) == []
+
+
+def test_a_non_ok_slack_response_is_not_read_as_success(b):
+    ch = _slack(b, {"ok": False, "error": "channel_not_found"})
+    assert ch.post("x") is False
+    assert ch.poll(None) == []
+
+
+# --- delivery: in order, nothing dropped, nothing repeated -----------------
+
+
+def test_delivery_STOPS_at_the_first_failure_rather_than_skipping_past_it(b):
+    """Order has to stay meaningful. An operator reading a delayed batch must be
+    able to trust nothing is missing from the middle of it."""
+    ch = b.RecordingChannel()
+    queue = [{"key": "a", "text": "1"}, {"key": "b", "text": "2"}, {"key": "c", "text": "3"}]
+    ch.reachable = False
+    still, delivered = b.deliver(ch, queue, set())
+    assert delivered == [] and [i["key"] for i in still] == ["a", "b", "c"]
+    ch.reachable = True
+    still, delivered = b.deliver(ch, still, set())
+    assert delivered == ["a", "b", "c"]
+    assert ch.sent == ["1", "2", "3"], "held messages arrived out of order"
+
+
+def test_an_already_delivered_event_is_NOT_resent(b):
+    ch = b.RecordingChannel()
+    queue = [{"key": "a", "text": "1"}, {"key": "b", "text": "2"}]
+    _, delivered = b.deliver(ch, queue, {"a"})
+    assert delivered == ["b"] and ch.sent == ["2"]
+
+
+# --- inbound: the admit set, and refusing to act ---------------------------
+
+
+def test_an_undeclared_sender_gets_SILENCE_and_a_recorded_refusal(b):
+    """Replying "you are not authorised" confirms to a stranger that something is
+    listening and tells them what. The refusal is recorded for the operator, who
+    is who it is evidence for."""
+    reply, refusal = b.handle_message(
+        {"user": "U_STRANGER", "text": "what is running?"},
+        declared_sender="U_OPERATOR",
+        facts={},
+    )
+    assert reply is None
+    assert refusal["refused"] == "U_STRANGER"
+
+
+@pytest.mark.parametrize(
+    "ask",
+    ["stop demo", "please restart the billing container", "destroy everything", "redeploy api"],
+)
+def test_an_action_request_is_DECLINED_with_the_path_that_can(b, ask):
+    """FR-022. The refusal is not what makes it safe — the absence of any
+    credential is — but an operator who gets silence learns nothing, and one who
+    gets a vague "I can't" learns less than one told where to go."""
+    reply, refusal = b.handle_message(
+        {"user": "U_OPERATOR", "text": ask}, declared_sender="U_OPERATOR", facts={}
+    )
+    assert refusal is None
+    assert "cannot change anything" in reply
+    assert "no container runtime client is installed" in reply
+    assert "control plane" in reply
+
+
+def test_an_answer_names_the_run_every_claim_came_from(b):
+    """FR-011a. An answer that reads confidently about a fleet it could not see is
+    worse than no answer."""
+    facts = {
+        "input_health": b.input_health(
+            stack_reachable=True, ingest="yes", unreachable_hosts=[], missing_logs=0
+        ),
+        "runs": [
+            {
+                "environment": "demo",
+                "host": "vps1",
+                "state": "running",
+                "assessment": "two commits, one push, tests failing on auth",
+                "run_id": "20260914T101010Z-ab12",
+            }
+        ],
+    }
+    reply, _ = b.handle_message(
+        {"user": "U1", "text": "how is demo going?"}, declared_sender="U1", facts=facts
+    )
+    assert "20260914T101010Z-ab12" in reply
+    assert "demo" in reply and "vps1" in reply
+
+
+def test_an_answer_from_a_DEGRADED_view_says_so_first(b):
+    facts = {
+        "input_health": b.input_health(
+            stack_reachable=False, ingest=None, unreachable_hosts=[], missing_logs=0
+        ),
+        "runs": [],
+    }
+    reply, _ = b.handle_message(
+        {"user": "U1", "text": "anything wrong?"}, declared_sender="U1", facts=facts
+    )
+    assert reply.startswith("Before anything else")
+
+
+def test_an_empty_view_says_so_rather_than_implying_calm(b):
+    """ "I have nothing in view" and "nothing is wrong" are different answers, and
+    only one of them is honest when the interpreter cannot see."""
+    facts = {"input_health": {"degraded": False, "problems": []}, "runs": []}
+    reply, _ = b.handle_message(
+        {"user": "U1", "text": "status?"}, declared_sender="U1", facts=facts
+    )
+    assert "no runs in view" in reply
+
+
+def test_the_bridge_contains_no_stray_CONTROL_CHARACTERS():
+    """Twice now a `\\b` or `\\n` has been written into this file as a literal
+    control byte by a generation step that treated the source as an interpolated
+    string rather than as code.
+
+    The `\\n` was loud — a SyntaxError. The `\\b` was SILENT: the regex compiled
+    fine, matched nothing, and `is_action_request` quietly returned False for
+    every request, so the interpreter would have answered "stop demo" with a
+    status report instead of a refusal. Only the test caught it.
+    """
+    src = _BRIDGE.read_text()
+    offenders = [
+        (n, repr(ln))
+        for n, ln in enumerate(src.splitlines(), 1)
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", ln)
+    ]
+    assert not offenders, f"literal control characters in the source: {offenders}"
+
+
+def test_the_action_detector_does_NOT_fire_on_an_ordinary_question():
+    """A refusal in answer to "how is demo doing" would make the interpreter
+    useless for the thing it exists to do."""
+    b = _load()
+    for ordinary in (
+        "how is demo going?",
+        "what happened overnight?",
+        "did the auth refactor push?",
+        "status",
+    ):
+        assert not b.is_action_request(ordinary), f"refused an ordinary question: {ordinary!r}"
