@@ -2453,9 +2453,7 @@ def test_excluding_the_TASK_also_excludes_the_LOGS_unless_told_otherwise(
     )
 
 
-def test_an_EXPLICIT_log_switch_is_obeyed_even_against_the_task_switch(
-    wiz, tmp_path, monkeypatch
-):
+def test_an_EXPLICIT_log_switch_is_obeyed_even_against_the_task_switch(wiz, tmp_path, monkeypatch):
     """Inheritance applies to SILENCE, never to a stated choice. An operator who
     wants the task private and the output exported has said so, and the tool
     warns rather than overrides."""
