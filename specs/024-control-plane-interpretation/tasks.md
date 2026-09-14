@@ -284,7 +284,7 @@ notification quotes them as content.
 - [ ] T048 [US4] Implement version-skew handling per 017's rule (FR-029): semver precedence,
       advisory when newer, refusal naming the remedy when the trail is newer, and a record whose
       schema it does not understand **refused rather than misread**, reported as a finding.
-- [ ] T049 [P] [US4] Extend the kill switch in `bin/agent-container` to cover interpreters (FR-030),
+- [X] T049 [P] [US4] Extend the kill switch in `bin/agent-container` to cover interpreters (FR-030),
       with unreachable hosts reported `undetermined`.
 - [ ] T050 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: role visible in `list` and
       `inventory ls`; kill switch stops it; unreachable host reported undetermined (SC-011).

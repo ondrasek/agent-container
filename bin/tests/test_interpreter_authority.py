@@ -166,3 +166,43 @@ def test_an_interpreter_is_never_given_the_control_plane_key(wiz):
             f"the control-plane key path mentions the interpreter role near "
             f"{marker!r} — that key is not scoped to inspect"
         )
+
+
+def test_the_kill_switch_SEES_an_interpreter(wiz, tmp_path, monkeypatch):
+    """FR-030. `panic` acts on the INVENTORY, so a new role is covered the moment
+    it is recorded there — but "covered by construction" is the kind of claim that
+    is true until a selector somewhere starts filtering by role.
+
+    Asserted against the entry the tool actually writes, rather than by reading
+    `do_panic` and reasoning about it.
+    """
+    entry = wiz.build_inventory_entry(
+        "watcher",
+        "vps1",
+        True,
+        role=wiz.ROLE_INTERPRETER,
+        watched_scope=["vps1"],
+        channel="C0123456789",
+        authority="observe",
+    )
+    assert entry["role"] == wiz.ROLE_INTERPRETER
+    assert entry["outcome"] == "active"
+    # The fields `panic` reads to decide what to act on, present and populated.
+    assert entry["name"] == "watcher" and entry["host"] == "vps1"
+
+
+def test_the_channel_id_is_VALIDATED_not_passed_through(wiz):
+    """Feature 014's threat-model row rests on the inventory having NO free-text
+    field: unlike a run record, whose `task` carries whatever an operator typed,
+    nothing here can carry a credential structurally.
+
+    Three operator-influenced fields were added by 024, which is exactly how such
+    a property is lost by accident. The channel is constrained at the door.
+    """
+    assert wiz.validate_interpreter_channel_id("C0123456789", "x") == "C0123456789"
+    for bad in ("", "c0123", "C", "not an id", "C0123456789'; rm -rf /", "C" * 64):
+        try:
+            wiz.validate_interpreter_channel_id(bad, "--slack-conversation")
+        except wiz.Fatal:
+            continue
+        raise AssertionError(f"the inventory would have accepted {bad!r} as a channel id")
