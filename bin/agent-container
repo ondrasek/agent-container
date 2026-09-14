@@ -12229,7 +12229,13 @@ def compose_up_exec(
     #
     # Printed, not prompted — 017's rule. `up` is a path an agent may drive, and
     # a prompt there is auto-answered, which reads as consent.
-    if resolve_otlp_endpoint() is not None:
+    # HEADLESS ONLY, matching what the entrypoint actually does. The claim used
+    # to be gated on an endpoint alone, so an interactive deploy was told its
+    # agent's output reached the collector when nothing teed it there — an
+    # exposure warning for an exposure that was not happening, which is its own
+    # kind of dishonesty: it trains an operator to discount the warning on the
+    # deploys where it IS true.
+    if spec.mode == "headless" and resolve_otlp_endpoint() is not None:
         _declared_logs = export_agent_logs()
         if EXPORT_AGENT_LOGS_DEFAULT if _declared_logs is None else _declared_logs:
             log(
@@ -14190,7 +14196,11 @@ def render_run_record(environment: str, rec: dict) -> None:
     # not know the collector kept anything, because export is fail-open and a 2xx
     # is not acceptance (017). "were exported to" is therefore the honest tense —
     # claiming they ARE there would be the same false green 023 exists to kill.
-    if resolve_settings_key("otlp_endpoint") is not None:
+    # The run's OWN kind decides this, not the operator's current settings: only
+    # a headless run has its output teed to the exporter. Saying "were exported"
+    # for an interactive run would be 016's misleadingly-complete trail, and it
+    # would send an operator looking in a stack for something that was never sent.
+    if rec.get("kind") == "headless" and resolve_settings_key("otlp_endpoint") is not None:
         declared_logs = export_agent_logs()
         if EXPORT_AGENT_LOGS_DEFAULT if declared_logs is None else declared_logs:
             console.print(

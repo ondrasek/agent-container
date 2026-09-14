@@ -45,6 +45,23 @@ def _extract(fn: str) -> str:
     return f"{fn}() {{\n{m.group(1)}}}\n"
 
 
+def _consts() -> str:
+    """The module-level constants the extracted functions read.
+
+    Taken FROM THE SOURCE rather than restated here: a second literal in the test
+    would agree with the first today and silently stop agreeing the moment either
+    is tuned — which is the same drift the batch interval was just consolidated to
+    avoid.
+    """
+    src = _ENTRYPOINT.read_text()
+    out = []
+    for name in ("AGENT_LOG_BUF_DIR", "AGENT_LOG_MAX_BATCH_BYTES"):
+        m = re.search(rf"^{name}=.*$", src, re.M)
+        assert m, f"{name} not found in entrypoint.sh"
+        out.append(m.group(0))
+    return "\n".join(out) + "\n"
+
+
 def _payload(body: str, *, stream: str = "stdout", run_id: str = "20260914T101010Z-ab12") -> dict:
     """Build one payload from `body`, through the SHIPPED function.
 
@@ -63,6 +80,8 @@ def _payload(body: str, *, stream: str = "stdout", run_id: str = "20260914T10101
             f"AGENT_CONTAINER_NAME=demo\nAGENT_CONTAINER_AGENT=claude\n"
             f"AGENT_CONTAINER_MODE=headless\n"
             f"RUNS_ID={run_id}\n"
+            + _consts()
+            + _consts()
             + _extract("agent_log_payload")
             + f"agent_log_payload {stream} 7 {f}\n"
         )
@@ -256,6 +275,7 @@ def test_the_payload_is_COMPACT_because_the_guard_matches_a_literal_prefix():
         "set -uo pipefail\n"
         "log() { :; }\n"
         "AGENT_CONTAINER_NAME=demo\nRUNS_ID=r1\n"
+        + _consts()
         + _extract("agent_log_payload")
         + "printf 'hello\\n' > /tmp/_acbody$$; agent_log_payload stdout 1 /tmp/_acbody$$\n"
     )
@@ -365,6 +385,7 @@ def _drive_export(passes: list[str]) -> tuple[bytes, list[str]]:
             "RUNS_ID=r1",
             # Record the payload instead of posting it.
             f'curl() {{ cat >> "{sent}"; printf "\\n" >> "{sent}"; }}',
+            _consts(),
             _extract("agent_log_payload"),
             _extract("agent_log_export_once"),
         ]
@@ -435,6 +456,7 @@ def test_a_TRUNCATED_buffer_does_not_kill_the_stream(tmp_path):
             "AGENT_CONTAINER_NAME=demo",
             "RUNS_ID=r1",
             f'curl() {{ cat >> "{sent}"; printf "\\n" >> "{sent}"; }}',
+            _consts(),
             _extract("agent_log_payload"),
             _extract("agent_log_export_once"),
             f"printf 'after-restart\\n' >> {buf}",
@@ -474,3 +496,69 @@ def test_the_tee_is_gated_on_the_EXPORTER_not_on_a_leftover_directory():
         "the sentinel is not cleared before the disabled early-return, so turning "
         "export off and restarting leaves the tee running with nothing draining it"
     )
+
+
+def test_a_large_backlog_is_split_across_SEVERAL_bounded_posts():
+    """One batch is one OTLP log RECORD, so an unbounded batch is an unsendable one.
+
+    A pass following a stall used to ship everything accumulated — up to the full
+    10MB cap — as a single `body.stringValue`. Loki's default `max_line_size` is
+    256KB and OTLP receivers bound request size independently, so that record is
+    rejected. The response is never read while the offset commits regardless, so
+    a rejected batch is gone PERMANENTLY: exactly the "2xx is not acceptance"
+    failure 023 exists to kill, and loudest for the runs that produced the most.
+    """
+    big = "x" * 200_000 + "\n"
+    content, bodies = _drive_export([big, "", "", "", ""])
+    assert len(bodies) > 1, "a 200KB backlog went out as one record"
+    ceiling = int(
+        re.search(r"AGENT_LOG_MAX_BATCH_BYTES=\D*(\d+)", _ENTRYPOINT.read_text()).group(1)
+    )
+    for b in bodies:
+        assert len(b.encode()) <= ceiling, (
+            f"a post carried {len(b.encode())} bytes, over the ceiling"
+        )
+    # And splitting must still be lossless — the whole point of bounding the read
+    # rather than dropping the overflow.
+    assert b"".join(x.encode() for x in bodies) == content
+
+
+def test_a_cap_of_ZERO_is_refused_rather_than_meaning_export_nothing():
+    """`0` is digits, so it slipped the guard and became a threshold of zero: the
+    run was capped on its first pass and — now that capping truncates — its output
+    discarded every pass after. Most operators read `0` as "no cap"."""
+    src = _ENTRYPOINT.read_text()
+    start = src.index("agent_log_export_start() {")
+    block = src[start : src.index("host_metrics_export_once() {")]
+    assert "0) log" in block and "means 'export nothing'" in block, (
+        "a cap of 0 is not refused, so it silently means the opposite of what it reads as"
+    )
+
+
+def test_export_is_gated_on_HEADLESS_mode():
+    """Only `run_headless_agent` tees into the buffers.
+
+    In interactive mode the loop spun every two seconds forever over buffers
+    nothing wrote to, while `up` promised the operator that everything the agent
+    printed reached their collector. A trail claiming a completeness it does not
+    have is what 016 spends a section refusing.
+    """
+    src = _ENTRYPOINT.read_text()
+    block = src[src.index("agent_log_export_start() {") : src.index("host_metrics_export_once() {")]
+    assert 'AGENT_CONTAINER_MODE:-interactive}" != "headless"' in block, (
+        "the exporter starts regardless of mode, so it runs where nothing tees to it"
+    )
+
+
+def test_the_cap_notice_is_not_swallowed_by_the_subshell_redirect():
+    """`log` writes to stderr; the subshell used to close with `> /dev/null 2>&1`.
+
+    The one line in that loop an operator must see — that their run hit the cap
+    and the rest of its output is being discarded — went to /dev/null, leaving a
+    marker at the collector as the only evidence, findable only by first noticing
+    a gap.
+    """
+    src = _ENTRYPOINT.read_text()
+    block = src[src.index("agent_log_export_start() {") : src.index("host_metrics_export_once() {")]
+    assert ") > /dev/null &" in block
+    assert ") > /dev/null 2>&1 &" not in block, "stderr is discarded, taking the cap notice with it"

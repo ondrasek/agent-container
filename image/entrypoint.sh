@@ -1354,6 +1354,9 @@ host_metrics_payload() {
 # a regular file never blocks on a reader, so the agent is decoupled from the
 # exporter by construction rather than by the exporter being quick.
 AGENT_LOG_BUF_DIR="${AGENT_LOG_BUF_DIR:-/tmp/agent-container-logexport}"
+# The most any single POST may carry. See agent_log_export_once for why this is a
+# correctness bound and not a tuning knob.
+AGENT_LOG_MAX_BATCH_BYTES="${AGENT_LOG_MAX_BATCH_BYTES:-65536}"
 
 agent_log_payload() {
     # One OTLP/HTTP+JSON logs document for one batch.
@@ -1437,6 +1440,21 @@ agent_log_export_once() {
     [[ "${size}" -lt "${off}" ]] && off=0
     [[ "${size}" -gt "${off}" ]] || return 0
     want=$(( size - off ))
+    # A CEILING PER POST, because one batch is one OTLP log RECORD.
+    #
+    # Without it a pass that followed a stall shipped everything accumulated —
+    # up to the full 10MB cap — as a single `body.stringValue`. Loki's default
+    # `max_line_size` is 256KB and OTLP receivers bound request size
+    # independently, so that record is rejected. And the response is never read
+    # while the offset commits regardless, so a rejected batch is GONE
+    # PERMANENTLY: the "2xx is not acceptance" failure 023 exists to kill,
+    # loudest for exactly the runs that produced the most output.
+    #
+    # 64KB leaves a wide margin under 256KB. The remainder drains on the next
+    # pass, so nothing is lost — a batch may split mid-line, which is why the
+    # bodies are defined to reassemble by concatenation rather than to be
+    # individually line-complete.
+    [[ "${want}" -gt "${AGENT_LOG_MAX_BATCH_BYTES}" ]] && want="${AGENT_LOG_MAX_BATCH_BYTES}"
     # THE CHUNK IS BOUNDED BY THE SIZE WE ARE ABOUT TO COMMIT, and this is the
     # whole reason the two reads are pinned together.
     #
@@ -1448,7 +1466,15 @@ agent_log_export_once() {
     # arrived at the collector twice. A chatty agent writes continuously, so it
     # recurred for the life of the run.
     chunk="${buf}.batch"
-    tail -c "+$(( off + 1 ))" "${buf}" 2>/dev/null | head -c "${want}" > "${chunk}" 2>/dev/null || return 0
+    # `|| true`, and it is NOT laziness. `head -c` closes the pipe as soon as it
+    # has its bytes, so `tail` takes SIGPIPE and exits 141 — and under
+    # `set -o pipefail` that makes the whole pipeline fail. With `|| return 0`
+    # here, EVERY backlog larger than the ceiling silently exported nothing: the
+    # bound added to make large batches sendable would have stopped them being
+    # sent at all. Caught by the test written for the bound itself.
+    #
+    # The chunk file is the real success test, so that is what is checked.
+    tail -c "+$(( off + 1 ))" "${buf}" 2>/dev/null | head -c "${want}" > "${chunk}" 2>/dev/null || true
     [[ -s "${chunk}" ]] || { rm -f "${chunk}" 2>/dev/null; return 0; }
     payload="$(agent_log_payload "${stream}" "${off}" "${chunk}" 2>&1)"
     case "${payload}" in
@@ -1559,8 +1585,32 @@ agent_log_export_start() {
         0|off|no|false) log "agent log export disabled (export_agent_logs: false)"; return 0 ;;
     esac
     command -v jq > /dev/null 2>&1 || { log "WARNING: jq is missing; agent log export disabled"; return 0; }
+    # HEADLESS ONLY, because only `run_headless_agent` tees into these buffers.
+    # In interactive mode the loop spun every two seconds for the life of the
+    # container over buffers nothing ever wrote to — while `up` told the operator
+    # "everything it prints reaches your collector" and `runs show` said the logs
+    # "were exported to" the stack. Both claims were gated on an endpoint being
+    # declared and on nothing else. A trail asserting a completeness it does not
+    # have is the exact failure 016 spends a section refusing.
+    #
+    # Interactive output goes to a tmux pane, not to a stream this entrypoint
+    # owns, so exporting it is a different piece of work rather than a flag.
+    if [[ "${AGENT_CONTAINER_MODE:-interactive}" != "headless" ]]; then
+        log "agent log export applies to headless runs only; this container is ${AGENT_CONTAINER_MODE:-interactive}"
+        return 0
+    fi
     cap="${AGENT_CONTAINER_AGENT_LOG_CAP_MB:-10}"
-    case "${cap}" in *[!0-9]*|"") cap=10 ;; esac
+    # `0` IS DIGITS, so it slipped past the guard below and became a threshold of
+    # zero: `total -ge 0` is true on the very first pass, so the run was capped
+    # immediately and — since the cap now truncates — its output discarded every
+    # pass. Most operators read `0` as "no cap". The CLI rejects it, but this
+    # entrypoint is also reachable from a hand-written compose file and from a
+    # deploy that predates that validation, so it is refused here too rather than
+    # silently meaning the opposite of what it looks like.
+    case "${cap}" in
+        0) log "WARNING: agent log cap of 0 means 'export nothing'; using the 10MB default"; cap=10 ;;
+        *[!0-9]*|"") cap=10 ;;
+    esac
     endpoint="${base%/}/v1/logs"
     mkdir -p "${AGENT_LOG_BUF_DIR}" 2>/dev/null || {
         log "WARNING: could not create ${AGENT_LOG_BUF_DIR}; agent log export disabled"; return 0; }
@@ -1657,7 +1707,17 @@ agent_log_export_start() {
             fi
             sleep "${AGENT_CONTAINER_AGENT_LOG_BATCH_SECONDS:-2}"
         done
-    ) > /dev/null 2>&1 &
+    # STDOUT ONLY. `2>&1` here swallowed the one line in this loop an operator
+    # must actually see: the cap notice. `log` writes to stderr, so it went to
+    # /dev/null with everything else, and the only evidence of truncation was a
+    # marker at the collector — which an operator finds by first noticing a gap.
+    # Now that reaching the cap also DISCARDS the rest of the run's output, that
+    # line is the difference between a known limit and a silent loss.
+    #
+    # Nothing else here is noisy: every curl already redirects its own output,
+    # and wc/tail carry their own 2>/dev/null. So the fail-open silence the
+    # original redirect was protecting is preserved without hiding this.
+    ) > /dev/null &
     disown 2>/dev/null || true
     log "agent log export -> ${endpoint} (cap ${cap}MB/run)"
 }
