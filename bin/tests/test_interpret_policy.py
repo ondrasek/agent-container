@@ -729,3 +729,84 @@ def test_version_skew_follows_017s_rule(b, mine, theirs, expected):
 def test_an_unreadable_version_is_never_assumed_COMPATIBLE(b):
     """Assuming is exactly what produces a confident wrong summary."""
     assert b.version_skew("", "") == b.SKEW_UNKNOWN
+
+
+# --- policy changes from the conversation (US6) -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("quiet for 30m", {"change": "silence", "minutes": 30}),
+        ("silence 45m please", {"change": "silence", "minutes": 45}),
+        ("digest on", {"change": "digest", "enabled": True}),
+        ("digest off", {"change": "digest", "enabled": False}),
+        ("unmute", {"change": "unmute"}),
+    ],
+)
+def test_a_policy_change_is_recognised(b, said, expected):
+    assert b.parse_policy_change(said) == expected
+
+
+def test_an_ordinary_question_is_NOT_read_as_a_policy_change(b):
+    """The recognised set is deliberately small. An operator steering their
+    supervisor in natural language is a surface where a misread instruction
+    changes what they get told, so anything unrecognised falls through to being
+    answered as a question — which is harmless."""
+    for ordinary in ("how is demo going?", "what failed overnight?", "status"):
+        assert b.parse_policy_change(ordinary) is None
+
+
+def test_a_policy_change_is_CONFIRMED_back_in_the_conversation(b):
+    """FR-019. A supervisor quietly holding a different policy from the one you
+    think you set is one whose silence you will misread later."""
+    reply, refusal = b.handle_message(
+        {"user": "U1", "text": "quiet for 30m"},
+        declared_sender="U1",
+        facts={"interpreter": "watcher"},
+    )
+    assert refusal is None
+    assert "quiet for 30 minutes" in reply
+    assert "HELD, not dropped" in reply
+
+
+def test_silencing_is_not_mistaken_for_an_ACTION_request(b):
+    """ "mute" and "stop" are close enough in operator language that checking the
+    action verb first would refuse a policy change as an attempt to act."""
+    reply, _ = b.handle_message(
+        {"user": "U1", "text": "mute 15m"}, declared_sender="U1", facts={"interpreter": "w"}
+    )
+    assert "cannot change anything" not in reply
+    assert "quiet for 15 minutes" in reply
+
+
+def test_ten_successful_runs_produce_ZERO_interruptions_and_ONE_digest(b):
+    """SC-009, as pure logic rather than as a ten-container acceptance run.
+
+    What the criterion is really about is the POLICY: quiet by default, and a
+    digest that batches rather than repeats. Both are decidable here, and a
+    version of this that spun up ten containers would test the container harness,
+    not the decision.
+    """
+    runs = [
+        {
+            "schema": 1,
+            "run_id": f"r{i}",
+            "environment": "demo",
+            "host": "vps1",
+            "outcome": "finished",
+            "ended_at": "2026-09-14T10:20:10Z",
+            "exit_code": 0,
+            "repository": {"commits": ["c"], "pushed": True},
+        }
+        for i in range(10)
+    ]
+    interruptions = [e for r in runs for e in b.notifiable_events(r, now=time.time())]
+    assert interruptions == [], "a successful run that pushed interrupted the operator"
+    # And a digest over them is a single message, not ten.
+    text = b.digest(
+        [{"environment": "demo", "host": "vps1", "kind": "ok", "state": "finished", "run_id": r["run_id"]} for r in runs],
+        interpreter="watcher",
+    )  # fmt: skip
+    assert text.count("\n") == 10, "the digest is not one message naming all ten"
+    assert text.startswith("[watcher] digest — 10 event(s):")

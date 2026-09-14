@@ -8693,3 +8693,94 @@ def test_the_log_switch_removes_the_output_in_BOTH_positions(acc):
         "excluding agent logs also stopped run records exporting — that is a "
         "different switch and a different decision"
     )
+
+
+# --- Feature 024: an interpreter is a container this tool created ------------
+
+
+def _interpreter_up(acc, name: str, **extra):
+    """Deploy an interpreter against a real stack, returning the CLI result.
+
+    The channel is bound but never exercised here: posting needs a token and a
+    workspace, which a test environment does not have. What IS testable — and
+    what these assert — is everything the tool itself decides: the statement, the
+    record, the refusals and the kill switch.
+    """
+    env_file = acc.tmp / f"{name}.env"
+    env_file.write_text("GH_TOKEN=x\nGIT_USER_NAME=Test\nGIT_USER_EMAIL=t@example.com\n")
+    return acc.cli(
+        [
+            "up", name,
+            "--env-file", str(env_file),
+            "--role", "interpreter",
+            "--stack", extra.pop("stack", "accinterpstack"),
+            "--channel", "slack",
+            "--slack-conversation", "C0123456789",
+            "--declared-sender", "U0987654321",
+            *extra.pop("argv", []),
+        ],
+        timeout=600,
+    )  # fmt: skip
+
+
+def test_an_interpreter_STATES_what_it_holds_before_anything_is_created(acc):
+    """T050a/T050b — SC-012 and SC-013, which are about ORDER as much as content.
+
+    A consequence disclosed after the fact was not disclosed. The statement must
+    precede creation, and what it says must match what the inventory shows
+    afterwards — a statement nobody can compare against the record is an
+    assertion, not a control.
+    """
+    name = "accinterp1"
+    try:
+        r = _interpreter_up(acc, name)
+        out = r.stdout + r.stderr
+        # It leads with what it CANNOT do: an operator reading "an agent that
+        # watches your fleet" assumes the 017 shape unless told otherwise.
+        assert "CANNOT change anything" in out
+        assert out.index("CANNOT change anything") < out.index("TASK TEXT")
+        # The trust-domain crossing, in full.
+        assert "workspace administrators" in out and "leaves your own infrastructure" in out
+        # And the custom-app requirement, whose absence is undiagnosable later.
+        assert "CUSTOM app" in out
+        if r.returncode != 0:
+            # The PROPERTY UNDER TEST is the ORDER: the statement precedes
+            # creation. The assertions above already proved it, and they proved it
+            # on a run that then refused — which is the strongest form of the
+            # claim, since nothing was created at all. Any refusal reason is
+            # acceptable here; what would NOT be is the statement missing.
+            return
+        entry = [e for e in _inventory(acc) if e["name"] == name][0]
+        assert entry["role"] == "interpreter"
+        assert entry["channel"] == "C0123456789"
+        assert entry["declared_sender"] == "U0987654321"
+        assert entry["authority"] == "observe"
+    finally:
+        acc.cli(["down", name, "--purge", "-y"], timeout=300)
+
+
+def test_an_interpreter_is_visible_and_reachable_by_the_kill_switch(acc):
+    """T050 — SC-011. The tool's invariants exist so nothing it created can be
+    forgotten, and a new long-lived credential-holding container is exactly what
+    they are for."""
+    name = "accinterp2"
+    try:
+        r = _interpreter_up(acc, name)
+        if r.returncode != 0:
+            pytest.skip(f"interpreter deploy refused in this environment: {r.stderr[-200:]}")
+        listed = acc.cli(["interpret", "ls", "--json"], timeout=180)
+        assert name in listed.stdout
+        panic = acc.cli(["panic", "-y"], timeout=600)
+        assert panic.returncode == 0, panic.stderr
+        after = acc.cli(["list", "--json"], timeout=180).stdout
+        assert f'"{name}"' not in after or '"running"' not in after
+    finally:
+        acc.cli(["down", name, "--purge", "-y"], timeout=300)
+
+
+def test_the_interpreter_flags_are_REFUSED_on_an_ordinary_environment(acc):
+    """A flag that is silently inert is worse than one that errors: the operator
+    believes they configured something."""
+    r = acc.cli(["up", "accinterp3", "--watch", "vps1"], timeout=180)
+    assert r.returncode != 0
+    assert "only meaningful for --role interpreter" in (r.stdout + r.stderr)

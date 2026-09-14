@@ -22,34 +22,64 @@ catches a mutation only when the scenario triggers it, so a reachable-but-not-ye
 called writer passes every behavioural test and fails only here.
 """
 
+import dis
 import json
 import re
+import types
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+def _globals_loaded(fn) -> set[str]:
+    """Only names the function actually loads as GLOBALS.
+
+    `co_names` — which `test_doctor.py`'s walker uses — also contains ATTRIBUTE
+    names, and that produces false positives in a 20k-line module where a method
+    name collides with a command name. Measured here: `parse_kv_config` calls
+    `match.start()`, `co_names` records `start`, and `start` is also a typer
+    command that deploys containers — so `interpret history` appeared to reach
+    `deliver_secrets` through a path that does not exist.
+
+    A guard that cries wolf is a guard someone deletes, taking the property with
+    it. `dis` separates LOAD_GLOBAL from attribute access, so this follows only
+    real call edges.
+    """
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return set()
+    return {
+        i.argval
+        for i in dis.get_instructions(code)
+        if i.opname in ("LOAD_GLOBAL", "LOAD_NAME") and isinstance(i.argval, str)
+    }
 
 
 def _reachable_names(wiz, root_func) -> set[str]:
     """Every global name reachable from `root_func`, transitively.
 
-    Lifted deliberately from `test_doctor.py` rather than imported: the two guards
-    protect different properties and must be able to diverge without one quietly
-    changing the other's meaning.
+    Lifted deliberately from `test_doctor.py` rather than imported — the two
+    guards protect different properties and must be able to diverge — and then
+    made more precise for the reason `_globals_loaded` records.
     """
     seen: set[str] = set()
     stack = [root_func]
     while stack:
         fn = stack.pop()
-        code = getattr(fn, "__code__", None)
-        if code is None:
-            continue
-        for n in code.co_names:
+        for n in _globals_loaded(fn):
             if n in seen:
                 continue
             seen.add(n)
             nxt = getattr(wiz, n, None)
             if callable(nxt) and getattr(nxt, "__module__", None) == wiz.__name__:
                 stack.append(nxt)
+            # Nested functions and comprehensions carry their own code objects,
+            # which the walker would otherwise not enter.
+            for const in getattr(getattr(fn, "__code__", None), "co_consts", ()) or ():
+                if hasattr(const, "co_names"):
+                    stack.append(types.SimpleNamespace(__code__=const))
     return seen
 
 
@@ -70,7 +100,13 @@ _FORBIDDEN = (
     "write_inventory_entry",
 )
 
-_INTERPRET_COMMANDS = ("interpret_ls", "interpret_show")
+_INTERPRET_COMMANDS = (
+    "interpret_ls",
+    "interpret_show",
+    "interpret_history",
+    "interpret_test_channel",
+    "interpret_serve",
+)
 
 
 def test_no_interpret_command_reaches_a_mutating_helper(wiz):
@@ -395,3 +431,99 @@ def test_the_interpreter_invents_NO_second_delivery_path(wiz):
         assert forbidden not in window, (
             f"a bespoke delivery path is being built around the channel token ({forbidden})"
         )
+
+
+def test_the_interpreters_REACH_is_bounded_to_the_trail(wiz):
+    """FR-026, a different absence from FR-020's.
+
+    Authority is "can it change anything"; REACH is "what can it see". An
+    interpreter that could read a container's filesystem, volumes or credentials
+    would satisfy every authority test in this file and still be a container with
+    a view of every secret the fleet holds. What it cannot see through the trail,
+    it must not see.
+    """
+    reachable = _reachable_names(wiz, wiz.interpret_history)
+    for forbidden in (
+        "deliver_secrets",
+        "resolve_credential_value",
+        "claim_cred_mounts",
+    ):
+        assert forbidden not in reachable, (
+            f"`interpret history` can reach `{forbidden}` — the interpreter's reach "
+            f"is supposed to stop at the trail"
+        )
+
+
+def test_no_AGENT_SESSION_DATA_is_read_or_exported(wiz):
+    """FR-025, the operator's own log-scope decision made enforceable.
+
+    They chose the agent's OUTPUT STREAM only — not transcripts, tool-call
+    records, memory files or agent configuration. Without a test that is a
+    paragraph in a spec; the wider reading would move an agent's entire
+    conversation, including whatever it read, into the stack.
+    """
+    bridge = (_ROOT / "image" / "interpret-bridge.py").read_text()
+    entry = (_ROOT / "image" / "entrypoint.sh").read_text()
+    i = entry.index("agent_log_payload() {")
+    export_block = entry[i : entry.index("host_metrics_export_once() {")]
+    for session_path in (".claude/", ".codex/", ".pi/", "sessions", "rollout-", "transcript"):
+        assert session_path not in bridge, f"the bridge reads agent session data: {session_path}"
+        assert session_path not in export_block, (
+            f"the log exporter reaches into agent session data: {session_path}"
+        )
+
+
+def test_an_interpreters_own_runs_ARE_recorded(wiz):
+    """FR-028. Exclusion from NOTIFICATION is not exclusion from the RECORD.
+
+    What it read, concluded and sent must itself be part of the trail — a
+    supervisor with no account of its own is the one thing in the fleet nobody
+    can audit. The role rides on an ordinary environment precisely so this comes
+    for free; the test exists because "for free" is the kind of property that
+    stops being true when someone adds a branch.
+    """
+    src = Path(wiz.__file__).read_text()
+    i = src.index("def compose_environment")
+    body = src[i : i + 8000]
+    # No role-conditional suppression of the run-record machinery.
+    for suppressed in ("RUNS_DISABLED", "SKIP_RUN_RECORD", "no_runs"):
+        assert suppressed not in body
+    # And the interpreter is an ordinary agent environment: same image, same
+    # volumes, same entrypoint. A second image would be where this breaks.
+    assert "CONTROL_PLANE_IMAGE_DIR if role == ROLE_CONTROL_PLANE else AGENT_IMAGE_DIR" in src
+
+
+def test_the_channel_token_can_be_WITHDRAWN_without_destroying_the_interpreter(wiz):
+    """FR-005. A credential that can only be withdrawn by destroying its holder is
+    one an operator will not withdraw.
+
+    The token is an ordinary declared credential, so withdrawal is the existing
+    mechanism: stop declaring it and redeploy. What this pins is that the tool has
+    a path that does NOT require `--purge` — which would take the environment's
+    own SSH identity with it (019's revocation boundary) and turn "rotate a Slack
+    token" into "re-register this container everywhere".
+    """
+    src = Path(wiz.__file__).read_text()
+    # `redeploy` exists and does not purge: that is the withdrawal path.
+    assert "def do_redeploy(" in src
+    i = src.index("def do_redeploy(")
+    body = src[i : i + 4000]
+    assert "purge" not in body.split("def ", 2)[0] or "--purge" not in body[:500], (
+        "redeploy appears to purge, which would make withdrawing a channel token "
+        "destroy the environment's SSH identity along with it"
+    )
+
+
+def test_a_channel_that_cannot_authenticate_its_sender_is_NOT_BINDABLE(wiz):
+    """FR-024b / SC-014. The declared sender is the admit set for an inbound path
+    into something that can see the whole fleet; over a channel that cannot say
+    who sent a message, that admit set controls nothing."""
+    assert wiz.INTERPRETER_CHANNELS == ("slack",)
+    with pytest.raises(wiz.Fatal, match="--channel must be one of"):
+        wiz.ExecSpec(
+            role=wiz.ROLE_INTERPRETER,
+            stack="obs",
+            channel="email",
+            slack_conversation="C1",
+            declared_sender="U1",
+        ).validate()

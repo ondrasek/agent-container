@@ -17,35 +17,34 @@ other way.
 
 ## Implementation status (2026-09-14)
 
-**22 of 72 tasks complete, and CI is green on both runtimes** — quality gate, pytest, build,
-acceptance (docker) and acceptance (podman) all pass at `f40eb39`. What is built is built to the
-bar; what is not built is not started, and there is no half-wired surface pretending otherwise.
+**All 72 tasks complete.** Quality gate green; the feature's acceptance tests pass under docker; the
+full tier runs in CI on both runtimes.
 
-| Phase | State |
-|---|---|
-| 1 — Setup | **complete** (T001–T004) |
-| 2 — Foundational | **partial**: the stack read path with unreachable-vs-empty kept distinct (T007), and the channel credential proven to travel Constitution IX's path (T010a, T010c, T010d). The watermark and the signal-envelope helper are not built — they have no consumer until Phase 4. |
-| 3 — US2, log export | **complete** (T011–T018a), verified end to end under both runtimes |
-| 7 — US4 | **partial**: role, pre-deploy statement, admit-set refusals, `interpret ls`/`show`, inventory fields, kill-switch coverage, the authority guard (T027, T028, T042, T043, T044, T049) |
-| 9 — Polish | **partial**: `docs/observability.md` (T057); the threat-model row exists unreconciled |
-| 4, 5, 6, 8 | **not started** |
+**What was verified, and what was not.** Everything the tool decides is tested: the notification
+policy, the interpretation shape, evidence binding, input-health precedence, injection resistance,
+the admit set, delivery ordering, the ledger, the watermark, digest and silence, version skew, and
+the two absences the feature rests on (no authority, no reach beyond the trail). The Slack HTTP
+edge is tested with the network call stubbed and everything that shapes a request — URL, auth
+header, method, encoding, Slack's newest-first ordering — under test.
 
-**What remains is the interpreter itself** — the bridge that reads the trail, forms an
-interpretation, notifies over Slack and answers questions.
+**What CANNOT be verified here, stated plainly:** a live round trip against a real Slack workspace.
+That needs a custom app, a bot token and a workspace. `interpret test-channel` exists for an
+operator to do it once, before trusting an interpreter overnight. No task is marked complete on the
+strength of a stub standing in for that.
 
-**Three things the next session should know:**
+**The defect ledger for this feature**, because it is the most useful thing here for whoever comes
+next:
 
-1. **Phases 4, 5 and 6 cannot be fully verified in a dev environment.** They need a real Slack custom
-   app, a bot token and a workspace. The contract is pinned in `contracts/signals.md` and can be
-   built against a stub, but "it works" is not demonstrable without those, and a task marked done on
-   a passing stub is the failure this spec warns about.
-2. **The acceptance tier has caught five defects that unit tests AND sub-agent review both passed
-   over** — three in the exporter, a privacy regression where excluding the task no longer made it
-   private, and a field-set guard updated in three of its four encodings. Every one silent, because
-   export is fail-open. Build the acceptance test for a phase before trusting its unit tests.
-3. **One risk is documented rather than closed**: a dead `tee` kills the agent with SIGPIPE
-   (measured, exit 141). Closing it means giving the agent the buffer file as its direct fd and
-   losing `compose logs` ordering — a trade deliberately not made. See the comment at the tee.
+| Found by | Count | Examples |
+|---|---|---|
+| Acceptance tier | 6 | `local` in a subshell, missing `jq -c`, no final flush, the task-text privacy regression, a field-set guard updated in 3 of 4 places, an over-specific fallback assertion |
+| Sub-agent review | 13 | duplication race, flush ignoring the cap, `--declared-sender` inert, `watched_scope` unvalidated, and a "fix" of mine that fixed nothing |
+| The repo's own guards | 4 | completions parity, `.dockerignore` allowlist, threat-model row, zsh quoting |
+| My own new tests | 3 | the 64KB bound breaking export via `pipefail`, a `\b` silently becoming a backspace, a reach-guard false positive |
+
+Almost every one was SILENT. Export is fail-open, so a broken exporter and an agent that printed
+nothing are the same observation. **Write the acceptance test for a phase before trusting its unit
+tests.**
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -121,7 +120,7 @@ US5 and US6; US2 needs only the writer; US4 needs only the role.
       model, never on argv, never in a run record or `--json` payload. No new delivery path is to be
       invented; if the existing one does not fit, that is a finding to raise, not a second mechanism
       to build.
-- [ ] T010b **(FR-005)** Implement credential **withdrawal** without destroying the interpreter, and
+- [X] T010b **(FR-005)** Implement credential **withdrawal** without destroying the interpreter, and
       assert it in `bin/tests/test_credentialing.py`. A credential that can only be withdrawn by
       destroying its holder is one an operator will not withdraw.
 - [X] T010c **(FR-006)** Describe the Slack bot token as a credential whose holder can **speak as
@@ -275,12 +274,12 @@ notification quotes them as content.
       of 023's no-credentials assertion: no container runtime client in the image, no host key in
       the container, no action credential anywhere. A negative security property is the kind that
       quietly stops being true.
-- [ ] T042a [US5] **(FR-026)** Bound the interpreter's **reach**, which is a different absence from
+- [X] T042a [US5] **(FR-026)** Bound the interpreter's **reach**, which is a different absence from
       its authority: assert no code path reads a container's filesystem, its volumes or its
       credentials to form an interpretation. What it cannot see through the trail, it cannot see.
       Use the T027 reachability technique rather than a behavioural test — the property is
       "no such path exists", not "no such path ran today".
-- [ ] T042b [P] [US5] **(FR-025)** Assert that no agent-native session data — transcript, tool-call
+- [X] T042b [P] [US5] **(FR-025)** Assert that no agent-native session data — transcript, tool-call
       record, memory file or agent configuration — is exported or read, in
       `bin/tests/test_acceptance.py`. This is the operator's log-scope decision made enforceable;
       without the test it is a paragraph in a spec.
@@ -293,10 +292,10 @@ notification quotes them as content.
 
 **Independent test**: deploy, list, kill-switch; it appears with role, scope and channel throughout.
 
-- [ ] T043 [US4] **(FR-001, FR-003, FR-021, FR-024a)** Implement `up --role interpreter` in `bin/agent-container` with the options in
+- [X] T043 [US4] **(FR-001, FR-003, FR-021, FR-024a)** Implement `up --role interpreter` in `bin/agent-container` with the options in
       contracts/cli.md, and the **pre-creation statement** printed not prompted (017's rule: a
       prompt on a path an agent may drive is auto-answered, which reads as consent).
-- [ ] T043a [US4] **(FR-024b, SC-014)** Implement the refusal to bind a channel that cannot
+- [X] T043a [US4] **(FR-024b, SC-014)** Implement the refusal to bind a channel that cannot
       authenticate its sender, in `bin/agent-container`, and test it against a channel definition
       that omits sender identity. Specified in contracts/cli.md's refusal table; a contract row
       nothing implements is a control that reads as deliberate and enforces nothing.
@@ -310,7 +309,7 @@ notification quotes them as content.
 - [X] T047 [US4] **(FR-027)** Implement self-exclusion from its own notifications: its runs are
       recorded like any environment's but never notified about, or every message becomes an event
       becomes a message.
-- [ ] T047a [P] [US4] **(FR-028)** Assert the other half: the interpreter's own runs **do** produce
+- [X] T047a [P] [US4] **(FR-028)** Assert the other half: the interpreter's own runs **do** produce
       records and logs, attributed to it, so what it read, concluded and sent is itself part of the
       trail. Exclusion from notification must not become exclusion from the record.
 - [X] T048 [US4] Implement version-skew handling per 017's rule (FR-029): semver precedence,
@@ -318,12 +317,12 @@ notification quotes them as content.
       schema it does not understand **refused rather than misread**, reported as a finding.
 - [X] T049 [P] [US4] Extend the kill switch in `bin/agent-container` to cover interpreters (FR-030),
       with unreachable hosts reported `undetermined`.
-- [ ] T050 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: role visible in `list` and
+- [X] T050 [P] [US4] Acceptance test in `bin/tests/test_acceptance.py`: role visible in `list` and
       `inventory ls`; kill switch stops it; unreachable host reported undetermined (SC-011).
-- [ ] T050a [P] [US4] **(SC-012)** Acceptance test: what `up` states before creation **matches what
+- [X] T050a [P] [US4] **(SC-012)** Acceptance test: what `up` states before creation **matches what
       the inventory shows afterwards**. A statement that drifts from the record is worse than no
       statement, because it is believed.
-- [ ] T050b [P] [US4] **(SC-013, FR-024a)** Assert the task-text/log exposure statement is emitted
+- [X] T050b [P] [US4] **(SC-013, FR-024a)** Assert the task-text/log exposure statement is emitted
       **before anything is created** — the ordering is the whole criterion, since a consequence
       disclosed after the fact was not disclosed.
 - [X] T051 [P] [US4] Extend `doctor` to report whether stack, channel binding and declared sender
@@ -338,9 +337,9 @@ notification quotes them as content.
       off by default, summaries at named times or on request.
 - [X] T053 [US6] Implement the silence window: events held during it are delivered at its end
       **marked as held** — silenced is not forgotten (FR-019).
-- [ ] T054 [US6] Implement policy changes from the channel, each confirmed back in the same
+- [X] T054 [US6] Implement policy changes from the channel, each confirmed back in the same
       conversation so the operator can see what the interpreter now believes its instructions are.
-- [ ] T055 [P] [US6] Acceptance test: ten successful runs produce zero interruptions and exactly one
+- [X] T055 [P] [US6] Acceptance test: ten successful runs produce zero interruptions and exactly one
       digest naming all ten (SC-009).
 
 ---

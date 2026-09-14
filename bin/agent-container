@@ -2256,6 +2256,16 @@ INVENTORY_FIELDS = (
 # that adds acting, and a field that already accepted "act" would be exactly such
 # a path — dormant, untested, and one edit from live.
 INTERPRETER_AUTHORITIES = ("observe",)
+# FR-024b. A NAMED choice at the surface rather than an assumption spread through
+# the interpreter's behaviour, so a second channel is an addition rather than a
+# rewrite — and so the admissibility rule has one place to live.
+#
+# ADMISSIBLE MEANS "CAN AUTHENTICATE ITS SENDER" (FR-023). The admit set for an
+# inbound path into something that can see the whole fleet has to rest on the
+# provider saying who sent a message; a channel that cannot is not bindable at
+# all. Email is the example that fails: anyone can put anyone in a From header,
+# so an admit set over it would be a control that controls nothing.
+INTERPRETER_CHANNELS = ("slack",)
 # Slack ids are an uppercase letter followed by uppercase alphanumerics (C… for a
 # conversation, U… for a user). Validated to keep the no-free-text property above,
 # NOT as a security control — a well-formed id is not an authorised one, and
@@ -11513,6 +11523,7 @@ class ExecSpec:
     # and the answer was to say so rather than to re-resolve silently.
     watch: list[str] = field(default_factory=list)
     stack: str | None = None
+    channel: str = "slack"
     slack_conversation: str | None = None
     declared_sender: str | None = None
 
@@ -11539,6 +11550,9 @@ class ExecSpec:
             for flag, value in (
                 ("--watch", self.watch),
                 ("--stack", self.stack),
+                # `--channel` has a default, so "was it given" cannot be read off
+                # the value. Compared against the default instead.
+                ("--channel", self.channel if self.channel != "slack" else None),
                 ("--slack-conversation", self.slack_conversation),
                 ("--declared-sender", self.declared_sender),
             ):
@@ -11553,6 +11567,17 @@ class ExecSpec:
             # is this. A default here would be a default that admits whoever the
             # channel provider lets through, to something that can see the whole
             # fleet.
+            if self.channel not in INTERPRETER_CHANNELS:
+                die(
+                    f"--channel must be one of {', '.join(INTERPRETER_CHANNELS)} "
+                    f"(got '{self.channel}')",
+                    remedy=(
+                        "only channels that AUTHENTICATE THE SENDER are admissible — the "
+                        "declared sender is the admit set for an inbound path into "
+                        "something that can see your whole fleet, and over a channel that "
+                        "cannot say who sent a message it would control nothing"
+                    ),
+                )
             if not self.stack:
                 die(
                     f"--role {ROLE_INTERPRETER} requires --stack: an interpreter reads the "
@@ -19215,6 +19240,14 @@ def up(
     ),
     # Feature 024. Declared at the surface, each named, none defaulted to a value
     # that would admit or publish anything (Constitution VIII).
+    channel: str = typer.Option(
+        "slack",
+        "--channel",
+        help="INTERPRETER only. Which channel it speaks on. Only channels that "
+        "authenticate the sender are admissible — the declared sender is an admit "
+        "set, and over a channel that cannot say who sent a message it controls "
+        "nothing.",
+    ),
     stack: str | None = typer.Option(
         None,
         "--stack",
@@ -19304,6 +19337,7 @@ def up(
         role=role,
         watch=watch.copy(),
         stack=stack,
+        channel=channel,
         slack_conversation=slack_conversation,
         declared_sender=declared_sender,
         task=resolve_task(task),

@@ -616,6 +616,13 @@ def handle_message(
     text = str(message.get("text") or "")
     if not admit(message, declared_sender):
         return None, {"refused": message.get("user"), "text": text[:200]}
+    change = parse_policy_change(text)
+    if change is not None:
+        # BEFORE the action check, because "quiet for 30m" contains "quiet" and
+        # not an action verb, but "mute" and "stop" are close enough in operator
+        # language that ordering this the other way would refuse a policy change
+        # as if it were an attempt to act.
+        return confirm_policy(change, interpreter=facts.get("interpreter") or "interpreter"), None
     if is_action_request(text):
         return REFUSAL.format(command="agent-container <command>"), None
     return answer(text, facts), None
@@ -821,6 +828,53 @@ def version_skew(interpreter_version: str, trail_version: str) -> str:
     # `major_on_zero = false` in this project, so pre-1.0 a MINOR bump is the
     # breaking channel — 0.31 → 0.32 is exactly the case this must catch.
     return SKEW_REFUSE
+
+
+# --- policy changes, asked for in the conversation --------------------------
+
+_POLICY_RE = re.compile(
+    r"(?i)\b(?:(?P<quiet>quiet|silence|mute)\s+(?:for\s+)?(?P<mins>\d+)\s*m"
+    r"|(?P<digest>digest)\s+(?P<digest_state>on|off)"
+    r"|(?P<unmute>unmute|resume|speak))\b"
+)
+
+
+def parse_policy_change(text: str) -> dict | None:
+    """A policy change asked for in the conversation, or None.
+
+    Deliberately a SMALL closed set. An operator steering their supervisor by
+    natural language is a surface where a misread instruction changes what they
+    get told — so what is recognised is narrow and anything unrecognised falls
+    through to being answered as a question, which is harmless.
+    """
+    m = _POLICY_RE.search(text or "")
+    if not m:
+        return None
+    if m.group("quiet"):
+        return {"change": "silence", "minutes": int(m.group("mins"))}
+    if m.group("digest"):
+        return {"change": "digest", "enabled": m.group("digest_state").lower() == "on"}
+    return {"change": "unmute"}
+
+
+def confirm_policy(change: dict, *, interpreter: str) -> str:
+    """Said back in the same conversation (FR-019).
+
+    CONFIRMED, NOT ACKNOWLEDGED. The operator has to be able to see what the
+    interpreter now believes its instructions are — a supervisor quietly holding
+    a different policy from the one you think you set is one whose silence you
+    will misread later.
+    """
+    if change["change"] == "silence":
+        return (
+            f"[{interpreter}] quiet for {change['minutes']} minutes. Anything that "
+            f"happens is HELD, not dropped, and arrives marked as held when the "
+            f"window ends."
+        )
+    if change["change"] == "digest":
+        state = "on" if change["enabled"] else "off"
+        return f"[{interpreter}] digest {state}."
+    return f"[{interpreter}] speaking again. Anything held while I was quiet follows."
 
 
 def main() -> int:  # pragma: no cover - the loop is exercised by acceptance
