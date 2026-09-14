@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.60.0 (2026-09-14)
+
+### Features
+
+- **024**: Complete the feature — channel choice, policy changes, and the last guards
+  ([`215562b`](https://github.com/ondrasek/agent-container/commit/215562b664f2532afc374bb4870e44cbc3f3bc35))
+
+
 ## v0.59.0 (2026-09-14)
 
 ### Features
