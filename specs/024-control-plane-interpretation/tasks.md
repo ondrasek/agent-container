@@ -17,30 +17,35 @@ other way.
 
 ## Implementation status (2026-09-14)
 
-**19 of 72 tasks complete.** What is built is built to the bar — gate green, acceptance verified
-under docker, documented — rather than stubbed. What is not built is not started.
+**22 of 72 tasks complete, and CI is green on both runtimes** — quality gate, pytest, build,
+acceptance (docker) and acceptance (podman) all pass at `f40eb39`. What is built is built to the
+bar; what is not built is not started, and there is no half-wired surface pretending otherwise.
 
 | Phase | State |
 |---|---|
 | 1 — Setup | **complete** (T001–T004) |
-| 3 — US2, log export | **complete** (T011–T018a). The MVP: verified end to end under docker, including that the output survives `down --purge`. Documented in `docs/observability.md`. |
-| 7 — US4, container invariants | **partial**: role, pre-deploy statement, admit-set refusals, `interpret ls`/`show`, inventory fields, kill-switch coverage (T027, T028, T042, T043, T044, T049). `interpret history` and `serve` are not built. |
-| 9 — Polish | **partial**: `docs/observability.md` done (T057); the threat-model row exists as an expectation row, unreconciled. |
-| 2, 4, 5, 6, 8 | **not started** |
+| 2 — Foundational | **partial**: the stack read path with unreachable-vs-empty kept distinct (T007), and the channel credential proven to travel Constitution IX's path (T010a, T010c, T010d). The watermark and the signal-envelope helper are not built — they have no consumer until Phase 4. |
+| 3 — US2, log export | **complete** (T011–T018a), verified end to end under both runtimes |
+| 7 — US4 | **partial**: role, pre-deploy statement, admit-set refusals, `interpret ls`/`show`, inventory fields, kill-switch coverage, the authority guard (T027, T028, T042, T043, T044, T049) |
+| 9 — Polish | **partial**: `docs/observability.md` (T057); the threat-model row exists unreconciled |
+| 4, 5, 6, 8 | **not started** |
 
-**What remains is the interpreter itself.** Everything shipped so far is the role, its refusals, its
-security property and its input (the log stream). The bridge that reads the trail, forms an
-interpretation, notifies over Slack and answers questions — Phases 2, 4, 5, 6 and 8 — does not exist.
+**What remains is the interpreter itself** — the bridge that reads the trail, forms an
+interpretation, notifies over Slack and answers questions.
 
-**Two things the next session should know before starting it:**
+**Three things the next session should know:**
 
 1. **Phases 4, 5 and 6 cannot be fully verified in a dev environment.** They need a real Slack custom
-   app, a bot token and a workspace. The API contract is pinned in `contracts/signals.md` and can be
-   built against a stub, but "it works" is not demonstrable without those.
-2. **Three defects in the shipped log exporter were found by the ACCEPTANCE tier, not by review or
-   unit tests** (a `local` in a subshell, a missing `jq -c` that failed a prefix guard, and a missing
-   final flush). All three were silent, because export is fail-open. Build the acceptance test for a
-   phase before trusting its unit tests.
+   app, a bot token and a workspace. The contract is pinned in `contracts/signals.md` and can be
+   built against a stub, but "it works" is not demonstrable without those, and a task marked done on
+   a passing stub is the failure this spec warns about.
+2. **The acceptance tier has caught five defects that unit tests AND sub-agent review both passed
+   over** — three in the exporter, a privacy regression where excluding the task no longer made it
+   private, and a field-set guard updated in three of its four encodings. Every one silent, because
+   export is fail-open. Build the acceptance test for a phase before trusting its unit tests.
+3. **One risk is documented rather than closed**: a dead `tee` kills the agent with SIGPIPE
+   (measured, exit 141). Closing it means giving the agent the buffer file as its direct fd and
+   losing `compose logs` ordering — a trade deliberately not made. See the comment at the tee.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -110,7 +115,7 @@ US5 and US6; US2 needs only the writer; US4 needs only the role.
       unprocessed events as "before the window" and silently drops exactly what was missed.
 - [ ] T010 Implement `--stack NAME` resolution on `up` in `bin/agent-container`, refusing with the
       stack named when it is absent or unreachable. A refusal, never a degraded mode (research R3).
-- [ ] T010a **(FR-005)** Deliver the interpreter's credentials — the Slack bot token and the stack
+- [X] T010a **(FR-005)** Deliver the interpreter's credentials — the Slack bot token and the stack
       address — to the **running** container over **its own sshd**, reusing the existing Feature
       003/019 delivery machinery in `bin/agent-container`. Constitution IX: never in the compose
       model, never on argv, never in a run record or `--json` payload. No new delivery path is to be
@@ -119,11 +124,11 @@ US5 and US6; US2 needs only the writer; US4 needs only the role.
 - [ ] T010b **(FR-005)** Implement credential **withdrawal** without destroying the interpreter, and
       assert it in `bin/tests/test_credentialing.py`. A credential that can only be withdrawn by
       destroying its holder is one an operator will not withdraw.
-- [ ] T010c **(FR-006)** Describe the Slack bot token as a credential whose holder can **speak as
+- [X] T010c **(FR-006)** Describe the Slack bot token as a credential whose holder can **speak as
       the interpreter to the operator**, wherever the tool enumerates what an environment holds.
       Assert the wording in `bin/tests/test_cli.py` — the blast radius is the point, and a token
       listed without it reads as configuration.
-- [ ] T010d **(FR-004)** Assert in `bin/tests/test_cli.py` that an interpreter's credential set is
+- [X] T010d **(FR-004)** Assert in `bin/tests/test_cli.py` that an interpreter's credential set is
       **disjoint from** a 017 control plane's: it receives no standing host key. FR-004 requires the
       read credential to be distinct precisely because a 017 key is not scoped to inspect.
 

@@ -338,3 +338,58 @@ def test_a_malformed_entry_is_SKIPPED_rather_than_misread(wiz, monkeypatch):
     )
     _stub_query(wiz, monkeypatch, rc=0, out=body)
     assert [e["line"] for e in wiz.stack_query_lines({}, "c", '{x="y"}')] == ["ok"]
+
+
+# --- the channel token travels Constitution IX's path -----------------------
+
+
+def test_the_channel_token_is_classified_SECRET_and_never_described(wiz):
+    """Constitution IX, for the one credential 024 introduces.
+
+    A deployment description is a PLAN — written before anything exists, kept
+    afterwards as the record, read by whatever wants to know what was deployed.
+    Nothing with that lifetime may hold a secret. So the token must be routed to
+    `deliver_secrets` (pushed into the RUNNING container over its own sshd) and
+    must never appear among the public entries that reach the compose model.
+
+    Asserted rather than assumed, because the plan declared this principle
+    satisfied while nothing demonstrated it — which a review flagged as the
+    feature's one critical gap.
+    """
+    target = f"{wiz.INJECT_ENV_DIR}/{wiz.INTERPRETER_CHANNEL_TOKEN_VAR}"
+    assert wiz.is_secret_target(target), (
+        "the channel token's target is not classified secret, so it would be "
+        "written into the deployment description"
+    )
+    public, secrets = wiz.split_injected(
+        [
+            ("slack", "xoxb-not-a-real-token", target),
+            ("a public config", "nothing secret", f"{wiz.INJECT_CONFIG_DIR}/settings.json"),
+        ]
+    )
+    assert [t for _n, _c, t in public] == [f"{wiz.INJECT_CONFIG_DIR}/settings.json"]
+    assert secrets == [(target, "xoxb-not-a-real-token")], (
+        "the channel token did not route to the delivery path"
+    )
+    # And the value is nowhere in what the description would carry.
+    assert "xoxb-not-a-real-token" not in json.dumps(public)
+
+
+def test_the_interpreter_invents_NO_second_delivery_path(wiz):
+    """The token is an ORDINARY declared credential, deliberately.
+
+    Constitution IX's machinery already pushes anything under SECRET_INJECT_DIRS
+    into the running container over its own sshd. A second path for this one
+    token would be a second thing to get right, to audit, and to leak from — and
+    the tool would then have two answers to "how does a secret reach a
+    container", which is one more than is safe.
+    """
+    src = Path(wiz.__file__).read_text()
+    i = src.index("INTERPRETER_CHANNEL_TOKEN_VAR")
+    # The constant exists as a NAME only; nothing around it should be building a
+    # bespoke transport.
+    window = src[i : i + 400]
+    for forbidden in ("subprocess.run", "scp", "ssh ", "base64"):
+        assert forbidden not in window, (
+            f"a bespoke delivery path is being built around the channel token ({forbidden})"
+        )
