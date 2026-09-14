@@ -1364,7 +1364,17 @@ agent_log_payload() {
     # document that is valid until the day an agent prints a quote, and then
     # produces a silent 400 against a fail-open exporter, which is a gap nothing
     # reports. `jq -Rs` is a real serializer and escapes all of it.
-    local stream="$1" seq="$2" now
+    # THE BODY ARRIVES AS A FILE, never through `$(...)`. Command substitution
+    # STRIPS ALL TRAILING NEWLINES, and this function's caller advances its offset
+    # by the full byte count — so every batch silently lost its terminating
+    # newline(s) while the bytes were marked as sent. `"foo\n"` and `"bar\n"`
+    # reassembled at the collector as `foobar`. Command substitution also drops
+    # NUL bytes, which an agent printing binary will produce.
+    #
+    # `--rawfile` reads the file verbatim into a jq string: newlines, NULs and all.
+    # It also keeps a large batch out of the shell's memory, which matters on the
+    # teardown path where the flush must never stall the container.
+    local stream="$1" seq="$2" body_file="$3" now
     now="$(date +%s%N 2>/dev/null)"
     case "${now}" in *[!0-9]*|"") now="$(( $(date +%s) * 1000000000 ))" ;; esac
     # `-c` IS LOAD-BEARING, not a formatting preference. jq PRETTY-PRINTS by
@@ -1376,7 +1386,8 @@ agent_log_payload() {
     # Measured: the acceptance test failed with zero log signals at the collector
     # while every unit test passed, because the unit tests parse the JSON (which is
     # valid either way) and never exercised the guard that consumes it.
-    jq -cRs --arg env "${AGENT_CONTAINER_NAME:-unknown}" \
+    jq -cn --rawfile body "${body_file}" \
+           --arg env "${AGENT_CONTAINER_NAME:-unknown}" \
            --arg agent "${AGENT_CONTAINER_AGENT:-unknown}" \
            --arg mode "${AGENT_CONTAINER_MODE:-unknown}" \
            --arg run "${RUNS_ID:-}" \
@@ -1400,27 +1411,53 @@ agent_log_payload() {
              [{key: "agent_container.run_id", value: {stringValue: $run}},
               {key: "service.instance.id", value: {stringValue: $run}}] end)
         )},
-        scopeLogs: [{logRecords: [{timeUnixNano: $now, body: {stringValue: .}}]}]
+        scopeLogs: [{logRecords: [{timeUnixNano: $now, body: {stringValue: $body}}]}]
       }]}'
 }
 
 agent_log_export_once() {
     # Ships whatever has accumulated in one stream's buffer since the last pass.
-    local endpoint="$1" stream="$2" buf="$3" state="$4" size off chunk payload
+    local endpoint="$1" stream="$2" buf="$3" state="$4" size off want chunk payload
     [[ -f "${buf}" ]] || return 0
-    size="$(wc -c < "${buf}" 2>/dev/null || echo 0)"
-    off="$(cat "${state}" 2>/dev/null || echo 0)"
+    # `tr -d ' '` because `wc -c` PADS on BSD. GNU's `wc -c < file` does not, so
+    # the container is fine — but these functions are extracted and run on dev
+    # hosts by the test suite, and there the state file would get "      36",
+    # the digits-only guard below would reset the offset to 0 EVERY pass, and the
+    # whole buffer would re-send forever.
+    size="$(wc -c < "${buf}" 2>/dev/null | tr -d ' ' || echo 0)"
+    case "${size}" in *[!0-9]*|"") size=0 ;; esac
+    off="$(cat "${state}" 2>/dev/null | tr -d ' ' || echo 0)"
     case "${off}" in *[!0-9]*|"") off=0 ;; esac
+    # A SHRUNK BUFFER RESETS THE OFFSET, or the stream dies permanently and
+    # silently. The buffers are truncated when the cap trips, and `/tmp` survives
+    # a container restart while the `.off` files do — so without this a restarted
+    # container starts with an offset past the end of a file that begins at zero,
+    # `size > off` is never true again, and nothing is ever exported for the rest
+    # of the run. No warning, because there is no failure to report.
+    [[ "${size}" -lt "${off}" ]] && off=0
     [[ "${size}" -gt "${off}" ]] || return 0
-    # `tail -c +N` is 1-indexed, so the first unread byte is off+1.
-    chunk="$(tail -c "+$(( off + 1 ))" "${buf}" 2>/dev/null)" || return 0
-    [[ -n "${chunk}" ]] || return 0
-    payload="$(printf '%s' "${chunk}" | agent_log_payload "${stream}" "${off}" 2>&1)"
+    want=$(( size - off ))
+    # THE CHUNK IS BOUNDED BY THE SIZE WE ARE ABOUT TO COMMIT, and this is the
+    # whole reason the two reads are pinned together.
+    #
+    # The first version read `size` here, then built the payload and POSTed
+    # (curl's timeout is 10s), then read the chunk with `tail -c +N` — which reads
+    # to EOF AT READ TIME — and finally stored the STALE `size`. Everything the
+    # agent wrote during that window shipped in this batch AND again in the next.
+    # Reproduced: with a writer appending during the pass, lines 2-4 and 7-8 each
+    # arrived at the collector twice. A chatty agent writes continuously, so it
+    # recurred for the life of the run.
+    chunk="${buf}.batch"
+    tail -c "+$(( off + 1 ))" "${buf}" 2>/dev/null | head -c "${want}" > "${chunk}" 2>/dev/null || return 0
+    [[ -s "${chunk}" ]] || { rm -f "${chunk}" 2>/dev/null; return 0; }
+    payload="$(agent_log_payload "${stream}" "${off}" "${chunk}" 2>&1)"
     case "${payload}" in
         '{"resourceLogs"'*) ;;
         # Same shape check host_metrics_export_once makes, for the same reason: a
         # jq compile error would otherwise be POSTed as if it were a log body.
-        *) log "WARNING: could not build the agent log payload: ${payload:0:160}"; return 0 ;;
+        *) log "WARNING: could not build the agent log payload: ${payload:0:160}"
+           rm -f "${chunk}" 2>/dev/null
+           return 0 ;;
     esac
     # FAIL-OPEN AND SILENT, exactly as the host-metrics exporter is. This runs on
     # a timer for the life of the container; a collector that goes away must not
@@ -1428,11 +1465,12 @@ agent_log_export_once() {
     curl -sS -m "${OTLP_TIMEOUT:-10}" -X POST "${endpoint}" \
         -H 'Content-Type: application/json' \
         --data-binary @- <<< "${payload}" > /dev/null 2>&1 || true
-    # The offset advances whether or not the POST landed. Retrying a batch
-    # forever against a dead collector would grow unboundedly and re-send the
-    # same lines when it came back; export is fail-open, and a gap is the
-    # declared consequence of an endpoint that is not there.
-    printf '%s' "${size}" > "${state}" 2>/dev/null || true
+    rm -f "${chunk}" 2>/dev/null || true
+    # The offset advances to the size we actually READ, whether or not the POST
+    # landed. Retrying forever against a dead collector would grow unboundedly and
+    # re-send on recovery; export is fail-open, and a gap is the declared
+    # consequence of an endpoint that is not there.
+    printf '%s' "$(( off + want ))" > "${state}" 2>/dev/null || true
 }
 
 agent_log_export_flush() {
@@ -1452,6 +1490,12 @@ agent_log_export_flush() {
     # precisely the one an operator wants the output of.
     local endpoint="$1" settle=0 prev=-1 size
     [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]] || return 0
+    # THE CAP APPLIES HERE TOO. Reported as a defect: the flush had no cap
+    # awareness, so a run that hit its cap and then kept printing would have the
+    # declined bytes shipped anyway by the teardown path — the cap defeated, the
+    # truncation marker made false, and a teardown that could stall on a very
+    # large read, which this function's own comment forbids.
+    [[ -f "${AGENT_LOG_BUF_DIR}/capped" ]] && return 0
     # Let `tee` finish. The agent has exited, so both tees see EOF and drain
     # promptly — but "promptly" is not "already", and reading a buffer mid-write
     # would ship a truncated final line. Bounded at ~2s: this is a teardown path
@@ -1494,6 +1538,15 @@ agent_log_export_start() {
         log "WARNING: could not create ${AGENT_LOG_BUF_DIR}; agent log export disabled"; return 0; }
     : > "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || true
     : > "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || true
+    # THE STATE GOES WITH THEM. `/tmp` survives a container restart and the
+    # entrypoint explicitly supports one, so a second boot would otherwise start
+    # with the previous run's byte offsets pointing past the end of buffers that
+    # begin at zero — and with a `capped` sentinel from a run that is over. Either
+    # one silently disables export for the whole new run, with nothing to report
+    # because nothing failed.
+    rm -f "${AGENT_LOG_BUF_DIR}/stdout.off" "${AGENT_LOG_BUF_DIR}/stderr.off" \
+          "${AGENT_LOG_BUF_DIR}/capped" "${AGENT_LOG_BUF_DIR}/marker" \
+          "${AGENT_LOG_BUF_DIR}"/*.batch 2>/dev/null || true
     export AGENT_LOG_BUF_DIR
     # Exported so the teardown paths can flush without recomputing it: the block
     # that knows `_otlp_base` unsets it a few lines below, and a second derivation
@@ -1523,8 +1576,17 @@ agent_log_export_start() {
                         + $(wc -c < "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || echo 0) ))
                 if [[ "${total}" -ge $(( cap * 1024 * 1024 )) ]]; then
                     capped=1
+                    # PERSISTED, because `capped` is a variable inside THIS
+                    # SUBSHELL and the teardown flush runs in the parent. Without
+                    # the sentinel the flush has no cap awareness at all: it would
+                    # read everything written after the cap and POST it, which
+                    # defeats the cap AND makes the truncation marker a lie —
+                    # 016's rule is that a trail may be incomplete, never
+                    # misleadingly complete.
+                    : > "${AGENT_LOG_BUF_DIR}/capped" 2>/dev/null || true
                     printf 'agent log export reached the %sMB cap for this run and stopped here' "${cap}" \
-                        | agent_log_payload truncated "${total}" \
+                        > "${AGENT_LOG_BUF_DIR}/marker" 2>/dev/null || true
+                    agent_log_payload truncated "${total}" "${AGENT_LOG_BUF_DIR}/marker" \
                         | curl -sS -m "${OTLP_TIMEOUT:-10}" -X POST "${endpoint}" \
                             -H 'Content-Type: application/json' --data-binary @- > /dev/null 2>&1 || true
                     log "agent log export reached its ${cap}MB cap for this run; a truncation marker was sent"
@@ -1556,7 +1618,7 @@ agent_log_export_start() {
                 printf '0' > "${AGENT_LOG_BUF_DIR}/stdout.off" 2>/dev/null || true
                 printf '0' > "${AGENT_LOG_BUF_DIR}/stderr.off" 2>/dev/null || true
             fi
-            sleep "${AGENT_LOG_BATCH_SECONDS:-2}"
+            sleep "${AGENT_CONTAINER_AGENT_LOG_BATCH_SECONDS:-2}"
         done
     ) > /dev/null 2>&1 &
     disown 2>/dev/null || true
@@ -2684,9 +2746,30 @@ run_headless_agent() {
     # original when log export is off — `<&0` is load-bearing (see above) and a
     # change to it must not ride along with a change about telemetry.
     #
-    # `tee -a` to a REGULAR FILE, never a pipe: a file write does not block on a
-    # reader, so a slow or dead exporter cannot apply back-pressure to the agent
-    # (FR-007a). See agent_log_export_start for why that is the whole design.
+    # `tee -a` writes to a REGULAR FILE, so the EXPORTER can never apply
+    # back-pressure: it only ever reads those files, and a collector that is slow,
+    # wedged or gone cannot reach the agent through them. That is the failure
+    # FR-007a is aimed at and it is closed by construction.
+    #
+    # THE RESIDUAL RISK IS THE TEE ITSELF, and it is stated here rather than left
+    # to be discovered. The agent's stdout is a PIPE to `tee` — that is what
+    # process substitution is — so:
+    #
+    #   * if `tee` stalls, the agent blocks after one 64 KiB pipe buffer.
+    #     Measured: an agent plateaued at ~1000 lines with `tee` SIGSTOPped.
+    #   * if `tee` DIES, the agent's next write takes SIGPIPE and it exits 141.
+    #     Measured. A working run would then be failed by its own log export,
+    #     which is the outcome FR-007a exists to prevent.
+    #
+    # `tee` dies if its write fails, which in practice means the container's
+    # filesystem filled. The cap keeps THESE buffers bounded (see
+    # agent_log_export_start), so the realistic trigger is something else filling
+    # the disk — in which case the run was in trouble regardless.
+    #
+    # Closing it completely means giving the agent the buffer file as its direct
+    # fd and forwarding to the container's stdout from a separate reader, which
+    # costs the live `compose logs` view its ordering guarantees. That trade has
+    # not been made; the limit is recorded instead, as this project prefers.
     if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then
         "${cmd[@]}" <&0 > >(tee -a "${AGENT_LOG_BUF_DIR}/stdout") \
                          2> >(tee -a "${AGENT_LOG_BUF_DIR}/stderr" >&2) &

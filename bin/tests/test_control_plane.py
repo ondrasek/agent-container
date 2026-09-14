@@ -767,6 +767,7 @@ def test_the_inventory_entry_carries_role_and_provenance(wiz, monkeypatch):
     # "nothing was declared" are different facts (Constitution VIII).
     assert e["watched_scope"] is None
     assert e["channel"] is None
+    assert e["declared_sender"] is None
     assert e["authority"] is None
 
 

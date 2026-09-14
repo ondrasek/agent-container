@@ -15,8 +15,10 @@ it: a test of a copy proves the copy correct.
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -44,17 +46,27 @@ def _extract(fn: str) -> str:
 
 
 def _payload(body: str, *, stream: str = "stdout", run_id: str = "20260914T101010Z-ab12") -> dict:
-    script = (
-        "set -uo pipefail\n"
-        "log() { :; }\n"
-        f"AGENT_CONTAINER_NAME=demo\nAGENT_CONTAINER_AGENT=claude\nAGENT_CONTAINER_MODE=headless\n"
-        f"RUNS_ID={run_id}\n"
-        + _extract("agent_log_payload")
-        + f"cat | agent_log_payload {stream} 7\n"
-    )
-    r = subprocess.run(
-        ["bash", "-c", script], input=body, capture_output=True, text=True, timeout=60
-    )
+    """Build one payload from `body`, through the SHIPPED function.
+
+    The body travels as a FILE because that is how the function takes it — via
+    `jq --rawfile`. It used to arrive through `$(...)`, which strips every
+    trailing newline while the caller's offset advances by the full byte count,
+    so batches silently lost their terminating newlines and reassembled glued
+    together at the collector.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "body"
+        f.write_bytes(body.encode())
+        script = (
+            "set -uo pipefail\n"
+            "log() { :; }\n"
+            f"AGENT_CONTAINER_NAME=demo\nAGENT_CONTAINER_AGENT=claude\n"
+            f"AGENT_CONTAINER_MODE=headless\n"
+            f"RUNS_ID={run_id}\n"
+            + _extract("agent_log_payload")
+            + f"agent_log_payload {stream} 7 {f}\n"
+        )
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, f"payload build failed: {r.stderr[-800:]}"
     return json.loads(r.stdout)
 
@@ -133,23 +145,54 @@ def test_the_truncation_marker_is_an_ATTRIBUTE_not_a_body_string():
     assert a["agent_container.stream"] == "truncated"
 
 
-def test_the_tee_writes_to_a_FILE_and_never_a_pipe():
-    """FR-007a, asserted against the source because it is a property of the shape
-    rather than of a behaviour a test can provoke.
+def test_the_EXPORTER_cannot_apply_back_pressure_to_the_agent():
+    """What is actually guaranteed, stated precisely — because the previous
+    version of this test was named for a stronger property than it checked.
 
-    A FIFO or a pipe applies BACK-PRESSURE the moment its reader is slow, wedged
-    or dead — and the reader here talks to a network endpoint that is allowed to
-    be all three, because export is fail-open by design. An agent blocked writing
-    a log line is observability breaking the work it exists to observe.
+    It was called `..._never_a_pipe` and asserted `"mkfifo" not in src`. A review
+    measured the truth: the agent's stdout goes into `>(tee …)`, which IS a pipe,
+    and with `tee` SIGSTOPped the agent plateaus after one 64 KiB pipe buffer. The
+    assertion greps for a string that was never going to appear, so it would pass
+    against an implementation where the agent genuinely blocks.
+
+    THE REAL GUARANTEE is narrower and still worth having: the EXPORTER — the
+    thing that talks to a network endpoint allowed to be slow, wedged or absent —
+    only ever READS the buffer files. It cannot stall the agent no matter what the
+    collector does, which is the failure FR-007a is aimed at. The residual risk is
+    `tee` itself (see the next test), and it is documented rather than hidden.
     """
     src = _ENTRYPOINT.read_text()
-    i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then')
-    block = src[i : i + 400]
+    i = src.index("agent_log_export_once() {")
+    j = src.index("agent_log_export_flush() {")
+    exporter = src[i:j]
+    # The exporter opens the buffer for READING only. A `>` or `>>` onto the
+    # buffer here would put the exporter in the agent's write path.
+    assert '> "${buf}"' not in exporter and '>> "${buf}"' not in exporter
+    assert "tail -c" in exporter and "wc -c" in exporter
+    tee_i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then')
+    block = src[tee_i : tee_i + 400]
     assert "tee -a" in block, "the agent's output must be teed"
-    assert "mkfifo" not in src, "a FIFO would let a stalled exporter block the agent"
     # And the original invocation survives untouched on the else branch, so an
     # environment with export off is byte-for-byte what it was before 024.
     assert '"${cmd[@]}" <&0 &' in block
+
+
+def test_the_tee_BACK_PRESSURE_RISK_is_documented_not_hidden():
+    """The residual risk the test above narrows to, recorded in the source.
+
+    A review measured it: with `tee` stopped the agent blocks after 64 KiB; with
+    `tee` killed the agent takes SIGPIPE and exits 141, so a working run would be
+    failed by its own log export. This project's standing rule is that a limit is
+    stated rather than discovered, so the entrypoint must say so where the tee is.
+    """
+    src = _ENTRYPOINT.read_text()
+    i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then')
+    window = src[max(0, i - 2200) : i + 400]
+    assert "SIGPIPE" in window, (
+        "the tee's residual back-pressure risk is not documented at the tee. "
+        "Measured: a stopped tee blocks the agent after one pipe buffer, and a "
+        "dead tee kills it with SIGPIPE — that is a limit, and limits are stated."
+    )
 
 
 def test_export_off_changes_NOTHING_about_how_the_agent_is_invoked():
@@ -214,7 +257,7 @@ def test_the_payload_is_COMPACT_because_the_guard_matches_a_literal_prefix():
         "log() { :; }\n"
         "AGENT_CONTAINER_NAME=demo\nRUNS_ID=r1\n"
         + _extract("agent_log_payload")
-        + "printf 'hello\\n' | agent_log_payload stdout 1\n"
+        + "printf 'hello\\n' > /tmp/_acbody$$; agent_log_payload stdout 1 /tmp/_acbody$$\n"
     )
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr[-500:]
@@ -297,3 +340,109 @@ def test_truncating_under_an_open_append_tee_is_safe():
             f"the file is {size} bytes after truncation — tee is not appending at "
             f"the new end, so truncation does not actually reclaim anything"
         )
+
+
+def _drive_export(passes: list[str]) -> tuple[bytes, list[str]]:
+    """Drive the REAL `agent_log_export_once` across several passes.
+
+    Returns (what the buffer ended up containing, the bodies that were POSTed).
+    `curl` is stubbed by a shell function that records the payload, so this
+    exercises the offset bookkeeping rather than the network.
+
+    This harness is the one the suite did not have, and its absence is why two
+    defects shipped: every other test here either builds a payload or greps the
+    source, so nothing drove the loop that decides WHAT to send and how far to
+    advance.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        dd = Path(d)
+        buf, state, sent = dd / "stdout", dd / "stdout.off", dd / "sent"
+        buf.write_text("")
+        script = [
+            "set -uo pipefail",
+            "log() { :; }",
+            "AGENT_CONTAINER_NAME=demo",
+            "RUNS_ID=r1",
+            # Record the payload instead of posting it.
+            f'curl() {{ cat >> "{sent}"; printf "\\n" >> "{sent}"; }}',
+            _extract("agent_log_payload"),
+            _extract("agent_log_export_once"),
+        ]
+        for chunk in passes:
+            script.append(f"printf %s {shlex.quote(chunk)} >> {shlex.quote(str(buf))}")
+            script.append(
+                f'agent_log_export_once "http://x/v1/logs" stdout '
+                f"{shlex.quote(str(buf))} {shlex.quote(str(state))}"
+            )
+        r = subprocess.run(
+            ["bash", "-c", "\n".join(script)], capture_output=True, text=True, timeout=120
+        )
+        assert r.returncode == 0, r.stderr[-600:]
+        bodies = []
+        if sent.exists():
+            for line in sent.read_text().splitlines():
+                if not line.strip():
+                    continue
+                doc = json.loads(line)
+                bodies.append(
+                    doc["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["body"]["stringValue"]
+                )
+        return buf.read_bytes(), bodies
+
+
+def test_what_was_sent_reassembles_to_the_buffer_BYTE_FOR_BYTE():
+    """THE TEST THAT WOULD HAVE CAUGHT BOTH SHIPPED DEFECTS.
+
+    Concatenating every body that was POSTed must equal the file exactly: no
+    gaps, no repeats, no lost newlines. That single assertion covers
+
+      * the duplication race — the offset advanced to a size captured before the
+        build-and-post while the chunk was read to EOF after it, so every batch
+        re-sent the window in between; and
+      * the trailing-newline loss — `$(...)` strips them while the offset advances
+        by the full byte count, so `"foo\\n"` and `"bar\\n"` arrived as `foobar`.
+
+    Both are invisible to a test that only checks one payload is well formed.
+    """
+    content, bodies = _drive_export(["first\n", "second\nthird\n", "\n\n", "fourth\n"])
+    assert b"".join(b.encode() for b in bodies) == content, (
+        f"sent {bodies!r} does not reassemble to the buffer {content!r} — "
+        f"either bytes were dropped, duplicated, or their newlines were eaten"
+    )
+
+
+def test_a_pass_with_nothing_new_sends_NOTHING():
+    """An exporter that re-sends an unchanged buffer duplicates the whole run's
+    output every interval, which is the same defect in its loudest form."""
+    _, bodies = _drive_export(["only\n", "", ""])
+    assert len(bodies) == 1, f"an idle pass sent something: {bodies!r}"
+
+
+def test_a_TRUNCATED_buffer_does_not_kill_the_stream(tmp_path):
+    """`/tmp` survives a container restart; the offsets used not to be cleared.
+
+    With a stale offset past the end of a buffer that restarts at zero, `size >
+    off` is never true again and the stream is dead for the whole new run — with
+    nothing logged, because nothing failed.
+    """
+    buf, state, sent = tmp_path / "b", tmp_path / "b.off", tmp_path / "sent"
+    buf.write_text("")
+    state.write_text("999999")  # a previous run's offset
+    script = "\n".join(
+        [
+            "set -uo pipefail",
+            "log() { :; }",
+            "AGENT_CONTAINER_NAME=demo",
+            "RUNS_ID=r1",
+            f'curl() {{ cat >> "{sent}"; printf "\\n" >> "{sent}"; }}',
+            _extract("agent_log_payload"),
+            _extract("agent_log_export_once"),
+            f"printf 'after-restart\\n' >> {buf}",
+            f'agent_log_export_once "http://x/v1/logs" stdout {buf} {state}',
+        ]
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-500:]
+    assert sent.exists() and "after-restart" in sent.read_text(), (
+        "a stale offset from a previous boot permanently silenced the stream"
+    )

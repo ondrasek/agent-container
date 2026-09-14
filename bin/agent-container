@@ -184,40 +184,27 @@ STACK_EXPOSURE_DEFAULT = STACK_EXPOSURE_HOST
 # constraint is recorded beside it — a default whose reason is lost is one nobody
 # can responsibly change later.
 
-# The channel is polled, not held open. Socket Mode would need a WebSocket and
-# therefore a third-party dependency, in a project whose one dependency is PyYAML
-# (Constitution VI) — so the mechanism is plain HTTPS, which `curl` already
-# speaks here and which the entrypoint already uses for OTLP.
-#
-# 15s is FOUR REQUESTS PER MINUTE. Slack allows 50+/min on `conversations.history`
-# for a CUSTOM app — one installed in the operator's own workspace — but only
-# 1/min for a commercially distributed non-Marketplace app. Four is an eighth of
-# the allowance we support and four times over the one we do not, which is why the
-# deploy-time statement names "custom app" rather than leaving it to be discovered
-# as unexplained lateness.
-INTERPRETER_CHANNEL_POLL_SECONDS = 15
-# The trail moves slower than a conversation and SC-001 allows five minutes.
-INTERPRETER_TRAIL_POLL_SECONDS = 30
-# Long enough that a slow build is not called stalled; short enough to matter
-# overnight. What is reported is the DURATION and the last output seen — never a
-# verdict, because silence alone cannot distinguish a wedged agent from a patient
-# one, and a supervisor that guesses is one an operator learns to discount.
-INTERPRETER_STALL_WINDOW_SECONDS = 20 * 60
-# Digests are OFF unless asked for. An unrequested daily message is noise until
-# the operator wants it, and a notifier that speaks when nothing happened is one
-# that gets muted — after which the operator believes they would have been told.
-INTERPRETER_DIGEST_DEFAULT = False
+# The interpreter's PACING defaults — poll intervals, the stall window, the digest
+# schedule — are deliberately NOT here yet. They belong with the phases that read
+# them, and their values and reasoning are recorded in this feature's research.
+# A named default with no consumer is not a default: it is a claim about behaviour
+# that does not exist, which is Constitution VIII's "absent ≠ defaulted" read from
+# the other direction. Four of them sat here unused until a review said so.
 
 # Agent output is bounded PER RUN, against the stack's 10GB ceiling. Without a cap
 # one agent in a print loop evicts the retention window, so the run that printed
 # most would erase the runs that mattered.
 AGENT_LOG_CAP_MB_DEFAULT = 10
-# Batched because a log line is not a run record: a POST per line turns a chatty
-# agent into a request storm against the operator's own collector. Whichever of
-# the three is reached first flushes.
-AGENT_LOG_BATCH_LINES = 100
-AGENT_LOG_BATCH_BYTES = 64 * 1024
-AGENT_LOG_BATCH_SECONDS = 2
+# Batched because a log line is not a run record: a POST per line would turn a
+# chatty agent into a request storm against the operator's own collector.
+#
+# ON TIME ALONE — and this comment used to claim otherwise. It named a line count
+# and a byte budget as additional flush triggers; neither was implemented and
+# neither constant was ever read, so the documentation described a batching policy
+# the exporter did not have. Found by review. DELIVERED to the container rather
+# than defaulted on both sides, because two independent literals agree only by
+# coincidence and drift on the first change.
+AGENT_LOG_BATCH_SECONDS_DEFAULT = 2
 # Exported unless declared otherwise — the same posture as the task text, for the
 # same reason (it is the field you want when a run failed and you have a phone).
 # SEPARATE FROM export_task_text ON PURPOSE: they are different exposures. The
@@ -2244,6 +2231,15 @@ INVENTORY_FIELDS = (
     # a closed vocabulary of one value.
     "watched_scope",
     "channel",
+    # THE ADMIT SET, recorded. It was required at deploy, described as "the admit
+    # set for an inbound path into something that can see your whole fleet", and
+    # then dropped on the floor: unvalidated, unrecorded, never delivered. Found by
+    # review, and it is verbatim the failure the validator twenty lines below
+    # condemns — a flag that is silently inert is worse than one that is refused,
+    # because the operator believes they configured something. FR-021/SC-012 ask
+    # for authority to be visible AFTER the deploy, and the sender is the one field
+    # that most needs to be.
+    "declared_sender",
     "authority",
     "notes",
 )
@@ -2258,6 +2254,60 @@ INTERPRETER_AUTHORITIES = ("observe",)
 # NOT as a security control — a well-formed id is not an authorised one, and
 # FR-023's admit set is what decides that.
 INTERPRETER_CHANNEL_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,31}$")
+
+
+def validate_interpreter_scope(entries: list[str]) -> list[str]:
+    """Each `--watch` entry, as a host or host/environment NAME.
+
+    The comment on INVENTORY_FIELDS asserts that all of the fields 024 adds are
+    validated rather than free text, and Feature 014's threat-model row rests on
+    this store having no free-text field at all — unlike a run record, whose
+    `task` carries whatever an operator typed, nothing here can carry a credential
+    STRUCTURALLY.
+
+    That claim was false for this field until a review said so: `--watch` went
+    into the entry verbatim. The test commit that came after even re-asserted the
+    property across all three fields while this one had no validation at all,
+    which made it likelier to go unnoticed rather than less.
+
+    THE LIMIT, STATED RATHER THAN OVERSOLD. Validating as a NAME removes shell
+    metacharacters, path traversal, whitespace and empty segments. It cannot
+    distinguish a name from a SECRET THAT HAPPENS TO LOOK LIKE ONE: an opaque
+    alphanumeric token is a well-formed name, and no validator can tell the two
+    apart without knowing which hosts exist. So this narrows the field to a shape;
+    it does not make it impossible for an operator to paste a credential into it,
+    and 014's "no free-text field" is accurate about the SHAPE of what is stored
+    rather than a guarantee about its meaning.
+    """
+    out: list[str] = []
+    for raw in entries:
+        # An EMPTY entry reaches here from `--watch ""`, which argparse-style
+        # option handling accepts happily. It would be stored as a scope entry
+        # that names nothing, and an interpreter's scope is the thing an operator
+        # reads back to know what it is looking at.
+        if not raw:
+            die(
+                "--watch was given an empty value",
+                remedy="--watch HOST or --watch HOST/ENVIRONMENT",
+            )
+        host, sep, env = raw.partition("/")
+        # A SEPARATOR WITH NOTHING AFTER IT is a malformed entry, not an entry
+        # that watches the whole host — `vps1/` slipped through a first version
+        # that simply skipped empty parts, and would have been stored verbatim.
+        # An operator who typed it meant something they did not finish saying.
+        if sep and not env:
+            die(
+                f"--watch {raw!r} ends with '/' but names no environment",
+                remedy="watch the whole host with --watch HOST, or name one: HOST/ENVIRONMENT",
+            )
+        for part in (host, env):
+            if not part:
+                continue
+            # The tool's own name rule, reused rather than re-invented: a second
+            # notion of "a valid name" is a second thing to keep in step.
+            validate_name(part)
+        out.append(raw)
+    return out
 
 
 def validate_interpreter_channel_id(value: str, what: str) -> str:
@@ -2475,6 +2525,7 @@ def build_inventory_entry(
     provenance: str | None = None,
     watched_scope: list[str] | None = None,
     channel: str | None = None,
+    declared_sender: str | None = None,
     authority: str | None = None,
 ) -> dict:  # noqa: FBT001
     """A new `active` entry (data-model §1).
@@ -2508,6 +2559,7 @@ def build_inventory_entry(
         # omitted has an empty one, and the two are different facts.
         "watched_scope": watched_scope,
         "channel": channel,
+        "declared_sender": declared_sender,
         "authority": authority,
         "notes": [],
     }
@@ -4126,6 +4178,7 @@ def record_inventory_creation(
     role: str = ROLE_AGENT,
     watched_scope: list[str] | None = None,
     channel: str | None = None,
+    declared_sender: str | None = None,
     authority: str | None = None,
 ) -> None:
     """Record a deployment (FR-001), and NEVER fail the deploy for it (FR-008).
@@ -4145,6 +4198,7 @@ def record_inventory_creation(
                 role=role,
                 watched_scope=watched_scope,
                 channel=channel,
+                declared_sender=declared_sender,
                 authority=authority,
             )
         )
@@ -11555,6 +11609,10 @@ class ExecSpec:
         env["AGENT_CONTAINER_AGENT_LOG_CAP_MB"] = str(
             AGENT_LOG_CAP_MB_DEFAULT if declared_cap is None else declared_cap
         )
+        # ONE owner for the batch interval. The entrypoint carried its own `:-2`
+        # fallback and the CLI carried a constant nothing delivered, so the two
+        # agreed by coincidence and would have diverged on the first change.
+        env["AGENT_CONTAINER_AGENT_LOG_BATCH_SECONDS"] = str(AGENT_LOG_BATCH_SECONDS_DEFAULT)
         if self.role == ROLE_CONTROL_PLANE and name:
             # Feature 017 FR-010/FR-014a: the container has to know its OWN name,
             # because two things inside it read this and neither can derive it.
@@ -12127,7 +12185,9 @@ def compose_up_exec(
         role=spec.role,
         # Feature 024: recorded only for the role they describe, so an agent
         # environment's entry says "this does not apply" rather than "empty".
-        watched_scope=(spec.watch.copy() if spec.role == ROLE_INTERPRETER else None),
+        watched_scope=(
+            validate_interpreter_scope(spec.watch) if spec.role == ROLE_INTERPRETER else None
+        ),
         channel=(
             validate_interpreter_channel_id(spec.slack_conversation or "", "--slack-conversation")
             if spec.role == ROLE_INTERPRETER
@@ -12136,6 +12196,11 @@ def compose_up_exec(
         # A vocabulary of one. FR-020a forbids a dormant path toward the feature
         # that adds acting, and a field that already accepted another value would
         # be one.
+        declared_sender=(
+            validate_interpreter_channel_id(spec.declared_sender or "", "--declared-sender")
+            if spec.role == ROLE_INTERPRETER
+            else None
+        ),
         authority=(INTERPRETER_AUTHORITIES[0] if spec.role == ROLE_INTERPRETER else None),
     )
     # FR-011: an upgrade must not leave a pre-018 private key behind.

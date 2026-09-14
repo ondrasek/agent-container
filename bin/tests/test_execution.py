@@ -183,6 +183,10 @@ def test_exec_spec_compose_environment(wiz):
         # string the operator typed, the log is everything the agent printed.
         "AGENT_CONTAINER_EXPORT_AGENT_LOGS": "1",
         "AGENT_CONTAINER_AGENT_LOG_CAP_MB": "10",
+        # Delivered rather than defaulted on both sides: the entrypoint used to
+        # carry its own fallback while the CLI carried a constant nothing sent, so
+        # the two agreed by coincidence and would drift on the first change.
+        "AGENT_CONTAINER_AGENT_LOG_BATCH_SECONDS": "2",
     }
     # No endpoint declared in this test's environment, so no endpoint is
     # delivered — undeclared is not the same as declared-empty (C18c).

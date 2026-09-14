@@ -206,3 +206,71 @@ def test_the_channel_id_is_VALIDATED_not_passed_through(wiz):
         except wiz.Fatal:
             continue
         raise AssertionError(f"the inventory would have accepted {bad!r} as a channel id")
+
+
+def test_the_WATCHED_SCOPE_is_validated_like_everything_else_in_the_store(wiz):
+    """The claim on INVENTORY_FIELDS, made true.
+
+    It asserted that all three fields 024 adds are validated rather than free
+    text, and Feature 014's threat-model row rests on this store having no
+    free-text field at all. For this field the claim was FALSE until a review
+    said so: `--watch` went in verbatim, so `--watch "$(cat ~/.token)"` would have
+    written a credential into the durable store the threat model says structurally
+    cannot hold one.
+
+    Worse, the test commit that followed re-asserted the property across all three
+    fields while this one still had no validation — strengthening the claim
+    without closing the hole, which makes a gap less likely to be noticed, not
+    more.
+    """
+    assert wiz.validate_interpreter_scope(["vps1", "vps1/api"]) == ["vps1", "vps1/api"]
+    for hostile in (
+        ["vps1; rm -rf /"],
+        ["../../etc/passwd"],
+        ["env with spaces"],
+        ["vps1/"],
+        [""],
+    ):
+        try:
+            wiz.validate_interpreter_scope(hostile)
+        except wiz.Fatal:
+            continue
+        raise AssertionError(f"the inventory would have stored {hostile!r} verbatim")
+
+
+def test_the_scope_validator_does_NOT_claim_to_detect_a_secret(wiz):
+    """The limit, asserted so nobody later reads the validator as more than it is.
+
+    An opaque alphanumeric token is a WELL-FORMED NAME. No validator can separate
+    it from a hostname without knowing which hosts exist, so `--watch <token>` is
+    still storable and 014's "no free-text field" describes the SHAPE of what is
+    stored, not a guarantee about its meaning. Pinned as a known limit rather than
+    left as an implied promise — the same way this project records what
+    reconciliation does not catch.
+    """
+    token_shaped = "ghp0realtokenvaluegoeshere"
+    assert wiz.validate_interpreter_scope([token_shaped]) == [token_shaped]
+
+
+def test_the_DECLARED_SENDER_is_recorded_not_merely_demanded(wiz):
+    """FR-021/SC-012. It was required at deploy, called "the admit set for an
+    inbound path into something that can see your whole fleet", and then dropped:
+    unvalidated, unrecorded, never delivered.
+
+    That is verbatim the failure the role validation condemns twenty lines
+    earlier — a flag that is silently inert is worse than one that is refused,
+    because the operator believes they configured something. An admit set nobody
+    can read back after the deploy is exactly that.
+    """
+    entry = wiz.build_inventory_entry(
+        "watcher",
+        "vps1",
+        True,
+        role=wiz.ROLE_INTERPRETER,
+        watched_scope=["vps1"],
+        channel="C0123456789",
+        declared_sender="U0987654321",
+        authority="observe",
+    )
+    assert entry["declared_sender"] == "U0987654321"
+    assert "declared_sender" in wiz.INVENTORY_FIELDS
