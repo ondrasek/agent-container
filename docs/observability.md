@@ -474,6 +474,69 @@ omitting a named field either happens or it does not.
 **`run_id` exports regardless.** That is what makes the exclusion cheap rather than lossy — without
 correlation, excluding the task removes the reason to look at the record at all.
 
+## The agent's output — a third payload class (Feature 024)
+
+A record is deliberately **not the logs** (see above), and for years that meant the logs died with
+the container: `runs show` could only point at `agent-container logs`, a command that stops working
+the moment the thing it needs is gone.
+
+The agent's **output stream** — what you see in the tmux pane, what `agent-container logs` shows —
+is now exported as it is produced, alongside records and egress events, correlated by the same
+`run_id`. It outlives the container.
+
+```sh
+agent-container runs show 20260914T101010Z-ab12
+# ...
+# after the container is gone: this run's agent output was exported to your
+# telemetry stack; query it there by run_id 20260914T101010Z-ab12
+```
+
+### It is a wider exposure than the task text, and it has its own switch
+
+| | `export_task_text` | `export_agent_logs` |
+|---|---|---|
+| What it governs | one string **you** typed | **everything the agent printed** |
+| Default | export | export |
+
+```yaml
+export_agent_logs: false      # in settings.yaml
+agent_log_cap_mb: 10          # per run
+```
+
+**Two switches, deliberately.** They are different decisions. Setting `export_task_text: false` is a
+judgement about a field you wrote; the log stream carries repository paths, file contents the agent
+echoed, and whatever a tool it ran printed to the terminal. One switch governing both would let an
+operator who excluded the task believe they had excluded the wider thing. `up` states the
+consequence when an endpoint is declared, before it applies.
+
+**Excluded by name, never by pattern** — the same rule as the task text, for the same reason.
+Nothing scans log bodies.
+
+### Bounded per run, and honest when it truncates
+
+An agent in a print loop would otherwise evict the stack's whole retention window: the run that
+printed most would erase the runs that mattered. On reaching the cap, export stops and sends **one
+truncation marker** — as an *attribute*, not as text in a body, so a consumer finds it without
+matching a string an agent could print itself.
+
+### What it cannot do to your run
+
+Export is off the agent's critical path by construction. The output is teed to a **file**, never a
+pipe or FIFO: a file write does not block on a reader, so an exporter that is slow, wedged or
+pointed at a collector that no longer exists loses log lines rather than applying back-pressure.
+An agent blocked writing a log line would be observability breaking the work it exists to observe.
+
+A short run does not lose its output: the buffer is drained after the agent exits and in the SIGTERM
+handler, so a run that prints one line and exits in two seconds — the common shape for headless
+work, and exactly the run whose output you want when it failed immediately — still exports.
+
+### Agent session data is NOT exported
+
+Transcripts, tool-call records, memory files and agent configuration are **not** read and **not**
+exported. Only the output stream. That keeps the exposure to what an operator looking over the
+agent's shoulder would see, and keeps the export identical for every supported agent — no per-agent
+session format to track, and none that can break this by changing.
+
 ## Getting the trail off the hosts
 
 ```sh

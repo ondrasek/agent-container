@@ -321,7 +321,7 @@ change** as the behaviour; stale docs are defects.
 - [ ] T056 Write `docs/interpretation.md`: what an interpreter is, how it differs from a 017 control
       plane, what it holds, what it cannot do and why that is structural, the Slack setup including
       the **custom-app requirement** and the rate-limit cliff a distributed app falls off.
-- [ ] T057 [P] Update `docs/observability.md`: the agent output stream is now a third payload class;
+- [X] T057 [P] Update `docs/observability.md`: the agent output stream is now a third payload class;
       `export_agent_logs` and its exposure; the per-run cap and truncation marker.
 - [ ] T058 [P] Update `docs/control-plane.md` to distinguish the two roles, so an operator choosing
       between them is not left inferring it.
