@@ -2,6 +2,39 @@
 
 <!-- version list -->
 
+## v0.57.0 (2026-09-14)
+
+### Chores
+
+- **claude**: Enable the karpathy-guidelines plugin
+  ([`d5f410d`](https://github.com/ondrasek/agent-container/commit/d5f410d574c3efa8addc5dd3958781682d5575c0))
+
+### Documentation
+
+- **024**: Specify the interpreting control plane, through to tasks
+  ([`1178c03`](https://github.com/ondrasek/agent-container/commit/1178c03fe4996758b8af09ff031dbed47c4378cb))
+
+- **constitution**: Add Principle X, Surgical Change (2.6.0)
+  ([`deea791`](https://github.com/ondrasek/agent-container/commit/deea7910cf95dc577317d03c18b9c2dd5a36c8f6))
+
+- **constitution**: Restore the amendment history deea791 deleted
+  ([`6b554a8`](https://github.com/ondrasek/agent-container/commit/6b554a8651b5133ff617d237285af14938aaa7a6))
+
+### Features
+
+- **024**: Add the interpreter role and the agent-log export switches
+  ([`6518ed8`](https://github.com/ondrasek/agent-container/commit/6518ed8f08a1563d5426671fc0f3ca92a4cfda87))
+
+- **024**: Export the agent's output, so the logs outlive the container
+  ([`34982f7`](https://github.com/ondrasek/agent-container/commit/34982f7ead9dec31d4d92f1e9b16eece477ab0b1))
+
+- **024**: State what an interpreter holds, before it exists
+  ([`bae89ba`](https://github.com/ondrasek/agent-container/commit/bae89bab258887629beee3e3f4b07a1abc5259ea))
+
+- **024**: Wire --role interpreter through up, with its admit set required
+  ([`0bc1a72`](https://github.com/ondrasek/agent-container/commit/0bc1a7226d3186ed1f6eead4abdb2350ca8832c4))
+
+
 ## v0.56.0 (2026-09-10)
 
 ### Testing
