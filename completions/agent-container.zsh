@@ -132,6 +132,7 @@ _agent-container() {
         'doctor:Would a deploy work? Read-only preflight report'
         'revoke:Withdraw a control plane key from every host that trusts it'
         'telemetry:The observability trail (collect, retry) — two legs, one payload'
+        'interpret:Interpreters — agents that READ the trail and never act on it'
                 'ssh-key:The agent'"'"'s own SSH key pair (show, rotate) — private half never leaves'
         'panic:KILL SWITCH — stop everything, everywhere, and report what it could not reach'
         'plan:Show the plan for the declarative spec (no mutation)'

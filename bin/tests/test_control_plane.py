@@ -762,6 +762,12 @@ def test_the_inventory_entry_carries_role_and_provenance(wiz, monkeypatch):
     assert e["role"] == "control-plane"
     assert e["provenance"] == "operator"
     assert tuple(e) == wiz.INVENTORY_FIELDS
+    # Feature 024 widened the set. A control plane is not an interpreter, so the
+    # three new fields are ABSENT rather than empty — "this does not apply" and
+    # "nothing was declared" are different facts (Constitution VIII).
+    assert e["watched_scope"] is None
+    assert e["channel"] is None
+    assert e["authority"] is None
 
 
 # --- the passphrase read-out (FR-007, C4, R3, T011) -------------------------

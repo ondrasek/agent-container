@@ -175,12 +175,12 @@ environment, run id and outcome with a reading grounded in that run's log.
 - [ ] T026 [US1] Implement catch-up after absence (FR-017): notification derived from the trail and
       the ledger, not from having witnessed events, so a stopped or rebooted interpreter reports
       what it missed, marked late, without duplicates.
-- [ ] T027 [US1] **Write the FR-020a reachability guard now, with this phase, not after it.** In
+- [X] T027 [US1] **Write the FR-020a reachability guard now, with this phase, not after it.** In
       `bin/tests/test_cli.py` (or a dedicated guard module), walk the transitive closure of
       `__code__.co_names` from every `interpret` command and assert no mutating helper is reachable
       — the technique Feature 013 uses to prove `doctor` read-only *by composition* rather than on
       the paths a test happened to exercise.
-- [ ] T028 [US1] Add the reachability guard to `bin/tests/test_guards_can_fail.py`, proving it
+- [X] T028 [US1] Add the reachability guard to `bin/tests/test_guards_can_fail.py`, proving it
       **fails** when a mutating call is introduced. A guard nobody has seen fail is a guard nobody
       knows works.
 - [ ] T029 [P] [US1] Unit-test the policy in `bin/tests/test_pure_logic.py`: quiet on success,
@@ -239,7 +239,7 @@ notification quotes them as content.
 - [ ] T041 [P] [US5] Adversarial acceptance tests in `bin/tests/test_acceptance.py` carrying SC-005:
       injected supervisor instructions change nothing and are quoted as content; a log claim
       contradicting the record is reported as a contradiction, not repeated.
-- [ ] T042 [P] [US5] Structural test asserting the **absence** of authority (SC-004a), in the style
+- [X] T042 [P] [US5] Structural test asserting the **absence** of authority (SC-004a), in the style
       of 023's no-credentials assertion: no container runtime client in the image, no host key in
       the container, no action credential anywhere. A negative security property is the kind that
       quietly stops being true.
@@ -268,7 +268,7 @@ notification quotes them as content.
       authenticate its sender, in `bin/agent-container`, and test it against a channel definition
       that omits sender identity. Specified in contracts/cli.md's refusal table; a contract row
       nothing implements is a control that reads as deliberate and enforces nothing.
-- [ ] T044 [US4] **(FR-002, FR-021)** Record role, watched scope, channel binding **and authority**
+- [X] T044 [US4] **(FR-002, FR-021)** Record role, watched scope, channel binding **and authority**
       on the inventory entry in `bin/agent-container`, so a stopped interpreter is still
       identifiable and its authority is visible after deploy, not only stated before it.
 - [ ] T045 [US4] **(FR-012a)** Implement `interpret ls`, `interpret show` and `interpret history` per

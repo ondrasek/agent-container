@@ -144,7 +144,7 @@ _agent_container() {
     fi
 
     # Top-level subcommands plus the two standalone options.
-    local subcommands="build host up redeploy stop start keys creds down purge wipe ls list attach logs runs egress telemetry inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help -v --verbose"
+    local subcommands="build host up redeploy stop start keys creds down purge wipe ls list attach logs runs egress telemetry interpret inventory panic ssh-key doctor revoke plan apply status destroy menu context skill commands completions --self-test --help -v --verbose"
 
     # The subcommand is the first non-option word after `agent-container`.
     local sub="" i

@@ -2229,8 +2229,45 @@ INVENTORY_FIELDS = (
     # about what may arrive IN a field.
     "role",
     "provenance",
+    # Feature 024 FR-002/FR-021. An interpreter is identifiable, and what it
+    # watches and speaks on is visible AFTER the deploy, not only stated before it
+    # — a statement nobody can compare against the record is an assertion, not a
+    # control (SC-012).
+    #
+    # ALL THREE ARE VALIDATED, NOT FREE TEXT, and that is load-bearing rather than
+    # tidy. Feature 014's entry in the threat model rests on this store having NO
+    # free-text field: unlike a run record, whose `task` carries whatever an
+    # operator typed, nothing here can carry a credential STRUCTURALLY. Three new
+    # operator-influenced fields are exactly how that property is lost by
+    # accident, so each is constrained at the door — scope entries are validated
+    # environment/host names, the channel is a channel-id shape, and authority is
+    # a closed vocabulary of one value.
+    "watched_scope",
+    "channel",
+    "authority",
     "notes",
 )
+
+# Feature 024. The only authority this feature defines. A vocabulary of one is
+# still a vocabulary: FR-020a forbids leaving a path toward the future feature
+# that adds acting, and a field that already accepted "act" would be exactly such
+# a path — dormant, untested, and one edit from live.
+INTERPRETER_AUTHORITIES = ("observe",)
+# Slack ids are an uppercase letter followed by uppercase alphanumerics (C… for a
+# conversation, U… for a user). Validated to keep the no-free-text property above,
+# NOT as a security control — a well-formed id is not an authorised one, and
+# FR-023's admit set is what decides that.
+INTERPRETER_CHANNEL_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,31}$")
+
+
+def validate_interpreter_channel_id(value: str, what: str) -> str:
+    """A Slack id, refused rather than coerced if it is not one."""
+    if not INTERPRETER_CHANNEL_ID_RE.match(value or ""):
+        die(
+            f"{what} must be a Slack id (an uppercase letter then uppercase "
+            f"letters/digits, e.g. C0123456789), not {value!r}"
+        )
+    return value
 
 
 def inventory_entry_id(name: str, when: str) -> str:
@@ -2436,6 +2473,9 @@ def build_inventory_entry(
     when: str | None = None,
     role: str = ROLE_AGENT,
     provenance: str | None = None,
+    watched_scope: list[str] | None = None,
+    channel: str | None = None,
+    authority: str | None = None,
 ) -> dict:  # noqa: FBT001
     """A new `active` entry (data-model §1).
 
@@ -2462,6 +2502,13 @@ def build_inventory_entry(
         # exactly what is not running.
         "role": role,
         "provenance": provenance or deploy_provenance(),
+        # Feature 024. None for every role but `interpreter`, and None rather than
+        # "" or [] on purpose: absent is not empty (Constitution VIII). An agent
+        # environment HAS no watched scope; an interpreter deployed with `--watch`
+        # omitted has an empty one, and the two are different facts.
+        "watched_scope": watched_scope,
+        "channel": channel,
+        "authority": authority,
         "notes": [],
     }
 
@@ -4073,7 +4120,13 @@ def set_inventory_outcome_for_host(host: str, outcome: str, when: str | None = N
 
 
 def record_inventory_creation(
-    name: str, host: str, host_provisioned: bool, role: str = ROLE_AGENT
+    name: str,
+    host: str,
+    host_provisioned: bool,
+    role: str = ROLE_AGENT,
+    watched_scope: list[str] | None = None,
+    channel: str | None = None,
+    authority: str | None = None,
 ) -> None:
     """Record a deployment (FR-001), and NEVER fail the deploy for it (FR-008).
 
@@ -4084,7 +4137,17 @@ def record_inventory_creation(
     be a worse outcome than the missing row.
     """
     try:
-        write_inventory_entry(build_inventory_entry(name, host, host_provisioned, role=role))
+        write_inventory_entry(
+            build_inventory_entry(
+                name,
+                host,
+                host_provisioned,
+                role=role,
+                watched_scope=watched_scope,
+                channel=channel,
+                authority=authority,
+            )
+        )
         prune_inventory()
     except (OSError, Fatal) as e:
         warn(
@@ -12058,7 +12121,22 @@ def compose_up_exec(
     # while nothing looks wrong. host_provisioned comes from the host record so US3
     # can later tell a host the tool CREATED from one merely registered.
     record_inventory_creation(
-        name, host_name, bool(host_rec.get("created_by_tool")), role=spec.role
+        name,
+        host_name,
+        bool(host_rec.get("created_by_tool")),
+        role=spec.role,
+        # Feature 024: recorded only for the role they describe, so an agent
+        # environment's entry says "this does not apply" rather than "empty".
+        watched_scope=(spec.watch.copy() if spec.role == ROLE_INTERPRETER else None),
+        channel=(
+            validate_interpreter_channel_id(spec.slack_conversation or "", "--slack-conversation")
+            if spec.role == ROLE_INTERPRETER
+            else None
+        ),
+        # A vocabulary of one. FR-020a forbids a dormant path toward the feature
+        # that adds acting, and a field that already accepted another value would
+        # be one.
+        authority=(INTERPRETER_AUTHORITIES[0] if spec.role == ROLE_INTERPRETER else None),
     )
     # FR-011: an upgrade must not leave a pre-018 private key behind.
     remove_stale_staged_host_key(host_name, name)
@@ -19596,6 +19674,107 @@ def revoke(
     """
     set_json_mode(as_json)
     do_revoke(name, yes, as_json)
+
+
+# --- Feature 024: `interpret` — READ-ONLY BY COMPOSITION ---------------------
+#
+# Every command in this group is covered by a reachability guard that walks the
+# transitive closure of `__code__.co_names` from each of them and asserts no
+# mutating helper is reachable — the technique Feature 013 uses to prove `doctor`
+# read-only. The distinction that makes it worth the machinery: an acceptance
+# test catches a mutation only when the scenario happens to trigger it, so a
+# reachable-but-not-yet-called writer passes every behavioural test and fails
+# only here.
+#
+# THERE IS DELIBERATELY NO VERB THAT ACTS. No `interpret stop`, no `interpret
+# run`, no `interpret act`. FR-020a forbids leaving a command surface that would
+# act if a credential were supplied later, because a capability that exists but is
+# switched off is one an operator cannot verify the absence of — and the absence
+# is the property FR-020 is asserting.
+interpret_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "Interpreters: agents that READ the fleet's trail and report on it. They "
+        "hold nothing that can change anything — no container runtime client is "
+        "installed and no host key is held — so this group reads and never acts."
+    ),
+)
+app.add_typer(interpret_app, name="interpret")
+
+
+def interpreter_entries() -> list[dict]:
+    """Active inventory entries for interpreters, newest first."""
+    return [
+        e
+        for e in read_inventory_entries()
+        if e.get("role") == ROLE_INTERPRETER and e.get("outcome") == "active"
+    ]
+
+
+@interpret_app.command("ls")
+def interpret_ls(as_json: bool = JSON_OPT) -> None:
+    """List interpreters: where they are, what they watch, and where they speak."""
+    set_json_mode(as_json)
+    rows = [
+        {
+            "name": e.get("name"),
+            "host": e.get("host"),
+            "scope": e.get("watched_scope") or [],
+            "channel": e.get("channel"),
+            "authority": e.get("authority"),
+        }
+        for e in interpreter_entries()
+    ]
+    if as_json:
+        emit_json({"interpreters": rows})
+        return
+    if not rows:
+        log("no interpreters")
+        return
+    log(f"{'NAME':<14}{'HOST':<14}{'AUTHORITY':<12}{'CHANNEL':<14}WATCHES")
+    for r in rows:
+        scope = ", ".join(r["scope"]) if r["scope"] else "-"
+        log(f"{r['name']:<14}{r['host']:<14}{r['authority']:<12}{r['channel']:<14}{scope}")
+
+
+@interpret_app.command("show")
+def interpret_show(
+    name: str = typer.Argument(..., help="Interpreter name."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """What one interpreter watches, speaks on, and is permitted to do."""
+    set_json_mode(as_json)
+    match = next((e for e in interpreter_entries() if e.get("name") == name), None)
+    if match is None:
+        die(
+            f"no active interpreter named '{name}'",
+            remedy="agent-container interpret ls",
+        )
+    scope = match.get("watched_scope") or []
+    if as_json:
+        emit_json(
+            {
+                "name": match.get("name"),
+                "host": match.get("host"),
+                "watched_scope": scope,
+                "channel": match.get("channel"),
+                "authority": match.get("authority"),
+                "created_at": match.get("created_at"),
+            }
+        )
+        return
+    log(f"{name}: interpreter on {match.get('host')}, created {match.get('created_at')}")
+    # The SCOPE IS A SNAPSHOT and saying so here is the point: 017 learned that an
+    # injected host registry goes stale the moment a host is registered
+    # afterwards, and the answer was to state it rather than re-resolve silently
+    # and appear to have looked.
+    log(f"  watches: {', '.join(scope) if scope else 'nothing — no scope was declared'}")
+    log(
+        "           (a SNAPSHOT taken at deploy; a host registered since is invisible until redeploy)"
+    )
+    log(f"  speaks on: Slack conversation {match.get('channel')}")
+    log(f"  authority: {match.get('authority')} — it cannot stop, start, redeploy, destroy,")
+    log("             task or reconfigure anything, and holds nothing that could")
 
 
 telemetry_app = typer.Typer(
