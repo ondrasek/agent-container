@@ -236,3 +236,64 @@ def test_every_jq_in_the_export_path_is_COMPACT():
         stripped = line.strip()
         if stripped.startswith("jq ") and not stripped.startswith("jq -c"):
             raise AssertionError(f"non-compact jq in the export path: {stripped!r}")
+
+
+def test_the_cap_bounds_DISK_not_only_export():
+    """The cap's second job, which the first version of it did not do.
+
+    Capping stopped the exporter loop with a `break`. That bounded what reached
+    the collector and left `tee -a` appending to the buffers for the rest of the
+    run with nothing draining them — so an agent in a print loop, the exact case
+    the cap exists for, filled the container's writable layer without limit.
+
+    That is worse than a generic disk-full. A full disk is what this project
+    measured making Loki accept every record and store none, which is the silent
+    telemetry loss 023 exists to detect. A log cap that can cause it is a control
+    that moved the problem.
+    """
+    src = _ENTRYPOINT.read_text()
+    i = src.index("agent_log_export_start() {")
+    j = src.index("host_metrics_export_once() {")
+    loop = src[i:j]
+    assert "capped=1" in loop
+    # The loop must keep running after capping, and truncate.
+    assert "] && break" not in loop.split("capped=1", 1)[1], (
+        "the exporter still breaks out of its loop on cap, leaving tee appending "
+        "to buffers nobody drains"
+    )
+    assert ': > "${AGENT_LOG_BUF_DIR}/stdout"' in loop.split("capped=1", 1)[1], (
+        "capped state must TRUNCATE the buffers, or the cap bounds export and not disk"
+    )
+
+
+def test_truncating_under_an_open_append_tee_is_safe():
+    """The mechanism the fix depends on, demonstrated rather than assumed.
+
+    `tee -a` opens with O_APPEND, so a truncation under it lands the next write at
+    the new end. Without O_APPEND the file offset would be stale and the next
+    write would leave a sparse hole — the file would keep growing on disk while
+    reading almost empty, which is the failure mode the fix is supposed to prevent
+    wearing a disguise.
+    """
+    import os
+    import tempfile
+    import time
+
+    with tempfile.TemporaryDirectory() as d:
+        buf = os.path.join(d, "buf")
+        open(buf, "w").close()
+        proc = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                f'for i in $(seq 1 200); do echo "line$i"; sleep 0.01; done | tee -a {buf} >/dev/null',
+            ]
+        )
+        time.sleep(0.4)
+        open(buf, "w").close()  # truncate under the running tee
+        proc.wait(timeout=30)
+        size = os.path.getsize(buf)
+        assert size < 2000, (
+            f"the file is {size} bytes after truncation — tee is not appending at "
+            f"the new end, so truncation does not actually reclaim anything"
+        )

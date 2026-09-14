@@ -1530,7 +1530,32 @@ agent_log_export_start() {
                     log "agent log export reached its ${cap}MB cap for this run; a truncation marker was sent"
                 fi
             fi
-            [[ "${capped}" -eq 1 ]] && break
+            # CAPPED MEANS STOP EXPORTING, NOT STOP DRAINING, and the difference
+            # is a disk.
+            #
+            # The first version of this loop `break`ed here. That bounded what
+            # reached the collector and left `tee -a` appending to these files for
+            # the rest of the run with nothing reading them — so an agent in a
+            # print loop, the exact case the cap exists for, filled the
+            # container's writable layer without limit. The cap would have been a
+            # control that moved the problem rather than solving it.
+            #
+            # Worse than a generic disk-full: a full disk is what this project
+            # already measured making Loki accept every record and store none,
+            # which is the silent-telemetry-loss failure 023 exists to detect. The
+            # log cap must not be a way to cause it.
+            #
+            # So the loop keeps running and TRUNCATES instead. `tee -a` holds the
+            # files open with O_APPEND, so truncating under it is safe: the next
+            # write lands at the new end rather than leaving a sparse hole.
+            if [[ "${capped}" -eq 1 ]]; then
+                : > "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || true
+                : > "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || true
+                # The offsets go with them, or the next pass reads `tail -c +N`
+                # past the end of a file that just shrank.
+                printf '0' > "${AGENT_LOG_BUF_DIR}/stdout.off" 2>/dev/null || true
+                printf '0' > "${AGENT_LOG_BUF_DIR}/stderr.off" 2>/dev/null || true
+            fi
             sleep "${AGENT_LOG_BATCH_SECONDS:-2}"
         done
     ) > /dev/null 2>&1 &
