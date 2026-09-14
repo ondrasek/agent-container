@@ -102,7 +102,23 @@ DEFAULT_ATTACH_ADDRESS = "localhost"
 EGRESS_ENFORCEMENT_DEFAULT = "advisory"  # Feature 012: absent enforcement is advisory
 ROLE_AGENT = "agent"
 ROLE_CONTROL_PLANE = "control-plane"
-ROLES = (ROLE_AGENT, ROLE_CONTROL_PLANE)
+# Feature 024. An INTERPRETER reads the fleet's trail and speaks about it; it is
+# a role of the agent image rather than a kind of its own, because `up`'s surface
+# (agent, task, env-file, egress, credentials) all applies to it — which is the
+# opposite of the telemetry stack's case below.
+#
+# WHAT SEPARATES IT FROM A CONTROL PLANE IS AN ABSENCE. A control plane holds a
+# standing key that is "not scoped to inspect": the same credential that reads
+# stops and destroys. An interpreter takes its input from the fleet's own output,
+# which is written by processes this tool treats as untrusted (threat model T16) —
+# so an interpreter that could act would be one whose instructions can be written
+# by the thing it supervises. It therefore holds NOTHING that can change the
+# fleet, and the absence is structural rather than a setting: the agent image
+# installs no container runtime client, so `detect_runtime()` cannot resolve and
+# every management command refuses. That is 017's reason for giving the
+# control-plane image both clients, applied in reverse and on purpose.
+ROLE_INTERPRETER = "interpreter"
+ROLES = (ROLE_AGENT, ROLE_CONTROL_PLANE, ROLE_INTERPRETER)
 CONTAINER_PREFIX = "agent-container-"
 PORT_BASE = 2200
 PORT_RANGE = 100  # 2200..2299
@@ -115,8 +131,9 @@ PORT_RANGE = 100  # 2200..2299
 # env-file, egress, credentials, tmux) is meaningless for a collector.
 KIND_AGENT = "agent"
 KIND_CONTROL_PLANE = ROLE_CONTROL_PLANE
+KIND_INTERPRETER = ROLE_INTERPRETER
 KIND_TELEMETRY_STACK = "telemetry-stack"
-KINDS = (KIND_AGENT, KIND_CONTROL_PLANE, KIND_TELEMETRY_STACK)
+KINDS = (KIND_AGENT, KIND_CONTROL_PLANE, KIND_INTERPRETER, KIND_TELEMETRY_STACK)
 
 # One prefix family, deliberately: `panic` and the inventory find what this tool
 # created by prefix, so a kind they cannot see is a hole in the kill switch
@@ -160,6 +177,54 @@ STACK_EXPOSURE_LEVELS = (STACK_EXPOSURE_LOOPBACK, STACK_EXPOSURE_HOST, STACK_EXP
 # bound only to the host's loopback on every runtime, and a stack agent
 # containers cannot reach is useless (FR-018a, research R1).
 STACK_EXPOSURE_DEFAULT = STACK_EXPOSURE_HOST
+
+# --- Feature 024: the interpreter's named defaults ---------------------------
+# Constitution VIII: each named HERE, so a default is greppable and has an owner.
+# Every value below was chosen against a measured constraint, not by feel, and the
+# constraint is recorded beside it — a default whose reason is lost is one nobody
+# can responsibly change later.
+
+# The channel is polled, not held open. Socket Mode would need a WebSocket and
+# therefore a third-party dependency, in a project whose one dependency is PyYAML
+# (Constitution VI) — so the mechanism is plain HTTPS, which `curl` already
+# speaks here and which the entrypoint already uses for OTLP.
+#
+# 15s is FOUR REQUESTS PER MINUTE. Slack allows 50+/min on `conversations.history`
+# for a CUSTOM app — one installed in the operator's own workspace — but only
+# 1/min for a commercially distributed non-Marketplace app. Four is an eighth of
+# the allowance we support and four times over the one we do not, which is why the
+# deploy-time statement names "custom app" rather than leaving it to be discovered
+# as unexplained lateness.
+INTERPRETER_CHANNEL_POLL_SECONDS = 15
+# The trail moves slower than a conversation and SC-001 allows five minutes.
+INTERPRETER_TRAIL_POLL_SECONDS = 30
+# Long enough that a slow build is not called stalled; short enough to matter
+# overnight. What is reported is the DURATION and the last output seen — never a
+# verdict, because silence alone cannot distinguish a wedged agent from a patient
+# one, and a supervisor that guesses is one an operator learns to discount.
+INTERPRETER_STALL_WINDOW_SECONDS = 20 * 60
+# Digests are OFF unless asked for. An unrequested daily message is noise until
+# the operator wants it, and a notifier that speaks when nothing happened is one
+# that gets muted — after which the operator believes they would have been told.
+INTERPRETER_DIGEST_DEFAULT = False
+
+# Agent output is bounded PER RUN, against the stack's 10GB ceiling. Without a cap
+# one agent in a print loop evicts the retention window, so the run that printed
+# most would erase the runs that mattered.
+AGENT_LOG_CAP_MB_DEFAULT = 10
+# Batched because a log line is not a run record: a POST per line turns a chatty
+# agent into a request storm against the operator's own collector. Whichever of
+# the three is reached first flushes.
+AGENT_LOG_BATCH_LINES = 100
+AGENT_LOG_BATCH_BYTES = 64 * 1024
+AGENT_LOG_BATCH_SECONDS = 2
+# Exported unless declared otherwise — the same posture as the task text, for the
+# same reason (it is the field you want when a run failed and you have a phone).
+# SEPARATE FROM export_task_text ON PURPOSE: they are different exposures. The
+# task is one string the operator wrote; the log is everything the agent printed.
+# One switch over both would let an operator who excluded the task believe they
+# had excluded the wider thing.
+EXPORT_AGENT_LOGS_DEFAULT = True
 
 
 # THE TOOL'S OWN THREE DIRECTORIES, resolved by one rule each.
@@ -6681,6 +6746,65 @@ def export_task_text(cwd: Path | None = None) -> bool | None:
         die(
             f"export_task_text must be true or false, not {type(value).__name__}",
             remedy="use an unquoted true/false in settings.yaml",
+        )
+    return value
+
+
+def export_agent_logs(cwd: Path | None = None) -> bool | None:
+    """Whether the agent's OUTPUT STREAM is exported — or None if UNDECLARED
+    (Feature 024, FR-007b).
+
+    A SECOND SWITCH, DELIBERATELY, and the separation is the point. `task` is one
+    string the operator typed; the log is EVERYTHING THE AGENT PRINTED, which is a
+    materially wider surface — repository paths, file contents it echoed, error
+    output, whatever a tool it ran wrote to the terminal. An operator who set
+    `export_task_text: false` has made a judgement about one field, and reading
+    that judgement as consent for the wider one would be the tool deciding on
+    their behalf in the direction that discloses.
+
+    EXCLUDED BY NAME, NEVER BY PATTERN — the same rule as the task text and for
+    the same reason: a redactor that misses one value converts caution into false
+    confidence, while an unexported stream either travels or it does not. There is
+    no regex, no entropy heuristic and no scan of log bodies.
+
+    Undeclared is reported as undeclared. The default lives in
+    EXPORT_AGENT_LOGS_DEFAULT and is applied at the delivery boundary, so
+    "the operator chose to export" stays distinguishable from "the operator never
+    said" (Constitution VIII: absent is not defaulted).
+    """
+    value = resolve_settings_key("export_agent_logs", cwd)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        # Refused rather than coerced, exactly as export_task_text refuses: the
+        # STRING "false" is truthy, so a coercing reader would export the logs of
+        # an operator who wrote the word false and believed it was off.
+        die(
+            f"export_agent_logs must be true or false, not {type(value).__name__}",
+            remedy="use an unquoted true/false in settings.yaml",
+        )
+    return value
+
+
+def agent_log_cap_mb(cwd: Path | None = None) -> int | None:
+    """The per-run ceiling on exported agent output, in MB — None if UNDECLARED
+    (Feature 024, FR-008).
+
+    A CAP EXISTS BECAUSE AN AGENT IN A LOOP PRINTS WITHOUT BOUND, and the stack's
+    retention is a shared budget: uncapped, the run that printed most evicts every
+    run that mattered. Reaching it does not fail anything — export stops and says
+    where, because 016's rule holds here too. A trail may be incomplete; it may
+    never look complete when it is not.
+    """
+    value = resolve_settings_key("agent_log_cap_mb", cwd)
+    if value is None:
+        return None
+    # bool is an int in Python, and `agent_log_cap_mb: true` is a mistake that
+    # would otherwise silently mean "1MB".
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        die(
+            f"agent_log_cap_mb must be a positive whole number of megabytes, not {value!r}",
+            remedy="e.g. agent_log_cap_mb: 10",
         )
     return value
 

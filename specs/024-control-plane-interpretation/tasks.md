@@ -42,16 +42,16 @@ These are not reminders, they are acceptance conditions. A task that violates on
 
 **Purpose**: the constants and surface the rest of the feature hangs off.
 
-- [ ] T001 **(FR-001)** Add `ROLE_INTERPRETER` to the `ROLES` tuple in `bin/agent-container` (~line 105), beside
+- [X] T001 **(FR-001)** Add `ROLE_INTERPRETER` to the `ROLES` tuple in `bin/agent-container` (~line 105), beside
       `ROLE_AGENT` and `ROLE_CONTROL_PLANE`. Add only the constant and its inclusion in `ROLES`.
-- [ ] T002 [P] Add the named defaults from research.md §R6 as module-level constants in
+- [X] T002 [P] Add the named defaults from research.md §R6 as module-level constants in
       `bin/agent-container`: channel poll interval (15s), trail poll interval (30s), stall window
       (20m), per-run log cap (10MB), export batch flush (100 lines / 64KB / 2s), the FR-015
       notifiable-event set, digest off. Each named at the surface per Constitution VIII.
-- [ ] T003 [P] **(FR-007b)** Add `export_agent_logs` (default true) and `agent_log_cap_mb` (default 10) to the
+- [X] T003 [P] **(FR-007b)** Add `export_agent_logs` (default true) and `agent_log_cap_mb` (default 10) to the
       settings schema in `bin/agent-container`, as a switch **separate** from `export_task_text` —
       see contracts/cli.md for why one switch governing both would mislead.
-- [ ] T004 [P] Assert the settings-key contract in `bin/tests/test_cli.py`: both new keys are
+- [X] T004 [P] Assert the settings-key contract in `bin/tests/test_cli.py`: both new keys are
       readable, defaulted, and reported as absent-versus-defaulted distinctly (Constitution VIII's
       "absent ≠ defaulted ≠ declared-empty").
 

@@ -2259,3 +2259,56 @@ def test_interactive_is_untouched_by_the_setting(wiz, tmp_path, monkeypatch):
     operator attaches to; it is kept alive as before."""
     _settings(tmp_path, monkeypatch, wiz, user="headless_restart: on-failure:9\n")
     assert wiz.ExecSpec(mode="interactive").restart_policy() == "unless-stopped"
+
+
+# --- Feature 024: the agent-log switch, a SECOND and separate exposure --------
+
+
+def test_an_undeclared_log_switch_reports_ABSENCE_not_the_default(wiz, tmp_path, monkeypatch):
+    """Constitution VIII, the same rule the task switch obeys: absent is not
+    defaulted. The reader reports what the operator SAID."""
+    proj = _settings(tmp_path, monkeypatch, wiz)
+    assert wiz.export_agent_logs(proj) is None
+    assert wiz.agent_log_cap_mb(proj) is None
+    # Named, not a bare literal inside a reader.
+    assert wiz.EXPORT_AGENT_LOGS_DEFAULT is True
+    assert wiz.AGENT_LOG_CAP_MB_DEFAULT == 10
+
+
+def test_a_declared_log_switch_is_reported_verbatim(wiz, tmp_path, monkeypatch):
+    """FR-007b: an explicit declaration must be distinguishable from the default."""
+    for declared in (True, False):
+        proj = _settings(tmp_path, monkeypatch, wiz,
+                         project=f"export_agent_logs: {str(declared).lower()}\n")  # fmt: skip
+        assert wiz.export_agent_logs(proj) is declared
+
+
+def test_the_log_switch_REFUSES_a_string(wiz, tmp_path, monkeypatch):
+    """Same failure shape as the task switch: the STRING "false" is truthy, so a
+    coercing reader exports the logs of an operator who believed they were off."""
+    proj = _settings(tmp_path, monkeypatch, wiz, project='export_agent_logs: "false"\n')
+    with pytest.raises(wiz.Fatal, match="must be true or false"):
+        wiz.export_agent_logs(proj)
+
+
+def test_the_log_cap_REFUSES_nonsense(wiz, tmp_path, monkeypatch):
+    """`agent_log_cap_mb: true` is a mistake that would otherwise mean 1MB, because
+    bool IS an int in Python — the coercion would silently throw away almost every
+    run's output while looking configured."""
+    for bad in ("true", "0", "-1", '"10"'):
+        proj = _settings(tmp_path, monkeypatch, wiz, project=f"agent_log_cap_mb: {bad}\n")
+        with pytest.raises(wiz.Fatal, match="positive whole number"):
+            wiz.agent_log_cap_mb(proj)
+
+
+def test_the_two_export_switches_are_INDEPENDENT(wiz, tmp_path, monkeypatch):
+    """THE POINT OF HAVING TWO. They are different exposures — one string the
+    operator typed versus everything the agent printed — so excluding the task
+    must not be read as consent to exclude (or to export) the wider one, in
+    either direction. One switch governing both would let an operator who
+    excluded the task believe they had excluded the logs.
+    """
+    proj = _settings(tmp_path, monkeypatch, wiz,
+                     project="export_task_text: false\nexport_agent_logs: true\n")  # fmt: skip
+    assert wiz.export_task_text(proj) is False
+    assert wiz.export_agent_logs(proj) is True
