@@ -389,8 +389,17 @@ def _drive_export(passes: list[str]) -> tuple[bytes, list[str]]:
             _extract("agent_log_payload"),
             _extract("agent_log_export_once"),
         ]
-        for chunk in passes:
-            script.append(f"printf %s {shlex.quote(chunk)} >> {shlex.quote(str(buf))}")
+        # EACH PASS'S CONTENT GOES THROUGH A FILE, never into the script text.
+        #
+        # Embedding it inline works on macOS and dies on Linux with
+        # `OSError: [Errno 7] Argument list too long` — a single argv element is
+        # capped at MAX_ARG_STRLEN (128KB, 32 pages) there, and the large-backlog
+        # test feeds 200KB. It passed locally and failed in CI, which is the only
+        # place the difference shows.
+        for n, chunk in enumerate(passes):
+            src = dd / f"pass{n}"
+            src.write_text(chunk)
+            script.append(f"cat {shlex.quote(str(src))} >> {shlex.quote(str(buf))}")
             script.append(
                 f'agent_log_export_once "http://x/v1/logs" stdout '
                 f"{shlex.quote(str(buf))} {shlex.quote(str(state))}"
