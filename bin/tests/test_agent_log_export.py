@@ -169,7 +169,7 @@ def test_the_EXPORTER_cannot_apply_back_pressure_to_the_agent():
     # buffer here would put the exporter in the agent's write path.
     assert '> "${buf}"' not in exporter and '>> "${buf}"' not in exporter
     assert "tail -c" in exporter and "wc -c" in exporter
-    tee_i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then')
+    tee_i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && ')
     block = src[tee_i : tee_i + 400]
     assert "tee -a" in block, "the agent's output must be teed"
     # And the original invocation survives untouched on the else branch, so an
@@ -186,8 +186,8 @@ def test_the_tee_BACK_PRESSURE_RISK_is_documented_not_hidden():
     stated rather than discovered, so the entrypoint must say so where the tee is.
     """
     src = _ENTRYPOINT.read_text()
-    i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then')
-    window = src[max(0, i - 2200) : i + 400]
+    i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && ')
+    window = src[max(0, i - 2600) : i + 400]
     assert "SIGPIPE" in window, (
         "the tee's residual back-pressure risk is not documented at the tee. "
         "Measured: a stopped tee blocks the agent after one pipe buffer, and a "
@@ -445,4 +445,32 @@ def test_a_TRUNCATED_buffer_does_not_kill_the_stream(tmp_path):
     assert r.returncode == 0, r.stderr[-500:]
     assert sent.exists() and "after-restart" in sent.read_text(), (
         "a stale offset from a previous boot permanently silenced the stream"
+    )
+
+
+def test_the_tee_is_gated_on_the_EXPORTER_not_on_a_leftover_directory():
+    """`/tmp` survives a restart of the same container.
+
+    Gating the tee on the buffer DIRECTORY meant that "deploy with export on, set
+    `export_agent_logs: false`, restart" left the directory behind: the tee ran,
+    no exporter drained it, and the buffers grew for the whole life of a run whose
+    operator had just turned export off.
+
+    The sentinel means "an exporter is running NOW", so it must be cleared on
+    every path out of `agent_log_export_start` that does not start one — including
+    the early return when export is disabled, which is the exact path the bug
+    travelled.
+    """
+    src = _ENTRYPOINT.read_text()
+    i = src.index('if [[ -n "${AGENT_LOG_BUF_DIR:-}" && ')
+    gate = src[i : i + 200]
+    assert "/exporting" in gate, "the tee is gated on something other than the exporter sentinel"
+    assert ' -d "${AGENT_LOG_BUF_DIR}" ]]; then' not in gate, (
+        "the tee is gated on the directory existing, which outlives the exporter"
+    )
+    start = src[src.index("agent_log_export_start() {") : src.index("host_metrics_export_once() {")]
+    before_return = start[: start.index("agent log export disabled")]
+    assert "rm -f" in before_return and "/exporting" in before_return, (
+        "the sentinel is not cleared before the disabled early-return, so turning "
+        "export off and restarting leaves the tee running with nothing draining it"
     )

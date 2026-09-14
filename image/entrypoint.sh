@@ -1501,6 +1501,12 @@ agent_log_export_flush() {
     # would ship a truncated final line. Bounded at ~2s: this is a teardown path
     # and a flush that could hang would hold the container open, which is the one
     # thing a log exporter must never do.
+    # ONE UNCONDITIONAL WAIT FIRST, or the loop can exit before `tee` has written
+    # anything at all. With `prev=-1` the first real comparison lands at t+0.1s;
+    # if the tees have not been scheduled yet both samples read 0, "unchanged" is
+    # true, and the flush ships an empty or partial buffer — which is exactly the
+    # race the settle loop was added to close, failing open and silently.
+    sleep 0.1
     while [[ "${settle}" -lt 20 ]]; do
         size=$(( $(wc -c < "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || echo 0)
                 + $(wc -c < "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || echo 0) ))
@@ -1509,10 +1515,25 @@ agent_log_export_flush() {
         settle=$(( settle + 1 ))
         sleep 0.1
     done
-    agent_log_export_once "${endpoint}" stdout \
-        "${AGENT_LOG_BUF_DIR}/stdout" "${AGENT_LOG_BUF_DIR}/stdout.off"
-    agent_log_export_once "${endpoint}" stderr \
-        "${AGENT_LOG_BUF_DIR}/stderr" "${AGENT_LOG_BUF_DIR}/stderr.off"
+    # A SHORT TIMEOUT, because this is the teardown path and the budget above is
+    # only half the story.
+    #
+    # The settle loop is bounded at ~2s; the two exports that follow were not.
+    # Each runs `curl -m "${OTLP_TIMEOUT:-10}"`, so a collector whose address
+    # BLACKHOLES packets — a stopped telemetry stack, a dropped network, a wrong
+    # port, precisely the cases export is fail-open FOR — added up to 20 seconds
+    # to the normal exit of every headless run.
+    #
+    # Worse on the SIGTERM path: that grace period is 10s by default, so the
+    # container was SIGKILLed part-way through a flush and lost the very output
+    # the flush exists to save. Export slowing and then failing a run is what
+    # FR-007a forbids, and it was doing both.
+    OTLP_TIMEOUT="${AGENT_LOG_FLUSH_TIMEOUT:-2}" \
+        agent_log_export_once "${endpoint}" stdout \
+            "${AGENT_LOG_BUF_DIR}/stdout" "${AGENT_LOG_BUF_DIR}/stdout.off"
+    OTLP_TIMEOUT="${AGENT_LOG_FLUSH_TIMEOUT:-2}" \
+        agent_log_export_once "${endpoint}" stderr \
+            "${AGENT_LOG_BUF_DIR}/stderr" "${AGENT_LOG_BUF_DIR}/stderr.off"
 }
 
 agent_log_export_start() {
@@ -1521,6 +1542,13 @@ agent_log_export_start() {
     # endpoint, and disowned for the same reason: it must never hold the
     # container open, and a headless run that finishes must not wait on a sleep.
     local base="$1" endpoint cap declared
+    # CLEARED FIRST, BEFORE ANY EARLY RETURN. The sentinel is what the tee is
+    # gated on, and every path out of this function that does NOT start an
+    # exporter must leave it absent — otherwise turning export off and restarting
+    # the same container leaves yesterday's sentinel behind, the tee runs, and
+    # nothing drains it. That is the bug this sentinel was added to fix, wearing
+    # the sentinel as a disguise.
+    rm -f "${AGENT_LOG_BUF_DIR:-/nonexistent}/exporting" 2>/dev/null || true
     declared="${AGENT_CONTAINER_EXPORT_AGENT_LOGS:-}"
     case "${declared}" in
         # EXCLUDED BY NAME, NEVER BY PATTERN — the rule the task text already
@@ -1547,6 +1575,9 @@ agent_log_export_start() {
     rm -f "${AGENT_LOG_BUF_DIR}/stdout.off" "${AGENT_LOG_BUF_DIR}/stderr.off" \
           "${AGENT_LOG_BUF_DIR}/capped" "${AGENT_LOG_BUF_DIR}/marker" \
           "${AGENT_LOG_BUF_DIR}"/*.batch 2>/dev/null || true
+    # Written LAST, after everything the tee depends on exists. It is what the
+    # tee is gated on, so it must never be true before the buffers are ready.
+    : > "${AGENT_LOG_BUF_DIR}/exporting" 2>/dev/null || true
     export AGENT_LOG_BUF_DIR
     # Exported so the teardown paths can flush without recomputing it: the block
     # that knows `_otlp_base` unsets it a few lines below, and a second derivation
@@ -1554,11 +1585,17 @@ agent_log_export_start() {
     AGENT_LOG_ENDPOINT="${endpoint}"
     export AGENT_LOG_ENDPOINT
     (
-        # NOT `local`: this is a SUBSHELL, not a function, and bash rejects
-        # `local` outside a function with "can only be used in a function". Under
-        # `set -e` that killed the exporter at birth — every run exported nothing,
-        # and because export is fail-open the failure looked exactly like an agent
-        # that printed nothing. Caught by the acceptance test, not by review.
+        # Plain assignment rather than `local`, which is a style choice here and
+        # NOT a bug fix — recorded because an earlier version of this comment
+        # claimed otherwise and a wrong comment is worse than none.
+        #
+        # `local` IS legal in a subshell as long as the subshell is lexically
+        # inside a function, which this one is. Measured on the image's own base
+        # (debian:12-slim, bash 5.2.15) and again on 5.3: it runs fine. The
+        # earlier claim came from testing a subshell at TOP LEVEL, where `local`
+        # genuinely does fail — a different construct that looked like this one.
+        # The zero-export symptom was explained entirely by the missing `jq -c`
+        # below.
         capped=0
         while :; do
             agent_log_export_once "${endpoint}" stdout \
@@ -2770,7 +2807,14 @@ run_headless_agent() {
     # fd and forwarding to the container's stdout from a separate reader, which
     # costs the live `compose logs` view its ordering guarantees. That trade has
     # not been made; the limit is recorded instead, as this project prefers.
-    if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then
+    # GATED ON THE EXPORTER RUNNING, not on a directory existing. `/tmp` survives
+    # a restart of the same container, so after "deploy with export on, set
+    # `export_agent_logs: false`, restart" the directory was still there: the tee
+    # ran, nothing drained it, and the buffers grew for the life of a run whose
+    # operator had just turned export OFF. The sentinel is written by
+    # agent_log_export_start and cleared by it, so it means "an exporter is
+    # running now" rather than "one ran once".
+    if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -f "${AGENT_LOG_BUF_DIR}/exporting" ]]; then
         "${cmd[@]}" <&0 > >(tee -a "${AGENT_LOG_BUF_DIR}/stdout") \
                          2> >(tee -a "${AGENT_LOG_BUF_DIR}/stderr" >&2) &
     else
