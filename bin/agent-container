@@ -11603,7 +11603,30 @@ class ExecSpec:
         # about a field they wrote, and carrying that over would be the tool
         # choosing for them in the direction that discloses.
         declared_logs = export_agent_logs()
-        include_logs = EXPORT_AGENT_LOGS_DEFAULT if declared_logs is None else declared_logs
+        if declared_logs is not None:
+            # An EXPLICIT choice is honoured in both directions. The operator said
+            # what they wanted about this stream; the tool does not know better.
+            include_logs = declared_logs
+        elif declared is False:
+            # AN UNDECLARED SWITCH INHERITS THE OPERATOR'S STATED CAUTION, and
+            # this case is why the two switches cannot be fully independent after
+            # all.
+            #
+            # Measured by the acceptance suite, which failed with "export_task_text:
+            # false did not remove the task text": agents ECHO THEIR TASK. So an
+            # operator who excluded the task still saw it arrive at the collector,
+            # through the log stream, from an exporter added later than the
+            # exclusion they were relying on. Their setting had quietly stopped
+            # meaning what it says.
+            #
+            # Honouring the narrower intent when they have expressed no view on
+            # logs is the only reading that does not surprise them. If they want
+            # the task private AND the output exported, `export_agent_logs: true`
+            # says so and is obeyed — with a warning, because it is rarely what
+            # anyone means.
+            include_logs = False
+        else:
+            include_logs = EXPORT_AGENT_LOGS_DEFAULT
         env["AGENT_CONTAINER_EXPORT_AGENT_LOGS"] = "1" if include_logs else "0"
         declared_cap = agent_log_cap_mb()
         env["AGENT_CONTAINER_AGENT_LOG_CAP_MB"] = str(
@@ -12237,7 +12260,22 @@ def compose_up_exec(
     # deploys where it IS true.
     if spec.mode == "headless" and resolve_otlp_endpoint() is not None:
         _declared_logs = export_agent_logs()
-        if EXPORT_AGENT_LOGS_DEFAULT if _declared_logs is None else _declared_logs:
+        _declared_task = export_task_text()
+        if _declared_task is False and _declared_logs is True:
+            # The combination almost nobody means. Agents echo their task, so
+            # exporting the output re-exports the text the other switch was set to
+            # withhold. Said plainly rather than resolved for them: they declared
+            # both, and an explicit choice is not something to quietly override.
+            warn(
+                "export_task_text is false but export_agent_logs is true — agents "
+                "commonly PRINT their task, so the text you excluded will reach "
+                "your collector through the log stream anyway"
+            )
+        if (
+            _declared_logs
+            if _declared_logs is not None
+            else (_declared_task is not False and EXPORT_AGENT_LOGS_DEFAULT)
+        ):
             log(
                 "telemetry: this environment exports the AGENT'S OUTPUT, not only its run "
                 "records — everything it prints reaches your collector. Exclude it with "

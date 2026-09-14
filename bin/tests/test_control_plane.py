@@ -2424,3 +2424,48 @@ def test_an_interpreter_ACCEPTS_every_supported_agent(wiz):
     no agent installed at all, an interpreter IS an agent."""
     for agent in wiz.AGENTS:
         _interp(wiz, agent=agent).validate()
+
+
+def test_excluding_the_TASK_also_excludes_the_LOGS_unless_told_otherwise(
+    wiz, tmp_path, monkeypatch
+):
+    """The interaction the acceptance suite found, and the reason the two switches
+    are not quite independent after all.
+
+    AGENTS ECHO THEIR TASK. So once the output stream started exporting, an
+    operator who had set `export_task_text: false` saw the excluded text arrive at
+    the collector anyway — through a channel added later than the exclusion they
+    were relying on. Their setting had quietly stopped meaning what it says, which
+    is the worst kind of privacy regression: silent, and in the disclosing
+    direction.
+
+    An UNDECLARED log switch therefore inherits the stated caution. An explicitly
+    declared one is obeyed in both directions, because an operator who said what
+    they wanted does not need the tool to know better.
+    """
+    proj = _settings(tmp_path, monkeypatch, wiz, project="export_task_text: false\n")
+    monkeypatch.chdir(proj if proj.is_dir() else proj.parent)
+    env = wiz.ExecSpec(mode="headless", agent="claude").compose_environment()
+    assert env["AGENT_CONTAINER_EXPORT_TASK"] == "0"
+    assert env["AGENT_CONTAINER_EXPORT_AGENT_LOGS"] == "0", (
+        "the task was excluded but the logs were not, so the agent printing its "
+        "own task re-exports exactly what the operator withheld"
+    )
+
+
+def test_an_EXPLICIT_log_switch_is_obeyed_even_against_the_task_switch(
+    wiz, tmp_path, monkeypatch
+):
+    """Inheritance applies to SILENCE, never to a stated choice. An operator who
+    wants the task private and the output exported has said so, and the tool
+    warns rather than overrides."""
+    proj = _settings(
+        tmp_path,
+        monkeypatch,
+        wiz,
+        project="export_task_text: false\nexport_agent_logs: true\n",
+    )
+    monkeypatch.chdir(proj if proj.is_dir() else proj.parent)
+    env = wiz.ExecSpec(mode="headless", agent="claude").compose_environment()
+    assert env["AGENT_CONTAINER_EXPORT_TASK"] == "0"
+    assert env["AGENT_CONTAINER_EXPORT_AGENT_LOGS"] == "1"
