@@ -621,6 +621,121 @@ def handle_message(
     return answer(text, facts), None
 
 
+# --- quiet when nothing is wrong (US6) --------------------------------------
+
+HELD_SILENCE = "silence_window"
+HELD_CHANNEL = "channel_unreachable"
+
+
+def in_silence_window(now: float, window: tuple[float, float] | None) -> bool:
+    """Whether the operator has asked not to be interrupted right now."""
+    if not window:
+        return False
+    start, end = window
+    return start <= now < end
+
+
+def partition_for_silence(
+    events: list[dict], now: float, window: tuple[float, float] | None
+) -> tuple[list[dict], list[dict]]:
+    """(send now, hold until the window ends).
+
+    SILENCED IS NOT FORGOTTEN (FR-019). An event that arrives during a quiet hour
+    is delivered when the hour ends, MARKED AS HELD — because an operator who
+    silenced an interpreter still needs to know what happened while it was quiet,
+    and one who discovers a failure hours later with no indication it was
+    withheld learns to distrust the silence feature rather than use it.
+    """
+    if not in_silence_window(now, window):
+        return events, []
+    held = []
+    for e in events:
+        marked = dict(e)
+        marked["held_reason"] = HELD_SILENCE
+        held.append(marked)
+    return [], held
+
+
+def digest(events: list[dict], *, interpreter: str) -> str | None:
+    """One message for everything that did not warrant an interruption.
+
+    Returns None for an empty digest rather than sending "nothing happened",
+    which is the notification a digest exists to avoid.
+    """
+    if not events:
+        return None
+    lines = [f"[{interpreter}] digest — {len(events)} event(s):"]
+    for e in events:
+        held = f" (held: {e['held_reason']})" if e.get("held_reason") else ""
+        lines.append(
+            f"  {e.get('environment')} on {e.get('host')}: {e.get('kind')} "
+            f"({e.get('state')}) run_id {e.get('run_id')}{held}"
+        )
+    return "\n".join(lines)
+
+
+def mark_late(events: list[dict], reason: str) -> list[dict]:
+    """Stamp events being delivered after the fact.
+
+    FR-017/FR-018. An operator reading a message must be able to tell "this just
+    happened" from "this happened while I was not being told" — otherwise a
+    catch-up burst after an outage reads as a sudden cascade of new failures.
+    """
+    out = []
+    for e in events:
+        marked = dict(e)
+        marked["held_reason"] = reason
+        out.append(marked)
+    return out
+
+
+# --- the ledger: what has already been reported ------------------------------
+
+
+def ledger_from_records(records: list[dict]) -> set[str]:
+    """Rebuild "already reported" from the durable signal, not from memory.
+
+    This is what makes FR-017 work. The interpreter can be stopped, its host can
+    reboot, and on return it recomputes events from the trail and subtracts this
+    — so nothing is repeated and nothing from the gap is lost. Keeping it in
+    memory would mean an interpreter that restarts either spams the operator with
+    everything it can still see or silently skips the window it was down for.
+    """
+    return {
+        str(r.get("event_key"))
+        for r in records
+        if isinstance(r, dict) and r.get("event_key") and r.get("delivery_state") == "sent"
+    }
+
+
+def bookkeeping_record(event: dict, *, interpreter: str, state: str, reason: str = "") -> dict:
+    """One notification-bookkeeping signal, in data-model.md's shape."""
+    rec = {
+        "signal": "notification",
+        "interpreter": interpreter,
+        "event_key": event.get("key"),
+        "run_id": event.get("run_id"),
+        "delivery_state": state,
+        "reported_at": time.time(),
+    }
+    if reason:
+        rec["held_reason"] = reason
+    return rec
+
+
+def advance_watermark(previous: str, consumed: list[dict], settled: bool) -> str:
+    """The new position — ONLY when the window's events were recorded.
+
+    017's reconcile watermark carries the same rule for the same reason: a
+    watermark advanced before the work settled makes the next pass treat
+    unprocessed items as "before the window", which silently excludes exactly the
+    events that were missed. An unsettled pass keeps its position and retries.
+    """
+    if not settled or not consumed:
+        return previous
+    return max(str(c.get("at") or "") for c in consumed) or previous
+
+
 def main() -> int:  # pragma: no cover - the loop is exercised by acceptance
     """Entry point. Deliberately thin: everything decidable is a function above."""
     raise SystemExit(

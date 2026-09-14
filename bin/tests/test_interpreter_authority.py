@@ -183,6 +183,7 @@ def test_the_kill_switch_SEES_an_interpreter(wiz, tmp_path, monkeypatch):
         True,
         role=wiz.ROLE_INTERPRETER,
         watched_scope=["vps1"],
+        stack="obs",
         channel="C0123456789",
         authority="observe",
     )
@@ -269,6 +270,7 @@ def test_the_DECLARED_SENDER_is_recorded_not_merely_demanded(wiz):
         True,
         role=wiz.ROLE_INTERPRETER,
         watched_scope=["vps1"],
+        stack="obs",
         channel="C0123456789",
         declared_sender="U0987654321",
         authority="observe",

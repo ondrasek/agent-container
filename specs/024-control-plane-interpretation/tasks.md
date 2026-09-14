@@ -107,13 +107,13 @@ US5 and US6; US2 needs only the writer; US4 needs only the role.
       `/loki/api/v1/query_range` idiom that 023's `stack_storage_probe` already uses. **Record in a
       comment why this is permitted here and forbidden in `reconcile`**: the tool queries a stack it
       created, never an operator's own collector (research R3, 017's vendor-coupling refusal).
-- [ ] T008 Implement the watermark per data-model.md: one per signal class per interpreter,
+- [X] T008 Implement the watermark per data-model.md: one per signal class per interpreter,
       advancing **only after** the window's events are recorded in the bookkeeping ledger. 017's
       reconcile watermark carries the same rule; the comment should say so.
-- [ ] T009 [P] Unit-test watermark advancement in `bin/tests/test_pure_logic.py`, including the
+- [X] T009 [P] Unit-test watermark advancement in `bin/tests/test_pure_logic.py`, including the
       negative case that matters: a partial pass must **not** advance it, or the next pass treats
       unprocessed events as "before the window" and silently drops exactly what was missed.
-- [ ] T010 Implement `--stack NAME` resolution on `up` in `bin/agent-container`, refusing with the
+- [X] T010 Implement `--stack NAME` resolution on `up` in `bin/agent-container`, refusing with the
       stack named when it is absent or unreachable. A refusal, never a degraded mode (research R3).
 - [X] T010a **(FR-005)** Deliver the interpreter's credentials — the Slack bot token and the stack
       address — to the **running** container over **its own sshd**, reusing the existing Feature
@@ -196,7 +196,7 @@ environment, run id and outcome with a reading grounded in that run's log.
 - [X] T022 [US1] Implement input-health precedence (FR-013): stack unreachable, ingest `DEGRADED`,
       host unreachable or log absent is stated **before** any claim about agents. Never infer
       activity or inactivity from missing data.
-- [ ] T023 [US1] **(FR-012b)** Implement the `notification` bookkeeping signal keyed on the **event**, not the
+- [X] T023 [US1] **(FR-012b)** Implement the `notification` bookkeeping signal keyed on the **event**, not the
       message (data-model.md) — this is what makes catch-up idempotent after a restart.
 - [X] T024 [US1] **(FR-016)** Implement the Slack write path (`chat.postMessage`) in
       `image/interpret-bridge.py`, stdlib only, with the FR-016 required fields in every message
@@ -243,7 +243,7 @@ right environment and run and cites the identifiers it used.
       run it came from; what could not be seen is stated rather than filled in (FR-011a, FR-013).
 - [X] T035 [US3] Implement unreachable-host reporting in replies: `undetermined`, never `absent` or
       `stopped` (Feature 014's rule, which a summarising reader is otherwise tempted to smooth over).
-- [ ] T036 [US3] Implement `interpret test-channel NAME` in `bin/agent-container` per
+- [X] T036 [US3] Implement `interpret test-channel NAME` in `bin/agent-container` per
       contracts/cli.md: post, read back, report the admitted sender identity — runnable before
       trusting the binding overnight.
 - [X] T037 [P] [US3] Acceptance test in `bin/tests/test_acceptance.py`: question answered within a
@@ -303,10 +303,10 @@ notification quotes them as content.
 - [X] T044 [US4] **(FR-002, FR-021)** Record role, watched scope, channel binding **and authority**
       on the inventory entry in `bin/agent-container`, so a stopped interpreter is still
       identifiable and its authority is visible after deploy, not only stated before it.
-- [ ] T045 [US4] **(FR-012a)** Implement `interpret ls`, `interpret show` and `interpret history` per
+- [X] T045 [US4] **(FR-012a)** Implement `interpret ls`, `interpret show` and `interpret history` per
       contracts/cli.md, each with `--json`. `history` is FR-012a — "what did you tell me about run
       X, and why".
-- [ ] T046 [US4] **(FR-025)** Implement `interpret serve`, refusing to run outside an interpreter container.
+- [X] T046 [US4] **(FR-025)** Implement `interpret serve`, refusing to run outside an interpreter container.
 - [ ] T047 [US4] **(FR-027)** Implement self-exclusion from its own notifications: its runs are
       recorded like any environment's but never notified about, or every message becomes an event
       becomes a message.
@@ -334,9 +334,9 @@ notification quotes them as content.
 
 ## Phase 8: User Story 6 — Quiet when nothing is wrong (P3)
 
-- [ ] T052 [US6] **(FR-019)** Implement digest mode in `bin/agent-container` and `image/interpret-bridge.py`:
+- [X] T052 [US6] **(FR-019)** Implement digest mode in `bin/agent-container` and `image/interpret-bridge.py`:
       off by default, summaries at named times or on request.
-- [ ] T053 [US6] Implement the silence window: events held during it are delivered at its end
+- [X] T053 [US6] Implement the silence window: events held during it are delivered at its end
       **marked as held** — silenced is not forgotten (FR-019).
 - [ ] T054 [US6] Implement policy changes from the channel, each confirmed back in the same
       conversation so the operator can see what the interpreter now believes its instructions are.

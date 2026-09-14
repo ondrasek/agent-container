@@ -589,3 +589,80 @@ def test_the_action_detector_does_NOT_fire_on_an_ordinary_question():
         "status",
     ):
         assert not b.is_action_request(ordinary), f"refused an ordinary question: {ordinary!r}"
+
+
+# --- US6: quiet when nothing is wrong --------------------------------------
+
+
+def test_events_in_a_SILENCE_WINDOW_are_held_not_dropped(b):
+    """FR-019. An operator who silenced an interpreter still needs to know what
+    happened while it was quiet; one who discovers a failure hours later with no
+    indication it was withheld learns to distrust the feature rather than use it."""
+    events = b.notifiable_events(_rec(outcome="failed", exit_code=1), now=1000.0)
+    send, held = b.partition_for_silence(events, 1000.0, (900.0, 1100.0))
+    assert send == []
+    assert [e["held_reason"] for e in held] == [b.HELD_SILENCE]
+
+
+def test_outside_the_window_nothing_is_held(b):
+    events = b.notifiable_events(_rec(outcome="failed", exit_code=1), now=2000.0)
+    send, held = b.partition_for_silence(events, 2000.0, (900.0, 1100.0))
+    assert len(send) == 1 and held == []
+
+
+def test_an_empty_digest_sends_NOTHING(b):
+    """Sending "nothing happened" is the notification a digest exists to avoid."""
+    assert b.digest([], interpreter="w") is None
+
+
+def test_a_digest_names_every_event_and_marks_the_held_ones(b):
+    events = b.notifiable_events(_rec(outcome="failed", exit_code=1), now=1000.0)
+    _, held = b.partition_for_silence(events, 1000.0, (900.0, 1100.0))
+    text = b.digest(held, interpreter="watcher")
+    assert text.startswith("[watcher] digest")
+    assert "held: silence_window" in text
+    assert "20260914T101010Z-ab12" in text
+
+
+def test_late_delivery_is_MARKED_so_a_burst_is_not_read_as_a_cascade(b):
+    """A catch-up after an outage would otherwise read as a sudden run of new
+    failures, which is the opposite of what happened."""
+    events = b.notifiable_events(_rec(outcome="failed", exit_code=1), now=1000.0)
+    marked = b.mark_late(events, b.HELD_CHANNEL)
+    assert marked[0]["held_reason"] == b.HELD_CHANNEL
+    assert events[0].get("held_reason") is None, "mark_late mutated its input"
+
+
+# --- the ledger and the watermark ------------------------------------------
+
+
+def test_the_ledger_is_rebuilt_from_the_DURABLE_signal_not_from_memory(b):
+    """FR-017's mechanism. In memory, an interpreter that restarts either spams
+    the operator with everything it can still see or silently skips the window it
+    was down for."""
+    records = [
+        {"event_key": "k1", "delivery_state": "sent"},
+        {"event_key": "k2", "delivery_state": "held"},
+        {"event_key": "k3", "delivery_state": "sent"},
+        {"not_a_record": True},
+    ]
+    assert b.ledger_from_records(records) == {"k1", "k3"}
+
+
+def test_a_held_event_is_NOT_treated_as_already_reported(b):
+    """It was decided, not delivered. Counting it as sent is how a silenced
+    failure disappears permanently."""
+    assert b.ledger_from_records([{"event_key": "k", "delivery_state": "held"}]) == set()
+
+
+def test_the_watermark_does_NOT_advance_on_an_unsettled_pass(b):
+    """017's rule, and the reason it exists: a watermark advanced before the work
+    settled makes the next pass treat unprocessed items as "before the window",
+    silently excluding exactly the events that were missed."""
+    consumed = [{"at": "100"}, {"at": "200"}]
+    assert b.advance_watermark("50", consumed, settled=False) == "50"
+    assert b.advance_watermark("50", consumed, settled=True) == "200"
+
+
+def test_the_watermark_holds_when_nothing_was_consumed(b):
+    assert b.advance_watermark("50", [], settled=True) == "50"

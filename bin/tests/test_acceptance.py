@@ -4338,6 +4338,7 @@ def test_the_inventory_holds_no_free_text_field(acc):
         # carefully: three of them are OPERATOR-INFLUENCED, which is precisely how
         # a store whose no-free-text property is structural stops being one.
         "watched_scope",
+        "stack",
         "channel",
         "declared_sender",
         "authority",
@@ -4353,7 +4354,7 @@ def test_the_inventory_holds_no_free_text_field(acc):
     # An agent environment is not an interpreter, so these are ABSENT rather than
     # empty — "does not apply" and "nothing declared" are different facts, and a
     # reader that cannot tell them apart is the Constitution VIII failure.
-    for interpreter_only in ("watched_scope", "channel", "declared_sender", "authority"):
+    for interpreter_only in ("watched_scope", "stack", "channel", "declared_sender", "authority"):
         assert entry[interpreter_only] is None, (
             f"{interpreter_only} is populated on an agent environment, where it has no meaning"
         )

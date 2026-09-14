@@ -766,6 +766,7 @@ def test_the_inventory_entry_carries_role_and_provenance(wiz, monkeypatch):
     # three new fields are ABSENT rather than empty — "this does not apply" and
     # "nothing was declared" are different facts (Constitution VIII).
     assert e["watched_scope"] is None
+    assert e["stack"] is None
     assert e["channel"] is None
     assert e["declared_sender"] is None
     assert e["authority"] is None
@@ -2390,7 +2391,11 @@ def _interp(wiz, **kw):
     """A valid interpreter spec. The channel options are REQUIRED, so every test
     that is about something else still has to supply them."""
     return wiz.ExecSpec(
-        role=wiz.ROLE_INTERPRETER, slack_conversation="C1", declared_sender="U1", **kw
+        role=wiz.ROLE_INTERPRETER,
+        stack="obs",
+        slack_conversation="C1",
+        declared_sender="U1",
+        **kw,
     )
 
 
@@ -2406,15 +2411,27 @@ def test_an_interpreter_REQUIRES_a_conversation_and_a_declared_sender(wiz):
     `authorized_keys`. There is no value for it that is safe to default, so it is
     refused rather than defaulted."""
     with pytest.raises(wiz.Fatal, match="requires --slack-conversation"):
-        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, declared_sender="U1").validate()
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", declared_sender="U1").validate()
     with pytest.raises(wiz.Fatal, match="requires --declared-sender"):
-        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, slack_conversation="C1").validate()
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", slack_conversation="C1").validate()
+    # A stack is a PREREQUISITE, not an option: an interpreter pointed at an
+    # arbitrary endpoint would have to learn that backend's query API, which is
+    # the vendor coupling 017 refuses.
+    with pytest.raises(wiz.Fatal, match="requires --stack"):
+        wiz.ExecSpec(
+            role=wiz.ROLE_INTERPRETER, slack_conversation="C1", declared_sender="U1"
+        ).validate()
 
 
 def test_the_interpreter_flags_are_REFUSED_on_other_roles(wiz):
     """A flag that is silently inert is worse than one that is refused: the
     operator believes they configured something."""
-    for kw in ({"watch": ["vps1"]}, {"slack_conversation": "C1"}, {"declared_sender": "U1"}):
+    for kw in (
+        {"watch": ["vps1"]},
+        {"stack": "obs"},
+        {"slack_conversation": "C1"},
+        {"declared_sender": "U1"},
+    ):
         with pytest.raises(wiz.Fatal, match="only meaningful for --role interpreter"):
             wiz.ExecSpec(role=wiz.ROLE_AGENT, **kw).validate()
 

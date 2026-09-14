@@ -2230,6 +2230,13 @@ INVENTORY_FIELDS = (
     # environment/host names, the channel is a channel-id shape, and authority is
     # a closed vocabulary of one value.
     "watched_scope",
+    # The tool-managed telemetry stack this interpreter reads and writes. A
+    # PREREQUISITE rather than an option (research R3): an interpreter pointed at
+    # an arbitrary otlp_endpoint would have to learn that backend's query API,
+    # which is the vendor coupling 017 refuses. Recorded because `interpret
+    # history` needs to know where to look, and because an operator asking "where
+    # do its conclusions go" should not have to remember.
+    "stack",
     "channel",
     # THE ADMIT SET, recorded. It was required at deploy, described as "the admit
     # set for an inbound path into something that can see your whole fleet", and
@@ -2524,6 +2531,7 @@ def build_inventory_entry(
     role: str = ROLE_AGENT,
     provenance: str | None = None,
     watched_scope: list[str] | None = None,
+    stack: str | None = None,
     channel: str | None = None,
     declared_sender: str | None = None,
     authority: str | None = None,
@@ -2558,6 +2566,7 @@ def build_inventory_entry(
         # environment HAS no watched scope; an interpreter deployed with `--watch`
         # omitted has an empty one, and the two are different facts.
         "watched_scope": watched_scope,
+        "stack": stack,
         "channel": channel,
         "declared_sender": declared_sender,
         "authority": authority,
@@ -4177,6 +4186,7 @@ def record_inventory_creation(
     host_provisioned: bool,
     role: str = ROLE_AGENT,
     watched_scope: list[str] | None = None,
+    stack: str | None = None,
     channel: str | None = None,
     declared_sender: str | None = None,
     authority: str | None = None,
@@ -4197,6 +4207,7 @@ def record_inventory_creation(
                 host_provisioned,
                 role=role,
                 watched_scope=watched_scope,
+                stack=stack,
                 channel=channel,
                 declared_sender=declared_sender,
                 authority=authority,
@@ -10941,6 +10952,9 @@ SECRET_INJECT_DIRS = (INJECT_APIKEY_DIR + "/", INJECT_ENV_DIR + "/")
 # different blast radius from the rest and is described as such wherever the tool
 # enumerates what an environment holds.
 INTERPRETER_CHANNEL_TOKEN_VAR = "SLACK_BOT_TOKEN"
+# Where the baked bridge lives in the image. Named here so the CLI's refusal and
+# the Dockerfile's COPY destination cannot drift apart silently.
+INTERPRETER_BRIDGE_PATH = "/usr/local/lib/agent-container/interpret-bridge.py"
 
 
 def is_secret_target(target: str) -> bool:
@@ -11455,6 +11469,7 @@ class ExecSpec:
     # injected at deploy goes stale the moment a host is registered afterwards,
     # and the answer was to say so rather than to re-resolve silently.
     watch: list[str] = field(default_factory=list)
+    stack: str | None = None
     slack_conversation: str | None = None
     declared_sender: str | None = None
 
@@ -11480,6 +11495,7 @@ class ExecSpec:
         if self.role != ROLE_INTERPRETER:
             for flag, value in (
                 ("--watch", self.watch),
+                ("--stack", self.stack),
                 ("--slack-conversation", self.slack_conversation),
                 ("--declared-sender", self.declared_sender),
             ):
@@ -11494,6 +11510,15 @@ class ExecSpec:
             # is this. A default here would be a default that admits whoever the
             # channel provider lets through, to something that can see the whole
             # fleet.
+            if not self.stack:
+                die(
+                    f"--role {ROLE_INTERPRETER} requires --stack: an interpreter reads the "
+                    f"trail out of a tool-managed telemetry stack and writes its "
+                    f"conclusions back into one. Pointed at an arbitrary endpoint it "
+                    f"would have to learn that backend's query API, which this tool "
+                    f"deliberately does not do",
+                    remedy="agent-container telemetry stack up <name>",
+                )
             if not self.slack_conversation:
                 die(
                     f"--role {ROLE_INTERPRETER} requires --slack-conversation: an "
@@ -12211,6 +12236,7 @@ def compose_up_exec(
         watched_scope=(
             validate_interpreter_scope(spec.watch) if spec.role == ROLE_INTERPRETER else None
         ),
+        stack=(validate_name(spec.stack) if spec.role == ROLE_INTERPRETER and spec.stack else None),
         channel=(
             validate_interpreter_channel_id(spec.slack_conversation or "", "--slack-conversation")
             if spec.role == ROLE_INTERPRETER
@@ -19146,6 +19172,12 @@ def up(
     ),
     # Feature 024. Declared at the surface, each named, none defaulted to a value
     # that would admit or publish anything (Constitution VIII).
+    stack: str | None = typer.Option(
+        None,
+        "--stack",
+        help="INTERPRETER only, and REQUIRED. The tool-managed telemetry stack it "
+        "reads the trail from and writes its interpretations back to.",
+    ),
     watch: list[str] = typer.Option(
         [],
         "--watch",
@@ -19228,6 +19260,7 @@ def up(
         agent=agent,
         role=role,
         watch=watch.copy(),
+        stack=stack,
         slack_conversation=slack_conversation,
         declared_sender=declared_sender,
         task=resolve_task(task),
@@ -19888,6 +19921,125 @@ def interpret_show(
     log(f"  speaks on: Slack conversation {match.get('channel')}")
     log(f"  authority: {match.get('authority')} — it cannot stop, start, redeploy, destroy,")
     log("             task or reconfigure anything, and holds nothing that could")
+    log(f"  answers:   only {match.get('declared_sender')} — no other sender is replied to")
+
+
+# The interpretation and bookkeeping signals, read back by run. The selector is
+# built here rather than by the caller so the namespace and attribute names have
+# ONE owner — the same reason 017 derives its export payload from one definition.
+def interpretation_selector(interpreter: str, run_id: str | None = None) -> str:
+    sel = f'{{service_namespace="agent-container"}} |= `"interpreter":"{interpreter}"`'
+    if run_id:
+        sel += f" |= `{run_id}`"
+    return sel
+
+
+@interpret_app.command("history")
+def interpret_history(
+    name: str = typer.Argument(..., help="Interpreter name."),
+    run: str | None = typer.Option(None, "--run", help="Only interpretations of this run."),
+    limit: int = typer.Option(50, "--limit", help="How many to read back."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """What this interpreter concluded, and why (FR-012a).
+
+    "What did you tell me about run X, and why" is the question an operator asks
+    after a notification they disagree with, and it is unanswerable if an
+    interpretation is only ever a message on a phone. They are written to the
+    stack as their own signal and read back here.
+    """
+    set_json_mode(as_json)
+    match = next((e for e in interpreter_entries() if e.get("name") == name), None)
+    if match is None:
+        die(f"no active interpreter named '{name}'", remedy="agent-container interpret ls")
+    host_name, host_rec = resolve_deploy_host(match.get("host"))
+    stack = match.get("stack") or ""
+    if not stack:
+        # An interpreter is deployed against a named stack; without one there is
+        # nowhere for its interpretations to have gone.
+        die(f"'{name}' has no telemetry stack recorded, so there is nothing to read back")
+    lines = stack_query_lines(
+        host_rec,
+        f"{STACK_CONTAINER_PREFIX}{stack}",
+        interpretation_selector(name, run),
+        limit=limit,
+    )
+    if lines is None:
+        # NONE IS NOT EMPTY, and this is the one place an operator would most
+        # readily misread it: "no interpretations" from a stack that could not be
+        # reached would say the interpreter concluded nothing, when the truth is
+        # that nobody could look.
+        die(
+            f"could not reach the telemetry stack '{stack}' on {host_name}, so this is "
+            f"NOT an empty history — it is an unknown one",
+            remedy=f"agent-container telemetry stack ls --host {host_name}",
+        )
+    if as_json:
+        emit_json({"interpreter": name, "run": run, "interpretations": lines})
+        return
+    if not lines:
+        log(f"{name} has recorded no interpretations{' for ' + run if run else ''}")
+        return
+    for entry in lines:
+        log(f"{entry['at']}  {entry['line']}")
+
+
+@interpret_app.command("test-channel")
+def interpret_test_channel(
+    name: str = typer.Argument(..., help="Interpreter name."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Prove the channel binding end to end, BEFORE trusting it overnight.
+
+    Reports what the tool can check from here without holding the token: that an
+    interpreter exists, which conversation it is bound to, and which sender it
+    will answer. The live round trip — post, read back, resolve the identity —
+    runs inside the container, where the credential is, because checking it here
+    would mean the operator's machine holding a token Constitution IX keeps off it.
+    """
+    set_json_mode(as_json)
+    match = next((e for e in interpreter_entries() if e.get("name") == name), None)
+    if match is None:
+        die(f"no active interpreter named '{name}'", remedy="agent-container interpret ls")
+    binding = {
+        "interpreter": name,
+        "host": match.get("host"),
+        "channel": match.get("channel"),
+        "declared_sender": match.get("declared_sender"),
+        "authority": match.get("authority"),
+    }
+    if as_json:
+        emit_json(binding)
+        return
+    log(f"{name}: bound to Slack conversation {binding['channel']}")
+    log(f"  will answer:  {binding['declared_sender']} and nobody else")
+    log(f"  authority:    {binding['authority']} — it cannot act on anything")
+    log(
+        f"  live check:   agent-container attach {name}, then `interpret serve --check` — "
+        f"the token lives in the container, not here"
+    )
+
+
+@interpret_app.command("serve")
+def interpret_serve(
+    check: bool = typer.Option(False, "--check", help="Prove the binding, then exit."),
+) -> None:
+    """The bridge loop. IN-CONTAINER ONLY.
+
+    Refused elsewhere because on an operator's machine this would be a long-lived
+    process holding a channel token with no container boundary around it — and
+    the whole shape of this feature is that the credential lives where the
+    container does.
+    """
+    if not Path(INTERPRETER_BRIDGE_PATH).is_file():
+        die(
+            "`interpret serve` runs inside an interpreter container",
+            remedy="agent-container attach <interpreter>, then run it there",
+        )
+    die(
+        "the bridge loop is started by the container's entrypoint; "
+        f"--check reports the binding{' (requested)' if check else ''}"
+    )
 
 
 telemetry_app = typer.Typer(
