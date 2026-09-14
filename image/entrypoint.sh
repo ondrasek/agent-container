@@ -1336,6 +1336,153 @@ host_metrics_payload() {
         }' 2>/dev/null
 }
 
+# --- Feature 024: the agent's OUTPUT becomes part of the trail ---------------
+# 016 was explicit that a run record is NOT the logs, and gave the reason: the
+# two have opposite lifetimes, the record outlives the container and the logs do
+# not. That is still true of the record. What changes here is that the logs stop
+# dying with the container — they are exported as a third payload class beside
+# records and egress events, correlated by the same run id, so "what was the
+# agent actually doing" is answerable after `down --purge`.
+#
+# WHY A FILE AND NOT A PIPE, which is the whole design and the one thing not to
+# "simplify" later. FR-007a forbids log export from slowing, blocking or failing
+# a run. A FIFO or a pipe to a reader applies BACK-PRESSURE the moment the reader
+# is slow, wedged or dead — and the reader here talks to a network endpoint that
+# is allowed to be all three, because export is fail-open by design. An agent
+# blocked on writing a log line would be observability breaking the work it
+# exists to observe, which inverts the entire point of the dual stack. A write to
+# a regular file never blocks on a reader, so the agent is decoupled from the
+# exporter by construction rather than by the exporter being quick.
+AGENT_LOG_BUF_DIR="${AGENT_LOG_BUF_DIR:-/tmp/agent-container-logexport}"
+
+agent_log_payload() {
+    # One OTLP/HTTP+JSON logs document for one batch.
+    #
+    # jq BUILDS IT, the shell does not. The body is ARBITRARY AGENT OUTPUT — it
+    # carries quotes, backslashes, control characters and whatever bytes a tool
+    # the agent ran decided to print. Hand-assembling JSON around that produces a
+    # document that is valid until the day an agent prints a quote, and then
+    # produces a silent 400 against a fail-open exporter, which is a gap nothing
+    # reports. `jq -Rs` is a real serializer and escapes all of it.
+    local stream="$1" seq="$2" now
+    now="$(date +%s%N 2>/dev/null)"
+    case "${now}" in *[!0-9]*|"") now="$(( $(date +%s) * 1000000000 ))" ;; esac
+    jq -Rs --arg env "${AGENT_CONTAINER_NAME:-unknown}" \
+           --arg agent "${AGENT_CONTAINER_AGENT:-unknown}" \
+           --arg mode "${AGENT_CONTAINER_MODE:-unknown}" \
+           --arg run "${RUNS_ID:-}" \
+           --arg stream "${stream}" \
+           --arg seq "${seq}" \
+           --arg now "${now}" '
+      {resourceLogs: [{
+        resource: {attributes: (
+          [{key: "service.namespace", value: {stringValue: "agent-container"}},
+           {key: "service.name", value: {stringValue: ("agent-container-" + $env)}},
+           {key: "agent_container.environment", value: {stringValue: $env}},
+           {key: "agent_container.agent", value: {stringValue: $agent}},
+           {key: "agent_container.mode", value: {stringValue: $mode}},
+           {key: "agent_container.signal", value: {stringValue: "log"}},
+           {key: "agent_container.stream", value: {stringValue: $stream}},
+           {key: "agent_container.seq", value: {stringValue: $seq}}]
+          # Omitted rather than exported as "" when record-keeping itself failed:
+          # an empty run id would JOIN UNRELATED RUNS under one key, which is
+          # worse than an unjoinable batch.
+          + (if $run == "" then [] else
+             [{key: "agent_container.run_id", value: {stringValue: $run}},
+              {key: "service.instance.id", value: {stringValue: $run}}] end)
+        )},
+        scopeLogs: [{logRecords: [{timeUnixNano: $now, body: {stringValue: .}}]}]
+      }]}'
+}
+
+agent_log_export_once() {
+    # Ships whatever has accumulated in one stream's buffer since the last pass.
+    local endpoint="$1" stream="$2" buf="$3" state="$4" size off chunk payload
+    [[ -f "${buf}" ]] || return 0
+    size="$(wc -c < "${buf}" 2>/dev/null || echo 0)"
+    off="$(cat "${state}" 2>/dev/null || echo 0)"
+    case "${off}" in *[!0-9]*|"") off=0 ;; esac
+    [[ "${size}" -gt "${off}" ]] || return 0
+    # `tail -c +N` is 1-indexed, so the first unread byte is off+1.
+    chunk="$(tail -c "+$(( off + 1 ))" "${buf}" 2>/dev/null)" || return 0
+    [[ -n "${chunk}" ]] || return 0
+    payload="$(printf '%s' "${chunk}" | agent_log_payload "${stream}" "${off}" 2>&1)"
+    case "${payload}" in
+        '{"resourceLogs"'*) ;;
+        # Same shape check host_metrics_export_once makes, for the same reason: a
+        # jq compile error would otherwise be POSTed as if it were a log body.
+        *) log "WARNING: could not build the agent log payload: ${payload:0:160}"; return 0 ;;
+    esac
+    # FAIL-OPEN AND SILENT, exactly as the host-metrics exporter is. This runs on
+    # a timer for the life of the container; a collector that goes away must not
+    # produce a line of entrypoint log per interval.
+    curl -sS -m "${OTLP_TIMEOUT:-10}" -X POST "${endpoint}" \
+        -H 'Content-Type: application/json' \
+        --data-binary @- <<< "${payload}" > /dev/null 2>&1 || true
+    # The offset advances whether or not the POST landed. Retrying a batch
+    # forever against a dead collector would grow unboundedly and re-send the
+    # same lines when it came back; export is fail-open, and a gap is the
+    # declared consequence of an endpoint that is not there.
+    printf '%s' "${size}" > "${state}" 2>/dev/null || true
+}
+
+agent_log_export_start() {
+    # Starts the exporter and prepares the buffers the agent's output is teed
+    # into. Called beside host_metrics_start, from the one block that knows the
+    # endpoint, and disowned for the same reason: it must never hold the
+    # container open, and a headless run that finishes must not wait on a sleep.
+    local base="$1" endpoint cap declared
+    declared="${AGENT_CONTAINER_EXPORT_AGENT_LOGS:-}"
+    case "${declared}" in
+        # EXCLUDED BY NAME, NEVER BY PATTERN — the rule the task text already
+        # follows. There is no scan of log bodies, no entropy heuristic and no
+        # looks-like-a-token check: a redactor that misses one value converts
+        # caution into false confidence, whereas a stream that is not exported
+        # either travels or it does not.
+        0|off|no|false) log "agent log export disabled (export_agent_logs: false)"; return 0 ;;
+    esac
+    command -v jq > /dev/null 2>&1 || { log "WARNING: jq is missing; agent log export disabled"; return 0; }
+    cap="${AGENT_CONTAINER_AGENT_LOG_CAP_MB:-10}"
+    case "${cap}" in *[!0-9]*|"") cap=10 ;; esac
+    endpoint="${base%/}/v1/logs"
+    mkdir -p "${AGENT_LOG_BUF_DIR}" 2>/dev/null || {
+        log "WARNING: could not create ${AGENT_LOG_BUF_DIR}; agent log export disabled"; return 0; }
+    : > "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || true
+    : > "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || true
+    export AGENT_LOG_BUF_DIR
+    (
+        local capped=0 total
+        while :; do
+            agent_log_export_once "${endpoint}" stdout \
+                "${AGENT_LOG_BUF_DIR}/stdout" "${AGENT_LOG_BUF_DIR}/stdout.off"
+            agent_log_export_once "${endpoint}" stderr \
+                "${AGENT_LOG_BUF_DIR}/stderr" "${AGENT_LOG_BUF_DIR}/stderr.off"
+            # THE CAP, and the marker that keeps an incomplete trail honest. An
+            # agent in a print loop would otherwise evict the stack's whole
+            # retention window, so the run that printed most would erase the runs
+            # that mattered. On reaching it export STOPS and says where — 016's
+            # rule holds here: a trail may be incomplete, never misleadingly
+            # complete.
+            if [[ "${capped}" -eq 0 ]]; then
+                total=$(( $(wc -c < "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || echo 0)
+                        + $(wc -c < "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || echo 0) ))
+                if [[ "${total}" -ge $(( cap * 1024 * 1024 )) ]]; then
+                    capped=1
+                    printf 'agent log export reached the %sMB cap for this run and stopped here' "${cap}" \
+                        | agent_log_payload truncated "${total}" \
+                        | curl -sS -m "${OTLP_TIMEOUT:-10}" -X POST "${endpoint}" \
+                            -H 'Content-Type: application/json' --data-binary @- > /dev/null 2>&1 || true
+                    log "agent log export reached its ${cap}MB cap for this run; a truncation marker was sent"
+                fi
+            fi
+            [[ "${capped}" -eq 1 ]] && break
+            sleep "${AGENT_LOG_BATCH_SECONDS:-2}"
+        done
+    ) > /dev/null 2>&1 &
+    disown 2>/dev/null || true
+    log "agent log export -> ${endpoint} (cap ${cap}MB/run)"
+}
+
 host_metrics_export_once() {
     local endpoint="$1" payload
     payload="$(host_metrics_payload)"
@@ -1647,6 +1794,11 @@ PYEOF
     # 9. THE BOX ITSELF. Agents report what they did; this reports what the
     #    container was doing while they did it.
     host_metrics_start "${_otlp_base}"
+
+    # Feature 024. The agent's own output, exported as it is produced, so the
+    # question 016 deliberately could not answer — "what was the agent actually
+    # doing" — survives the container it was doing it in.
+    agent_log_export_start "${_otlp_base}"
 
     log "telemetry fan-out configured for ${_otlp_base} (claude, codex, pi, opencode, host + OTEL_* for any SDK)"
     unset _otlp_base _otlp_proto _otlp_service _otel_attrs _otel_begin _otel_end _tmp_otel _codex_cfg _oc_cfg _pi_ext_dir _pi_pkg
@@ -2442,7 +2594,20 @@ run_headless_agent() {
     # /dev/null when job control is off, so without it the agent would read EOF
     # where `exec` handed it the container's stdin — a behaviour change nobody
     # asked for, hidden inside a change about record-keeping.
-    "${cmd[@]}" <&0 &
+    #
+    # The tee is CONDITIONAL so that the invocation above is byte-for-byte the
+    # original when log export is off — `<&0` is load-bearing (see above) and a
+    # change to it must not ride along with a change about telemetry.
+    #
+    # `tee -a` to a REGULAR FILE, never a pipe: a file write does not block on a
+    # reader, so a slow or dead exporter cannot apply back-pressure to the agent
+    # (FR-007a). See agent_log_export_start for why that is the whole design.
+    if [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]]; then
+        "${cmd[@]}" <&0 > >(tee -a "${AGENT_LOG_BUF_DIR}/stdout") \
+                         2> >(tee -a "${AGENT_LOG_BUF_DIR}/stderr" >&2) &
+    else
+        "${cmd[@]}" <&0 &
+    fi
     AGENT_PID=$!
     # `|| rc=$?` and not a bare `wait`: under `set -e` a failing agent would end
     # this script immediately, before the exit trap could record WHY it failed.

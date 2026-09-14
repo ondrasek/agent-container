@@ -11405,6 +11405,22 @@ class ExecSpec:
         declared = export_task_text()
         include_task = EXPORT_TASK_TEXT_DEFAULT if declared is None else declared
         env["AGENT_CONTAINER_EXPORT_TASK"] = "1" if include_task else "0"
+        # Feature 024: the SECOND export switch, delivered the same way and for
+        # the same reason — an absent variable is indistinguishable from a deploy
+        # predating the switch, and this too is an exposure the operator chose.
+        #
+        # It is separate from the task switch because it is a separate decision.
+        # The task is one string the operator typed; the log is everything the
+        # agent printed. An operator who excluded the task has made a judgement
+        # about a field they wrote, and carrying that over would be the tool
+        # choosing for them in the direction that discloses.
+        declared_logs = export_agent_logs()
+        include_logs = EXPORT_AGENT_LOGS_DEFAULT if declared_logs is None else declared_logs
+        env["AGENT_CONTAINER_EXPORT_AGENT_LOGS"] = "1" if include_logs else "0"
+        declared_cap = agent_log_cap_mb()
+        env["AGENT_CONTAINER_AGENT_LOG_CAP_MB"] = str(
+            AGENT_LOG_CAP_MB_DEFAULT if declared_cap is None else declared_cap
+        )
         if self.role == ROLE_CONTROL_PLANE and name:
             # Feature 017 FR-010/FR-014a: the container has to know its OWN name,
             # because two things inside it read this and neither can derive it.
@@ -11988,6 +12004,25 @@ def compose_up_exec(
         # or `list --json` (FR-004/FR-005), which is what those exist for.
         if spec.repo and is_ssh_git_url(spec.repo):
             announce_agent_ssh_key(host_rec, name, agent_pub, spec.repo)
+    # Feature 024, FR-007b. The endpoint was declared once, long ago, for run
+    # RECORDS — a closed set of fields the operator can read in the provenance
+    # table and reason about. Agent output is a different order of exposure:
+    # whatever the agent printed, including file contents it echoed, paths it
+    # walked and whatever a tool it ran wrote to the terminal. The operator who
+    # consented to the first did not thereby consent to the second, so the
+    # consequence is STATED at the moment it starts applying rather than left to
+    # be discovered in a dashboard.
+    #
+    # Printed, not prompted — 017's rule. `up` is a path an agent may drive, and
+    # a prompt there is auto-answered, which reads as consent.
+    if resolve_otlp_endpoint() is not None:
+        _declared_logs = export_agent_logs()
+        if EXPORT_AGENT_LOGS_DEFAULT if _declared_logs is None else _declared_logs:
+            log(
+                "telemetry: this environment exports the AGENT'S OUTPUT, not only its run "
+                "records — everything it prints reaches your collector. Exclude it with "
+                "`export_agent_logs: false` in settings.yaml."
+            )
     hflag = "" if host_name == DEFAULT_HOST else f" --host {host_name}"
     verb = "redeployed" if redeploy else "started"
     log(f"{verb} {container_name(name)}; attach with: agent-container attach {name}{hflag}")
@@ -13872,6 +13907,34 @@ def render_run_record(environment: str, rec: dict) -> None:
     console.print(
         f"logs, while the container lives: agent-container logs {environment}", soft_wrap=True
     )
+    # Feature 024, FR-009. That line above was the whole answer until the agent's
+    # output started being exported: logs died with the container, so `runs show`
+    # could only point at a command that stops working the moment the thing it
+    # needs is gone. When an endpoint is declared they OUTLIVE the container, and
+    # saying so is the difference between an operator who looks and one who
+    # assumes the answer is lost.
+    #
+    # Declared, not confirmed. The tool knows an endpoint was configured; it does
+    # not know the collector kept anything, because export is fail-open and a 2xx
+    # is not acceptance (017). "were exported to" is therefore the honest tense —
+    # claiming they ARE there would be the same false green 023 exists to kill.
+    if resolve_settings_key("otlp_endpoint") is not None:
+        declared_logs = export_agent_logs()
+        if EXPORT_AGENT_LOGS_DEFAULT if declared_logs is None else declared_logs:
+            console.print(
+                "after the container is gone: this run's agent output was exported to your "
+                f"telemetry stack; query it there by run_id {rec.get('run_id') or '?'}",
+                soft_wrap=True,
+            )
+        else:
+            # Said aloud rather than left as silence. An operator who turned this
+            # off months ago and is now looking for a destroyed container's output
+            # should meet the reason here, not conclude the feature is broken.
+            console.print(
+                "after the container is gone: nothing — agent output was not exported "
+                "(export_agent_logs: false)",
+                soft_wrap=True,
+            )
 
 
 # --- `runs list --changed <path>` (C16, SC-007) ------------------------------

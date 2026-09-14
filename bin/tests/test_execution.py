@@ -178,6 +178,11 @@ def test_exec_spec_compose_environment(wiz):
         # is indistinguishable from a deploy predating the switch, and this is a
         # field whose exposure the operator chose.
         "AGENT_CONTAINER_EXPORT_TASK": "1",
+        # Feature 024, same rule applied to the SECOND export decision. Separate
+        # from the task switch because it is a separate exposure: the task is one
+        # string the operator typed, the log is everything the agent printed.
+        "AGENT_CONTAINER_EXPORT_AGENT_LOGS": "1",
+        "AGENT_CONTAINER_AGENT_LOG_CAP_MB": "10",
     }
     # No endpoint declared in this test's environment, so no endpoint is
     # delivered — undeclared is not the same as declared-empty (C18c).

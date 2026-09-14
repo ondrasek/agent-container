@@ -112,26 +112,26 @@ interpreter's credentials arrive the way every other credential in this tool arr
 **Independent test**: run an agent with an endpoint declared, query the stack by `run_id`, assert
 the output lines are present and in order; destroy the container; assert they are still there.
 
-- [ ] T011 [US2] **(FR-007)** Add the log exporter to `image/entrypoint.sh`, **beside** the existing OTLP
+- [X] T011 [US2] **(FR-007)** Add the log exporter to `image/entrypoint.sh`, **beside** the existing OTLP
       attribute composition (`_otel_attrs`, ~line 1442). Add beside; **do not restructure that
       region and do not shorten its comments**. Tee the agent's output into a buffer the exporter
       drains, batching per the T002 flush defaults and POSTing the `log` signal with `curl`.
-- [ ] T012 [US2] Make the exporter run **off the agent's critical path** in
+- [X] T012 [US2] Make the exporter run **off the agent's critical path** in
       `image/entrypoint.sh`: a slow, wedged or dead exporter loses log lines and MUST NOT apply
       back-pressure. FR-007a — observability that can stall the work inverts the point of the dual
       stack.
-- [ ] T013 [US2] **(FR-008)** Implement the per-run cap and its single `truncated` marker record in
+- [X] T013 [US2] **(FR-008)** Implement the per-run cap and its single `truncated` marker record in
       `image/entrypoint.sh` per contracts/signals.md. The marker is a **record with an attribute**,
       not a line of body text, so consumers find it by attribute and not by matching text they do
       not control.
-- [ ] T014 [US2] **(FR-007c)** Honour `export_agent_logs` in `image/entrypoint.sh`: excluded by name only, never
+- [X] T014 [US2] **(FR-007c)** Honour `export_agent_logs` in `image/entrypoint.sh`: excluded by name only, never
       by pattern or entropy heuristic (FR-007c — a redactor that misses one value converts caution
       into false confidence).
-- [ ] T015 [US2] **(FR-007b)** State the wider exposure when an endpoint is declared, in `bin/agent-container`:
+- [X] T015 [US2] **(FR-007b)** State the wider exposure when an endpoint is declared, in `bin/agent-container`:
       logs carry whatever the agent printed, which is broader than the task text (FR-007b).
-- [ ] T016 [US2] **(FR-009)** Extend `runs show` in `bin/agent-container` to name the stack as where the log went
+- [X] T016 [US2] **(FR-009)** Extend `runs show` in `bin/agent-container` to name the stack as where the log went
       when it was exported, and to keep saying logs are gone when it was not (FR-009).
-- [ ] T017 [P] [US2] Shell-suite coverage in `bin/tests/test_entrypoint.sh`: correlation by
+- [X] T017 [P] [US2] Shell-suite coverage in `bin/tests/test_entrypoint.sh`: correlation by
       `run_id`, stdout/stderr kept distinct, sequence monotonic, cap reached produces exactly one
       marker, and a dead endpoint leaves the run completely unaffected.
 - [ ] T018 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: logs queryable in the stack
