@@ -22,6 +22,7 @@ catches a mutation only when the scenario triggers it, so a reachable-but-not-ye
 called writer passes every behavioural test and fails only here.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -274,3 +275,66 @@ def test_the_DECLARED_SENDER_is_recorded_not_merely_demanded(wiz):
     )
     assert entry["declared_sender"] == "U0987654321"
     assert "declared_sender" in wiz.INVENTORY_FIELDS
+
+
+# --- the stack read path: None is not empty ---------------------------------
+
+
+def _stub_query(wiz, monkeypatch, *, rc=0, out=""):
+    class R:
+        returncode = rc
+        stdout = out
+        stderr = ""
+
+    monkeypatch.setattr(wiz, "query", lambda *a, **k: R())
+    monkeypatch.setattr(wiz, "driver_runtime_argv", lambda *a, **k: ["docker"])
+
+
+def test_an_UNREACHABLE_stack_reads_as_None_never_as_empty(wiz, monkeypatch):
+    """FR-013, and the distinction the whole feature's honesty rests on.
+
+    An interpreter that cannot reach its stack and one whose stack holds nothing
+    must not produce the same answer. Collapsing them lets "I could not look"
+    become "nothing happened", which is the false green 023 exists to kill,
+    arriving on the operator's phone with a supervisor's credibility attached.
+    """
+    _stub_query(wiz, monkeypatch, rc=7, out="")
+    assert wiz.stack_query_lines({}, "c", '{x="y"}') is None
+
+    # A body that is not JSON is UNREACHABLE too — a truncated or error response
+    # must not read as an empty store.
+    _stub_query(wiz, monkeypatch, rc=0, out="<html>502 Bad Gateway</html>")
+    assert wiz.stack_query_lines({}, "c", '{x="y"}') is None
+
+    # Well-formed and genuinely empty is EMPTY, and that is a different answer.
+    _stub_query(wiz, monkeypatch, rc=0, out='{"data":{"result":[]}}')
+    assert wiz.stack_query_lines({}, "c", '{x="y"}') == []
+
+
+def test_lines_come_back_in_time_order_with_their_labels(wiz, monkeypatch):
+    """Ordering is not cosmetic: an interpretation quotes spans of output, and a
+    span assembled out of order would misrepresent what the agent did."""
+    body = json.dumps(
+        {
+            "data": {
+                "result": [
+                    {"stream": {"agent_container_run_id": "r1"}, "values": [["20", "later"]]},
+                    {"stream": {"agent_container_run_id": "r1"}, "values": [["10", "earlier"]]},
+                ]
+            }
+        }
+    )
+    _stub_query(wiz, monkeypatch, rc=0, out=body)
+    got = wiz.stack_query_lines({}, "c", '{x="y"}')
+    assert [e["line"] for e in got] == ["earlier", "later"]
+    assert got[0]["labels"]["agent_container_run_id"] == "r1"
+
+
+def test_a_malformed_entry_is_SKIPPED_rather_than_misread(wiz, monkeypatch):
+    """016's rule for a record whose schema this build does not understand:
+    refuse it rather than guess at its shape."""
+    body = json.dumps(
+        {"data": {"result": [{"stream": {}, "values": [["10", "ok"], ["bad"], "nonsense"]}]}}
+    )
+    _stub_query(wiz, monkeypatch, rc=0, out=body)
+    assert [e["line"] for e in wiz.stack_query_lines({}, "c", '{x="y"}')] == ["ok"]

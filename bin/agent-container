@@ -20022,6 +20022,68 @@ def stack_storage_probe(host_rec: dict, cname: str, port: int, settle: int = 8) 
     return STACK_ACCEPTED_NOT_STORED
 
 
+def stack_query_lines(
+    host_rec: dict, cname: str, selector: str, *, limit: int = 100
+) -> list[dict] | None:
+    """Read log lines back out of a telemetry stack. None when the stack could not
+    be asked at all.
+
+    WHY THIS IS ALLOWED HERE AND FORBIDDEN IN `reconcile`, which is the line this
+    function sits on and the reason it carries a comment this long.
+
+    017 refuses to query the operator's collector during reconciliation — "the
+    tool does not query your collector" — and makes them supply ids instead,
+    because knowing a backend's query API is a vendor coupling that would spread
+    through the tool and outlive whichever backend prompted it.
+
+    This queries a stack THIS TOOL CREATED, running the image it names by default,
+    reached through the runtime rather than over the network (023's two-address
+    lesson). The coupling is to our own artifact, which we already build, probe
+    and tear down — 023's ingest health check queries exactly this way for exactly
+    this reason. An interpreter pointed at an arbitrary `otlp_endpoint` would have
+    to learn that backend's API, which is the coupling 017 refuses, and is why a
+    tool-managed stack is a PREREQUISITE for an interpreter rather than an option.
+
+    NONE IS NOT EMPTY. A stack that cannot be reached and a stack with nothing to
+    say are different facts, and the caller must be able to tell them apart —
+    FR-013 makes reporting the difference a requirement, because inferring
+    "nothing happened" from "I could not look" is the false green this project
+    keeps finding.
+    """
+    r = query(
+        driver_runtime_argv(host_rec)
+        + [
+            "exec", cname, "curl", "-sG", "-m", "10",
+            f"http://localhost:{STACK_LOKI_PORT}/loki/api/v1/query_range",
+            "--data-urlencode", f"query={selector}",
+            "--data-urlencode", f"limit={limit}",
+        ]
+    )  # fmt: skip
+    if r.returncode != 0:
+        return None
+    try:
+        payload = json.loads(r.stdout)
+    except ValueError, TypeError:
+        # Unparseable is UNREACHABLE, not empty. A truncated or error body must
+        # not read as "the stack holds nothing".
+        return None
+    result = payload.get("data", {}).get("result")
+    if not isinstance(result, list):
+        return None
+    out: list[dict] = []
+    for stream in result:
+        labels = stream.get("stream") or {}
+        for entry in stream.get("values") or []:
+            # Loki returns [timestamp_ns, line]; anything else is a shape this
+            # build does not understand, and 016's rule is to refuse rather than
+            # misread.
+            if not isinstance(entry, list) or len(entry) != 2:
+                continue
+            out.append({"at": entry[0], "line": entry[1], "labels": labels})
+    out.sort(key=operator.itemgetter("at"))
+    return out
+
+
 def stack_storage_warning(name: str, verdict: str) -> None:
     """Say what a non-`stored` verdict MEANS, since nothing else will.
 

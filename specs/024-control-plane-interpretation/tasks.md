@@ -98,7 +98,7 @@ US5 and US6; US2 needs only the writer; US4 needs only the role.
       signal; an undeclared attribute produces a warning at read time, as 016 warns for unknown
       record fields. **(FR-010)** Include the guard that log export does not change what a record
       is: a record keeps 016's closed field set, and no log field may be folded into it.
-- [ ] T007 Implement the stack read helper in `bin/agent-container` using the `curl` +
+- [X] T007 Implement the stack read helper in `bin/agent-container` using the `curl` +
       `/loki/api/v1/query_range` idiom that 023's `stack_storage_probe` already uses. **Record in a
       comment why this is permitted here and forbidden in `reconcile`**: the tool queries a stack it
       created, never an operator's own collector (research R3, 017's vendor-coupling refusal).
