@@ -2,6 +2,61 @@
 
 <!-- version list -->
 
+## v0.58.0 (2026-09-14)
+
+### Bug Fixes
+
+- **024**: Act on the review — four defects, and two claims that were false
+  ([`8cee042`](https://github.com/ondrasek/agent-container/commit/8cee04235551414d28be667cdeccf11c51f3eb6a))
+
+- **024**: Excluding the task no longer leaks it through the log stream
+  ([`3d4adb8`](https://github.com/ondrasek/agent-container/commit/3d4adb8329fbe6901d589a122db5eaa49c8645f7))
+
+- **024**: Make the log cap bound DISK, not only what is exported
+  ([`5e69cb7`](https://github.com/ondrasek/agent-container/commit/5e69cb7791082e4f95d663627f5d1ae99dcaf957))
+
+- **024**: Second review round — and retract a fix that fixed nothing
+  ([`70f761d`](https://github.com/ondrasek/agent-container/commit/70f761df61231d927658322b9465b46356eede00))
+
+- **024**: The large-backlog test only ran on macOS
+  ([`e2f185e`](https://github.com/ondrasek/agent-container/commit/e2f185e7ad98704b456563e46022575ad7b8cffc))
+
+- **024**: Third review round — bounded posts, honest claims, and a self-inflicted trap
+  ([`d23224c`](https://github.com/ondrasek/agent-container/commit/d23224c3b695734cce5bd6e7e59b403a575701a4))
+
+- **entrypoint**: Host metrics have never worked; the sampler died on tick one
+  ([`6238820`](https://github.com/ondrasek/agent-container/commit/62388201e23496358d658a048d9695913cf33cf2))
+
+### Code Style
+
+- **024**: Formatting the previous commit should have carried
+  ([`c84c792`](https://github.com/ondrasek/agent-container/commit/c84c7925c6197cf06da82099094b0367929f845e))
+
+### Documentation
+
+- **024**: Document the agent output stream as a third payload class
+  ([`c636387`](https://github.com/ondrasek/agent-container/commit/c636387fa677c3fd4bd9df1d5331fc55d27055d9))
+
+- **024**: Record where the implementation actually stands
+  ([`11b9676`](https://github.com/ondrasek/agent-container/commit/11b9676ee91f2873bdc41d1656ba74461e31bd52))
+
+### Features
+
+- **024**: Read back out of the stack, with unreachable distinct from empty
+  ([`93e964d`](https://github.com/ondrasek/agent-container/commit/93e964d7951d005950bf723c2eca8fe277c513d6))
+
+- **024**: The interpret command group, and a guard that proves it cannot act
+  ([`70df4e0`](https://github.com/ondrasek/agent-container/commit/70df4e04cff6bb3bd2f2418a1f7a0b3958dd420d))
+
+### Testing
+
+- **024**: Pin kill-switch coverage and the channel-id validation
+  ([`c211d50`](https://github.com/ondrasek/agent-container/commit/c211d5055cb104c289e0ac654754ddf2be012105))
+
+- **024**: Widen the acceptance guard on the inventory's field set
+  ([`f40eb39`](https://github.com/ondrasek/agent-container/commit/f40eb394de87bb3d059e23d34858f44cc5fead58))
+
+
 ## v0.57.0 (2026-09-14)
 
 ### Chores
