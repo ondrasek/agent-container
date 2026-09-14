@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.59.0 (2026-09-14)
+
+### Features
+
+- **024**: Digest, silence, the ledger, and the interpret command surface
+  ([`9214672`](https://github.com/ondrasek/agent-container/commit/9214672e66866fe54d51c34c2eac53ba3cc9586d))
+
+- **024**: The interpreter's decision logic, and it resists its own inputs
+  ([`382e199`](https://github.com/ondrasek/agent-container/commit/382e1992bcb7ebbd7d05fc20da51f4ede0cf4109))
+
+- **024**: The Slack edge and the delivery loop
+  ([`af01a6d`](https://github.com/ondrasek/agent-container/commit/af01a6dd37f8f1cead0d207cf5f090e5be8d083b))
+
+
 ## v0.58.0 (2026-09-14)
 
 ### Bug Fixes
