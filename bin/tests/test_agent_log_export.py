@@ -160,3 +160,79 @@ def test_export_off_changes_NOTHING_about_how_the_agent_is_invoked():
     assert src.count('"${cmd[@]}" <&0') == 2, (
         "expected exactly two invocations — the teed one and the untouched original"
     )
+
+
+def test_the_export_path_has_NO_PER_AGENT_BRANCH(monkeypatch):
+    """FR-025a. The output stream is treated identically for every supported
+    agent, and that is a property of the code's SHAPE, not of a behaviour a test
+    can provoke for four agents in a tier that takes an hour.
+
+    The alternative the operator rejected — reading each agent's native session
+    data — would have meant four formats to track, each free to change under us.
+    This asserts the narrow reading stayed narrow: the exporter never asks which
+    agent it is exporting for, so no agent can break it by changing its own
+    output conventions, and no agent can be accidentally privileged.
+    """
+    src = _ENTRYPOINT.read_text()
+    i = src.index("agent_log_payload() {")
+    j = src.index("host_metrics_export_once() {")
+    block = src[i:j]
+    # WORD BOUNDARIES, not substrings. The first version of this test asserted
+    # `"pi" not in block` and failed on `pipefail` — an assertion that fires on
+    # text having nothing to do with the property is one that gets deleted rather
+    # than fixed, taking the property with it.
+    for agent in ("claude", "codex", "opencode", "pi"):
+        hit = re.search(rf"\b{agent}\b", block)
+        assert hit is None, (
+            f"the log export path names the agent '{agent}' at offset {hit.start()} "
+            f"— the stream must be the same for every agent, or the AGENTS list "
+            f"stops being the whole of the agent-specific surface"
+        )
+    # The agent's NAME rides along as an attribute, which is the opposite of
+    # branching on it: the far end can filter, the exporter stays uniform.
+    assert "AGENT_CONTAINER_AGENT" in block
+
+
+def test_the_payload_is_COMPACT_because_the_guard_matches_a_literal_prefix():
+    """THE BUG THIS TEST EXISTS FOR, and it shipped past every other test here.
+
+    `agent_log_export_once` validates what it is about to POST by matching the
+    literal prefix `{"resourceLogs"` — the same shape check `host_metrics_export_once`
+    makes, and for the same reason: a jq COMPILE ERROR would otherwise be posted as
+    if it were a log body.
+
+    jq pretty-prints by default. Without `-c` the document begins `{\\n  "resourceLogs"`,
+    the guard rejects every payload as malformed, and because export is fail-open the
+    only symptom is a run that exports records and no logs. Every test above passed
+    throughout, because they parse the JSON — which is valid either way — and none of
+    them exercised the guard that consumes it.
+
+    So this asserts the property the GUARD needs, not the property a parser needs.
+    """
+    script = (
+        "set -uo pipefail\n"
+        "log() { :; }\n"
+        "AGENT_CONTAINER_NAME=demo\nRUNS_ID=r1\n"
+        + _extract("agent_log_payload")
+        + "printf 'hello\\n' | agent_log_payload stdout 1\n"
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-500:]
+    out = r.stdout
+    assert out.startswith('{"resourceLogs"'), (
+        "the payload is not compact, so the shape guard in agent_log_export_once "
+        f"will discard it and nothing will ever be exported. Got: {out[:60]!r}"
+    )
+    assert out.count("\n") <= 1, "a multi-line payload means jq -c was dropped"
+
+
+def test_every_jq_in_the_export_path_is_COMPACT():
+    """The prefix guard is used by more than one exporter in this file, so the
+    property belongs to the file rather than to one function."""
+    src = _ENTRYPOINT.read_text()
+    i = src.index("agent_log_payload() {")
+    j = src.index("host_metrics_export_once() {")
+    for line in src[i:j].splitlines():
+        stripped = line.strip()
+        if stripped.startswith("jq ") and not stripped.startswith("jq -c"):
+            raise AssertionError(f"non-compact jq in the export path: {stripped!r}")

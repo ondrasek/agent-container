@@ -1367,7 +1367,16 @@ agent_log_payload() {
     local stream="$1" seq="$2" now
     now="$(date +%s%N 2>/dev/null)"
     case "${now}" in *[!0-9]*|"") now="$(( $(date +%s) * 1000000000 ))" ;; esac
-    jq -Rs --arg env "${AGENT_CONTAINER_NAME:-unknown}" \
+    # `-c` IS LOAD-BEARING, not a formatting preference. jq PRETTY-PRINTS by
+    # default, so the document begins `{\n  "resourceLogs"` — and the shape check
+    # in agent_log_export_once matches the literal prefix `{"resourceLogs"`. Without
+    # `-c` every payload this function builds is discarded by that guard as
+    # malformed, and because export is fail-open the result is a run that exports
+    # records and no logs, with one WARNING line in an entrypoint log nobody reads.
+    # Measured: the acceptance test failed with zero log signals at the collector
+    # while every unit test passed, because the unit tests parse the JSON (which is
+    # valid either way) and never exercised the guard that consumes it.
+    jq -cRs --arg env "${AGENT_CONTAINER_NAME:-unknown}" \
            --arg agent "${AGENT_CONTAINER_AGENT:-unknown}" \
            --arg mode "${AGENT_CONTAINER_MODE:-unknown}" \
            --arg run "${RUNS_ID:-}" \
@@ -1426,6 +1435,42 @@ agent_log_export_once() {
     printf '%s' "${size}" > "${state}" 2>/dev/null || true
 }
 
+agent_log_export_flush() {
+    # THE FINAL DRAIN, and without it this whole feature loses exactly the runs it
+    # is most often asked about.
+    #
+    # Measured by the acceptance test that was written to prove the happy path: a
+    # headless run that prints one line and exits is GONE before the exporter's
+    # first timed pass. The exporter samples on an interval; the container's life
+    # was shorter than the interval. Everything it had buffered died with the
+    # container, and the failure was silent in the way this project keeps finding
+    # — export is fail-open, so a run with no exported output is indistinguishable
+    # from an agent that printed nothing.
+    #
+    # Short runs are not an edge case here. They are the common case for headless
+    # work, and the run that exits in two seconds because it failed immediately is
+    # precisely the one an operator wants the output of.
+    local endpoint="$1" settle=0 prev=-1 size
+    [[ -n "${AGENT_LOG_BUF_DIR:-}" && -d "${AGENT_LOG_BUF_DIR}" ]] || return 0
+    # Let `tee` finish. The agent has exited, so both tees see EOF and drain
+    # promptly — but "promptly" is not "already", and reading a buffer mid-write
+    # would ship a truncated final line. Bounded at ~2s: this is a teardown path
+    # and a flush that could hang would hold the container open, which is the one
+    # thing a log exporter must never do.
+    while [[ "${settle}" -lt 20 ]]; do
+        size=$(( $(wc -c < "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || echo 0)
+                + $(wc -c < "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || echo 0) ))
+        [[ "${size}" -eq "${prev}" ]] && break
+        prev="${size}"
+        settle=$(( settle + 1 ))
+        sleep 0.1
+    done
+    agent_log_export_once "${endpoint}" stdout \
+        "${AGENT_LOG_BUF_DIR}/stdout" "${AGENT_LOG_BUF_DIR}/stdout.off"
+    agent_log_export_once "${endpoint}" stderr \
+        "${AGENT_LOG_BUF_DIR}/stderr" "${AGENT_LOG_BUF_DIR}/stderr.off"
+}
+
 agent_log_export_start() {
     # Starts the exporter and prepares the buffers the agent's output is teed
     # into. Called beside host_metrics_start, from the one block that knows the
@@ -1450,8 +1495,18 @@ agent_log_export_start() {
     : > "${AGENT_LOG_BUF_DIR}/stdout" 2>/dev/null || true
     : > "${AGENT_LOG_BUF_DIR}/stderr" 2>/dev/null || true
     export AGENT_LOG_BUF_DIR
+    # Exported so the teardown paths can flush without recomputing it: the block
+    # that knows `_otlp_base` unsets it a few lines below, and a second derivation
+    # is a second thing that can drift.
+    AGENT_LOG_ENDPOINT="${endpoint}"
+    export AGENT_LOG_ENDPOINT
     (
-        local capped=0 total
+        # NOT `local`: this is a SUBSHELL, not a function, and bash rejects
+        # `local` outside a function with "can only be used in a function". Under
+        # `set -e` that killed the exporter at birth — every run exported nothing,
+        # and because export is fail-open the failure looked exactly like an agent
+        # that printed nothing. Caught by the acceptance test, not by review.
+        capped=0
         while :; do
             agent_log_export_once "${endpoint}" stdout \
                 "${AGENT_LOG_BUF_DIR}/stdout" "${AGENT_LOG_BUF_DIR}/stdout.off"
@@ -2440,6 +2495,11 @@ headless_shutdown() {
         wait "${AGENT_PID}"
         rc=$?
     fi
+    # Feature 024: a STOPPED run is one of the cases the trail exists for (016
+    # completes its record as `stopped` right here), so its output matters as much
+    # as a clean exit's — arguably more, since nobody watched it. Within the
+    # runtime's grace period, same as everything else in this handler.
+    agent_log_export_flush "${AGENT_LOG_ENDPOINT:-}" || true
     exit "${rc}"
 }
 
@@ -2616,6 +2676,10 @@ run_headless_agent() {
     # so their session record is shipped here. Never allowed to change `rc` —
     # the container must still exit with the AGENT's status (004 FR-002).
     ship_agent_session "${a}" || true
+    # Feature 024: the agent's buffered output, drained BEFORE the exit. Never
+    # allowed to change `rc` — the container must still exit with the AGENT's
+    # status (004 FR-002), which is the same rule ship_agent_session follows.
+    agent_log_export_flush "${AGENT_LOG_ENDPOINT:-}" || true
     exit "${rc}"
 }
 

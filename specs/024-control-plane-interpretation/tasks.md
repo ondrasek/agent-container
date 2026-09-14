@@ -134,9 +134,9 @@ the output lines are present and in order; destroy the container; assert they ar
 - [X] T017 [P] [US2] Shell-suite coverage in `bin/tests/test_entrypoint.sh`: correlation by
       `run_id`, stdout/stderr kept distinct, sequence monotonic, cap reached produces exactly one
       marker, and a dead endpoint leaves the run completely unaffected.
-- [ ] T018 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: logs queryable in the stack
+- [X] T018 [P] [US2] Acceptance test in `bin/tests/test_acceptance.py`: logs queryable in the stack
       after `down --purge` destroys the container (SC-003).
-- [ ] T018a [P] [US2] **(FR-025a)** Parameterise a log-export test over the `AGENTS` tuple, so the
+- [X] T018a [P] [US2] **(FR-025a)** Parameterise a log-export test over the `AGENTS` tuple, so the
       stream is proven identical for every supported agent and the test **fails on an agent it has
       no expectation for** — the idiom 017's agent census already uses. This is what keeps a
       per-agent format from creeping in later.

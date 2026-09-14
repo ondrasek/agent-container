@@ -8555,3 +8555,126 @@ def test_a_stack_that_accepts_without_storing_is_reported_as_degraded(acc):
         assert "does not STORE" in out, f"the state is reported but not explained:\n{out[-1200:]}"
     finally:
         _stack_teardown(acc, name)
+
+
+# --- Feature 024 US2: the agent's OUTPUT reaches the trail -------------------
+
+
+def _run_printing(acc, name: str, *, task: str, prints: str) -> None:
+    """A headless run whose TASK and whose OUTPUT are different strings.
+
+    `_exporting_headless_run` passes one marker as both, which is right for the
+    tests it was written for and useless here: this feature is about the output
+    specifically, and a marker that is also in the record's `task` field cannot
+    tell "the agent's output was exported" from "the task text was". The first
+    version of these tests used that helper and passed for the wrong reason in
+    one direction and failed for the wrong reason in the other.
+    """
+    ws = _fake_agent(acc, name, f"echo {prints}; exit 0")
+    acc.up(
+        name,
+        mode="headless",
+        agent="claude",
+        task=task,
+        workspace="bind",
+        workspace_dir=ws,
+        env_extra=[_FAKE_AGENT_PATH],
+        foreground=True,
+        wait=False,
+    )
+
+
+def test_agent_output_reaches_the_collector_and_OUTLIVES_the_container(acc):
+    """T018 / SC-003. The property 016 deliberately did not provide.
+
+    016 was explicit that a record is NOT the logs, because the two have opposite
+    lifetimes: the record outlives the container and the logs do not. `runs show`
+    could therefore only point at `agent-container logs`, a command that stops
+    working the moment the thing it needs is gone. This asserts the new half —
+    the output is at the collector, and DESTROYING THE CONTAINER does not take it.
+    """
+    marker = "LOGMARKER-4c8e-printed-by-the-agent"
+    with _collector("accept", 9541) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9541))
+        _run_printing(acc, "explog", task="TASK-4c8e-unrelated", prints=marker)
+        # Not `_wait_until`: when this fails, "timed out" is the least useful thing
+        # it could say. What settles the question is whether ANYTHING arrived — a
+        # collector holding run records but no log signal is a wiring bug, and one
+        # holding nothing at all is a reachability problem somewhere else entirely.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if log.exists() and marker in log.read_text(errors="replace"):
+                break
+            time.sleep(0.4)
+        else:
+            got = log.read_text(errors="replace") if log.exists() else "<no collector file>"
+            pytest.fail(
+                f"the agent's output ({marker}) never reached the collector.\n"
+                f"signals that DID arrive: "
+                f"{sorted(set(re.findall(r'agent_container.signal[^,]*?stringValue.:.([a-z]+)', got)))}\n"
+                f"last 2000 bytes:\n{got[-2000:]}"
+            )
+        body = log.read_text(errors="replace")
+        # It must arrive AS A LOG SIGNAL, not smuggled into a run record — FR-010
+        # keeps the record's field set closed, and a consumer separates the three
+        # payload classes by this attribute.
+        assert "agent_container.signal" in body and '"log"' in body, (
+            "the output arrived without the signal attribute that distinguishes it "
+            f"from a record:\n{body[-1200:]}"
+        )
+        # And it must correlate, or it is an unjoinable pile of text.
+        assert "agent_container.run_id" in body, (
+            "agent output exported without a run_id, so it cannot be matched to the "
+            "run that produced it"
+        )
+        before = log.read_bytes()
+        # THE POINT OF THE FEATURE. Destroy the container AND its volumes.
+        acc.cli(["down", "explog", "--purge", "-y"], timeout=300)
+        time.sleep(2)
+        after = log.read_bytes()
+    assert marker in after.decode(errors="replace"), (
+        "the agent's output did not survive the container it was printed in — which "
+        "is the entire reason this export exists"
+    )
+    assert after.startswith(before), "the collector lost log records across the teardown"
+
+
+def test_the_log_switch_removes_the_output_in_BOTH_positions(acc):
+    """FR-007c, the shape the task-text test already uses: a switch verified in
+    one position may not be wired at all.
+
+    The second half matters more here than it does for the task text. An operator
+    who sets `export_agent_logs: false` is saying "do not send everything my agent
+    prints to my collector" — and if that is unwired, what leaves is far wider
+    than the one field they were thinking about.
+    """
+    marker = "LOGMARKER-a71f-should-not-leave"
+    with _collector("accept", 9542) as log:
+        _settings(acc, otlp_endpoint=_collector_url(9542), export_agent_logs=True)
+        _run_printing(acc, "explogon", task="TASK-a71f-unrelated", prints=marker)
+        _wait_until(
+            lambda: log.exists() and marker in log.read_text(errors="replace"),
+            "the agent's output at the collector with export on",
+        )
+
+    with _collector("accept", 9543) as log2:
+        _settings(acc, otlp_endpoint=_collector_url(9543), export_agent_logs=False)
+        _run_printing(acc, "explogoff", task="TASK-a71f-unrelated", prints=marker)
+        # Wait for the RECORD, so the absence below is "the run exported and the
+        # logs were excluded" rather than "nothing exported yet".
+        _wait_until(
+            lambda: log2.exists() and log2.stat().st_size > 0, "a run record at the collector"
+        )
+        time.sleep(3)
+        body = log2.read_text(errors="replace")
+    assert marker not in body, (
+        "export_agent_logs: false did not stop the agent's output leaving — an "
+        "operator who set it believes everything their agent prints stays local"
+    )
+    # The RECORD still exports. The switch is about one payload class, not about
+    # turning telemetry off, and collapsing the two would make the narrow control
+    # a blunt one.
+    assert "agent_container.run_id" in body, (
+        "excluding agent logs also stopped run records exporting — that is a "
+        "different switch and a different decision"
+    )
