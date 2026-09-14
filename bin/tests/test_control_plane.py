@@ -2379,14 +2379,41 @@ def test_an_interpreter_with_no_scope_SAYS_SO(wiz, capsys):
     assert "no scope declared" in out
 
 
+def _interp(wiz, **kw):
+    """A valid interpreter spec. The channel options are REQUIRED, so every test
+    that is about something else still has to supply them."""
+    return wiz.ExecSpec(
+        role=wiz.ROLE_INTERPRETER, slack_conversation="C1", declared_sender="U1", **kw
+    )
+
+
 def test_an_interpreter_REFUSES_headless(wiz):
     """It is a long-lived reader; a headless run ends when its agent does."""
     with pytest.raises(wiz.Fatal, match="long-lived reader"):
-        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, mode="headless").validate()
+        _interp(wiz, mode="headless").validate()
+
+
+def test_an_interpreter_REQUIRES_a_conversation_and_a_declared_sender(wiz):
+    """FR-023. The declared sender is the ADMIT SET for an inbound path into
+    something that can see the whole fleet — the channel's equivalent of sshd's
+    `authorized_keys`. There is no value for it that is safe to default, so it is
+    refused rather than defaulted."""
+    with pytest.raises(wiz.Fatal, match="requires --slack-conversation"):
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, declared_sender="U1").validate()
+    with pytest.raises(wiz.Fatal, match="requires --declared-sender"):
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, slack_conversation="C1").validate()
+
+
+def test_the_interpreter_flags_are_REFUSED_on_other_roles(wiz):
+    """A flag that is silently inert is worse than one that is refused: the
+    operator believes they configured something."""
+    for kw in ({"watch": ["vps1"]}, {"slack_conversation": "C1"}, {"declared_sender": "U1"}):
+        with pytest.raises(wiz.Fatal, match="only meaningful for --role interpreter"):
+            wiz.ExecSpec(role=wiz.ROLE_AGENT, **kw).validate()
 
 
 def test_an_interpreter_ACCEPTS_every_supported_agent(wiz):
     """FR-003: none is privileged by the design. Unlike a control plane, which has
     no agent installed at all, an interpreter IS an agent."""
     for agent in wiz.AGENTS:
-        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, agent=agent).validate()
+        _interp(wiz, agent=agent).validate()
