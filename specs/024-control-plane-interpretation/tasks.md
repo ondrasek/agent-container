@@ -17,8 +17,10 @@ other way.
 
 ## Implementation status (2026-09-14)
 
-**All 72 tasks complete.** Quality gate green; the feature's acceptance tests pass under docker; the
-full tier runs in CI on both runtimes.
+**All 72 tasks complete, and CI is GREEN ON BOTH RUNTIMES** at `215562b` — quality gate, pytest,
+build, acceptance (docker) and acceptance (podman). The podman leg is the one that matters: it is
+where this project's runtime-specific defects surface, and the last feature's only escaped bug was
+podman-only.
 
 **What was verified, and what was not.** Everything the tool decides is tested: the notification
 policy, the interpretation shape, evidence binding, input-health precedence, injection resistance,
@@ -368,7 +370,7 @@ change** as the behaviour; stale docs are defects.
       authority absence as the mitigation that makes the rest tolerable.
 - [X] T060 [P] Update `CLAUDE.md` only if an invariant changed — and if it did, prune first: the
       file measures 1999 tokens against its own 2000-token cap. Measure with a tokenizer.
-- [ ] T061 Run the full gate unpiped (`./scripts/quality-gate.sh`; read its exit code) and the
+- [X] T061 Run the full gate unpiped (`./scripts/quality-gate.sh`; read its exit code) and the
       acceptance tier under **both** runtimes. The podman/docker split is where this project's
       runtime-specific defects surface.
 
