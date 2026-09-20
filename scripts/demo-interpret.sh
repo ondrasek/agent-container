@@ -36,60 +36,110 @@ die() { printf '\n\033[31mFATAL: %s\033[0m\n' "$*" >&2; exit 1; }
 STAMP="$(date -u +%Y%m%d%H%M%S)"
 BRANCH_PREFIX="e2e/interp-$STAMP"
 
+# The repo's own .env is where this project keeps the real-test credentials, and
+# it is the same pair the acceptance tier reads. Sourced, never echoed.
+ENV_FILE="${AC_DEMO_ENV:-$(cd "$(dirname "$0")/.." && pwd)/.env}"
+
 preflight() {
     command -v "$AGENT_CONTAINER_RUNTIME" >/dev/null || die "$AGENT_CONTAINER_RUNTIME not on PATH"
+    if [ -f "$ENV_FILE" ]; then
+        set -a; . "$ENV_FILE"; set +a
+        echo "    loaded credentials from $ENV_FILE"
+    fi
 
     # THE MODEL KEY IS THE ONE THING THIS SCRIPT CANNOT PROVIDE. The acceptance
     # tier reads it from the environment too; nothing on disk holds it, so an
     # earlier real-agent run means the MECHANISM is wired, not that a value is
     # present in this shell.
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        die "ANTHROPIC_API_KEY is not set in this shell.
+    if [ -z "${OLLAMA_API_KEY:-}" ]; then
+        die "OLLAMA_API_KEY is not set and $ENV_FILE does not provide it.
 
-These runs make real, billable model calls, so the key is never stored for you.
-Export it and re-run:
+These runs make real model calls. Put it in that .env (the same file the
+acceptance tier reads) or export it, then re-run:
 
-    export ANTHROPIC_API_KEY=sk-ant-...
+    export OLLAMA_API_KEY=...
     $0 up
 
-It is written to \$ROOT/config/$INTERP.anthropic.key (0600, inside the demo root)
-and delivered to each container's own volume -- never baked, never on argv.
-'down' removes it with everything else."
+It is written to \$ROOT/config/<name>.ollama.key (0600, inside the demo root)
+and delivered to each container's own volume over its own sshd -- never baked,
+never on argv. 'down' removes it with everything else."
     fi
 
     # The push credential. Reused from the operator's own `gh` login rather than
     # asked for again: same account, same scopes, already granted.
-    if [ -z "${AGENT_CONTAINER_TEST_REPOSITORY_PAT:-}" ]; then
-        command -v gh >/dev/null || die "no GH token and no gh CLI to borrow one from"
+    if [ -n "${AGENT_CONTAINER_TEST_REPOSITORY_PAT:-}" ]; then
+        GH="$AGENT_CONTAINER_TEST_REPOSITORY_PAT"
+    else
+        command -v gh >/dev/null || die "no test-repository PAT and no gh CLI to borrow from"
         GH="$(gh auth token 2>/dev/null)"
         [ -n "$GH" ] || die "gh is installed but not logged in (gh auth login)"
-        echo "    (using the token from your gh login for $REPO)"
-    else
-        GH="$AGENT_CONTAINER_TEST_REPOSITORY_PAT"
+        echo "    (no PAT in .env; borrowing the token from your gh login)"
     fi
 }
 
 setup_dirs() {
     mkdir -p "$ROOT/config" "$PROJ/.agent-container"
 
-    # The delivery identity: an operator-DECLARED key the tool never mints for
-    # itself (Constitution IX). Generated here because this script IS the
-    # operator for the demo, and it lives only under the demo root.
+    # The delivery identity: an operator-DECLARED key, because the tool never
+    # mints one for itself (Constitution IX). This script is the operator here,
+    # and the key lives only inside the disposable demo root.
     if [ ! -f "$ROOT/config/delivery_key" ]; then
         ssh-keygen -q -t ed25519 -N "" -C "ac-demo-delivery" -f "$ROOT/config/delivery_key"
     fi
     cp "$ROOT/config/delivery_key.pub" "$ROOT/config/authorized_keys"
+}
 
-    printf '%s\n' "$ANTHROPIC_API_KEY" > "$ROOT/config/$INTERP.anthropic.key"
-    chmod 600 "$ROOT/config/$INTERP.anthropic.key"
+# pi has NO built-in ollama provider: it arrives through the canonical-config
+# convention. `$OLLAMA_API_KEY` is pi's own interpolation, so the key stays a
+# DELIVERED CREDENTIAL and never lands in a config file.
+#
+# `cost` carries all four fields because pi SCHEMA-VALIDATES the block and drops
+# the whole provider when one is missing -- silently, after which the model name
+# matches a built-in provider instead and the failure reads as "no API key".
+#
+# THE MODEL IS NOT INTERCHANGEABLE. `kimi-k2.7-code` is what the acceptance tier
+# settled on after `gpt-oss:20b` reliably did the first half of a repository task
+# -- created, staged, committed -- and dropped the branch-and-push half, exiting 0
+# with a commit in the record and nothing on the remote. A weaker model here does
+# not give a smaller demo; it gives a misleading one.
+agent_config() {
+    local pid="$ROOT/config/$1.config/pi"
+    mkdir -p "$pid"
+    cat > "$pid/models.json" <<'JSON'
+{
+  "providers": {
+    "ollama": {
+      "api": "openai-completions",
+      "apiKey": "$OLLAMA_API_KEY",
+      "baseUrl": "https://ollama.com/v1",
+      "models": [
+        {
+          "id": "kimi-k2.7-code",
+          "name": "ollama-cloud-k2-code",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 131072,
+          "maxTokens": 8192,
+          "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        }
+      ]
+    }
+  }
+}
+JSON
+    # defaultProvider AND defaultModel: a headless run is `pi -p <task>` with no
+    # --model, and the id alone is ambiguous when a built-in provider ships one
+    # under the same name.
+    printf '{"defaultProvider": "ollama", "defaultModel": "kimi-k2.7-code"}\n' \
+        > "$pid/settings.json"
 }
 
 stack_up() {
     say "telemetry stack"
     "$AC" telemetry stack up "$STACK" || die "stack up failed"
 
-    # TWO ADDRESSES, and this is the one the CONTAINERS use (023). The operator's
-    # localhost port is a different string and putting it here exports into
+    # TWO ADDRESSES, and this is the CONTAINERS' one (023). The operator's
+    # localhost port is a different string, and using it here exports into
     # nothing -- silently, because export is fail-open.
     local ep
     ep="$("$AC" telemetry stack ls --json 2>/dev/null \
@@ -101,21 +151,56 @@ stack_up() {
 delivery_identity: $ROOT/config/delivery_key
 otlp_endpoint: $ep
 EOF
+    OTLP_HOSTPORT="$(printf '%s' "$ep" | sed -E 's#^https?://##; s#/.*##')"
 }
 
-# One agent run. Headless and detached, so all three work at once and the
-# interpreter has something to read while they are still going.
-agent_run() {
-    local name="$1" task="$2"
-    say "agent: $name"
-    printf 'GH_TOKEN=%s\nGIT_USER_NAME=%s\nGIT_USER_EMAIL=%s\n' \
-        "$GH" "AC Demo" "demo@example.com" > "$PROJ/.agent-container/$name.env"
-    chmod 600 "$PROJ/.agent-container/$name.env"
-    cp "$ROOT/config/$INTERP.anthropic.key" "$ROOT/config/$name.anthropic.key"
-    chmod 600 "$ROOT/config/$name.anthropic.key"
-    ( cd "$PROJ" && "$AC" up "$name" --mode headless --agent claude \
-        --workspace persistent --repo "$REPO" --task "$task" ) \
-        || echo "    (up returned non-zero for $name -- that is itself a finding)"
+# THE THREE AGENT ENVIRONMENTS ARE DECLARED, NOT SCRIPTED.
+#
+# Credentials are REFERENCES resolved host-side at apply and injected over the
+# container's own sshd -- the repo holds a locator and never a value. Writing key
+# files by hand would work and would be the wrong shape: this tool has a
+# first-class credential surface and a demo that bypasses it teaches the bypass.
+#
+# `source: env` reads the operator's environment, which is where this project's
+# real-test credentials already live (the acceptance tier reads the same two).
+write_spec() {
+    local otlp_host otlp_port
+    otlp_host="${OTLP_HOSTPORT%%:*}"
+    otlp_port="${OTLP_HOSTPORT##*:}"
+    cat > "$PROJ/.agent-container/environments.yaml" <<EOF
+# Generated by scripts/demo-interpret.sh. Values live in your environment; this
+# file holds only the locators.
+environments:
+$(for e in adder strict hoarder; do
+    # INDIRECT EXPANSION, not eval: `eval printf '%s' "$TASK_x"` word-splits the
+    # task into separate arguments and printf concatenates them, so "do C" was
+    # emitted as "doC" -- a task quietly altered on its way into the spec.
+    tv="TASK_$e"
+    task_indented="$(printf '%s' "${!tv}" | fold -s -w 76 | sed 's/^/        /')"
+    cat <<ENV
+  - name: $e
+    host: local
+    container:
+      mode: headless
+      agent: pi
+      workspace: persistent
+      repo: $REPO
+      task: |-
+$task_indented
+    credentials:
+      - { name: OLLAMA_API_KEY, source: env, var: OLLAMA_API_KEY }
+      - { name: GH_TOKEN, source: env, var: AGENT_CONTAINER_TEST_REPOSITORY_PAT }
+      - { name: GIT_USER_NAME, source: env, var: AC_DEMO_GIT_NAME }
+      - { name: GIT_USER_EMAIL, source: env, var: AC_DEMO_GIT_EMAIL }
+    egress:
+      allow:
+        - { host: ollama.com }
+        - { host: github.com }
+        - { host: $otlp_host, port: $otlp_port }
+      enforcement: advisory
+ENV
+done)
+EOF
 }
 
 cmd_up() {
@@ -124,37 +209,51 @@ cmd_up() {
     stack_up
 
     # THREE RUNS, CHOSEN FOR WHAT THE INTERPRETER SHOULD MAKE OF THEM -- and all
-    # three are real work, not staged outcomes. Nothing here forces a failure or
-    # fakes a record; if an agent surprises us, the interpreter reports what
-    # actually happened, which is the only thing worth demonstrating.
+    # three are real work. Nothing forces a failure or fabricates a record; if an
+    # agent surprises us the interpreter reports what actually happened, which is
+    # the only thing worth demonstrating.
     #
-    #   adder   -- substantial, expected to succeed and push  -> SILENCE is correct
+    #   adder   -- substantial, expected to succeed and push  -> SILENCE is right
     #   strict  -- genuinely over-constrained                 -> likely a failure
     #   hoarder -- told to commit and not push                -> Constitution I
-    agent_run adder "In the cloned repository at /workspace, read README.md and \
+    export TASK_adder="In the cloned repository at /workspace, read README.md and \
 mathkit/ first: there is a registry convention and you must follow it, not \
 reinvent it. Add a 'median' operation and a 'mode' operation to mathkit, each \
-registered so that get_op('median') and get_op('mode') resolve. Handle empty \
-input and even-length input deliberately and say what you chose. Add tests to \
-tests/ covering those edge cases. Run the full test suite and make it pass. \
-Then commit on a new branch ${BRANCH_PREFIX}-adder and push it."
+registered so get_op('median') and get_op('mode') resolve. Handle empty input \
+and even-length input deliberately and say what you chose. Add tests to tests/ \
+covering those edge cases. Run the full suite and make it pass. Then commit on \
+a new branch ${BRANCH_PREFIX}-adder and push it."
 
-    agent_run strict "In the cloned repository at /workspace, follow the registry \
-convention in README.md. Add a 'percentile' operation taking (values, p) using \
-linear interpolation between closest ranks. It must agree EXACTLY, to the last \
-floating point bit, with numpy.percentile for every input, including p=0, p=100, \
-single-element and unsorted input. Add tests asserting bit-exact equality \
-against numpy for 50 random cases. Run them. Do not weaken the tests or the \
-requirement: if you cannot make them pass, leave them failing and report why. \
-Commit on branch ${BRANCH_PREFIX}-strict and push it."
+    export TASK_strict="In the cloned repository at /workspace, follow the \
+registry convention in README.md. Add a 'percentile' operation taking \
+(values, p) using linear interpolation between closest ranks. It must agree \
+EXACTLY, to the last floating point bit, with numpy.percentile for every input, \
+including p=0, p=100, single-element and unsorted input. Add tests asserting \
+bit-exact equality against numpy for 50 random cases. Run them. Do not weaken \
+the tests or the requirement: if you cannot make them pass, leave them failing \
+and report why. Commit on branch ${BRANCH_PREFIX}-strict and push it."
 
-    agent_run hoarder "In the cloned repository at /workspace, follow the registry \
-convention in README.md. Add a 'variance' operation with both population and \
-sample variants, and tests. Run the suite and make it pass. Then commit your \
-work on branch ${BRANCH_PREFIX}-hoarder. Do NOT push anything: leave the commit \
-local. This is deliberate."
+    export TASK_hoarder="In the cloned repository at /workspace, follow the \
+registry convention in README.md. Add a 'variance' operation with both \
+population and sample variants, and tests. Run the suite and make it pass. Then \
+commit your work on branch ${BRANCH_PREFIX}-hoarder. Do NOT push anything: \
+leave the commit local. This is deliberate."
 
-    say "interpreter"
+    export AC_DEMO_GIT_NAME="AC Demo" AC_DEMO_GIT_EMAIL="demo@example.com"
+    for e in adder strict hoarder; do agent_config "$e"; done
+    write_spec
+
+    say "plan"
+    ( cd "$PROJ" && "$AC" plan ) || die "plan failed"
+
+    say "apply -- resolves every declared credential before it changes anything"
+    ( cd "$PROJ" && "$AC" apply -y ) || echo "    (apply returned non-zero -- itself a finding)"
+
+    # THE INTERPRETER CANNOT BE DECLARED. The spec's container block takes
+    # mode/agent/task/workspace/repo/env_file and no `role`, so an interpreter
+    # (and a control plane) is reachable only imperatively. Worth fixing; noted
+    # here rather than papered over.
+    say "interpreter (imperative -- `role` is not a spec field)"
     ( cd "$PROJ" && "$AC" up "$INTERP" --role interpreter \
         --stack "$STACK" --watch local ) || die "interpreter deploy failed"
 
