@@ -20235,6 +20235,13 @@ def interpreter_facts(name: str, entry: dict, host_name: str, host_rec: dict) ->
             "run_id": rec.get("run_id"),
         }
         for rec in stored_records_for_scope(entry.get("watched_scope") or [])
+        # AN INTERPRETER DOES NOT REPORT ON ITSELF. Its own interactive session
+        # restarts whenever it is redeployed, and four "watcher: stopped" lines
+        # crowd out the one run the operator asked about — measured in the demo.
+        # Same idiom as `panic` from inside a control plane excluding itself
+        # (017): the observer is not part of what it observes. Excluded BY NAME,
+        # which is exact here because the environment name is the interpreter's.
+        if rec.get("environment") != name
     ]
     return {
         "interpreter": name,

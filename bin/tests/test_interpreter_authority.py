@@ -609,3 +609,21 @@ def test_a_stack_that_accepts_and_discards_is_degraded_not_healthy(wiz, monkeypa
 
     assert facts["input_health"]["degraded"] is True
     assert any("not storing them" in p for p in facts["input_health"]["problems"])
+
+
+def test_an_interpreter_does_not_report_on_its_own_environment(wiz, monkeypatch):
+    """Its own session restarts on every redeploy, and those lines crowd out the
+    runs the operator asked about — four of them, in the live demo, above the one
+    that mattered. 017's `panic` excludes itself from inside for the same reason:
+    the observer is not part of what it observes."""
+    recs = [
+        {"host": "local", "environment": "watcher", "outcome": "stopped"},
+        {"host": "local", "environment": "smoke", "outcome": "failed"},
+    ]
+    monkeypatch.setattr(wiz, "stack_query_lines", lambda *a, **k: [])
+    monkeypatch.setattr(wiz, "stack_storage_probe", lambda *a, **k: wiz.STACK_STORED)
+    monkeypatch.setattr(wiz, "stored_records_for_scope", lambda scope: recs)
+
+    facts = wiz.interpreter_facts("watcher", {"stack": "obs"}, "local", {})
+
+    assert [r["environment"] for r in facts["runs"]] == ["smoke"]

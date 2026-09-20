@@ -599,6 +599,28 @@ _ACTION_RE = re.compile(
 )
 
 
+# THE ACTION WORDS ARE ALSO THIS DOMAIN'S NOUNS, which is not a detail: "run",
+# "task" and "deploy" name the very things an operator asks about. Matching the
+# bare verb refused "what happened with the smoke run?" and "how are the runs
+# going?" — the two most natural questions this feature exists to answer.
+#
+# A determiner (or an interrogative) in front means the word is being used as a
+# noun. Up to two words may sit between, for "the smoke run" and "the adder run".
+_NOUN_USE_RE = re.compile(
+    r"(?i)\b(the|a|an|this|that|these|those|my|our|its|their|each|every|any|last|"
+    r"next|first|latest|which|what|whose)\s+(?:\w+\s+){0,2}"
+    r"(runs?|tasks?|deploys?|restarts?|removals?)\b"
+)
+_PLURAL_NOUN_RE = re.compile(r"(?i)\b(runs|tasks|deploys|restarts)\b")
+
+# An opening interrogative means a question was asked, whatever verbs follow:
+# "when did the deploy start?" is not an instruction to start anything.
+_QUESTION_RE = re.compile(
+    r"(?i)^\s*(what|which|whose|how|when|where|why|who|did|does|do|is|are|was|"
+    r"were|has|have|had|any|anything|status|tell me|show me)\b"
+)
+
+
 def is_action_request(text: str) -> bool:
     """Whether an operator is asking it to DO something rather than say something.
 
@@ -606,8 +628,20 @@ def is_action_request(text: str) -> bool:
     not what makes it safe — the absence of any credential is — but an operator
     who asks and gets silence learns nothing, and one who gets a vague "I can't"
     learns less than one who is told where to go.
+
+    THE TIE-BREAK GOES TO ANSWERING, and that is the opposite of what a security
+    filter would do, because this is not one. A missed match costs nothing: there
+    is no credential and no runtime client here, so an "action" this fails to
+    spot still cannot happen. A FALSE match costs the operator the answer they
+    asked for, from the only thing watching their fleet. Only one of those two
+    errors has a victim.
     """
-    return bool(_ACTION_RE.search(text or ""))
+    t = text or ""
+    probe = _NOUN_USE_RE.sub(" ", t)
+    probe = _PLURAL_NOUN_RE.sub(" ", probe)
+    if not _ACTION_RE.search(probe):
+        return False
+    return not _QUESTION_RE.match(t)
 
 
 def handle_message(

@@ -871,3 +871,54 @@ def test_main_answers_ask_and_refuses_everything_else(b, capsys):
     assert capsys.readouterr().out.strip() != ""
     with pytest.raises(SystemExit):
         b.main([])
+
+
+# --- the action words are also this domain's nouns --------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what happened with the smoke run?",
+        "how are the runs going?",
+        "which run failed?",
+        "what was the task?",
+        "when did the deploy start?",
+        "show me the last run",
+        "did anything fail, and why?",
+    ],
+)
+def test_a_question_ABOUT_runs_is_answered_not_refused(b, text):
+    """FR-022 must not eat the questions this feature exists to answer.
+
+    "run", "task" and "deploy" are action verbs AND the names of the things an
+    operator asks about, and the first version matched the bare word: asking
+    "what happened with the smoke run?" got the cannot-act refusal. Measured
+    against a live interpreter, not imagined.
+    """
+    assert b.is_action_request(text) is False, f"refused a status question: {text!r}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "stop demo",
+        "stop the strict run",
+        "can you restart the adder run?",
+        "please destroy everything",
+        "redeploy watcher",
+        "kill it",
+    ],
+)
+def test_an_actual_instruction_is_still_refused(b, text):
+    """The other side of the same seam. Loosening the detector until it never
+    fires would be a quieter way of deleting it."""
+    assert b.is_action_request(text) is True, f"missed an action request: {text!r}"
+
+
+def test_the_tie_break_favours_ANSWERING_and_the_reason_is_asymmetric(b):
+    """A missed match costs nothing — there is no credential and no runtime
+    client here, so an unspotted "action" still cannot happen. A false match
+    costs the operator the answer. Only one of those errors has a victim, and
+    this pins which way the ambiguity resolves."""
+    assert b.is_action_request("why don't you stop worrying about the run?") is False
