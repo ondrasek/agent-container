@@ -26,6 +26,7 @@ environments:
       workspace: persistent    # persistent | bind | ephemeral
       repo: https://github.com/you/acme   # optional clone-on-start
       env_file: ./acme.env     # non-secret env (relative to the project root)
+      role: agent              # agent (default) | control-plane | interpreter
     credentials:               # references, never values (US2 — see Roadmap)
       - { name: ANTHROPIC_API_KEY, source: env, var: ANTHROPIC_API_KEY }
     egress:                    # where this environment may go (Feature 012)
@@ -46,6 +47,42 @@ Parsed with **`yaml.safe_load`** (never `yaml.load` — an untrusted `!!python/.
 tag can never construct an object or run code). The spec is **validated before any
 action**: on a bad field the tool refuses and names the offending file + field,
 making no partial change. Unknown keys and out-of-range enums are errors.
+
+### Roles, and the one that declares more
+
+`container.role` takes `agent` (the default — every spec written before this field existed means
+exactly this), `control-plane` (017) or `interpreter` (024).
+
+An **interpreter** declares what it watches and how it speaks in its own `interpreter:` block —
+separate from `container:` because these say what it *reads* and *speaks on*, not how a container
+runs. `watch` beside `workspace` would read as a property of every environment.
+
+```yaml
+environments:
+  - name: watcher
+    host: local
+    container:
+      role: interpreter
+    interpreter:
+      stack: obs               # REQUIRED — the tool-managed stack it reads
+      watch: [local, vps1/demo]  # hosts, or host/environment. A SNAPSHOT at deploy
+      channel: cli             # cli (default) | slack
+```
+
+Everything `up --role interpreter` refuses is refused here **in the same words**: no `stack`, no
+deployment; `channel: slack` without both `slack_conversation` and `declared_sender`, no
+deployment. A declarative path that validates more loosely than the imperative one is how a spec
+becomes the way to obtain a deployment the tool would otherwise decline — the surface splits, and
+the weaker half wins.
+
+An `interpreter:` block on an environment that is not one is **refused, not ignored**. Ignoring it
+leaves an operator believing their fleet is watched by something that is not watching it.
+
+`role` participates in **drift**: an environment redeclared from `interpreter` to `agent` is one
+that *gained* an agent and a credential path, and reporting that as `matching` would hide a
+privilege change behind an unchanged name. A container deployed before roles existed carries no
+role and compares as `agent` — the default it was deployed under — so it does not report drift on
+a field nobody touched.
 
 ## The verbs (active only inside a project)
 

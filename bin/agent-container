@@ -18076,10 +18076,14 @@ def validate_environment(env: object, where: str) -> None:
     _enum_field(container, "mode", EXEC_MODES, where)
     _enum_field(container, "agent", AGENTS, where)
     _enum_field(container, "workspace", WORKSPACE_MODES, where)
-    allowed_c = {"mode", "agent", "task", "workspace", "workspace_dir", "repo", "env_file"}
+    _enum_field(container, "role", ROLES, where)
+    allowed_c = {
+        "mode", "agent", "task", "workspace", "workspace_dir", "repo", "env_file", "role",
+    }  # fmt: skip
     for k in container:
         if k not in allowed_c:
             die(f"{where}: unknown container key {k!r}")
+    validate_interpreter_block(env, container.get("role") or ROLE_AGENT, where)
     creds = env.get("credentials") or []
     if not isinstance(creds, list):
         die(f"{where}: 'credentials' must be a list")
@@ -18088,8 +18092,55 @@ def validate_environment(env: object, where: str) -> None:
     if "egress" in env:
         validate_egress(env.get("egress"), where)
     for k in env:
-        if k not in {"name", "host", "container", "credentials", "egress"}:
+        if k not in {"name", "host", "container", "credentials", "egress", "interpreter"}:
             die(f"{where}: unknown key {k!r}")
+
+
+def validate_interpreter_block(env: dict, role: str, where: str) -> None:
+    """The `interpreter:` mapping — declarable only by an environment that IS one.
+
+    A SEPARATE BLOCK, not five more container keys, because these describe what an
+    interpreter WATCHES and SPEAKS ON rather than how a container runs. Putting
+    `watch` beside `workspace` would read as a property of every environment, and
+    the first question a reader asks of a spec is which fields apply to them.
+
+    Everything `up --role interpreter` refuses is refused here in the same words.
+    A declarative path that validates more loosely than the imperative one is how
+    a spec becomes the way to get a deployment the tool would not otherwise
+    allow — the surface splits, and the weaker half wins.
+    """
+    block = env.get("interpreter")
+    if block is None:
+        if role == ROLE_INTERPRETER:
+            die(
+                f"{where}: role 'interpreter' requires an 'interpreter:' block "
+                f"naming at least the telemetry stack it reads",
+                remedy="interpreter:\n      stack: <name>\n      watch: [<host>]",
+            )
+        return
+    if role != ROLE_INTERPRETER:
+        # REFUSED, not ignored. A watch list that silently does nothing is a
+        # reader believing their fleet is being read when nothing is reading it.
+        die(f"{where}: 'interpreter:' is only valid with container.role: interpreter")
+    if not isinstance(block, dict):
+        die(f"{where}: 'interpreter' must be a mapping")
+    for k in block:
+        if k not in {"stack", "watch", "channel", "slack_conversation", "declared_sender"}:
+            die(f"{where}: unknown interpreter key {k!r}")
+    if not block.get("stack") or not isinstance(block.get("stack"), str):
+        die(f"{where}: interpreter.stack is required (the stack it reads the trail from)")
+    watch = block.get("watch") or []
+    if not isinstance(watch, list) or any(not isinstance(w, str) for w in watch):
+        die(f"{where}: interpreter.watch must be a list of host or host/environment names")
+    _enum_field(block, "channel", INTERPRETER_CHANNELS, where)
+    channel = block.get("channel") or ExecSpec.channel
+    if channel in INTERPRETER_CHANNELS_LEAVING_TRUST_DOMAIN:
+        # No default admits everyone: this is the inbound path to something that
+        # can see the whole fleet (FR-023), and a spec is exactly where an absent
+        # field gets read as "fine".
+        for required in ("slack_conversation", "declared_sender"):
+            if not block.get(required):
+                die(f"{where}: interpreter.{required} is required on the '{channel}' channel")
 
 
 def load_project_spec(root: Path, skip_unknown: bool = False) -> list[dict]:
@@ -18208,8 +18259,9 @@ def ensure_provisioned_host(host_name: str, table: dict) -> dict:
 
 
 def env_exec_spec(env: dict) -> ExecSpec:
-    """Map a declared `container` block to the 004 ExecSpec."""
+    """Map a declared `container` block (and `interpreter` block) to the ExecSpec."""
     c = env.get("container") or {}
+    i = env.get("interpreter") or {}
     return ExecSpec(
         # ExecSpec OWNS these defaults; the reader must not restate them. Two
         # copies of "the default mode is interactive" drift the moment one is
@@ -18221,6 +18273,15 @@ def env_exec_spec(env: dict) -> ExecSpec:
         repo=c.get("repo"),
         workspace=c.get("workspace") or ExecSpec.workspace,
         workspace_dir=c.get("workspace_dir"),
+        role=c.get("role") or ExecSpec.role,
+        # The interpreter fields ride the same ExecSpec the imperative path
+        # builds, so both routes converge before anything is validated or
+        # deployed and neither can grow a behaviour the other lacks.
+        stack=i.get("stack"),
+        watch=list(i.get("watch") or []),
+        channel=i.get("channel") or ExecSpec.channel,
+        slack_conversation=i.get("slack_conversation"),
+        declared_sender=i.get("declared_sender"),
     )
 
 
@@ -18380,6 +18441,7 @@ def env_desired_config(spec: ExecSpec, egress: object = None) -> dict[str, str |
         "agent": spec.agent,
         "repo": spec.repo if (spec.repo and spec.workspace != "bind") else None,
         "egress": egress_config_token(egress),
+        "role": spec.role,
     }
 
 
@@ -18396,9 +18458,20 @@ def config_drift(
     ...              {"mode": "interactive", "agent": "claude", "repo": None})
     [('mode', 'headless', 'interactive'), ('agent', 'codex', 'claude')]
     """
+    # ROLE IS DRIFTABLE, and it is the field where drift matters most: an
+    # environment redeclared from interpreter to agent is one that GAINED an
+    # agent and a credential path, and reporting that as "matching" would hide a
+    # privilege change behind an unchanged name.
+    #
+    # A container deployed before roles existed carries no AGENT_CONTAINER_ROLE,
+    # and absent means `agent` — the default it was deployed under. Without this
+    # every pre-024 container reports drift on a field nobody changed, and a
+    # status that cries drift is one an operator stops reading.
+    live = live | {"role": live.get("role") or ROLE_AGENT}
+    desired = desired | {"role": desired.get("role") or ROLE_AGENT}
     return [
         (field, desired.get(field), live.get(field))
-        for field in ("mode", "agent", "repo", "egress")
+        for field in ("mode", "agent", "repo", "egress", "role")
         if desired.get(field) != live.get(field)
     ]
 

@@ -25,6 +25,23 @@ agent-container up watcher --role interpreter --stack obs --watch vps1 \
     --channel slack --slack-conversation C0123456789 --declared-sender U0987654321
 ```
 
+Or declare it, which is the same deployment by the other route:
+
+```yaml
+# .agent-container/environments.yaml
+environments:
+  - name: watcher
+    host: local
+    container: { role: interpreter }
+    interpreter:
+      stack: obs
+      watch: [local]
+```
+
+```sh
+agent-container apply
+```
+
 ## Read this before you deploy one
 
 It is **not** a 017 control plane, and the difference is the point.
