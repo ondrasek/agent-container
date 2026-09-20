@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.61.2 (2026-09-20)
+
+### Testing
+
+- **024**: Check in the text an interpreter actually sends
+  ([`b1a96b2`](https://github.com/ondrasek/agent-container/commit/b1a96b2a2e59862e1ab28eb6459b87ee3ebeb006))
+
+
 ## v0.61.1 (2026-09-20)
 
 ### Bug Fixes
