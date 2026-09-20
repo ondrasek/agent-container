@@ -939,10 +939,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) >= 2 and args[0] == "--ask":
-        # Facts come from the loop's own view when it is running; a cold `--ask`
-        # answers from what it can see and SAYS it could see nothing, rather than
-        # inventing calm. FR-013's rule holds on every path that speaks.
-        facts = _collect_facts()
+        # FACTS ARRIVE ON STDIN, FROM THE CALLER THAT COULD GATHER THEM.
+        #
+        # This container holds no container runtime client (FR-020) and a
+        # telemetry stack does not publish its query API, so there is no route
+        # from in here to the trail — by construction, twice over. The CLI has
+        # both and passes what it read; interpreting it is still done here, which
+        # is the half that needs the agent.
+        facts = _facts_from_stdin() or _collect_facts()
         print(answer_question(" ".join(args[1:]), facts))
         return 0
     raise SystemExit(
@@ -951,18 +955,54 @@ def main(argv: list[str] | None = None) -> int:
     )
 
 
-def _collect_facts() -> dict:  # pragma: no cover - exercised by acceptance
-    """What this container can see right now.
+def _facts_from_stdin() -> dict | None:
+    """Facts the caller gathered, or None when nobody supplied any.
 
-    Deliberately minimal and deliberately HONEST about being minimal: a cold
-    invocation has no loop state, so it reports an empty view rather than an
-    untroubled one. "I have nothing in view" and "nothing is wrong" are different
-    answers and only one of them is true here.
+    None and an empty view are kept apart all the way down: "nobody told me" is
+    not "there is nothing", and collapsing them here would reinstate the false
+    green at the last step, after every layer below took care to avoid it.
+    """
+    import json
+    import sys
+
+    # EVERY step here is guarded, because a channel that cannot read its facts
+    # must degrade to "I was told nothing" and never to a traceback: `--ask` is
+    # the CLI channel's whole inbound half, and a crash there is indistinguishable
+    # to the operator from an interpreter that is down.
+    #
+    # Single-name `except` clauses on purpose — the repo formatter rewrites the
+    # tuple form to PEP 758, which the image's Python 3.11 cannot parse.
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        raw = sys.stdin.read().strip()
+    except OSError:
+        return None
+    except ValueError:
+        return None
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _collect_facts() -> dict:  # pragma: no cover - exercised by acceptance
+    """The fallback when no facts were supplied — an ADMISSION, not a view.
+
+    An earlier version of this claimed `stack_reachable=True` while never having
+    looked, which is precisely the false green 023 exists to kill: an answer that
+    sounds informed because nothing contradicted it. Nothing had been asked.
     """
     return {
         "interpreter": __import__("os").environ.get("AGENT_CONTAINER_NAME", "interpreter"),
         "input_health": input_health(
-            stack_reachable=True, ingest="yes", unreachable_hosts=[], missing_logs=0
+            stack_reachable=False,
+            ingest="unknown",
+            unreachable_hosts=[],
+            missing_logs=0,
         ),
         "runs": [],
     }

@@ -525,3 +525,67 @@ def test_a_channel_that_cannot_authenticate_its_sender_is_NOT_BINDABLE(wiz):
     assert wiz.INTERPRETER_CHANNELS[0] == "cli"
     with pytest.raises(wiz.Fatal, match="--channel must be one of"):
         wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", channel="email").validate()
+
+
+# ---------------------------------------------------------------------------
+# FR-013 on the `interpret ask` path: the facts the CLI gathers for the container
+# ---------------------------------------------------------------------------
+#
+# WHY THIS PATH EXISTS AT ALL, since it looks like a layering violation until you
+# try to remove it: the interpreter holds no container runtime client (FR-020,
+# guarded above) and a telemetry stack publishes its UI and its OTLP ingest but
+# NOT its query API — so from inside that container there is no route to the
+# trail, by construction, twice over. The operator's machine has both. The CLI
+# therefore reads and the container interprets.
+#
+# The risk this creates is that the gathering half loses the honesty the
+# interpreting half was built around, since it is a different function in a
+# different process. These two tests pin exactly that seam.
+
+
+def test_facts_report_an_unreachable_stack_as_degraded_not_as_quiet(wiz, monkeypatch):
+    """An unreachable stack must reach the container as a PROBLEM, not as silence.
+
+    This is 023's false green one layer up, and it is the failure that would be
+    invisible: an empty `runs` list renders as "nothing is wrong" in a message
+    carrying a supervisor's credibility, and nothing downstream can tell it apart
+    from a genuinely quiet fleet unless this function says which one it saw.
+    """
+    monkeypatch.setattr(wiz, "stack_query_lines", lambda *a, **k: None)
+    monkeypatch.setattr(wiz, "stored_records_for_scope", lambda scope: [])
+
+    facts = wiz.interpreter_facts(
+        "watcher", {"stack": "obs", "watched_scope": ["vps1"]}, "vps1", {}
+    )
+
+    assert facts["input_health"]["degraded"] is True
+    assert any("could not be reached" in p for p in facts["input_health"]["problems"])
+
+
+def test_facts_from_a_reachable_stack_are_not_marked_degraded(wiz, monkeypatch):
+    """The other half of the same seam — otherwise "degraded" is a constant, and a
+    preamble that always fires is one the operator stops reading."""
+    monkeypatch.setattr(wiz, "stack_query_lines", lambda *a, **k: [])
+    monkeypatch.setattr(wiz, "stored_records_for_scope", lambda scope: [])
+
+    facts = wiz.interpreter_facts("watcher", {"stack": "obs"}, "vps1", {})
+
+    assert facts["input_health"]["degraded"] is False
+    assert facts["input_health"]["problems"] == []
+
+
+def test_an_interpreter_with_no_declared_scope_reads_everything_not_nothing(wiz, monkeypatch):
+    """An empty scope must not silently mean an empty view.
+
+    Deploying without `--watch` already prints that there will be nothing to
+    interpret; answering a direct question with silence on top of that is the same
+    warning delivered a second time, in a form indistinguishable from a healthy
+    fleet. Absent is not declared-empty (Constitution VIII).
+    """
+    rec = {"host": "vps1", "environment": "demo", "outcome": "failed", "exit_code": 1}
+    monkeypatch.setattr(wiz, "stored_record_paths", lambda *a, **k: [Path("r.json")])
+    monkeypatch.setattr(wiz, "read_stored_record", lambda p, kind="run record": rec)
+
+    assert len(wiz.stored_records_for_scope([])) == 1
+    assert len(wiz.stored_records_for_scope(["vps1"])) == 1
+    assert wiz.stored_records_for_scope(["other"]) == []

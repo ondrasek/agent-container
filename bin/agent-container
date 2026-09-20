@@ -5158,9 +5158,14 @@ def detect_runtime() -> str:
     return resolve_runtime_source()[0]
 
 
-def query(argv: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+def query(
+    argv: list[str], timeout: float | None = None, stdin_text: str | None = None
+) -> subprocess.CompletedProcess:
     vlog_argv(argv, "query")
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    # stdin_text carries BULK INPUT that must not go on argv — the interpreter's
+    # facts are the current caller. Constitution III's argv rule is about
+    # credentials, and none travel this way; the reason here is size and quoting.
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, input=stdin_text)
 
 
 def container_running(rt: str, cname: str) -> bool:
@@ -20053,10 +20058,24 @@ def interpret_show(
     log(
         "           (a SNAPSHOT taken at deploy; a host registered since is invisible until redeploy)"
     )
-    log(f"  speaks on: Slack conversation {match.get('channel')}")
+    # CHANNEL-AWARE, because the previous version printed "Slack conversation cli"
+    # for a CLI interpreter — the channel's name in the conversation's place, with
+    # "Slack" hardcoded. A status line that is wrong about the thing it is
+    # reporting is worse than one that omits it.
+    if match.get("conversation"):
+        log(f"  speaks on: {match.get('channel')}, conversation {match.get('conversation')}")
+    else:
+        log(f"  speaks on: {match.get('channel')} — read it with `agent-container interpret")
+        log(f'             notifications {name}`, ask with `interpret ask {name} "..."`')
     log(f"  authority: {match.get('authority')} — it cannot stop, start, redeploy, destroy,")
     log("             task or reconfigure anything, and holds nothing that could")
-    log(f"  answers:   only {match.get('declared_sender')} — no other sender is replied to")
+    # "only None" was the old output for a channel with no declared sender, which
+    # reads as a value rather than as its absence.
+    if match.get("declared_sender"):
+        log(f"  answers:   only {match.get('declared_sender')} — no other sender is replied to")
+    else:
+        log("  answers:   whoever can reach this container through your runtime — the")
+        log("             same boundary `stop`, `destroy` and `panic` already rest on")
 
 
 # The interpretation and bookkeeping signals, read back by run. The selector is
@@ -20171,6 +20190,85 @@ def interpret_notifications(
         log(f"{entry['at']}  {entry['line']}")
 
 
+def interpreter_facts(name: str, entry: dict, host_name: str, host_rec: dict) -> dict:
+    """What this interpreter can see, gathered from the operator's side.
+
+    INPUT HEALTH IS PART OF THE ANSWER, not a precondition for it (FR-013). A
+    stack that cannot be reached produces facts that SAY so, rather than an empty
+    view the container would render as "nothing is wrong" — which is the false
+    green 023 exists to kill, one layer up.
+    """
+    stack = entry.get("stack")
+    lines = None
+    if stack:
+        lines = stack_query_lines(
+            host_rec,
+            f"{STACK_CONTAINER_PREFIX}{stack}",
+            '{service_namespace="agent-container"}',
+            limit=200,
+        )
+    runs: list[dict] = [
+        {
+            "environment": rec.get("environment"),
+            "host": rec.get("host"),
+            "state": str(rec.get("outcome") or "running"),
+            "assessment": _run_assessment(rec),
+            "run_id": rec.get("run_id"),
+        }
+        for rec in stored_records_for_scope(entry.get("watched_scope") or [])
+    ]
+    return {
+        "interpreter": name,
+        "input_health": {
+            "degraded": lines is None,
+            "problems": (
+                [f"the telemetry stack '{stack}' on {host_name} could not be reached"]
+                if lines is None
+                else []
+            ),
+        },
+        "runs": runs,
+    }
+
+
+def _run_assessment(rec: dict) -> str:
+    """A factual one-liner. NOT a judgement — that is the agent's job, and 016 is
+    explicit that a record says what a run did and never what it should have."""
+    repo = rec.get("repository") or {}
+    bits = []
+    if rec.get("exit_code") is not None:
+        bits.append(f"exit {rec['exit_code']}")
+    if repo.get("commits"):
+        bits.append(f"{len(repo['commits'])} commit(s), pushed={repo.get('pushed')}")
+    if rec.get("task"):
+        bits.append(f"task: {rec['task']}")
+    return "; ".join(bits)
+
+
+def stored_records_for_scope(scope: list[str]) -> list[dict]:
+    """Run records for the hosts (and environments) an interpreter watches.
+
+    An EMPTY scope reads everything the operator has, rather than nothing: an
+    interpreter deployed without `--watch` is told at deploy that it will have
+    nothing to interpret, and answering a direct question with silence on top of
+    that would be a second, quieter way of saying the same thing.
+    """
+    out: list[dict] = []
+    for path in stored_record_paths(None, None):
+        rec = read_stored_record(path, kind="run record")
+        if rec is None:
+            continue
+        if not scope:
+            out.append(rec)
+            continue
+        for entry in scope:
+            host, _, env = entry.partition("/")
+            if rec.get("host") == host and (not env or rec.get("environment") == env):
+                out.append(rec)
+                break
+    return out
+
+
 @interpret_app.command("ask")
 def interpret_ask(
     name: str = typer.Argument(..., help="Interpreter name."),
@@ -20198,13 +20296,28 @@ def interpret_ask(
     match = next((e for e in interpreter_entries() if e.get("name") == name), None)
     if match is None:
         die(f"no active interpreter named '{name}'", remedy="agent-container interpret ls")
-    _, host_rec = resolve_deploy_host(match.get("host"))
+    host_name, host_rec = resolve_deploy_host(match.get("host"))
+    # THE FACTS ARE GATHERED HERE, NOT IN THE CONTAINER, and that is forced by
+    # FR-020 rather than chosen for convenience.
+    #
+    # The interpreter holds no container runtime client — that absence is the
+    # whole of its "cannot act" guarantee — so it cannot `exec` into the stack the
+    # way `stack_query_lines` does. And a telemetry stack publishes its UI and its
+    # OTLP ingest but NOT its query API, so there is no network path either. The
+    # operator's machine has both; the container has neither.
+    #
+    # So the CLI reads the trail and hands the container what it found. The
+    # container still does the interpreting, which is the part that needs the
+    # agent. See the note in docs/interpretation.md: the autonomous loop cannot
+    # use this route, because nobody is at the keyboard to run it.
+    facts = interpreter_facts(name, match, host_name, host_rec)
     r = query(
         driver_runtime_argv(host_rec)
         + [
-            "exec", container_name(name),
+            "exec", "-i", container_name(name),
             "python3", INTERPRETER_BRIDGE_PATH, "--ask", question,
-        ]
+        ],
+        stdin_text=json.dumps(facts),
     )  # fmt: skip
     if r.returncode != 0:
         die(

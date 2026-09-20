@@ -68,6 +68,21 @@ which is how an operator learns to skim the warning on the deploy where it *is*.
 should not have to accept a third party to use this feature. Everything below about *what* an
 interpreter decides applies to both; only the delivery differs.
 
+**Where the facts come from, and why it is not where you would put them.** The interpreter holds no
+container runtime client — that absence *is* its "cannot act" guarantee — and a telemetry stack
+publishes its UI and its OTLP ingest but **not Loki's query API**. So from inside that container
+there is no route to the trail, twice over and on purpose. Your machine has both. `interpret ask`
+therefore **reads the trail here and hands the container what it found**; the container still does
+the interpreting, which is the half that needs an agent.
+
+**This route needs someone at the keyboard, and the autonomous loop does not have one.** `interpret
+ask` works because you ran it. `interpret serve` — the loop that decides what is worth telling you
+without being asked — has no such caller, and today it cannot reach its own inputs. Closing that
+means either publishing the stack's query port to the interpreter (a change to 023's exposure
+surface, which is declared, not incidental) or giving the interpreter a credential-free read path of
+its own. **Neither is built.** `ask`, `notifications`, `history` and `show` are what works; treat
+unattended notification as unfinished rather than quiet.
+
 **How `cli` works.** Its outbound half is not a send at all — notifications are written to your
 telemetry stack as they are decided, which had to happen anyway so the "already reported" ledger
 survives a container that stops. `interpret notifications` reads them back. Its inbound half is
