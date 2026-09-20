@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.61.1 (2026-09-20)
+
+### Bug Fixes
+
+- **024**: Gather the interpreter's facts where the access is
+  ([`af188b0`](https://github.com/ondrasek/agent-container/commit/af188b06582fad7fc9c30c231a7c843b36182242))
+
+### Documentation
+
+- **025**: Record the open questions in the spec, not the checklist
+  ([`0eb0e91`](https://github.com/ondrasek/agent-container/commit/0eb0e9196f0237d12df4874d8bd427ffa43167f8))
+
+
 ## v0.61.0 (2026-09-20)
 
 ### Features
