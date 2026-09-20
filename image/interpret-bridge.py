@@ -222,6 +222,13 @@ def input_health(
         problems.append("the stack accepts records and is not storing them")
     elif ingest == "NO":
         problems.append("the stack is not accepting records")
+    elif ingest != "yes":
+        # UNKNOWN IS NOT FINE. These states arrive as a string from another
+        # process, and an unrecognised one — a typo, a newer producer, a value
+        # that changed case — previously fell through to "nothing is wrong",
+        # which is the one answer this function exists to prevent. Not knowing
+        # is reported as not knowing.
+        problems.append(f"the stack's ingest state is not one I recognise: {ingest!r}")
     if unreachable_hosts:
         problems.append(f"unreachable hosts: {', '.join(sorted(unreachable_hosts))}")
     if missing_logs:

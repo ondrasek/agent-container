@@ -566,6 +566,7 @@ def test_facts_from_a_reachable_stack_are_not_marked_degraded(wiz, monkeypatch):
     """The other half of the same seam — otherwise "degraded" is a constant, and a
     preamble that always fires is one the operator stops reading."""
     monkeypatch.setattr(wiz, "stack_query_lines", lambda *a, **k: [])
+    monkeypatch.setattr(wiz, "stack_storage_probe", lambda *a, **k: wiz.STACK_STORED)
     monkeypatch.setattr(wiz, "stored_records_for_scope", lambda scope: [])
 
     facts = wiz.interpreter_facts("watcher", {"stack": "obs"}, "vps1", {})
@@ -589,3 +590,22 @@ def test_an_interpreter_with_no_declared_scope_reads_everything_not_nothing(wiz,
     assert len(wiz.stored_records_for_scope([])) == 1
     assert len(wiz.stored_records_for_scope(["vps1"])) == 1
     assert wiz.stored_records_for_scope(["other"]) == []
+
+
+def test_a_stack_that_accepts_and_discards_is_degraded_not_healthy(wiz, monkeypatch):
+    """REACHABLE IS NOT HEALTHY, and this is the gap that shipped once.
+
+    A stack whose store is refusing writes answers every query successfully while
+    holding nothing — measured on a full disk, and the reason `telemetry stack ls`
+    grew three ingest states rather than two. An interpreter that stops at
+    reachable/unreachable reports confidently from an empty store, which is the
+    false green 023 exists to kill, arriving with a supervisor's credibility.
+    """
+    monkeypatch.setattr(wiz, "stack_query_lines", lambda *a, **k: [])
+    monkeypatch.setattr(wiz, "stack_storage_probe", lambda *a, **k: wiz.STACK_ACCEPTED_NOT_STORED)
+    monkeypatch.setattr(wiz, "stored_records_for_scope", lambda scope: [])
+
+    facts = wiz.interpreter_facts("watcher", {"stack": "obs"}, "vps1", {})
+
+    assert facts["input_health"]["degraded"] is True
+    assert any("not storing them" in p for p in facts["input_health"]["problems"])

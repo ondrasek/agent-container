@@ -20200,13 +20200,32 @@ def interpreter_facts(name: str, entry: dict, host_name: str, host_rec: dict) ->
     """
     stack = entry.get("stack")
     lines = None
+    problems: list[str] = []
     if stack:
+        cname = f"{STACK_CONTAINER_PREFIX}{stack}"
         lines = stack_query_lines(
-            host_rec,
-            f"{STACK_CONTAINER_PREFIX}{stack}",
-            '{service_namespace="agent-container"}',
-            limit=200,
+            host_rec, cname, '{service_namespace="agent-container"}', limit=200
         )
+        if lines is None:
+            problems.append(f"the telemetry stack '{stack}' on {host_name} could not be reached")
+        else:
+            # ACCEPTED IS NOT STORED, and reachable is not healthy.
+            #
+            # An earlier version of this function stopped at reachable/unreachable,
+            # which left the ONE failure this feature exists to catch reading as
+            # clean: a stack that answers every query successfully while holding
+            # nothing. `telemetry stack ls` has distinguished these three states
+            # since 023 — measured on a full disk — and an interpreter that does
+            # not is a supervisor confidently summarising an empty store.
+            #
+            # This costs a settle window on every `ask`. That is the trade, taken
+            # deliberately: a fast answer that cannot tell "quiet" from "losing
+            # everything" is the false green with a supervisor's credibility on it.
+            storage = stack_storage_probe(host_rec, cname, 4318, settle=4)
+            if storage == STACK_ACCEPTED_NOT_STORED:
+                problems.append(f"the stack '{stack}' accepts records and is not storing them")
+            elif storage == STACK_NOT_ACCEPTING:
+                problems.append(f"the stack '{stack}' is not accepting records")
     runs: list[dict] = [
         {
             "environment": rec.get("environment"),
@@ -20219,14 +20238,7 @@ def interpreter_facts(name: str, entry: dict, host_name: str, host_rec: dict) ->
     ]
     return {
         "interpreter": name,
-        "input_health": {
-            "degraded": lines is None,
-            "problems": (
-                [f"the telemetry stack '{stack}' on {host_name} could not be reached"]
-                if lines is None
-                else []
-            ),
-        },
+        "input_health": {"degraded": bool(problems), "problems": problems},
         "runs": runs,
     }
 
