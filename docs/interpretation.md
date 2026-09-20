@@ -9,8 +9,19 @@ An **interpreter** speaks first.
 
 ```sh
 agent-container telemetry stack up obs
-agent-container up watcher --role interpreter \
-    --stack obs --watch vps1 \
+agent-container up watcher --role interpreter --stack obs --watch vps1
+
+agent-container interpret notifications watcher     # what it decided
+agent-container interpret ask watcher "how is demo going?"
+```
+
+That is the whole setup. **No token, no account, no third party** — the default
+channel is `cli`, and nothing leaves your infrastructure.
+
+For a phone instead, opt into Slack:
+
+```sh
+agent-container up watcher --role interpreter --stack obs --watch vps1 \
     --channel slack --slack-conversation C0123456789 --declared-sender U0987654321
 ```
 
@@ -24,26 +35,60 @@ It is **not** a 017 control plane, and the difference is the point.
 | What it holds | a standing key that stops and destroys | a read path and a way to speak |
 | If it is deceived | an environment can be destroyed | you get a misleading message |
 
-`up --role interpreter` states five things before it creates anything — printed, not prompted,
-because `up` is a path an agent may drive and a prompt there is auto-answered, which reads as
-consent:
+`up --role interpreter` states what it will hold before it creates anything — printed, not
+prompted, because `up` is a path an agent may drive and a prompt there is auto-answered, which
+reads as consent.
+
+Two paragraphs are the same whichever channel you choose:
 
 1. **It CANNOT change anything.** Not a setting — structural. No container runtime client is
    installed in the agent image, so `detect_runtime()` cannot resolve and every management command
    refuses; and it is never given the control plane's standing key. This is 017's reason for giving
    that image *both* runtime clients, applied here in reverse and on purpose.
 2. **What it reads** — a snapshot of the scope, taken at deploy.
-3. **What it SENDS**, and this is the paragraph to read twice. See below.
-4. **What its token grants** — voice, not access.
-5. **That the Slack app must be a custom app.** See the rate-limit cliff below.
 
-## Your agents' task text and output leave your infrastructure
+The rest **belong to the channel, not to the role**. On `cli` you are told that nothing leaves your
+infrastructure and who it will answer. On `slack` you are told what it SENDS and to whom, what the
+token grants, and that the app must be a custom one.
+
+Reciting Slack's warnings for a CLI interpreter would describe an exposure that is not happening —
+which is how an operator learns to skim the warning on the deploy where it *is*.
+
+## Two channels, and the default is the smaller exposure
+
+| | **`cli`** (default) | `slack` |
+|---|---|---|
+| Needs | nothing | a custom app, a bot token, a workspace |
+| Reaches you | when you ask | on your phone |
+| Your task text and output | **stay put** | go to that workspace |
+| Who it answers | whoever can reach the container | a declared workspace member |
+| Inbound network path | none | none |
+
+**`cli` is the default because it is the smaller exposure.** An operator who does not need a phone
+should not have to accept a third party to use this feature. Everything below about *what* an
+interpreter decides applies to both; only the delivery differs.
+
+**How `cli` works.** Its outbound half is not a send at all — notifications are written to your
+telemetry stack as they are decided, which had to happen anyway so the "already reported" ledger
+survives a container that stops. `interpret notifications` reads them back. Its inbound half is
+`interpret ask`, which reaches the container through your runtime and prints the answer. A terminal
+has nowhere to push to, so a CLI channel pulls.
+
+**Who it answers, for `cli`.** Whoever can reach the container through your container runtime — the
+same boundary `stop`, `destroy` and `panic` already rest on. Not an anonymous path from anywhere:
+your machine talking to your container. The alternative is a third party deciding who you are.
+
+**`interpret notifications` works for a Slack interpreter too.** It shows what was *decided*,
+independently of whether the channel managed to carry it — which is the first thing you want when
+the channel is the thing you suspect.
+
+## With Slack: your agents' task text and output leave your infrastructure
 
 Every exposure this feature's ancestors created stayed on your own machines. 016 wrote task text to
 a `0600` file on your disk. 023 put it behind an unauthenticated UI on your own host, bounded by an
 exposure level you chose.
 
-**This sends task text and everything your agents print into a Slack workspace** — readable by
+**On the `slack` channel this sends task text and everything your agents print into a workspace** — readable by
 everyone in the bound conversation, by your workspace administrators, and under your workspace's
 retention policy. No exposure setting reaches that, because the boundary is somebody else's SaaS
 account.
@@ -144,6 +189,8 @@ a stranger that something is listening and tells them what.
 | `interpret ls` | interpreters, their scope, channel and authority |
 | `interpret show NAME` | one of them, including the sender it will answer |
 | `interpret history NAME [--run ID]` | what it concluded and why. **Unreachable is not empty** — a stack nobody could reach is reported as an unknown history, not an empty one |
+| `interpret notifications NAME` | what it decided was worth telling you, whichever channel it speaks on |
+| `interpret ask NAME "<question>"` | ask it, from here. No channel credentials involved |
 | `interpret test-channel NAME` | the binding, before you trust it overnight |
 | `interpret serve` | the loop. In-container only |
 

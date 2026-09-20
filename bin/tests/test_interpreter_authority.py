@@ -220,7 +220,8 @@ def test_the_kill_switch_SEES_an_interpreter(wiz, tmp_path, monkeypatch):
         role=wiz.ROLE_INTERPRETER,
         watched_scope=["vps1"],
         stack="obs",
-        channel="C0123456789",
+        channel="slack",
+        conversation="C0123456789",
         authority="observe",
     )
     assert entry["role"] == wiz.ROLE_INTERPRETER
@@ -307,7 +308,8 @@ def test_the_DECLARED_SENDER_is_recorded_not_merely_demanded(wiz):
         role=wiz.ROLE_INTERPRETER,
         watched_scope=["vps1"],
         stack="obs",
-        channel="C0123456789",
+        channel="slack",
+        conversation="C0123456789",
         declared_sender="U0987654321",
         authority="observe",
     )
@@ -518,12 +520,8 @@ def test_a_channel_that_cannot_authenticate_its_sender_is_NOT_BINDABLE(wiz):
     """FR-024b / SC-014. The declared sender is the admit set for an inbound path
     into something that can see the whole fleet; over a channel that cannot say
     who sent a message, that admit set controls nothing."""
-    assert wiz.INTERPRETER_CHANNELS == ("slack",)
+    assert wiz.INTERPRETER_CHANNELS == ("cli", "slack")
+    # `cli` first because it is the default and the smaller exposure.
+    assert wiz.INTERPRETER_CHANNELS[0] == "cli"
     with pytest.raises(wiz.Fatal, match="--channel must be one of"):
-        wiz.ExecSpec(
-            role=wiz.ROLE_INTERPRETER,
-            stack="obs",
-            channel="email",
-            slack_conversation="C1",
-            declared_sender="U1",
-        ).validate()
+        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", channel="email").validate()

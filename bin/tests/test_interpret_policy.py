@@ -810,3 +810,64 @@ def test_ten_successful_runs_produce_ZERO_interruptions_and_ONE_digest(b):
     )  # fmt: skip
     assert text.count("\n") == 10, "the digest is not one message naming all ten"
     assert text.startswith("[watcher] digest — 10 event(s):")
+
+
+# --- the CLI channel: no third party, no token, no account ------------------
+
+
+def test_the_cli_channel_sends_NOTHING_anywhere(b):
+    """Its outbound half is not a send. The durable copy is the notification
+    signal written to the stack — which FR-012b required anyway so the ledger
+    survives a container that stops — and the CLI reads it back."""
+    ch = b.CliChannel()
+    assert ch.name == "cli"
+    assert ch.post("hello") is True
+    assert ch.sent == ["hello"]
+    # Nothing to poll: a question arrives as a process, not as a message waiting
+    # somewhere, so there is no inbox and no window to lose one in.
+    assert ch.poll(None) == []
+
+
+def test_asking_routes_through_THE_SAME_answering_path_as_slack(b):
+    """A second answering path would be a second place for "ground every claim in
+    a run id" to stop being true."""
+    facts = {
+        "interpreter": "watcher",
+        "input_health": b.input_health(
+            stack_reachable=True, ingest="yes", unreachable_hosts=[], missing_logs=0
+        ),
+        "runs": [
+            {
+                "environment": "demo",
+                "host": "vps1",
+                "state": "running",
+                "assessment": "tests failing on auth",
+                "run_id": "20260918T101010Z-ab12",
+            }
+        ],
+    }
+    out = b.answer_question("how is demo going?", facts)
+    assert "20260918T101010Z-ab12" in out
+    assert "demo" in out
+
+
+def test_asking_an_ACTION_still_gets_the_refusal(b):
+    """The CLI channel does not widen what an interpreter may do. The refusal is
+    structural — it holds nothing that could act — and routing `ask` through the
+    same handler keeps that true by construction rather than by a second check."""
+    out = b.answer_question("stop demo", {"interpreter": "w"})
+    assert "cannot change anything" in out
+
+
+def test_a_COLD_ask_says_it_has_nothing_in_view_rather_than_implying_calm(b):
+    """ "I have nothing in view" and "nothing is wrong" are different answers, and
+    a cold invocation with no loop state can only honestly give the first."""
+    out = b.answer_question("anything wrong?", {"interpreter": "w", "runs": []})
+    assert "no runs in view" in out
+
+
+def test_main_answers_ask_and_refuses_everything_else(b, capsys):
+    assert b.main(["--ask", "how", "is", "demo"]) == 0
+    assert capsys.readouterr().out.strip() != ""
+    with pytest.raises(SystemExit):
+        b.main([])

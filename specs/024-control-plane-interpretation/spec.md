@@ -468,13 +468,29 @@ silence; assert the failure is reported then, marked as held.
   no default that admits anyone. A message from any other sender MUST be refused unanswered and the
   refusal recorded with the sender's channel identity. A channel that cannot authenticate its sender
   MUST NOT be bindable.
-- **FR-024**: The channel MUST be **Slack**, connected **outbound** — the interpreter opens the
-  connection and no port is opened on it or published for it, so the channel adds no inbound network
-  surface to the host. The sender MUST be identified as a Slack workspace member, and that identity
-  is what FR-023's declared sender is expressed in.
-- **FR-024a**: Before an interpreter is created, the tool MUST state that agent **task text** and
-  agent **output** will be visible to everyone who can read the bound conversation and to the
-  workspace's administrators, and will be held under the workspace's retention policy. This is the
+- **FR-024**: The channel MUST be one of a NAMED set. Two ship: **`cli`** (the default) and
+  **`slack`**. Both are outbound or local — the interpreter opens every connection it makes, and no
+  port is opened on it or published for it, so no channel adds inbound network surface to the host.
+  For `slack` the sender is a workspace member, and that identity is what FR-023's declared sender
+  is expressed in.
+- **FR-024-cli**: The **`cli`** channel MUST let an operator use an interpreter with **no
+  third-party service, no token and no account**. Its two directions are:
+  - **outbound** — notifications are written to the trail as they are decided (FR-012b already
+    requires this) and READ BACK on demand. A terminal has nowhere to push to, so a CLI channel
+    pulls; that is a query over something already durable, not a second delivery mechanism.
+  - **inbound** — a question is asked through the CLI and answered from the interpreter's own view.
+    FR-023's sender identity here is **reaching the container through the runtime**, the boundary
+    every other management command in this tool already rests on. It is not an anonymous path from
+    anywhere; it is the operator's own machine talking to their own container.
+
+  **It is the SMALLER exposure and is therefore the default.** FR-024a's disclosure does not apply
+  to it at all: nothing leaves the operator's trust domain, nobody else administers it, and no
+  retention policy but the stack's own governs it. An operator who does not need a phone should not
+  have to accept a third party to use this feature.
+- **FR-024a**: **When the bound channel carries content OUT of the operator's trust domain** —
+  `slack` does, `cli` does not — before an interpreter is created the tool MUST state that agent
+  **task text** and agent **output** will be visible to everyone who can read the bound conversation
+  and to that service's administrators, and will be held under its retention policy. This is the
   023/T15 exposure leaving the operator's trust domain, and like every other consequence in this
   tool it is stated before it applies rather than discovered after. Stated by printing, not by
   prompting, for 017's reason: a prompt on a path an agent may drive is auto-answered.
@@ -482,6 +498,10 @@ silence; assert the failure is reported then, marked as held.
   through the interpreter's behaviour, so a second channel can be added without restating what an
   interpreter does. Only channels that authenticate the sender (FR-023) are admissible; a channel
   that cannot MUST NOT be bindable, and email is named as the example that fails this test.
+- **FR-024d**: A channel's REQUIREMENTS MUST be the channel's own. `slack` requires a conversation
+  and a declared workspace member; `cli` requires neither and MUST NOT demand them. Requiring one
+  channel's fields for another is the inert-flag failure this spec refuses elsewhere — an operator
+  handed a Slack conversation id for a CLI interpreter has configured nothing.
 
 **Scope of what is read**
 

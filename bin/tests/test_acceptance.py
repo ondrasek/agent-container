@@ -4340,6 +4340,7 @@ def test_the_inventory_holds_no_free_text_field(acc):
         "watched_scope",
         "stack",
         "channel",
+        "conversation",
         "declared_sender",
         "authority",
         "notes",
@@ -4354,7 +4355,14 @@ def test_the_inventory_holds_no_free_text_field(acc):
     # An agent environment is not an interpreter, so these are ABSENT rather than
     # empty — "does not apply" and "nothing declared" are different facts, and a
     # reader that cannot tell them apart is the Constitution VIII failure.
-    for interpreter_only in ("watched_scope", "stack", "channel", "declared_sender", "authority"):
+    for interpreter_only in (
+        "watched_scope",
+        "stack",
+        "channel",
+        "conversation",
+        "declared_sender",
+        "authority",
+    ):
         assert entry[interpreter_only] is None, (
             f"{interpreter_only} is populated on an agent environment, where it has no meaning"
         )
@@ -8714,9 +8722,7 @@ def _interpreter_up(acc, name: str, **extra):
             "--env-file", str(env_file),
             "--role", "interpreter",
             "--stack", extra.pop("stack", "accinterpstack"),
-            "--channel", "slack",
-            "--slack-conversation", "C0123456789",
-            "--declared-sender", "U0987654321",
+            *extra.pop("channel_argv", ["--channel", "cli"]),
             *extra.pop("argv", []),
         ],
         timeout=600,
@@ -8738,11 +8744,12 @@ def test_an_interpreter_STATES_what_it_holds_before_anything_is_created(acc):
         # It leads with what it CANNOT do: an operator reading "an agent that
         # watches your fleet" assumes the 017 shape unless told otherwise.
         assert "CANNOT change anything" in out
-        assert out.index("CANNOT change anything") < out.index("TASK TEXT")
-        # The trust-domain crossing, in full.
-        assert "workspace administrators" in out and "leaves your own infrastructure" in out
-        # And the custom-app requirement, whose absence is undiagnosable later.
-        assert "CUSTOM app" in out
+        assert out.index("CANNOT change anything") < out.index("NOTHING LEAVES")
+        # On the DEFAULT channel the honest statement is the opposite one, and it
+        # is made rather than left as silence: an operator choosing between
+        # channels is choosing between exposures.
+        assert "NOTHING LEAVES your infrastructure" in out
+        assert "CUSTOM app" not in out, "the CLI statement recites Slack's paragraphs"
         if r.returncode != 0:
             # The PROPERTY UNDER TEST is the ORDER: the statement precedes
             # creation. The assertions above already proved it, and they proved it
@@ -8752,8 +8759,11 @@ def test_an_interpreter_STATES_what_it_holds_before_anything_is_created(acc):
             return
         entry = [e for e in _inventory(acc) if e["name"] == name][0]
         assert entry["role"] == "interpreter"
-        assert entry["channel"] == "C0123456789"
-        assert entry["declared_sender"] == "U0987654321"
+        assert entry["channel"] == "cli"
+        # A CLI interpreter has no conversation and no declared sender, and the
+        # record says so rather than inventing them (FR-024d).
+        assert entry["conversation"] is None
+        assert entry["declared_sender"] is None
         assert entry["authority"] == "observe"
     finally:
         acc.cli(["down", name, "--purge", "-y"], timeout=300)

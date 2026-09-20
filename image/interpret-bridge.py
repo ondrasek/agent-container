@@ -877,12 +877,95 @@ def confirm_policy(change: dict, *, interpreter: str) -> str:
     return f"[{interpreter}] speaking again. Anything held while I was quiet follows."
 
 
-def main() -> int:  # pragma: no cover - the loop is exercised by acceptance
-    """Entry point. Deliberately thin: everything decidable is a function above."""
-    raise SystemExit(
-        "interpret-bridge is driven by `agent-container interpret serve` inside an "
-        "interpreter container"
+class CliChannel(Channel):
+    """The DEFAULT channel: no third party, no token, no account.
+
+    Its outbound half is not a send at all. Notifications are written to the trail
+    as they are decided — FR-012b already requires that, so the ledger survives a
+    container that stops — and `agent-container interpret notifications` reads
+    them back. A terminal has nowhere to push to, so a CLI channel pulls, and what
+    it pulls had to exist anyway.
+
+    Its inbound half arrives as a single question on argv (`--ask`), answered on
+    stdout and gone. Nothing listens, nothing polls, and there is no queue to keep
+    in step with anything.
+
+    WHAT IT REMOVES IS THE POINT. Slack costs this feature its largest exposure —
+    task text and agent output leaving the operator's trust domain into a
+    workspace somebody else administers under a retention policy somebody else
+    sets. Over the CLI none of that happens, which is why this is the default and
+    Slack is the opt-in.
+    """
+
+    name = "cli"
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def post(self, text: str) -> bool:
+        # Recorded, not transmitted. The durable copy is the notification signal
+        # the caller writes to the stack; this is only what a single pass decided,
+        # for a caller that wants it without a round trip.
+        self.sent.append(text)
+        return True
+
+    def poll(self, since: str | None) -> list[dict]:
+        # Nothing to poll. A question arrives as a process, not as a message
+        # waiting somewhere — so there is no inbox, and no window in which an
+        # unread one can be lost.
+        return []
+
+
+def answer_question(question: str, facts: dict) -> str:
+    """One question, answered from the interpreter's own view.
+
+    The same `handle_message` path the Slack channel uses, with the admit check
+    already satisfied by the caller having reached this container at all — which
+    is what FR-023's sender identity means for `cli`. Routing it through the same
+    function is deliberate: a second answering path would be a second place for
+    "ground every claim in a run id" to stop being true.
+    """
+    reply, _refusal = handle_message(
+        {"user": facts.get("declared_sender") or "cli", "text": question},
+        declared_sender=facts.get("declared_sender") or "cli",
+        facts=facts,
     )
+    return reply or ""
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point. Deliberately thin: everything decidable is a function above."""
+    import sys
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) >= 2 and args[0] == "--ask":
+        # Facts come from the loop's own view when it is running; a cold `--ask`
+        # answers from what it can see and SAYS it could see nothing, rather than
+        # inventing calm. FR-013's rule holds on every path that speaks.
+        facts = _collect_facts()
+        print(answer_question(" ".join(args[1:]), facts))
+        return 0
+    raise SystemExit(
+        "interpret-bridge answers `--ask <question>`; the loop is started by the "
+        "container's entrypoint"
+    )
+
+
+def _collect_facts() -> dict:  # pragma: no cover - exercised by acceptance
+    """What this container can see right now.
+
+    Deliberately minimal and deliberately HONEST about being minimal: a cold
+    invocation has no loop state, so it reports an empty view rather than an
+    untroubled one. "I have nothing in view" and "nothing is wrong" are different
+    answers and only one of them is true here.
+    """
+    return {
+        "interpreter": __import__("os").environ.get("AGENT_CONTAINER_NAME", "interpreter"),
+        "input_health": input_health(
+            stack_reachable=True, ingest="yes", unreachable_hosts=[], missing_logs=0
+        ),
+        "runs": [],
+    }
 
 
 if __name__ == "__main__":  # pragma: no cover

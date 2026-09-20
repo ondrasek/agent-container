@@ -2238,6 +2238,10 @@ INVENTORY_FIELDS = (
     # do its conclusions go" should not have to remember.
     "stack",
     "channel",
+    # WHICH conversation, when the channel has them. Separate from `channel`
+    # because the two answer different questions — "how does it talk" and "where"
+    # — and a CLI interpreter has the first and not the second.
+    "conversation",
     # THE ADMIT SET, recorded. It was required at deploy, described as "the admit
     # set for an inbound path into something that can see your whole fleet", and
     # then dropped on the floor: unvalidated, unrecorded, never delivered. Found by
@@ -2265,7 +2269,16 @@ INTERPRETER_AUTHORITIES = ("observe",)
 # provider saying who sent a message; a channel that cannot is not bindable at
 # all. Email is the example that fails: anyone can put anyone in a From header,
 # so an admit set over it would be a control that controls nothing.
-INTERPRETER_CHANNELS = ("slack",)
+# `cli` FIRST, because it is the DEFAULT and the smaller exposure. An operator
+# who does not need a phone should not have to accept a third party to use this
+# feature: over the CLI nothing leaves their trust domain, nobody else
+# administers it, and FR-024a's disclosure does not apply at all.
+INTERPRETER_CHANNELS = ("cli", "slack")
+# Which channels carry content OUT of the operator's trust domain. This is what
+# FR-024a's statement is gated on — not the channel's name, so a channel added
+# later has to declare which side of that line it is on rather than inheriting
+# silence.
+INTERPRETER_CHANNELS_LEAVING_TRUST_DOMAIN = ("slack",)
 # Slack ids are an uppercase letter followed by uppercase alphanumerics (C… for a
 # conversation, U… for a user). Validated to keep the no-free-text property above,
 # NOT as a security control — a well-formed id is not an authorised one, and
@@ -2543,6 +2556,7 @@ def build_inventory_entry(
     watched_scope: list[str] | None = None,
     stack: str | None = None,
     channel: str | None = None,
+    conversation: str | None = None,
     declared_sender: str | None = None,
     authority: str | None = None,
 ) -> dict:  # noqa: FBT001
@@ -2578,6 +2592,7 @@ def build_inventory_entry(
         "watched_scope": watched_scope,
         "stack": stack,
         "channel": channel,
+        "conversation": conversation,
         "declared_sender": declared_sender,
         "authority": authority,
         "notes": [],
@@ -4241,6 +4256,7 @@ def record_inventory_creation(
     watched_scope: list[str] | None = None,
     stack: str | None = None,
     channel: str | None = None,
+    conversation: str | None = None,
     declared_sender: str | None = None,
     authority: str | None = None,
 ) -> None:
@@ -4262,6 +4278,7 @@ def record_inventory_creation(
                 watched_scope=watched_scope,
                 stack=stack,
                 channel=channel,
+                conversation=conversation,
                 declared_sender=declared_sender,
                 authority=authority,
             )
@@ -11523,7 +11540,7 @@ class ExecSpec:
     # and the answer was to say so rather than to re-resolve silently.
     watch: list[str] = field(default_factory=list)
     stack: str | None = None
-    channel: str = "slack"
+    channel: str = "cli"
     slack_conversation: str | None = None
     declared_sender: str | None = None
 
@@ -11552,7 +11569,7 @@ class ExecSpec:
                 ("--stack", self.stack),
                 # `--channel` has a default, so "was it given" cannot be read off
                 # the value. Compared against the default instead.
-                ("--channel", self.channel if self.channel != "slack" else None),
+                ("--channel", self.channel if self.channel != "cli" else None),
                 ("--slack-conversation", self.slack_conversation),
                 ("--declared-sender", self.declared_sender),
             ):
@@ -11587,18 +11604,36 @@ class ExecSpec:
                     f"deliberately does not do",
                     remedy="agent-container telemetry stack up <name>",
                 )
-            if not self.slack_conversation:
-                die(
-                    f"--role {ROLE_INTERPRETER} requires --slack-conversation: an "
-                    f"interpreter with no conversation has nowhere to report to"
-                )
-            if not self.declared_sender:
-                die(
-                    f"--role {ROLE_INTERPRETER} requires --declared-sender: this is "
-                    f"the admit set for an inbound path into something that can see "
-                    f"your whole fleet, and there is no value for it that is safe to "
-                    f"default"
-                )
+            # A CHANNEL'S REQUIREMENTS ARE THE CHANNEL'S OWN (FR-024d). Demanding
+            # Slack's fields for a CLI interpreter would be the inert-flag failure
+            # this file refuses twenty lines above: an operator handed a
+            # conversation id for a channel that has no conversations has
+            # configured nothing.
+            if self.channel == "slack":
+                if not self.slack_conversation:
+                    die(
+                        "--channel slack requires --slack-conversation: an "
+                        "interpreter with no conversation has nowhere to report to"
+                    )
+                if not self.declared_sender:
+                    die(
+                        "--channel slack requires --declared-sender: this is the "
+                        "admit set for an inbound path into something that can see "
+                        "your whole fleet, and there is no value for it that is safe "
+                        "to default"
+                    )
+            else:
+                # And they are REFUSED on a channel that has no use for them,
+                # rather than accepted and ignored.
+                for flag, value in (
+                    ("--slack-conversation", self.slack_conversation),
+                    ("--declared-sender", self.declared_sender),
+                ):
+                    if value:
+                        die(
+                            f"{flag} is only meaningful for --channel slack "
+                            f"(got --channel {self.channel})"
+                        )
         if self.role == ROLE_INTERPRETER and self.mode != "interactive":
             die(
                 f"--mode {self.mode} is not available for --role {ROLE_INTERPRETER}: an "
@@ -12305,17 +12340,21 @@ def compose_up_exec(
             validate_interpreter_scope(spec.watch) if spec.role == ROLE_INTERPRETER else None
         ),
         stack=(validate_name(spec.stack) if spec.role == ROLE_INTERPRETER and spec.stack else None),
-        channel=(
-            validate_interpreter_channel_id(spec.slack_conversation or "", "--slack-conversation")
-            if spec.role == ROLE_INTERPRETER
+        # The channel's NAME for every interpreter; the conversation id only where
+        # a conversation exists. Validating a Slack id for a CLI interpreter would
+        # demand a field that channel has no concept of (FR-024d).
+        channel=(spec.channel if spec.role == ROLE_INTERPRETER else None),
+        conversation=(
+            validate_interpreter_channel_id(spec.slack_conversation, "--slack-conversation")
+            if spec.role == ROLE_INTERPRETER and spec.slack_conversation
             else None
         ),
         # A vocabulary of one. FR-020a forbids a dormant path toward the feature
         # that adds acting, and a field that already accepted another value would
         # be one.
         declared_sender=(
-            validate_interpreter_channel_id(spec.declared_sender or "", "--declared-sender")
-            if spec.role == ROLE_INTERPRETER
+            validate_interpreter_channel_id(spec.declared_sender, "--declared-sender")
+            if spec.role == ROLE_INTERPRETER and spec.declared_sender
             else None
         ),
         authority=(INTERPRETER_AUTHORITIES[0] if spec.role == ROLE_INTERPRETER else None),
@@ -12589,7 +12628,9 @@ def report_control_plane_scope(name: str, hosts: list[str] | None) -> list[str]:
     return [f"{name}: declared scope ({len(hosts)} host(s)): {', '.join(hosts)}", tail]
 
 
-def state_interpreter_consequences(name: str, scope: list[str], conversation: str) -> None:
+def state_interpreter_consequences(
+    name: str, scope: list[str], conversation: str, channel: str = "cli"
+) -> None:
     """Feature 024 FR-021/FR-024a/SC-012/SC-013 — said BEFORE the deploy.
 
     Same shape and the same reason as the control-plane statement below, with the
@@ -12597,21 +12638,19 @@ def state_interpreter_consequences(name: str, scope: list[str], conversation: st
     an interpreter's is what it CANNOT, because an operator reading "an agent that
     watches your fleet" will assume the 017 shape unless told otherwise.
 
-    THE THIRD PARAGRAPH IS THE ONE THAT MATTERS and the one no other statement in
-    this tool has had to make. Every prior exposure this feature's ancestors
-    created stayed inside the operator's own infrastructure: 016 wrote task text to
-    a 0600 file on their disk, 023 put it behind an unauthenticated UI on their own
-    host, bounded by an exposure level they chose. This sends task text AND
-    everything the agent printed OUT of the operator's trust domain entirely, into
-    a workspace somebody else administers and whose retention policy somebody else
-    sets. No exposure level reaches that, because the boundary is a SaaS account.
-    So it is stated in full rather than summarised — an operator who is going to
-    regret this should meet it here, before the container exists.
+    THE PARAGRAPHS ARE THE CHANNEL'S, NOT THE ROLE'S (FR-024a, FR-024d). Only a
+    channel that carries content OUT of the operator's trust domain earns the
+    trust-domain warning, and reciting it for a `cli` interpreter would be worse
+    than useless: it would describe an exposure that is not happening, on the
+    deploy where it is not happening, which trains an operator to skim it on the
+    deploy where it is.
 
     Printed, not prompted: `up` is a path an agent may drive, and a prompt there is
     auto-answered, which reads as consent (017's rule).
     """
-    log(f"deploying {name} as an INTERPRETER — read this before it starts:")
+    log(
+        f"deploying {name} as an INTERPRETER on the '{channel}' channel — read this before it starts:"
+    )
     log(
         "  1. it CANNOT change anything. It cannot stop, start, redeploy, destroy, "
         "task or reconfigure any environment, and it cannot deploy another "
@@ -12623,23 +12662,39 @@ def state_interpreter_consequences(name: str, scope: list[str], conversation: st
         f"  2. it READS the trail of: {', '.join(scope) if scope else 'nothing — no scope declared'}"
         + ("" if scope else " (declare --watch, or it will have nothing to interpret)")
     )
-    log(
-        f"  3. it SENDS your agents' TASK TEXT and their OUTPUT to Slack conversation "
-        f"{conversation}. Everyone who can read that conversation, and your workspace "
-        f"administrators, will see them, under your workspace's retention policy. "
-        f"This leaves your own infrastructure — no exposure setting reaches it"
-    )
-    log(
-        f"  4. it holds a Slack bot token ({INTERPRETER_CHANNEL_TOKEN_VAR}). Whoever "
-        f"holds that can speak to you AS this interpreter — it grants no access, it "
-        f"grants VOICE, which includes telling you the fleet is fine"
-    )
-    log(
-        "  5. the Slack app must be a CUSTOM app in your own workspace. A "
-        "commercially distributed non-Marketplace app is rate-limited to 1 request "
-        "per minute where a custom one gets 50+, and the interpreter would answer "
-        "minutes late for a reason nothing here can detect"
-    )
+    if channel in INTERPRETER_CHANNELS_LEAVING_TRUST_DOMAIN:
+        log(
+            f"  3. it SENDS your agents' TASK TEXT and their OUTPUT to Slack conversation "
+            f"{conversation}. Everyone who can read that conversation, and your workspace "
+            f"administrators, will see them, under your workspace's retention policy. "
+            f"This leaves your own infrastructure — no exposure setting reaches it"
+        )
+        log(
+            f"  4. it holds a Slack bot token ({INTERPRETER_CHANNEL_TOKEN_VAR}). Whoever "
+            f"holds that can speak to you AS this interpreter — it grants no access, it "
+            f"grants VOICE, which includes telling you the fleet is fine"
+        )
+        log(
+            "  5. the Slack app must be a CUSTOM app in your own workspace. A "
+            "commercially distributed non-Marketplace app is rate-limited to 1 request "
+            "per minute where a custom one gets 50+, and the interpreter would answer "
+            "minutes late for a reason nothing here can detect"
+        )
+    else:
+        # Said PLAINLY rather than left as silence. An operator choosing between
+        # channels is choosing between exposures, and the absence of a warning is
+        # not the same as being told there is nothing to warn about.
+        log(
+            "  3. NOTHING LEAVES your infrastructure. There is no third party, no "
+            "token and no account: it writes what it concludes to your own telemetry "
+            "stack, and you read it with `agent-container interpret notifications "
+            f'{name}` and ask with `agent-container interpret ask {name} "..."`'
+        )
+        log(
+            "  4. it answers whoever can reach it through your container runtime — "
+            "the same boundary `stop`, `destroy` and `panic` already rest on. Not an "
+            "inbound path from anywhere; your machine talking to your container"
+        )
 
 
 def state_control_plane_consequences(name: str, hosts: list[str] | None) -> None:
@@ -12706,7 +12761,9 @@ def do_up(
     # an operator who reads paragraph 3 and stops has not yet sent a single line of
     # their agents' output to a workspace they do not administer.
     if spec.role == ROLE_INTERPRETER:
-        state_interpreter_consequences(name, spec.watch, spec.slack_conversation or "?")
+        state_interpreter_consequences(
+            name, spec.watch, spec.slack_conversation or "?", channel=spec.channel
+        )
     ensure_tunnel(host_rec)
     # Drain-on-contact (FR-001a, research R7). A detached run — the default
     # headless mode — ends with no CLI attached, so its record waits on the volume
@@ -19241,12 +19298,13 @@ def up(
     # Feature 024. Declared at the surface, each named, none defaulted to a value
     # that would admit or publish anything (Constitution VIII).
     channel: str = typer.Option(
-        "slack",
+        "cli",
         "--channel",
-        help="INTERPRETER only. Which channel it speaks on. Only channels that "
-        "authenticate the sender are admissible — the declared sender is an admit "
-        "set, and over a channel that cannot say who sent a message it controls "
-        "nothing.",
+        help="INTERPRETER only: cli (default) | slack. `cli` needs no token and no "
+        "account, and nothing leaves your infrastructure — read notifications with "
+        "`interpret notifications`, ask with `interpret ask`. `slack` reaches a "
+        "phone, and sends your agents' task text and output to that workspace. Only "
+        "channels that authenticate the sender are admissible.",
     ),
     stack: str | None = typer.Option(
         None,
@@ -20059,6 +20117,105 @@ def interpret_history(
         return
     for entry in lines:
         log(f"{entry['at']}  {entry['line']}")
+
+
+@interpret_app.command("notifications")
+def interpret_notifications(
+    name: str = typer.Argument(..., help="Interpreter name."),
+    limit: int = typer.Option(50, "--limit", help="How many to read back."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """What this interpreter would have told you — read from the trail.
+
+    THE CLI CHANNEL'S OUTBOUND HALF (FR-024-cli). A terminal has nowhere to push
+    to, so this pulls. That is not a workaround: the notifications are already
+    written to the stack as they are decided, because FR-012b requires the
+    "already reported" ledger to be durable as produced rather than held in a
+    container that can stop. Reading them is a query over something that had to
+    exist anyway, not a second delivery mechanism to keep in step with the first.
+
+    Which is why this works for a Slack interpreter too: it shows what was
+    decided, independently of whether the channel managed to carry it.
+    """
+    set_json_mode(as_json)
+    match = next((e for e in interpreter_entries() if e.get("name") == name), None)
+    if match is None:
+        die(f"no active interpreter named '{name}'", remedy="agent-container interpret ls")
+    stack = match.get("stack")
+    if not stack:
+        die(f"'{name}' has no telemetry stack recorded, so there is nothing to read back")
+    _, host_rec = resolve_deploy_host(match.get("host"))
+    lines = stack_query_lines(
+        host_rec,
+        f"{STACK_CONTAINER_PREFIX}{stack}",
+        f'{{service_namespace="agent-container"}} |= `"signal":"notification"` '
+        f'|= `"interpreter":"{name}"`',
+        limit=limit,
+    )
+    if lines is None:
+        # NONE IS NOT EMPTY, and here it is the difference between "nothing has
+        # happened" and "I could not look" — which is the whole reason FR-013
+        # exists, arriving one layer up.
+        die(
+            f"could not reach the telemetry stack '{stack}', so this is NOT an empty "
+            f"notification list — it is an unknown one",
+            remedy="agent-container telemetry stack ls",
+        )
+    if as_json:
+        emit_json({"interpreter": name, "notifications": lines})
+        return
+    if not lines:
+        log(f"{name} has decided nothing worth telling you about")
+        return
+    for entry in lines:
+        log(f"{entry['at']}  {entry['line']}")
+
+
+@interpret_app.command("ask")
+def interpret_ask(
+    name: str = typer.Argument(..., help="Interpreter name."),
+    question: str = typer.Argument(..., help="What to ask it."),
+    as_json: bool = JSON_OPT,
+) -> None:
+    """Ask an interpreter a question, from here.
+
+    THE CLI CHANNEL'S INBOUND HALF (FR-024-cli). The question goes to the
+    container through the runtime and the answer comes back on stdout — no third
+    party, no token, no account, and no inbound path: your machine talking to
+    your container.
+
+    FR-023's sender identity, for this channel, is REACHING THE CONTAINER AT ALL.
+    That is the same boundary `stop`, `destroy` and `panic` already rest on, and
+    the tool has assumed a single trusted operator since the constitution was
+    written. It is not the weaker claim it might look like: the alternative is a
+    third party deciding who you are.
+
+    READ-ONLY, like every other command in this group — the interpreter holds
+    nothing that could act on an answer, and the FR-020a guard covers this
+    command with the rest.
+    """
+    set_json_mode(as_json)
+    match = next((e for e in interpreter_entries() if e.get("name") == name), None)
+    if match is None:
+        die(f"no active interpreter named '{name}'", remedy="agent-container interpret ls")
+    _, host_rec = resolve_deploy_host(match.get("host"))
+    r = query(
+        driver_runtime_argv(host_rec)
+        + [
+            "exec", container_name(name),
+            "python3", INTERPRETER_BRIDGE_PATH, "--ask", question,
+        ]
+    )  # fmt: skip
+    if r.returncode != 0:
+        die(
+            f"could not ask '{name}': {(r.stderr or r.stdout).strip()[:200]}",
+            remedy=f"agent-container interpret show {name}",
+        )
+    answer_text = r.stdout.strip()
+    if as_json:
+        emit_json({"interpreter": name, "question": question, "answer": answer_text})
+        return
+    console.print(answer_text, soft_wrap=True)
 
 
 @interpret_app.command("test-channel")

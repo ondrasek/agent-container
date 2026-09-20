@@ -768,6 +768,7 @@ def test_the_inventory_entry_carries_role_and_provenance(wiz, monkeypatch):
     assert e["watched_scope"] is None
     assert e["stack"] is None
     assert e["channel"] is None
+    assert e["conversation"] is None
     assert e["declared_sender"] is None
     assert e["authority"] is None
 
@@ -2329,7 +2330,7 @@ def test_the_interpreter_statement_LEADS_with_what_it_cannot_do(wiz, capsys):
     """An operator reading "an agent that watches your fleet" will assume the 017
     shape unless told otherwise, so the order is inverted on purpose: a control
     plane's headline is what it CAN do, an interpreter's is what it cannot."""
-    wiz.state_interpreter_consequences("watcher", ["vps1"], "C0123456789")
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "C0123456789", channel="slack")
     cap = capsys.readouterr()
     out = cap.err + cap.out
     # By POSITION, not by line shape: `log()` prefixes every line and rich may
@@ -2346,7 +2347,7 @@ def test_the_interpreter_statement_names_the_TRUST_DOMAIN_crossing(wiz, capsys):
     it entirely, and no exposure level reaches a SaaS account — so the statement
     has to say that in as many words rather than summarising it as "sends to
     Slack", which reads as a delivery detail rather than a disclosure."""
-    wiz.state_interpreter_consequences("watcher", ["vps1"], "C0123456789")
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "C0123456789", channel="slack")
     cap = capsys.readouterr()
     out = cap.err + cap.out
     assert "TASK TEXT" in out and "OUTPUT" in out
@@ -2359,7 +2360,7 @@ def test_the_interpreter_statement_describes_the_token_as_VOICE(wiz, capsys):
     """FR-006. Every other credential this tool delivers buys ACCESS to something.
     This one buys the ability to speak as the operator's own supervisor, which is
     a different blast radius and has to be described as one."""
-    wiz.state_interpreter_consequences("watcher", ["vps1"], "C1")
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "C1", channel="slack")
     cap = capsys.readouterr()
     out = cap.err + cap.out
     assert "grants no access, it grants VOICE" in out
@@ -2370,7 +2371,7 @@ def test_the_interpreter_statement_names_the_CUSTOM_APP_requirement(wiz, capsys)
     """The rate-limit cliff is undiagnosable from inside: a distributed app gets
     1 request/minute against a custom app's 50+, so the interpreter would answer
     minutes late and nothing in this tool could tell that from a quiet fleet."""
-    wiz.state_interpreter_consequences("watcher", [], "C1")
+    wiz.state_interpreter_consequences("watcher", [], "C1", channel="slack")
     cap = capsys.readouterr()
     out = cap.err + cap.out
     assert "CUSTOM app" in out
@@ -2388,11 +2389,20 @@ def test_an_interpreter_with_no_scope_SAYS_SO(wiz, capsys):
 
 
 def _interp(wiz, **kw):
-    """A valid interpreter spec. The channel options are REQUIRED, so every test
-    that is about something else still has to supply them."""
+    """A valid interpreter spec on the DEFAULT channel.
+
+    `cli` needs no conversation and no declared sender — a channel's requirements
+    are the channel's own (FR-024d) — so a test about something else supplies
+    neither. `_interp_slack` is for the tests that are about Slack.
+    """
+    return wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", **kw)
+
+
+def _interp_slack(wiz, **kw):
     return wiz.ExecSpec(
         role=wiz.ROLE_INTERPRETER,
         stack="obs",
+        channel="slack",
         slack_conversation="C1",
         declared_sender="U1",
         **kw,
@@ -2411,9 +2421,20 @@ def test_an_interpreter_REQUIRES_a_conversation_and_a_declared_sender(wiz):
     `authorized_keys`. There is no value for it that is safe to default, so it is
     refused rather than defaulted."""
     with pytest.raises(wiz.Fatal, match="requires --slack-conversation"):
-        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", declared_sender="U1").validate()
+        wiz.ExecSpec(
+            role=wiz.ROLE_INTERPRETER, stack="obs", channel="slack", declared_sender="U1"
+        ).validate()
     with pytest.raises(wiz.Fatal, match="requires --declared-sender"):
-        wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", slack_conversation="C1").validate()
+        wiz.ExecSpec(
+            role=wiz.ROLE_INTERPRETER, stack="obs", channel="slack", slack_conversation="C1"
+        ).validate()
+    # And the CLI channel demands NEITHER (FR-024d). Requiring one channel's
+    # fields for another is the inert-flag failure this file refuses elsewhere:
+    # a conversation id means nothing to a channel with no conversations.
+    wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs").validate()
+    for kw in ({"slack_conversation": "C1"}, {"declared_sender": "U1"}):
+        with pytest.raises(wiz.Fatal, match="only meaningful for --channel slack"):
+            wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs", **kw).validate()
     # A stack is a PREREQUISITE, not an option: an interpreter pointed at an
     # arbitrary endpoint would have to learn that backend's query API, which is
     # the vendor coupling 017 refuses.
@@ -2484,3 +2505,41 @@ def test_an_EXPLICIT_log_switch_is_obeyed_even_against_the_task_switch(wiz, tmp_
     env = wiz.ExecSpec(mode="headless", agent="claude").compose_environment()
     assert env["AGENT_CONTAINER_EXPORT_TASK"] == "0"
     assert env["AGENT_CONTAINER_EXPORT_AGENT_LOGS"] == "1"
+
+
+def test_the_CLI_statement_says_NOTHING_LEAVES_rather_than_staying_silent(wiz, capsys):
+    """FR-024a is gated on the CHANNEL, not on the role.
+
+    Reciting Slack's trust-domain warning for a CLI interpreter would describe an
+    exposure that is not happening, on the deploy where it is not happening —
+    which trains an operator to skim it on the deploy where it is. But silence is
+    not the answer either: an operator choosing between channels is choosing
+    between exposures, and the absence of a warning is not the same as being told
+    there is nothing to warn about.
+    """
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "?", channel="cli")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    assert "NOTHING LEAVES your infrastructure" in out
+    assert "no third party, no token and no account" in out
+    # And none of Slack's paragraphs appear.
+    for slack_only in ("TASK TEXT", "workspace administrators", "CUSTOM app", "bot token"):
+        assert slack_only not in out, f"the CLI statement recites Slack's {slack_only!r}"
+
+
+def test_the_CLI_statement_still_LEADS_with_what_it_cannot_do(wiz, capsys):
+    """The channel changes the exposure paragraph, never the authority one."""
+    wiz.state_interpreter_consequences("watcher", ["vps1"], "?", channel="cli")
+    cap = capsys.readouterr()
+    out = cap.err + cap.out
+    assert "CANNOT change anything" in out
+    assert out.index("CANNOT change anything") < out.index("NOTHING LEAVES")
+
+
+def test_cli_is_the_DEFAULT_channel(wiz):
+    """The smaller exposure is the one you get without asking. An operator who
+    does not need a phone should not have to accept a third party."""
+    assert wiz.ExecSpec(role=wiz.ROLE_INTERPRETER, stack="obs").channel == "cli"
+    assert wiz.INTERPRETER_CHANNELS[0] == "cli"
+    assert "slack" in wiz.INTERPRETER_CHANNELS_LEAVING_TRUST_DOMAIN
+    assert "cli" not in wiz.INTERPRETER_CHANNELS_LEAVING_TRUST_DOMAIN
