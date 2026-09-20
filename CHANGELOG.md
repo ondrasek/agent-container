@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.61.0 (2026-09-20)
+
+### Features
+
+- **024**: A CLI channel, and it is the default
+  ([`147b49d`](https://github.com/ondrasek/agent-container/commit/147b49dc6b7429b1e6021158eb4cfa11d030c004))
+
+
 ## v0.60.0 (2026-09-14)
 
 ### Features
