@@ -253,6 +253,59 @@ with a reason, rather than deploying a container missing its credential.
 - **Existence check**: the question "is this name present in that host's store", answerable without
   reading the value, and the thing FR-005 refuses on.
 
+## Open questions for planning
+
+These are not `[NEEDS CLARIFICATION]` markers — none of them blocks writing the spec, and none has
+an answer an operator picks. They are decisions that belong to `/speckit-plan`, recorded here so
+they are decided rather than absorbed.
+
+### OQ-1 — Does the unrevocable-secret trade need a constitution amendment? *(blocking for plan)*
+
+**The conflict, stated exactly.** Constitution IX's persistence clause says a secret MAY and
+generally MUST persist, and then binds that permission to a condition:
+
+> Persistence is conditional on RECONCILIATION and the two MUST NOT be separated: whatever holds a
+> secret MUST be removed when the operator stops declaring it, or the declaration stops being the
+> authority and the system can hold a credential its configuration says is gone. Storage MUST
+> therefore be per-secret and named, so that one can be withdrawn without disturbing the others —
+> and the tool MUST expose that withdrawal itself.
+
+A referenced podman secret satisfies *per-secret and named* and fails *the tool MUST expose that
+withdrawal*. It cannot: the value is the operator's, it may serve containers this tool has never
+heard of, and removing it on `--purge` would be the tool destroying something it did not create.
+
+**This is a MUST, not a SHOULD**, so FR-011 — stating the gap at `--purge` — does not satisfy the
+constitution. It documents a violation. Three ways out, and planning must choose one:
+
+| Option | What it means | Cost |
+|---|---|---|
+| **A. Amend IX** | Say the withdrawal duty applies to storage the tool CREATED. A secret it never created is not "whatever holds a secret" in IX's sense | An amendment to the project's most carefully written principle, to accommodate one feature — the shape that erodes a constitution |
+| **B. Keep IX, drop the feature** | The duty is unconditional; a route that cannot honour it is not admissible | Forgoes the exposure reduction the feature exists for |
+| **C. Keep IX, narrow the feature** | Admit only secrets the operator declares as tool-scoped, and refuse any whose name suggests wider use | A convention doing a control's job — the "control that enforces nothing while reading as deliberate" this project keeps finding |
+
+The spec's own view, offered as input and not as a decision: **A is probably right and must be
+argued on its merits, not on convenience.** IX was written when every secret the tool stored was one
+the tool had put there, and the clause exists to stop the tool holding a credential its
+configuration says is gone. A value the tool never held cannot be one the tool is holding. If that
+reasoning does not survive contact with the amendment process, B is the honest outcome — and C
+should be rejected outright, because a naming convention is not a boundary.
+
+### OQ-2 — Is existence checkable without reading the value on every supported runtime?
+
+FR-005 refuses a deployment when a declared secret is absent, and Assumptions records that this is
+checkable without reading. If any supported runtime cannot answer "does this name exist" without
+returning the value, FR-005 must be **reconsidered**, never satisfied by reading — a read for
+validation restores exactly the exposure the feature removes, and would do it on the path an
+operator is least likely to inspect.
+
+### OQ-3 — Where does the route live in the declaration?
+
+A referenced secret is not a new `CRED_SOURCES` entry in the existing sense: those name where the
+tool READS a value from before delivering it, and this route has no read. Planning must decide
+whether that makes it a source with a null read, a sibling concept, or something the existing model
+should be reshaped around. Getting this wrong is not a security problem; it is the kind that leaves
+two nearly-identical concepts an operator has to distinguish forever.
+
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes

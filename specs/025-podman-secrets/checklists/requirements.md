@@ -41,6 +41,10 @@ clear. That is not a scope option an operator chooses between — it is a princi
 already written down. So the spec treats creation as OUT OF SCOPE rather than deferred (FR-003,
 FR-003a), specifically so no later change can read "we shipped the read-only half first".
 
+The three decisions planning must make are written into the spec as **Open questions** (OQ-1 to
+OQ-3) rather than left in these notes, because a question that lives only in a checklist is one
+that gets closed by ticking the checklist. OQ-1 is blocking.
+
 Two things a reviewer should push on:
 
 1. **FR-005 assumes existence is checkable without reading the value.** If that turns out to be
